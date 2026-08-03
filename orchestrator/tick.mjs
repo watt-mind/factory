@@ -57,6 +57,24 @@ const cap = repo.max_in_flight ?? policy?.concurrency?.max_in_flight_per_repo ??
 const TIMEOUT_BIN = Bun.which("timeout") ?? Bun.which("gtimeout");
 if (!TIMEOUT_BIN) console.log(c.yellow("  ! no timeout(1)/gtimeout on PATH — a wedged run will not be wall-clock capped"));
 
+// The ticket prompt, inlined rather than invoked as `/factory-ticket <ID>`.
+//
+// A slash command only resolves from the directory the session runs in, and
+// that directory is a fresh WORKTREE. `.claude/commands/` holds symlinks into
+// this repo, but a worktree carries only what the branch has committed — so a
+// command added here after the last commit to the product repo does not exist
+// where it is needed, and `claude -p` answers "Unknown command", reports
+// subtype `success`, and exits having done nothing. Every ticket in the batch
+// then burns a claim in under a second.
+//
+// The body is plain harness-neutral markdown, which is why run-agent.sh
+// already passes it this way for the non-Claude harnesses. Doing the same here
+// deletes the failure class instead of documenting it.
+const COMMAND_MD = readFileSync(path.join(ROOT, "shared/commands/factory-ticket.md"), "utf8");
+const COMMAND_MODEL = /^model:\s*(\S+)/m.exec(/^---\n([\s\S]*?)\n---\n/.exec(COMMAND_MD)?.[1] ?? "")?.[1] ?? null;
+const COMMAND_BODY = COMMAND_MD.replace(/^---\n[\s\S]*?\n---\n/, "");
+const promptFor = (id) => COMMAND_BODY.replaceAll("$ARGUMENTS", id);
+
 const Q = `query($t:String!,$p:String!){ issues(first:250, filter:{
     team:{key:{eq:$t}}, project:{name:{eq:$p}},
     state:{ type:{ nin:["completed","canceled"] } } }){
@@ -191,6 +209,17 @@ const ENV_FAIL_LIMIT = policy?.circuit_breaker?.consecutive_env_failures ?? 2;
 let envFailures = 0;
 let tripped = false;
 
+// Counts a failure that says nothing about the ticket and everything about the
+// machine — a template that won't build, a session that ends before it takes a
+// turn. Ticket-specific failures must NOT come through here: one hard ticket
+// stopping the queue is a worse outcome than letting it fail alone.
+function noteEnvFailure(what) {
+  if (++envFailures >= ENV_FAIL_LIMIT && !tripped) {
+    tripped = true;
+    console.log(c.red(`\n  CIRCUIT BREAKER: ${envFailures} consecutive environment failures (${what}) — no further tickets will be claimed this run. Fix the environment first.\n`));
+  }
+}
+
 async function runTicket(t) {
   const up = spawnSync("/bin/bash", [repo.worktree_up, t.identifier], { cwd: repoPath, encoding: "utf8" });
   if (up.status !== 0) {
@@ -198,13 +227,12 @@ async function runTicket(t) {
     console.log(c.red(`  ${t.identifier} worktree-up failed: ${why}`));
     results.push({ id: t.identifier, ok: false, why: "worktree-up failed" });
     await unclaim(t, `worktree-up failed: ${why}`);
-    if (++envFailures >= ENV_FAIL_LIMIT && !tripped) {
-      tripped = true;
-      console.log(c.red(`\n  CIRCUIT BREAKER: ${envFailures} consecutive environment failures — no further tickets will be claimed this run. Fix the worktree template first.\n`));
-    }
+    noteEnvFailure("worktree-up");
     return;
   }
-  envFailures = 0;
+  // NB: a working worktree-up does not clear the streak — only a run that
+  // actually took a turn does (below). Clearing it here let four consecutive
+  // zero-turn sessions through, because each one built its worktree fine.
   const wt = path.join(expand(repo.worktree_root), t.identifier);
   console.log(`${c.dim(clock())} ${c.cyan(t.identifier)} worktree ready ${c.dim(wt)}`);
 
@@ -214,14 +242,25 @@ async function runTicket(t) {
   // Same hard cap as run-agent.sh: a wedged ticket must not hold its slot
   // forever. TERM at the limit, KILL 30s later.
   const maxMin = policy?.limits?.max_run_minutes ?? 45;
-  const capPrefix = TIMEOUT_BIN ? `${TIMEOUT_BIN} -k 30s ${maxMin}m ` : "";
 
   await new Promise((resolve) => {
-    const child = spawn("/bin/bash", ["-lc",
-      `${capPrefix}env -u ANTHROPIC_API_KEY -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p ` +
-      `"/factory-ticket ${t.identifier}" --output-format stream-json --verbose ` +
-      `--max-budget-usd ${budget} --fallback-model sonnet`],
-      { cwd: wt, stdio: ["ignore", "pipe", "pipe"] });
+    // Spawned without a shell: the prompt is a markdown document full of
+    // backticks and quotes, and there is no quoting of it into `bash -lc`
+    // that stays correct as the command body is edited.
+    const claudeArgs = [
+      "-p", promptFor(t.identifier),
+      "--output-format", "stream-json", "--verbose",
+      "--max-budget-usd", budget,
+      "--fallback-model", "sonnet",
+    ];
+    // The frontmatter's `model:` used to be applied by the slash command;
+    // inlining the body means passing it explicitly or silently downgrading.
+    if (COMMAND_MODEL) claudeArgs.push("--model", COMMAND_MODEL);
+    const envArgs = ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT", "claude", ...claudeArgs];
+    const [bin, args] = TIMEOUT_BIN
+      ? [TIMEOUT_BIN, ["-k", "30s", `${maxMin}m`, "env", ...envArgs]]
+      : ["env", envArgs];
+    const child = spawn(bin, args, { cwd: wt, stdio: ["ignore", "pipe", "pipe"] });
 
     let buf = "";
     let recorded = false;
@@ -238,9 +277,22 @@ async function runTicket(t) {
         }
       }
       if (e.type === "result" || "num_turns" in e) {
-        const ok = e.subtype === "success" && !e.is_error && (e.num_turns ?? 0) > 0;
-        console.log(`${c.dim(clock())} ${tag} ${ok ? c.green("done") : c.red("FAILED")} ${c.dim(`${e.num_turns ?? 0} turns ~$${(e.total_cost_usd ?? 0).toFixed(2)}`)}`);
-        results.push({ id: t.identifier, ok, log, why: ok ? undefined : `run ended ${e.subtype ?? "?"}${e.is_error ? " (error)" : ""}` });
+        const turns = e.num_turns ?? 0;
+        const ok = e.subtype === "success" && !e.is_error && turns > 0;
+        console.log(`${c.dim(clock())} ${tag} ${ok ? c.green("done") : c.red("FAILED")} ${c.dim(`${turns} turns ~$${(e.total_cost_usd ?? 0).toFixed(2)}`)}`);
+        // Report what the session actually said. "run ended success" on its own
+        // reads as a contradiction next to FAIL, and hid an "Unknown command"
+        // for a whole batch.
+        const said = String(e.result ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+        results.push({
+          id: t.identifier, ok, log,
+          why: ok ? undefined : `${turns} turns, ended ${e.subtype ?? "?"}${e.is_error ? " (error)" : ""}${said ? ` — ${said}` : ""}`,
+        });
+        // Zero turns means the session never got started — a bad prompt, a
+        // missing binary, auth. Nothing about this ticket would make the next
+        // one behave differently, so it counts against the breaker.
+        if (turns === 0) noteEnvFailure("session ended without taking a turn");
+        else if (ok) envFailures = 0;
         recorded = true;
       }
     };
