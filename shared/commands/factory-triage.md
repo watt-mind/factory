@@ -16,6 +16,8 @@ Before working an issue, mark it so it appears in **Agents In Flight** and no ot
 
 Claim one issue at a time as you get to it, not all of them up front — a batch claimed and then abandoned blocks the queue for everything you never reached.
 
+**Answered holds come first.** Before the Triage pile, check for tickets carrying `ai:blocked` (in `Blocked` or `Triage`) that have a comment newer than the label's application — the orchestrator's gate resurfaces exactly these, and a human answer that sits unread costs a round-trip through the slowest part of the pipeline. For each: read the reply, **remove `ai:blocked`**, then re-run promote-or-hold below with the answer in hand (and record the decision in the product-decisions doc where it belongs). If the reply doesn't actually resolve the hold, comment a sharper question and **re-add `ai:blocked`** — removing and re-adding is required, not optional: the fresh label event is what resets the orchestrator's reply detection, and a hold that keeps the old label event gets re-examined every tick forever.
+
 For each issue in `Triage` state (plus any `Todo` issue missing the `ai:agent-ready` label):
 
 1. **Sanity check** — is it a duplicate of an existing issue, already fixed in the codebase or git history, or obsolete? If so, say which and mark it (duplicate → link + cancel, fixed → comment with evidence + close). Confirm with me before canceling anything non-obvious.

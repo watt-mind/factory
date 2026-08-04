@@ -18,6 +18,7 @@ import path from "node:path";
 import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
 import { parseOwnedPaths, pathsCollide } from "./owned-paths.mjs";
+import { AI_BLOCKED, answeredHeldTickets } from "./reply-detection.mjs";
 import { budgetExhausted } from "../lib/spend.mjs";
 
 const argv = process.argv.slice(2);
@@ -115,14 +116,23 @@ for (const repo of repos) {
   // `ai:blocked` in Triage means a previous tick already decided this one needs
   // a human. Counting it as triage work is how the stage ends up re-deriving
   // the same hold every 5 minutes — the same shape as the merge stage
-  // re-reviewing escalated PRs. It reappears the moment the label comes off.
-  const triage = nodes.filter((i) => state(i) === "Triage" && !labels(i).includes("ai:blocked"));
-  const triageHeld = nodes.filter((i) => state(i) === "Triage" && labels(i).includes("ai:blocked"));
+  // re-reviewing escalated PRs. It reappears the moment the label comes off —
+  // or, below, the moment a reply lands after the label was applied.
+  const triage = nodes.filter((i) => state(i) === "Triage" && !labels(i).includes(AI_BLOCKED));
+  const triageHeld = nodes.filter((i) => state(i) === "Triage" && labels(i).includes(AI_BLOCKED));
   const ready = nodes.filter((i) => state(i) === "Todo" && labels(i).includes("ai:agent-ready") && !i.assignee);
   const notReady = nodes.filter((i) => state(i) === "Todo" && !labels(i).includes("ai:agent-ready"));
   const inProgress = nodes.filter((i) => state(i) === "In Progress");
   const inReview = nodes.filter((i) => state(i) === "In Review");
   const blocked = nodes.filter((i) => state(i) === "Blocked");
+
+  // Held tickets someone has replied to since the hold. These re-enter the
+  // triage stage's queue: the agent reads the answer, removes ai:blocked, and
+  // re-runs promote-or-hold. The second query only fires when the cheap query
+  // shows a held ticket at all.
+  const heldAny = nodes.filter((i) => ["Triage", "Blocked"].includes(state(i)) && labels(i).includes(AI_BLOCKED));
+  const answeredIds = heldAny.length ? await answeredHeldTickets(repo) : new Set();
+  const answered = heldAny.filter((i) => answeredIds.has(i.identifier));
 
   // GitHub is the source of truth for what is waiting to merge, not Linear.
   // Gating the merge stage on `In Review` tickets meant a finished PR whose
@@ -143,6 +153,7 @@ for (const repo of repos) {
 
   line("Triage (unspecified)", triage.length, triage.length > 20 ? c.yellow : (s) => s);
   if (triageHeld.length) line("Triage, held for you", triageHeld.length, c.red);
+  if (answered.length) line("Held, reply received", answered.length, c.green);
   line("Todo, not ready", notReady.length);
   line("READY to dispatch", ready.length, ready.length ? c.green : c.red);
   line("In Progress", inProgress.length);
@@ -186,6 +197,9 @@ for (const repo of repos) {
     // combined count kept the gate open for Todo-without-agent-ready tickets
     // the stage never touches, spawning a no-op agent every tick.
     triageState: triage.length,
+    // Held tickets with a reply newer than their ai:blocked application — the
+    // triage stage re-examines these, so they open the triage gate too.
+    answered: answered.length,
     ready: ready.length,
     inProgress: inProgress.length,
     inReview: inReview.length,
@@ -199,6 +213,7 @@ for (const repo of repos) {
     inProgressTickets: inProgress.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
     inReviewTickets: inReview.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
     blockedTickets: blocked.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
+    answeredTickets: answered.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
   });
 
   if (quiet) continue;
@@ -231,7 +246,10 @@ for (const repo of repos) {
   }
   if (blocked.length) {
     console.log(c.red(`\n  BLOCKED — needs a human:`));
-    for (const t of blocked) console.log(`    ${t.identifier.padEnd(10)} ${t.title.slice(0, 60)}`);
+    for (const t of blocked) {
+      const tag = answeredIds.has(t.identifier) ? c.green("  <- reply received, triage will re-examine") : "";
+      console.log(`    ${t.identifier.padEnd(10)} ${t.title.slice(0, 60)}${tag}`);
+    }
   }
 }
 
@@ -255,8 +273,10 @@ if (GATE) {
   // Exit 1 = idle, skip. Anything else is a real error and stops the loop.
   const has = {
     // Only spawn a triage agent when a Triage-STATE ticket is waiting — the
-    // stage never touches Todo tickets, ready or not.
-    triage: (s) => s.triageState > 0,
+    // stage never touches Todo tickets, ready or not. A held ticket whose
+    // question got answered is triage work again: the stage reads the reply
+    // and re-runs promote-or-hold.
+    triage: (s) => s.triageState > 0 || s.answered > 0,
     // Don't dispatch with no free slot or nothing startable — an agent that
     // wakes to find the cap full has burned a run to learn nothing.
     dispatch: (s) => s.slotsFree > 0 && s.startable.length > 0,
