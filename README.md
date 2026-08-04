@@ -245,7 +245,7 @@ Only then start the supervisor on a cadence.
 | Tickets per tick | `--args` in `config/schedule.yaml` | triage 3, dispatch 2 |
 | Concurrent tickets | `max_in_flight` in `config/repos.yaml` | 3 |
 | Spend per run | `--budget`, else `budget.per_ticket_usd` in `config/policy.yaml` | $5 |
-| Daily spend | `budget.per_day_usd` | $1000 |
+| Daily spend | `budget.per_day_usd` | $2000 |
 | Which repos | `--repo` on each job | `bj29` only |
 
 ### Auth and "budget" on a subscription
@@ -321,6 +321,16 @@ bun orchestrator/economics.mjs --roll        # append to the permanent rollup
 > **Every harness streams a different schema, and a parser that only knows Claude fails silently.** codex, agy and pi report no cost field, so summing `total_cost_usd` scored them as `$0 / 0 turns / no result` — indistinguishable from a harness that genuinely did nothing. On 2026-08-04 that hid 109 codex and 50 agy runs (35% of all runs) from `lib/spend.mjs`, and the per-day gate was measuring two thirds of the factory while reporting it as the whole.
 >
 > So all four schemas normalise into one `Run` record in `lib/transcript.mjs`, the budget gate imports the same parser, and harnesses that report no cost get priced from their token counts and labelled as the estimate they are. Being wrong by a constant factor is fine; being blind to a whole harness is not. Tests: `bun test lib/transcript.test.mjs` — the fixture per harness is the point.
+
+### Browser isolation — one Chrome per agent, from git
+
+Concurrent Claude agents used to share one chrome-devtools-mcp profile: ten tickets dispatched in the same second all raced for one `SingletonLock`, first Chrome won, and everyone else burned turns on `browser is already running` — 95 errors across 26 runs. The fix is structural, not prompt-level, and it lives in this repo:
+
+- **`config/mcp/claude.json`** defines the browser server the factory passes to every Claude spawn via `--mcp-config`: `--isolated` (temp profile per session, auto-cleaned — collisions become impossible), `--headless`, and webp screenshot caps (`--screenshotFormat=webp --screenshotQuality=70 --screenshotMaxWidth=1280`) that shrink the factory's single biggest context cost 4–6x at the source, while an agent that truly needs a pixel-perfect PNG can still request one per-call.
+- **Deliberately NOT `--strict-mcp-config`.** Strict mode also drops the claude.ai connectors, and losing the Linear MCP severs the control plane — verified empirically on 2026-08-04: 0 Linear tools under strict, 52 without it. The global chrome-devtools *plugin* is disabled in `~/.claude/settings.json` instead, so exactly one browser server loads.
+- **`orchestrator/chrome-sweep.mjs`** cleans up what the wall-clock cap leaves behind: a killed run's MCP server dies without closing its Chrome, which reparents to launchd and keeps running. The sweep kills only processes that pass three fences (agent profile dir in the command line, browser main process, reparented to PID 1 — a live agent's Chrome still has its MCP server as parent) and clears stale `Singleton*` locks nobody holds. Dry-run by default; `--apply` to act. The one unforgivable failure — killing the human's actual Chrome — has a test per fence.
+
+Verified end to end: two parallel headless sessions each launched their own Chrome and navigated with zero contention. After the next batch, `bun run economics -- --since 1d` should show browser-collision errors at zero and `take_screenshot` payloads down ~4–6x.
 
 ## Why `Owned Paths` and not keyword matching
 

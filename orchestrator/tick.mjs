@@ -280,6 +280,12 @@ async function runTicket(t) {
         "--output-format", "stream-json", "--verbose",
         "--max-budget-usd", budget,
         "--fallback-model", "sonnet",
+        // Browser server from git: isolated per-session Chrome (ends the
+        // shared-profile collisions) + webp screenshot caps at the source.
+        // NOT --strict-mcp-config — strict drops the claude.ai connectors,
+        // and losing the Linear MCP severs the control plane (verified
+        // 2026-08-04). Mirrors run-agent.sh.
+        "--mcp-config", path.join(ROOT, "config/mcp/claude.json"),
         ...(COMMAND_MODEL ? ["--model", COMMAND_MODEL] : []),
       ];
     } else if (HARNESS === "codex") {

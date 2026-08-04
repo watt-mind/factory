@@ -199,12 +199,19 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # still parses the final envelope for the exit code.
 set +e
 if [[ "$HARNESS" == "claude" ]]; then
+  # --mcp-config supplies the browser server from git (config/mcp/claude.json):
+  # isolated per-session Chrome profiles ended the shared-profile collisions
+  # (95 errors across 26 runs), and webp screenshot caps cut the biggest context
+  # cost at the source. Deliberately NOT --strict-mcp-config: strict also drops
+  # the claude.ai connectors, and losing the Linear MCP severs the control
+  # plane (verified empirically 2026-08-04 — 0 Linear tools under strict).
   (
     cd "$REPO_PATH"
     $RUN_CAP $ENV_PREFIX claude -p "$PROMPT" \
       --output-format stream-json --verbose \
       --max-budget-usd "$BUDGET" \
       --fallback-model sonnet \
+      --mcp-config "$ROOT/config/mcp/claude.json" \
       $MODEL_ARGS $READONLY_ARGS
   ) 2>&1 | (cd "$ROOT" && bun runners/report.mjs --log "$LOG" --harness claude)
 else
