@@ -192,24 +192,43 @@ export async function fetchTeams() {
   return result;
 }
 
+/**
+ * The Linear filter for one reaper run. Pure and exported so the two questions
+ * this script asks stay testable without a network call.
+ *
+ * Default: the UNION of both claim signals — any ticket carrying
+ * `ai:in-progress` in ANY state, plus anything sitting in `In Progress`.
+ *
+ * The union is the point. Querying the heartbeat label alone (what this did
+ * until OPS-63) contradicted isAgentClaim(), which also accepts `agent:*`: a
+ * ticket claimed with `agent:claude-code` but no heartbeat label — exactly what
+ * a run that dies before its first heartbeat leaves behind — was never fetched
+ * and so could never be reaped, however long it sat. CLNT-688 sat that way for
+ * 190 minutes while the reaper reported "no stale claims".
+ *
+ * The label half of the union is still needed alongside the state half: triage
+ * claims tickets while specifying them and leaves them in `Triage`, so a
+ * crashed triage run strands `ai:in-progress` on a ticket no state-based query
+ * ever looks at.
+ *
+ * Widening the fetch does NOT widen what gets reclaimed. main() still filters
+ * everything through isAgentClaim() before touching it, so a human's In
+ * Progress ticket is fetched, counted in the "skipping N" line, and left alone.
+ *
+ * --any-assignee: the audit view exists specifically to see In Progress work
+ * REGARDLESS of any agent label — including a human's. It skips the
+ * isAgentClaim() pre-filter in main() rather than the query, which is what
+ * still makes it different from the default now that the default includes
+ * In Progress.
+ */
+export function buildIssueFilter(teamKey = null, anyAssignee = false) {
+  const team = teamKey ? `, team: { key: { eq: "${teamKey}" } }` : "";
+  if (anyAssignee) return `state: { name: { eq: "In Progress" } }${team}`;
+  return `or: [ { labels: { name: { eq: "${HEARTBEAT_LABEL}" } } }, { state: { name: { eq: "In Progress" } } } ]${team}`;
+}
+
 export async function fetchInProgress(teamKey = null, anyAssignee = false) {
-  const teamFilter = teamKey ? `, team: { key: { eq: "${teamKey}" } }` : "";
-  // Two different questions, two different filters.
-  //
-  // Default: any ticket carrying the claim marker, in ANY state — not just In
-  // Progress. Triage claims tickets while specifying them and leaves them in
-  // `Triage`, so a crashed triage run would otherwise strand `ai:in-progress`
-  // forever on a ticket no state-based query ever looks at.
-  //
-  // --any-assignee: the audit view exists specifically to see In Progress work
-  // REGARDLESS of the ai:in-progress label — including a human's, with no
-  // agent label at all. Filtering by that label here would make the flag a
-  // no-op: everything returned would already carry it. So this path queries by
-  // state instead, and isAgentClaim() (applied downstream) tells the two
-  // apart — main() must still never reclaim anything that fails it.
-  const filter = anyAssignee
-    ? `state: { name: { eq: "In Progress" } }${teamFilter}`
-    : `labels: { name: { eq: "ai:in-progress" } }${teamFilter}`;
+  const filter = buildIssueFilter(teamKey, anyAssignee);
   const q = `
     query {
       issues(first: 250, filter: { ${filter} }) {

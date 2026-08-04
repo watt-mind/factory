@@ -105,3 +105,36 @@ describe("reaper run log discovery", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+import { buildIssueFilter } from "./reaper.mjs";
+
+describe("issue fetch filter (OPS-63)", () => {
+  test("default filter is the union of the heartbeat label and In Progress state", () => {
+    const f = buildIssueFilter();
+    // Both halves present: a ticket claimed with only `agent:*` sits in
+    // In Progress with no heartbeat label, and must still be fetched.
+    expect(f).toContain(`labels: { name: { eq: "${HEARTBEAT_LABEL}" } }`);
+    expect(f).toContain(`state: { name: { eq: "In Progress" } }`);
+    expect(f.startsWith("or: [")).toBe(true);
+  });
+
+  test("default filter no longer excludes agent-labelled tickets lacking the heartbeat label", () => {
+    // The regression itself: the old filter was the label clause ALONE, so a
+    // ticket isAgentClaim() accepts via `agent:*` was never returned.
+    const agentOnly = { labels: { nodes: [{ name: "agent:claude-code" }] }, state: { name: "In Progress" } };
+    expect(isAgentClaim(agentOnly)).toBe(true);
+    expect(buildIssueFilter()).not.toBe(`labels: { name: { eq: "${HEARTBEAT_LABEL}" } }`);
+  });
+
+  test("--any-assignee still queries by state alone, so it can surface human work", () => {
+    const f = buildIssueFilter(null, true);
+    expect(f).toBe(`state: { name: { eq: "In Progress" } }`);
+    expect(f).not.toContain(HEARTBEAT_LABEL);
+  });
+
+  test("team scoping is ANDed onto both variants", () => {
+    expect(buildIssueFilter("CLNT")).toContain(`team: { key: { eq: "CLNT" } }`);
+    expect(buildIssueFilter("CW", true)).toContain(`team: { key: { eq: "CW" } }`);
+    expect(buildIssueFilter(null)).not.toContain("team:");
+  });
+});
