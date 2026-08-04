@@ -19,8 +19,16 @@
  *       section like any stage agent, tailable from here.
  * (`b` shows the blocked-tickets digest, which is read-only like the rest.)
  * Everything else re-reads the same state queue.mjs and the log files already
- * expose. This is the bird's-eye view across repos and in-flight tickets;
+ * expose — including `enter`, which just hands the terminal to $PAGER on the
+ * selected log file and takes it back, and `c`, which copies a ticket id via
+ * pbcopy. This is the bird's-eye view across repos and in-flight tickets;
  * run.mjs is still the place to watch one job's full dry/apply output.
+ *
+ * Unattended signal: the terminal tab title (OSC 0) carries the repo and a
+ * "⚠" once anything needs a look (a failed stage, a blocked ticket, a quiet
+ * running ticket, or spend over 90% of the daily cap) — same condition rings
+ * the bell once, on the transition into that state, so leaving this in a
+ * background tab still surfaces trouble.
  */
 import React, { useEffect, useRef, useState } from "react";
 import { render, Box, Text, useInput, useStdout } from "ink";
@@ -407,6 +415,7 @@ function App() {
         setSummaries(data);
         setError(null);
         setLastPoll(clock());
+        setLastPollMs(Date.now());
       } catch (e) {
         if (!cancelled) setError(String(e.message ?? e));
       }
@@ -419,15 +428,16 @@ function App() {
     // current agents+tickets list, which this effect can't see.
   }, []);
 
-  // Terminal tab title (OSC 0) follows the selected repo, so the tab strip
-  // says which repo this monitor is on without focusing it.
-  useEffect(() => {
-    if (process.stdout.isTTY) process.stdout.write(`\x1b]0;factory watch${summary?.repo ? ` — ${summary.repo}` : ""}\x07`);
-  }, [summary?.repo]);
-
   useEffect(() => {
     const id = setInterval(() => setSpend(todaysSpendUSD(LOG_DIR)), LOG_POLL_MS);
     setSpend(todaysSpendUSD(LOG_DIR));
+    return () => clearInterval(id);
+  }, []);
+
+  // Drives the "next poll in Ns" countdown in the footer — otherwise a stale
+  // queue strip and a slow poll look identical.
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -459,12 +469,33 @@ function App() {
     return () => clearInterval(id);
   }, [summary]);
 
+  const budgetTone = spendTone(spend, PER_DAY_USD);
+  const quietTickets = rows.filter(
+    (t) => t.status === "running" && ticketAges[t.identifier] != null && ticketAges[t.identifier] >= QUIET_MS,
+  ).length;
+  const attention = needsAttention({ blocked: summary?.blocked ?? 0, stages: stages ?? [], quietTickets, budgetTone });
+
+  // Terminal tab title (OSC 0) follows the selected repo and gets a "⚠"
+  // prefix for as long as `attention` holds. The bell is separate and rings
+  // once, only on the false -> true edge, so an unresolved problem nags the
+  // tab (title) without nagging the ear (bell) every poll.
+  useEffect(() => {
+    if (process.stdout.isTTY) {
+      const prefix = attention ? "⚠ " : "";
+      process.stdout.write(`\x1b]0;${prefix}factory watch${summary?.repo ? ` — ${summary.repo}` : ""}\x07`);
+    }
+    if (attention && !wasAttention.current && process.stdout.isTTY) process.stdout.write("\x07");
+    wasAttention.current = attention;
+  }, [summary?.repo, attention]);
+
   const selKey = selAgent ? selAgent.file : selectedTicket;
+  useEffect(() => { setScrollOffset(0); }, [selKey, summary?.repo]); // switching selection re-follows live output
   useEffect(() => {
     const tail = () => {
-      if (!summary || (!selAgent && !selectedTicket)) { setLogLines([]); return; }
+      if (!summary || (!selAgent && !selectedTicket)) { setLogEntries([]); logFileRef.current = null; return; }
       const file = selAgent ? selAgent.file : latestLogForTicket(LOG_DIR, summary.repo, selectedTicket);
-      setLogLines(tailFormattedLines(file, 40));
+      logFileRef.current = file;
+      setLogEntries(tailEntries(file, TAIL_BUFFER));
     };
     tail();
     const id = setInterval(tail, LOG_POLL_MS);
@@ -563,15 +594,35 @@ function App() {
     if (input === "x" && summary?.team) startReaper(summary.team, false);
     if (input === "b" && summary?.repo) startDigest(summary.repo);
     if (input === "u" && summary?.repo) startUnblock(summary.repo);
+    if (input === "c" && selTicketRow?.identifier) {
+      try {
+        const p = Bun.spawn(["pbcopy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+        p.stdin.write(selTicketRow.identifier);
+        p.stdin.end();
+      } catch { /* no clipboard available — nothing to fall back to here */ }
+    }
     if (key.leftArrow) { setRepoIdx((i) => Math.max(0, i - 1)); setRowIdx(0); }
     if (key.rightArrow) { setRepoIdx((i) => Math.max(0, Math.min(summaries.length - 1, i + 1))); setRowIdx(0); }
+    if (/^[1-9]$/.test(input) && Number(input) - 1 < summaries.length) { setRepoIdx(Number(input) - 1); setRowIdx(0); }
     if (key.upArrow) setRowIdx(Math.max(0, selIdx - 1));
     if (key.downArrow) setRowIdx(Math.min(Math.max(0, allCount - 1), selIdx + 1));
+    if (key.pageUp) setScrollOffset((o) => Math.min(Math.max(0, logEntries.length - 1), o + LOG_PAGE));
+    if (key.pageDown) setScrollOffset((o) => Math.max(0, o - LOG_PAGE));
+    if (input === "G") setScrollOffset(0);
+    if (key.return && logFileRef.current) {
+      // Suspend the alt-screen TUI, hand the terminal to $PAGER for real
+      // scrollback + search, then take it back. Synchronous on purpose —
+      // ink's own input loop is paused for the duration, same as htop's `l`.
+      const file = logFileRef.current;
+      process.stdout.write("\x1b[?1049l");
+      Bun.spawnSync([process.env.PAGER || "less", "-R", "+G", file], { stdout: "inherit", stdin: "inherit", stderr: "inherit" });
+      process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H");
+    }
   });
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={width} height={height}>
-      <Text bold>factory — foreground monitor</Text>
+      <Text bold color={attention ? "yellow" : undefined}>{attention ? "⚠ " : ""}factory — foreground monitor</Text>
       <RepoTabs repos={summaries.map((s) => s.repo)} selected={repoIdx} />
       <QueueStrip summary={summary} />
       <StageStrip
@@ -590,18 +641,22 @@ function App() {
           <UnblockPane unblock={unblock} />
         ) : (
           <>
-            <TicketList stageAgents={stageAgents} rows={rows} ready={summary?.startable} ages={ticketAges} selected={selIdx} height={paneHeight} />
-            <LogTail label={selAgent ? `${selAgent.label} agent${selAgent.harness ? ` (${selAgent.harness})` : ""}` : selectedTicket} lines={logLines} height={paneHeight} />
+            <TicketList stageAgents={stageAgents} rows={rows} ready={summary?.startable} blocked={summary?.blockedTickets} ages={ticketAges} selected={selIdx} height={paneHeight} />
+            <LogTail label={selAgent ? `${selAgent.label} agent${selAgent.harness ? ` (${selAgent.harness})` : ""}` : selectedTicket} entries={logEntries} scrollOffset={scrollOffset} height={paneHeight} />
           </>
         )}
       </Box>
       <Box justifyContent="space-between">
         <Text dimColor>
-          spend {formatSpend(spend, PER_DAY_USD)} today
+          spend {formatSpend(spend, PER_DAY_USD)}
+          {spendPct(spend, PER_DAY_USD) != null && (
+            <Text color={budgetTone === "bad" ? "red" : budgetTone === "warn" ? "yellow" : undefined}> ({spendPct(spend, PER_DAY_USD)}%)</Text>
+          )}
+          {" "}today
           {error ? <Text color="red">  ! {error.slice(0, 50)}</Text> : null}
         </Text>
         <Text dimColor>
-          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ? shortcuts · q quit
+          {lastPoll ? `updated ${lastPoll}${lastPollMs != null ? ` · next ${Math.max(0, Math.ceil((QUEUE_POLL_MS - (nowTick - lastPollMs)) / 1000))}s` : ""}` : "loading…"}  ? shortcuts · q quit
         </Text>
       </Box>
     </Box>
