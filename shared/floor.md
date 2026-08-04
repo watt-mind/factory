@@ -1,7 +1,10 @@
 <!-- FACTORY:FLOOR:BEGIN -->
 <!-- Generated from watt-mind/factory shared/floor.md. Do not edit here — edit
      the source and re-run `node build/emit.mjs`, or your change is lost on the
-     next sync. -->
+     next sync. Keep the source prettier-canonical (`npx prettier -w`): some
+     repos run prettier on *.md in pre-commit hooks, and any construct prettier
+     rewrites (e.g. *emphasis* -> _emphasis_) makes --check read those repos as
+     perpetually stale. -->
 
 ## Agent operating floor
 
@@ -70,7 +73,7 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 **Screenshots are the single most expensive thing you can do.** A full-page PNG averages 199KB — roughly a hundred times a typical command's output, and it stays resident for the rest of the session.
 
 - **Never `Read` an image you just captured.** The capture already put it in context; reading the file back doubles it for nothing. This was 572 payloads across the measured runs.
-- Use the **accessibility tree** (`take_snapshot`, `read_page`) for anything structural — labels, hierarchy, focus order, presence of an element. It averages 7KB against 199KB and is more precise for those questions. Screenshot only when the finding is genuinely *visual*: spacing, contrast, truncation, overlap.
+- Use the **accessibility tree** (`take_snapshot`, `read_page`) for anything structural — labels, hierarchy, focus order, presence of an element. It averages 7KB against 199KB and is more precise for those questions. Screenshot only when the finding is genuinely _visual_: spacing, contrast, truncation, overlap.
 - When you do screenshot, prefer a **mobile viewport** and a **specific element** over a full desktop page.
 
 **Don't re-read what you have already read.** 285 duplicate reads of an identical path inside a single run were measured. If you read a file, it is still in your context — scroll back rather than re-reading. For a large file, `offset`/`limit` the part you need instead of pulling all of it.
