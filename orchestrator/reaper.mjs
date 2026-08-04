@@ -153,15 +153,27 @@ export async function fetchTeams() {
   return result;
 }
 
-export async function fetchInProgress(teamKey = null) {
+export async function fetchInProgress(teamKey = null, anyAssignee = false) {
   const teamFilter = teamKey ? `, team: { key: { eq: "${teamKey}" } }` : "";
-  // Any ticket carrying the claim marker, in ANY state — not just In Progress.
-  // Triage claims tickets while specifying them and leaves them in `Triage`, so
-  // a crashed triage run would otherwise strand `ai:in-progress` forever on a
-  // ticket no state-based query ever looks at.
+  // Two different questions, two different filters.
+  //
+  // Default: any ticket carrying the claim marker, in ANY state — not just In
+  // Progress. Triage claims tickets while specifying them and leaves them in
+  // `Triage`, so a crashed triage run would otherwise strand `ai:in-progress`
+  // forever on a ticket no state-based query ever looks at.
+  //
+  // --any-assignee: the audit view exists specifically to see In Progress work
+  // REGARDLESS of the ai:in-progress label — including a human's, with no
+  // agent label at all. Filtering by that label here would make the flag a
+  // no-op: everything returned would already carry it. So this path queries by
+  // state instead, and isAgentClaim() (applied downstream) tells the two
+  // apart — main() must still never reclaim anything that fails it.
+  const filter = anyAssignee
+    ? `state: { name: { eq: "In Progress" } }${teamFilter}`
+    : `labels: { name: { eq: "ai:in-progress" } }${teamFilter}`;
   const q = `
     query {
-      issues(first: 250, filter: { labels: { name: { eq: "ai:in-progress" } }${teamFilter} }) {
+      issues(first: 250, filter: { ${filter} }) {
         nodes {
           id identifier title url startedAt updatedAt
           team { key }
@@ -324,7 +336,7 @@ Options:
   console.log(`=== Stale-claim reaper [${mode}] threshold=${args.minutes}min ===\n`);
 
   const teams = await fetchTeams();
-  let issues = await fetchInProgress(args.team);
+  let issues = await fetchInProgress(args.team, args.anyAssignee);
   const now = new Date();
   const cutoff = new Date(now.getTime() - args.minutes * 60 * 1000);
 
@@ -380,6 +392,16 @@ Options:
     const whoStr = who.padEnd(16);
     const titleStr = (issue.title || "").slice(0, 44);
     console.log(`  STALE ${id} ${ageStr}m  ${whoStr} ${titleStr}`);
+
+    // Enforced here, not just by the upstream fetch: --any-assignee queries by
+    // state so it can show human work for audit purposes, which means a stale
+    // ticket in `considered` may not be an agent claim at all. Unassigning a
+    // human's ticket because they didn't comment in 45 minutes would be far
+    // worse than the crashed agent this reaper exists to clean up after.
+    if (!isAgentClaim(issue)) {
+      console.log(`        (no agent claim label — a human's work, not touching it)`);
+      continue;
+    }
 
     const teamKey = issue.team?.key;
     const team = teams[teamKey];

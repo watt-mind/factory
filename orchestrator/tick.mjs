@@ -61,6 +61,10 @@ const cap = repo.max_in_flight ?? policy?.concurrency?.max_in_flight_per_repo ??
 // of the same weekly allowance.
 const HARNESS = val("--harness") ?? "claude";
 if (!Bun.which(HARNESS)) { console.error(`harness "${HARNESS}" is not on PATH`); process.exit(2); }
+// linear.md's agent:* taxonomy names the harness that actually holds the
+// claim (agent:claude-code, agent:gemini, ...) — it must track HARNESS, not
+// assume claude, or a ticket run on agy gets labelled as if Claude did it.
+const AGENT_LABEL = `agent:${HARNESS === "claude" ? "claude-code" : HARNESS}`;
 
 const TIMEOUT_BIN = Bun.which("timeout") ?? Bun.which("gtimeout");
 if (!TIMEOUT_BIN) console.log(c.yellow("  ! no timeout(1)/gtimeout on PATH — a wedged run will not be wall-clock capped"));
@@ -155,7 +159,7 @@ async function claim(t) {
   const keep = (t.labels?.nodes ?? [])
     .filter((l) => l.name !== "ai:agent-ready")
     .map((l) => allLabels.find((x) => x.name === l.name)?.id).filter(Boolean);
-  const want = [...new Set([...keep, labelId("ai:in-progress"), labelId("agent:claude-code")].filter(Boolean))];
+  const want = [...new Set([...keep, labelId("ai:in-progress"), labelId(AGENT_LABEL)].filter(Boolean))];
   await gql(`mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
     { id: t.id, in: { stateId: inProgressId, assigneeId: me.id, labelIds: want } });
   // Linear has no compare-and-swap; this read-back IS the concurrency control.
@@ -241,7 +245,11 @@ async function runTicket(t) {
     const why = (up.stderr || up.stdout || "").trim().split("\n").pop();
     console.log(c.red(`  ${t.identifier} worktree-up failed: ${why}`));
     results.push({ id: t.identifier, ok: false, why: "worktree-up failed" });
-    await unclaim(t, `worktree-up failed: ${why}`);
+    // Must not throw: an unhandled rejection here kills the whole rolling
+    // loop via Promise.race in the main dispatch loop below, taking down
+    // every OTHER in-flight ticket's tracking with it. Same guard as the
+    // other two unclaim() call sites.
+    await unclaim(t, `worktree-up failed: ${why}`).catch(() => {});
     noteEnvFailure("worktree-up");
     return;
   }
