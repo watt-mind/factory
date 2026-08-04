@@ -26,6 +26,7 @@ import { todaysSpendUSD } from "../lib/spend.mjs";
 import {
   buildTicketRows, latestLogForTicket, tailFormattedLines, formatSpend,
   formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge, visibleWindow,
+  activeAgents,
 } from "./watch-lib.mjs";
 
 const LOG_DIR = path.join(homedir(), ".factory/logs");
@@ -100,18 +101,31 @@ function QueueStrip({ summary }) {
  * triage -> dispatch -> merge, with a live dot on whatever is running right
  * now (log written < 90s ago) and "how long since it last ran, and did it
  * end well" for the rest.
+ *
+ * An idle stage with a backlog is the strip's whole reason to exist — "merge
+ * hasn't run in 40m and 12 PRs are waiting" means the supervisor for that
+ * stage isn't running (or its gate is failing), and that renders yellow so it
+ * cannot be mistaken for a quiet queue. `counts` carries how many agents each
+ * stage is running (dispatch runs one per ticket, so ×N).
  */
-function StageStrip({ stages }) {
+function StageStrip({ stages, waiting, counts }) {
   if (!stages) return null;
   return (
     <Box>
       <Text dimColor>stages </Text>
       {stages.map((s) => {
         const failed = s.lastResult && !s.lastResult.ok;
+        const backlog = waiting?.[s.stage] ?? 0;
+        const n = counts?.[s.stage] ?? 0;
         return (
           <Box key={s.stage} marginRight={2}>
             {s.active ? (
-              <Text color="green">● {s.stage}</Text>
+              <Text color="green">● {s.stage}{n > 1 ? ` ×${n}` : ""}</Text>
+            ) : backlog > 0 ? (
+              <Text color="yellow">
+                ○ {s.stage} {formatAge(s.ageMs)} — {backlog} waiting
+                {failed ? <Text color="red" bold> FAIL</Text> : null}
+              </Text>
             ) : (
               <Text dimColor>
                 ○ {s.stage} <Text>{formatAge(s.ageMs)}</Text>
@@ -190,28 +204,52 @@ async function runReaperProcess(team, apply) {
   return { out, err };
 }
 
-function TicketList({ rows, ready, selected, height }) {
-  // Budget in rows: 1 header, 2 per ticket, 3 for the ready section, 2 for
-  // the more-above/below markers. Never let the list outgrow the pane — an
-  // overgrown frame is what pushes the TUI into terminal scrollback.
+function TicketList({ stageAgents, rows, ready, ages, selected, height }) {
+  // Budget in rows: agents section (1 header + 1 per agent), 1 in-flight
+  // header, 2 per ticket, 3 for the ready section, 2 for the more-above/below
+  // markers. Never let the list outgrow the pane — an overgrown frame is what
+  // pushes the TUI into terminal scrollback.
+  const agentReserve = stageAgents.length > 0 ? stageAgents.length + 1 : 0;
   const readyReserve = ready?.length > 0 ? 3 : 0;
-  const maxRows = Math.max(1, Math.floor((height - 1 - readyReserve - 2) / 2));
-  const [start, end] = visibleWindow(rows.length, selected, maxRows);
+  const maxRows = Math.max(1, Math.floor((height - agentReserve - 1 - readyReserve - 2) / 2));
+  const ticketSel = Math.max(0, selected - stageAgents.length);
+  const [start, end] = visibleWindow(rows.length, ticketSel, maxRows);
   return (
     <Box flexDirection="column" width="42%" marginRight={1}>
+      {stageAgents.length > 0 && (
+        <Box flexDirection="column">
+          <Text dimColor>agents</Text>
+          {stageAgents.map((a, i) => (
+            <Text key={a.file} inverse={i === selected}>
+              <Text color="green">●</Text> {a.label}
+              {a.harness ? <Text dimColor> {a.harness}</Text> : null}
+              <Text dimColor> {formatAge(a.ageMs)}</Text>
+            </Text>
+          ))}
+        </Box>
+      )}
       <Text dimColor>in flight</Text>
       {rows.length === 0 && <Text dimColor>  nothing running or in review</Text>}
       {start > 0 && <Text dimColor>  ▲ {start} more</Text>}
       {rows.slice(start, end).map((t, idx) => {
         const i = start + idx;
-        const isSel = i === selected;
-        const dot = t.status === "running" ? "●" : "◐";
-        const dotColor = t.status === "running" ? "green" : "yellow";
+        const isSel = stageAgents.length + i === selected;
+        const age = ages?.[t.identifier];
+        // A running ticket whose log went quiet is the thing to look at — the
+        // agent may be thinking, or gone (the reaper fires at 45m of Linear
+        // silence; this is the earlier, cheaper tell).
+        const quiet = t.status === "running" && age != null && age >= 90_000;
+        const dot = t.status === "running" ? (quiet ? "◌" : "●") : "◐";
+        const dotColor = t.status === "running" ? (quiet ? "yellow" : "green") : "yellow";
+        const note = t.status !== "running" ? "in review"
+          : age == null ? "running — no log"
+          : quiet ? `quiet ${formatAge(age)}`
+          : `running ${formatAge(age)}`;
         return (
           <Box key={t.identifier} flexDirection="column" marginBottom={0}>
             <Text inverse={isSel}>
               <Text color={dotColor}>{dot}</Text> {t.identifier}{" "}
-              <Text dimColor>{t.status === "running" ? "running" : "in review"}</Text>
+              <Text dimColor color={quiet ? "yellow" : undefined}>{note}</Text>
             </Text>
             <Text dimColor wrap="truncate-end">  {t.title}</Text>
           </Box>
@@ -228,13 +266,13 @@ function TicketList({ rows, ready, selected, height }) {
   );
 }
 
-function LogTail({ ticket, lines, height }) {
+function LogTail({ label, lines, height }) {
   const shown = lines.slice(-Math.max(1, height - 1));
   return (
     <Box flexDirection="column" width="58%">
-      <Text dimColor>{ticket ? `log tail — ${ticket}` : "log tail"}</Text>
-      {!ticket && <Text dimColor>  select a ticket to tail its log</Text>}
-      {ticket && lines.length === 0 && <Text dimColor>  no log yet</Text>}
+      <Text dimColor>{label ? `log tail — ${label}` : "log tail"}</Text>
+      {!label && <Text dimColor>  select a ticket or agent to tail its log</Text>}
+      {label && lines.length === 0 && <Text dimColor>  no log yet</Text>}
       {shown.map((line, i) => (
         <Text key={i} wrap="truncate-end">{line}</Text>
       ))}
@@ -252,9 +290,9 @@ function App() {
   const [spend, setSpend] = useState(0);
   const [reaper, setReaper] = useState(null); // { phase, team, lines, stale }
   const [stages, setStages] = useState(null);
+  const [agents, setAgents] = useState([]);
+  const [ticketAges, setTicketAges] = useState({});
   const [showHelp, setShowHelp] = useState(false);
-  const rowIdxRef = useRef(rowIdx);
-  rowIdxRef.current = rowIdx;
   const pollRef = useRef(null);
   const { stdout } = useStdout();
   const width = Math.max(70, stdout?.columns ?? 100);
@@ -272,10 +310,6 @@ function App() {
         setSummaries(data);
         setError(null);
         setLastPoll(clock());
-        setRowIdx((prev) => {
-          const rows = buildTicketRows(data[Math.min(repoIdx, data.length - 1)] ?? {});
-          return Math.min(prev, Math.max(0, rows.length - 1));
-        });
       } catch (e) {
         if (!cancelled) setError(String(e.message ?? e));
       }
@@ -284,9 +318,8 @@ function App() {
     poll();
     const id = setInterval(poll, QUEUE_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
-    // repoIdx intentionally omitted — clamping reads the latest via closure
-    // over the freshest `data`, not a stale repoIdx from mount time.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // rowIdx is not clamped here — it's clamped at render time against the
+    // current agents+tickets list, which this effect can't see.
   }, []);
 
   useEffect(() => {
@@ -297,26 +330,43 @@ function App() {
 
   const summary = summaries[repoIdx];
   const rows = buildTicketRows(summary ?? {});
-  const selectedTicket = rows[rowIdx]?.identifier ?? null;
+  // Selection runs over one flat list: live stage agents first (triage/merge —
+  // dispatch agents ARE the running tickets below), then tickets.
+  const stageAgents = agents.filter((a) => !a.identifier);
+  const allCount = stageAgents.length + rows.length;
+  const selIdx = Math.min(rowIdx, Math.max(0, allCount - 1));
+  const selAgent = selIdx < stageAgents.length ? stageAgents[selIdx] : null;
+  const selTicketRow = selAgent ? null : rows[selIdx - stageAgents.length] ?? null;
+  const selectedTicket = selTicketRow?.identifier ?? null;
 
   useEffect(() => {
-    if (!summary?.repo) { setStages(null); return; }
-    const scan = () => setStages(stageStatuses(LOG_DIR, summary.repo));
+    if (!summary?.repo) { setStages(null); setAgents([]); setTicketAges({}); return; }
+    const scan = () => {
+      setStages(stageStatuses(LOG_DIR, summary.repo));
+      setAgents(activeAgents(LOG_DIR, summary.repo));
+      const ages = {};
+      for (const t of summary.inProgressTickets ?? []) {
+        const f = latestLogForTicket(LOG_DIR, summary.repo, t.identifier);
+        ages[t.identifier] = f ? Math.max(0, Date.now() - Bun.file(f).lastModified) : null;
+      }
+      setTicketAges(ages);
+    };
     scan();
     const id = setInterval(scan, LOG_POLL_MS);
     return () => clearInterval(id);
-  }, [summary?.repo]);
+  }, [summary]);
 
+  const selKey = selAgent ? selAgent.file : selectedTicket;
   useEffect(() => {
     const tail = () => {
-      if (!selectedTicket || !summary) { setLogLines([]); return; }
-      const file = latestLogForTicket(LOG_DIR, summary.repo, selectedTicket);
-      setLogLines(tailFormattedLines(file, 30));
+      if (!summary || (!selAgent && !selectedTicket)) { setLogLines([]); return; }
+      const file = selAgent ? selAgent.file : latestLogForTicket(LOG_DIR, summary.repo, selectedTicket);
+      setLogLines(tailFormattedLines(file, 40));
     };
     tail();
     const id = setInterval(tail, LOG_POLL_MS);
     return () => clearInterval(id);
-  }, [selectedTicket, summary?.repo]);
+  }, [selKey, summary?.repo]);
 
   const startReaper = async (team, apply) => {
     setReaper({ phase: apply ? "applying" : "dry", team, lines: [], stale: 0 });
@@ -354,7 +404,7 @@ function App() {
     if (key.escape) process.exit(0);
     if (input === "r") { pollRef.current?.(); setSpend(todaysSpendUSD(LOG_DIR)); }
     if (input === "o") {
-      const url = rows[rowIdx]?.url;
+      const url = selTicketRow?.url;
       if (url) {
         // Desktop app first; if the linear:// handler isn't registered, `open`
         // exits non-zero and the https URL goes to the browser instead.
@@ -366,8 +416,8 @@ function App() {
     if (input === "x" && summary?.team) startReaper(summary.team, false);
     if (key.leftArrow) { setRepoIdx((i) => Math.max(0, i - 1)); setRowIdx(0); }
     if (key.rightArrow) { setRepoIdx((i) => Math.max(0, Math.min(summaries.length - 1, i + 1))); setRowIdx(0); }
-    if (key.upArrow) setRowIdx((i) => Math.max(0, i - 1));
-    if (key.downArrow) setRowIdx((i) => Math.min(rows.length - 1, i + 1));
+    if (key.upArrow) setRowIdx(Math.max(0, selIdx - 1));
+    if (key.downArrow) setRowIdx(Math.min(Math.max(0, allCount - 1), selIdx + 1));
   });
 
   return (
@@ -375,7 +425,11 @@ function App() {
       <Text bold>factory — foreground monitor</Text>
       <RepoTabs repos={summaries.map((s) => s.repo)} selected={repoIdx} />
       <QueueStrip summary={summary} />
-      <StageStrip stages={stages} />
+      <StageStrip
+        stages={stages}
+        counts={{ dispatch: agents.filter((a) => a.identifier).length }}
+        waiting={{ triage: summary?.triageState ?? 0, dispatch: summary?.startable?.length ?? 0, merge: summary?.openPRs ?? 0 }}
+      />
       <Box marginTop={1} marginBottom={1} flexGrow={1}>
         {showHelp ? (
           <HelpPane />
@@ -383,8 +437,8 @@ function App() {
           <ReaperPane reaper={reaper} />
         ) : (
           <>
-            <TicketList rows={rows} ready={summary?.startable} selected={rowIdx} height={paneHeight} />
-            <LogTail ticket={selectedTicket} lines={logLines} height={paneHeight} />
+            <TicketList stageAgents={stageAgents} rows={rows} ready={summary?.startable} ages={ticketAges} selected={selIdx} height={paneHeight} />
+            <LogTail label={selAgent ? `${selAgent.label} agent${selAgent.harness ? ` (${selAgent.harness})` : ""}` : selectedTicket} lines={logLines} height={paneHeight} />
           </>
         )}
       </Box>

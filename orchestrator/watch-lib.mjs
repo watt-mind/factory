@@ -8,7 +8,7 @@
  * inline for its own console output; this mirrors that same normalisation
  * read-only, from the .jsonl files tick.mjs already writes to ~/.factory/logs.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, openSync, readSync, closeSync } from "node:fs";
 import path from "node:path";
 
 const trim = (s, n) => String(s ?? "").replace(/\s+/g, " ").slice(0, n);
@@ -193,4 +193,48 @@ export function parseReaperOutput(text) {
   const m = /===\s+(?:Would reclaim|Reclaimed):\s+(\d+)/.exec(s);
   if (m) return { stale: Number(m[1]) };
   return { stale: 0 };
+}
+
+/**
+ * One entry per agent running RIGHT NOW: every log under logDir for `repo`
+ * whose mtime is within `activeMs`. The filename says which stage invoked it —
+ * `<repo>-factory-<stage>-<stamp>.jsonl` is the stage's own agent (triage,
+ * merge, …); `<repo>-<TICKET-ID>-<stamp>.jsonl` is a dispatch agent working
+ * that ticket. Sorted most-recently-active first.
+ */
+export function activeAgents(logDir, repo, { now = Date.now(), activeMs = 90_000 } = {}) {
+  const out = [];
+  try {
+    for (const f of new Bun.Glob(`${repo}-*.jsonl`).scanSync(logDir)) {
+      const full = path.join(logDir, f);
+      const ageMs = Math.max(0, now - Bun.file(full).lastModified);
+      if (ageMs >= activeMs) continue;
+      // Stamps appear as 20260804-164848, 20260804164848, and a trailing-dot
+      // variant (…143850..jsonl) — tolerate all three.
+      const rest = f.slice(repo.length + 1).replace(/\.jsonl$/, "");
+      const stage = /^factory-(.+?)-\d{8}-?\d{6}\.?$/.exec(rest);
+      const ticket = /^(.+?)-\d{8}-?\d{6}\.?$/.exec(rest);
+      if (stage) out.push({ stage: stage[1], label: stage[1], identifier: null, file: full, ageMs, harness: peekHarness(full) });
+      else if (ticket) out.push({ stage: "dispatch", label: ticket[1], identifier: ticket[1], file: full, ageMs, harness: peekHarness(full) });
+    }
+  } catch { /* no log dir yet */ }
+  return out.sort((a, b) => a.ageMs - b.ageMs);
+}
+
+/**
+ * Which harness wrote this log, from its first bytes: Claude's stream-json
+ * opens with {"type":"system","subtype":"init"}, agy's envelope with
+ * {"event":…}. 160 bytes is enough for either and cheap to re-peek.
+ */
+export function peekHarness(file) {
+  try {
+    const fd = openSync(file, "r");
+    const buf = Buffer.alloc(160);
+    const n = readSync(fd, buf, 0, 160, 0);
+    closeSync(fd);
+    const head = buf.toString("utf8", 0, n);
+    if (head.includes('"type":"system"') || head.includes('"type":"assistant"')) return "claude";
+    if (head.includes('"event"') || head.includes("step_update")) return "agy";
+  } catch { /* unreadable — unknown */ }
+  return null;
 }

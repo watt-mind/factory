@@ -13,6 +13,7 @@ import path from "node:path";
 import {
   parseLogLine, formatEntry, tailFormattedLines, latestLogForTicket, buildTicketRows, formatSpend,
   formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge, visibleWindow,
+  activeAgents,
 } from "./watch-lib.mjs";
 
 test("ignores blank lines and non-JSON noise", () => {
@@ -211,4 +212,28 @@ test("visibleWindow keeps the selection in view and clamps at both ends", () => 
   expect(visibleWindow(20, 10, 6)).toEqual([7, 13]);    // centred mid-list
   expect(visibleWindow(20, 19, 6)).toEqual([14, 20]);   // bottom clamp
   expect(visibleWindow(20, 5, 0)).toEqual([0, 0]);      // degenerate pane
+});
+
+test("activeAgents labels stage vs dispatch agents and drops stale logs", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  writeFileSync(path.join(dir, "bj29-factory-triage-20260804-164848.jsonl"), "{}");
+  writeFileSync(path.join(dir, "bj29-CLNT-810-20260804143850..jsonl"), "{}"); // double-dot stamp variant
+  writeFileSync(path.join(dir, "bj29-factory-merge-20260804120000.jsonl"), "{}"); // dashless stamp
+  const live = activeAgents(dir, "bj29");
+  expect(live.map((a) => [a.stage, a.label, a.identifier]).sort()).toEqual([
+    ["dispatch", "CLNT-810", "CLNT-810"],
+    ["merge", "merge", null],
+    ["triage", "triage", null],
+  ]);
+  // The same files 10 minutes later are nobody's live agent.
+  expect(activeAgents(dir, "bj29", { now: Date.now() + 10 * 60_000 })).toEqual([]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("activeAgents tolerates a missing log dir and foreign repos", () => {
+  expect(activeAgents("/no/such/dir", "bj29")).toEqual([]);
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  writeFileSync(path.join(dir, "legalease-CLNT-1-20260804-120000.jsonl"), "{}");
+  expect(activeAgents(dir, "bj29")).toEqual([]);
+  rmSync(dir, { recursive: true, force: true });
 });
