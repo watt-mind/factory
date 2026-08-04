@@ -92,9 +92,22 @@ If a browser tool still errors: report it and continue with non-browser verifica
 
 Quote glob arguments: `grep -rn "..." src --include='*.ts'`, never `--include=*.ts`. zsh expands the unquoted form against the current directory and **errors** when nothing matches there, killing the command before grep runs. Seen repeatedly in real transcripts.
 
-### Linear labels
+### Linear
 
-`type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y`. Nothing else resolves — `type:chore` fails the mutation. `area:*` values are per-team; check an existing ticket in the same project rather than inventing one. Every new issue also gets exactly one `source:*` label saying what created it: `source:agent` for work you discover and file yourself, `source:human` for a direct human request, `source:sentry` / `source:client-support` for those intake paths.
+**Use `bun tools/linear.mjs` from the factory checkout — not the Linear MCP.** The MCP is a UI-managed connector that fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback. The tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
+
+```bash
+bun tools/linear.mjs get CLNT-616                     # ticket, state, labels, criteria
+bun tools/linear.mjs claim CLNT-616 --agent claude    # assign + In Progress + labels + read-back
+bun tools/linear.mjs comment CLNT-616 "..."           # the heartbeat
+bun tools/linear.mjs state CLNT-616 "In Review" --add ai:needs-review
+bun tools/linear.mjs file --team CLNT --title "..." --body "..." --type bug
+bun tools/linear.mjs queue --team CLNT                # what is dispatchable
+```
+
+`claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.
+
+**Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove`; a hand-written mutation that passes only the labels you want added silently strips every other label on the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
 
 ### Secrets
 

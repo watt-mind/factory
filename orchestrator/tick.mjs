@@ -28,6 +28,7 @@ import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
 import { parseOwnedPaths, pathsCollide } from "./owned-paths.mjs";
 import { budgetExhausted } from "../lib/spend.mjs";
+import { agentLabel } from "../tools/linear.mjs";
 
 const argv = process.argv.slice(2);
 const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
@@ -64,7 +65,7 @@ if (!Bun.which(HARNESS)) { console.error(`harness "${HARNESS}" is not on PATH`);
 // linear.md's agent:* taxonomy names the harness that actually holds the
 // claim (agent:claude-code, agent:gemini, ...) — it must track HARNESS, not
 // assume claude, or a ticket run on agy gets labelled as if Claude did it.
-const AGENT_LABEL = `agent:${HARNESS === "claude" ? "claude-code" : HARNESS}`;
+const AGENT_LABEL = agentLabel(HARNESS);
 
 const TIMEOUT_BIN = Bun.which("timeout") ?? Bun.which("gtimeout");
 if (!TIMEOUT_BIN) console.log(c.yellow("  ! no timeout(1)/gtimeout on PATH — a wedged run will not be wall-clock capped"));
