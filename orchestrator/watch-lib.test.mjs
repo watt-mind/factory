@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   parseLogLine, formatEntry, tailFormattedLines, latestLogForTicket, buildTicketRows, formatSpend,
+  formatIssueCounts, parseReaperOutput,
 } from "./watch-lib.mjs";
 
 test("ignores blank lines and non-JSON noise", () => {
@@ -132,4 +133,25 @@ test("buildTicketRows tolerates a summary with no tickets", () => {
 test("formatSpend rounds to cents", () => {
   expect(formatSpend(4.2, 40)).toBe("$4.20 / $40.00");
   expect(formatSpend(7 * 1.1, 10)).toBe("$7.70 / $10.00");
+});
+
+test("formatIssueCounts renders done/total and marks capped counts as floors", () => {
+  expect(formatIssueCounts(41, 57, false)).toBe("41/57");
+  expect(formatIssueCounts(250, 400, true)).toBe("250/400+");
+  expect(formatIssueCounts(undefined, undefined, false)).toBe("0/0");
+});
+
+test("parseReaperOutput reads the reclaim count from a dry run", () => {
+  const out = "=== Stale-claim reaper [DRY RUN] threshold=45min ===\n\n  STALE CW-12  61m  agent  title\n\n=== Would reclaim: 2 | Healthy: 3 ===\nRun again with --apply to reclaim these.";
+  expect(parseReaperOutput(out)).toEqual({ stale: 2 });
+});
+
+test("parseReaperOutput reads the count from an --apply run", () => {
+  expect(parseReaperOutput("=== Reclaimed: 1 | Healthy: 0 ===")).toEqual({ stale: 1 });
+});
+
+test("parseReaperOutput treats a clean queue or garbage as nothing to reclaim", () => {
+  expect(parseReaperOutput("=== No stale claims among 4 in progress. ===")).toEqual({ stale: 0 });
+  expect(parseReaperOutput("")).toEqual({ stale: 0 });
+  expect(parseReaperOutput(null)).toEqual({ stale: 0 });
 });

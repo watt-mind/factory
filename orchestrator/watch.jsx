@@ -8,10 +8,13 @@
  *   bun orchestrator/watch.jsx
  *   bun orchestrator/watch.jsx --repo bj29
  *
- * Never spawns an agent and never writes anywhere — it only re-reads the
- * same state queue.mjs and the log files already expose. This is the
- * bird's-eye view across repos and in-flight tickets; run.mjs is still the
- * place to watch one job's full dry/apply output.
+ * Never spawns an agent, and writes nowhere with ONE deliberate exception:
+ * pressing `x` runs the stale-claim reaper for the selected repo's team —
+ * dry-run first, and `--apply` only after a second explicit `y`, only when the
+ * dry run found something to reclaim. Everything else re-reads the same state
+ * queue.mjs and the log files already expose. This is the bird's-eye view
+ * across repos and in-flight tickets; run.mjs is still the place to watch one
+ * job's full dry/apply output.
  */
 import React, { useEffect, useRef, useState } from "react";
 import { render, Box, Text, useInput, useStdout } from "ink";
@@ -20,7 +23,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ROOT } from "../lib/schedule.mjs";
 import { todaysSpendUSD } from "../lib/spend.mjs";
-import { buildTicketRows, latestLogForTicket, tailFormattedLines, formatSpend } from "./watch-lib.mjs";
+import {
+  buildTicketRows, latestLogForTicket, tailFormattedLines, formatSpend,
+  formatIssueCounts, parseReaperOutput,
+} from "./watch-lib.mjs";
 
 const LOG_DIR = path.join(homedir(), ".factory/logs");
 const QUEUE_POLL_MS = 20_000;
@@ -84,8 +90,48 @@ function QueueStrip({ summary }) {
       <StatChip label="review" value={summary.inReview} tone={summary.inReview ? "warn" : undefined} />
       <StatChip label="triage" value={summary.triage} />
       <StatChip label="blocked" value={summary.blocked} tone={summary.blocked ? "bad" : undefined} />
+      <StatChip label="PRs" value={summary.openPRs} tone={summary.openPRs ? "warn" : undefined} />
+      <StatChip label="done" value={formatIssueCounts(summary.done, summary.total, summary.countCapped)} />
     </Box>
   );
+}
+
+/**
+ * Runs orchestrator/reaper.mjs and takes over the main pane while the output
+ * is up. Dry runs happen on `x` alone; the `stale` count parsed from that dry
+ * run is what unlocks the `y` -> --apply step.
+ */
+function ReaperPane({ reaper }) {
+  const title = {
+    dry: `reaper — dry run (team ${reaper.team})…`,
+    "dry-done": `reaper — dry run (team ${reaper.team})`,
+    applying: `reaper — applying (team ${reaper.team})…`,
+    applied: `reaper — reclaimed (team ${reaper.team})`,
+    error: "reaper — failed",
+  }[reaper.phase];
+  const canApply = reaper.phase === "dry-done" && reaper.stale > 0;
+  return (
+    <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor={reaper.phase === "error" ? "red" : "yellow"} paddingX={1}>
+      <Text bold color={reaper.phase === "error" ? "red" : "yellow"}>{title}</Text>
+      {reaper.lines.length === 0 && <Text dimColor>running…</Text>}
+      {reaper.lines.map((line, i) => (
+        <Text key={i} wrap="truncate-end">{line}</Text>
+      ))}
+      <Text dimColor>{canApply ? "y reclaim these · " : ""}esc close</Text>
+    </Box>
+  );
+}
+
+async function runReaperProcess(team, apply) {
+  const args = ["orchestrator/reaper.mjs", "--team", team];
+  if (apply) args.push("--apply");
+  const p = Bun.spawn(["bun", ...args], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+  const [out, err] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { out, err };
 }
 
 function TicketList({ rows, ready, selected }) {
@@ -138,8 +184,10 @@ function App() {
   const [rowIdx, setRowIdx] = useState(0);
   const [logLines, setLogLines] = useState([]);
   const [spend, setSpend] = useState(0);
+  const [reaper, setReaper] = useState(null); // { phase, team, lines, stale }
   const rowIdxRef = useRef(rowIdx);
   rowIdxRef.current = rowIdx;
+  const pollRef = useRef(null);
   const { stdout } = useStdout();
   const width = Math.max(70, Math.min(140, stdout?.columns ?? 100));
 
@@ -160,6 +208,7 @@ function App() {
         if (!cancelled) setError(String(e.message ?? e));
       }
     };
+    pollRef.current = poll;
     poll();
     const id = setInterval(poll, QUEUE_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
@@ -189,10 +238,39 @@ function App() {
     return () => clearInterval(id);
   }, [selectedTicket, summary?.repo]);
 
+  const startReaper = async (team, apply) => {
+    setReaper({ phase: apply ? "applying" : "dry", team, lines: [], stale: 0 });
+    try {
+      const { out, err } = await runReaperProcess(team, apply);
+      const text = (out + (err ? `\n${err}` : "")).trimEnd();
+      setReaper({
+        phase: apply ? "applied" : "dry-done",
+        team,
+        lines: text.split("\n").filter((l) => l.trim() !== "").slice(-16),
+        stale: parseReaperOutput(out).stale,
+      });
+      // A reclaim changes the queue right now — don't leave the strip stale
+      // for up to 20s claiming the ticket is still In Progress.
+      if (apply) pollRef.current?.();
+    } catch (e) {
+      setReaper({ phase: "error", team, lines: [String(e.message ?? e)], stale: 0 });
+    }
+  };
+
   useInput((input, key) => {
-    if (input === "q" || key.escape || (key.ctrl && input === "c")) process.exit(0);
+    if (input === "q" || (key.ctrl && input === "c")) process.exit(0);
+    if (reaper) {
+      // The pane owns the keyboard while it's up: esc closes it (instead of
+      // quitting), y confirms --apply, and only off a dry run that found work.
+      if (key.escape) setReaper(null);
+      if (input === "y" && reaper.phase === "dry-done" && reaper.stale > 0) startReaper(reaper.team, true);
+      return;
+    }
+    if (key.escape) process.exit(0);
+    if (input === "r") { pollRef.current?.(); setSpend(todaysSpendUSD(LOG_DIR)); }
+    if (input === "x" && summary?.team) startReaper(summary.team, false);
     if (key.leftArrow) { setRepoIdx((i) => Math.max(0, i - 1)); setRowIdx(0); }
-    if (key.rightArrow) { setRepoIdx((i) => Math.min(summaries.length - 1, i + 1)); setRowIdx(0); }
+    if (key.rightArrow) { setRepoIdx((i) => Math.max(0, Math.min(summaries.length - 1, i + 1))); setRowIdx(0); }
     if (key.upArrow) setRowIdx((i) => Math.max(0, i - 1));
     if (key.downArrow) setRowIdx((i) => Math.min(rows.length - 1, i + 1));
   });
@@ -203,8 +281,14 @@ function App() {
       <RepoTabs repos={summaries.map((s) => s.repo)} selected={repoIdx} />
       <QueueStrip summary={summary} />
       <Box marginTop={1} marginBottom={1}>
-        <TicketList rows={rows} ready={summary?.startable} selected={rowIdx} />
-        <LogTail ticket={selectedTicket} lines={logLines} />
+        {reaper ? (
+          <ReaperPane reaper={reaper} />
+        ) : (
+          <>
+            <TicketList rows={rows} ready={summary?.startable} selected={rowIdx} />
+            <LogTail ticket={selectedTicket} lines={logLines} />
+          </>
+        )}
       </Box>
       <Box justifyContent="space-between">
         <Text dimColor>
@@ -212,7 +296,7 @@ function App() {
           {error ? <Text color="red">  ! {error.slice(0, 50)}</Text> : null}
         </Text>
         <Text dimColor>
-          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ↑↓ select · ←→ repo · q quit
+          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ↑↓ select · ←→ repo · r refresh · x reaper · q quit
         </Text>
       </Box>
     </Box>

@@ -88,3 +88,20 @@ export function buildTicketRows(summary) {
 export function formatSpend(spent, perDay) {
   return `$${(spent ?? 0).toFixed(2)} / $${(perDay ?? 0).toFixed(2)}`;
 }
+
+/** Project progress for the stat strip. `capped` means the counts are floors (a 250-issue page filled up). */
+export function formatIssueCounts(done, total, capped) {
+  return `${done ?? 0}/${total ?? 0}${capped ? "+" : ""}`;
+}
+
+/**
+ * What a reaper.mjs run concluded, parsed from its stdout. The number gates the
+ * TUI's confirm step: --apply is only offered when the dry run found something
+ * to reclaim, so a stray keypress on a clean queue can never write to Linear.
+ */
+export function parseReaperOutput(text) {
+  const s = String(text ?? "");
+  const m = /===\s+(?:Would reclaim|Reclaimed):\s+(\d+)/.exec(s);
+  if (m) return { stale: Number(m[1]) };
+  return { stale: 0 };
+}

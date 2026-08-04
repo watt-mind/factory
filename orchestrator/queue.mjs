@@ -66,6 +66,21 @@ const QUERY = `
     }
   }`;
 
+// Finished work, for the done/total readout. Kept out of QUERY on purpose: the
+// active-issue query feeds gates and dispatch decisions, and mixing hundreds of
+// Done tickets into `nodes` would push live work past the 250-issue page long
+// before the project gets big enough to notice any other way.
+const CLOSED_QUERY = `
+  query($team: String!, $project: String!) {
+    issues(first: 250, filter: {
+      team: { key: { eq: $team } },
+      project: { name: { eq: $project } },
+      state: { type: { in: ["completed", "canceled"] } }
+    }) {
+      nodes { state { type } }
+    }
+  }`;
+
 /**
  * Open PRs that a merge run could actually act on: not drafts, and not already
  * escalated to a human. Returns [] rather than throwing when `gh` is missing or
@@ -89,6 +104,11 @@ for (const repo of repos) {
   if (!GATE && !JSON_OUT) console.log(c.bold(`\n${repo.name}`) + c.dim(`  ${repo.team} / ${repo.project}  ->  ${repo.base}`));
 
   const nodes = (await gql(QUERY, { team: repo.team, project: repo.project }))?.issues?.nodes ?? [];
+  const closed = (await gql(CLOSED_QUERY, { team: repo.team, project: repo.project }))?.issues?.nodes ?? [];
+  const done = closed.filter((i) => i.state?.type === "completed").length;
+  const total = nodes.length + closed.length;
+  // Either page hitting its 250 cap means these are floors, not counts.
+  const countCapped = nodes.length === 250 || closed.length === 250;
   const labels = (i) => (i.labels?.nodes ?? []).map((l) => l.name);
   const state = (i) => i.state?.name ?? "?";
 
@@ -128,6 +148,7 @@ for (const repo of repos) {
   line("In Progress", inProgress.length);
   line("In Review", inReview.length, inReview.length ? c.cyan : (s) => s);
   line("Blocked", blocked.length, blocked.length ? c.red : (s) => s);
+  line("Done / project total", `${done}/${total}${countCapped ? "+" : ""}`, c.dim);
 
   // What dispatch would actually pick up, honouring Owned Paths against what is
   // already running. Sorted the way §7 sorts: priority asc, then created asc.
@@ -154,6 +175,12 @@ for (const repo of repos) {
 
   summary.push({
     repo: repo.name,
+    // Team key, so the monitor can scope actions like the reaper without
+    // re-reading config/repos.yaml itself.
+    team: repo.team,
+    done,
+    total,
+    countCapped,
     triage: triage.length + notReady.length,
     // Triage-state only. The stage processes Triage tickets; gating on the
     // combined count kept the gate open for Todo-without-agent-ready tickets
