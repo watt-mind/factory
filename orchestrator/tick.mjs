@@ -281,12 +281,12 @@ async function runTicket(t) {
         "--output-format", "stream-json", "--verbose",
         "--max-budget-usd", budget,
         "--fallback-model", "sonnet",
-        // Browser server from git: isolated per-session Chrome (ends the
-        // shared-profile collisions) + webp screenshot caps at the source.
-        // NOT --strict-mcp-config — strict drops the claude.ai connectors,
-        // and losing the Linear MCP severs the control plane (verified
-        // 2026-08-04). Mirrors run-agent.sh.
-        "--mcp-config", path.join(ROOT, "config/mcp/claude.json"),
+        // --strict makes this file the ONLY source of MCP servers: no user
+        // scope, no project .mcp.json, no claude.ai connectors. What an
+        // unattended agent can reach is declared in git and moves by PR.
+        // Drops the Linear MCP too — tools/linear.mjs replaces it, reached via
+        // the FACTORY_ROOT set below. Mirrors run-agent.sh.
+        "--mcp-config", path.join(ROOT, "config/mcp/claude.json"), "--strict-mcp-config",
         ...(COMMAND_MODEL ? ["--model", COMMAND_MODEL] : []),
       ];
     } else if (HARNESS === "codex") {
@@ -329,6 +329,12 @@ async function runTicket(t) {
       "-u", "GROQ_API_KEY",
       "-u", "CLAUDECODE",
       "-u", "CLAUDE_CODE_ENTRYPOINT",
+      // Agents run in a worktree, not in this checkout, so `bun
+      // tools/linear.mjs` does not resolve for them. The floor tells them to
+      // use "$FACTORY_ROOT/tools/linear.mjs"; this is what makes that true.
+      // Without it, --strict-mcp-config removes the Linear MCP and leaves no
+      // replacement — the control plane goes silent.
+      `FACTORY_ROOT=${ROOT}`,
       harnessBin, ...piPreArgs, ...harnessArgs
     ];
     const [bin, args] = TIMEOUT_BIN

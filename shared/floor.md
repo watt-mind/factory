@@ -96,13 +96,16 @@ Quote glob arguments: `grep -rn "..." src --include='*.ts'`, never `--include=*.
 
 **Use `bun tools/linear.mjs` from the factory checkout — not the Linear MCP.** The MCP is a UI-managed connector that fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback. The tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
 
+You work in a worktree, not in the factory checkout, so **always go through `$FACTORY_ROOT`** — the factory sets it on every run. A bare `bun tools/linear.mjs` resolves to nothing.
+
 ```bash
-bun tools/linear.mjs get CLNT-616                     # ticket, state, labels, criteria
-bun tools/linear.mjs claim CLNT-616 --agent claude    # assign + In Progress + labels + read-back
-bun tools/linear.mjs comment CLNT-616 "..."           # the heartbeat
-bun tools/linear.mjs state CLNT-616 "In Review" --add ai:needs-review
-bun tools/linear.mjs file --team CLNT --title "..." --body "..." --type bug
-bun tools/linear.mjs queue --team CLNT                # what is dispatchable
+L="$FACTORY_ROOT/tools/linear.mjs"                 # or ~/Develop/factory/tools/linear.mjs
+bun "$L" get CLNT-616                              # ticket, state, labels, criteria
+bun "$L" claim CLNT-616 --agent claude             # assign + In Progress + labels + read-back
+bun "$L" comment CLNT-616 "..."                    # the heartbeat
+bun "$L" state CLNT-616 "In Review" --add ai:needs-review
+bun "$L" file --team CLNT --title "..." --body "..." --type bug
+bun "$L" queue --team CLNT                         # what is dispatchable
 ```
 
 `claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.

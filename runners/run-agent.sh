@@ -128,6 +128,12 @@ fi
 # runs draw on subscription allowances instead of API per-token billing.
 UNSET_KEYS=("-u" "ANTHROPIC_API_KEY" "-u" "GEMINI_API_KEY" "-u" "GOOGLE_API_KEY" "-u" "GOOGLE_GENAI_API_KEY" "-u" "OPENAI_API_KEY" "-u" "MISTRAL_API_KEY" "-u" "DEEPSEEK_API_KEY" "-u" "GROQ_API_KEY")
 
+# Stages run inside a repo, not inside this checkout, so `bun tools/linear.mjs`
+# does not resolve for them. The floor tells agents to use
+# "$FACTORY_ROOT/tools/linear.mjs"; this is what makes that path real. Without
+# it, --strict-mcp-config removes the Linear MCP and leaves no replacement.
+export FACTORY_ROOT="$ROOT"
+
 if [[ "$USE_API" == "1" ]]; then
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "--use-api given but ANTHROPIC_API_KEY is not set" >&2; exit 2; }
   AUTH_NOTE="ANTHROPIC_API_KEY (billed per token; connectors disabled)"
@@ -138,9 +144,14 @@ else
 fi
 
 if [[ "$DRY" == "1" ]]; then
+  # Must mirror the real invocation below. A --dry that omits flags is worse
+  # than no --dry: it is the thing people check before trusting a run.
+  MCP_NOTE=""
+  [[ "$HARNESS" == "claude" ]] && MCP_NOTE="--mcp-config $ROOT/config/mcp/claude.json --strict-mcp-config"
   echo "would run in $REPO_PATH:"
-  echo "  $HARNESS -p '$PROMPT' --max-budget-usd $BUDGET $MODEL_ARGS $READONLY_ARGS"
-  echo "  auth: $AUTH_NOTE"
+  echo "  $HARNESS -p '$PROMPT' --max-budget-usd $BUDGET $MCP_NOTE $MODEL_ARGS $READONLY_ARGS"
+  echo "  auth: $AUTH_NOTE   FACTORY_ROOT=$ROOT"
+  [[ -n "$MCP_NOTE" ]] && echo "  mcp:  strict — only servers declared in config/mcp/claude.json (no claude.ai connectors)"
   exit 0
 fi
 
@@ -199,19 +210,22 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # still parses the final envelope for the exit code.
 set +e
 if [[ "$HARNESS" == "claude" ]]; then
-  # --mcp-config supplies the browser server from git (config/mcp/claude.json):
-  # isolated per-session Chrome profiles ended the shared-profile collisions
-  # (95 errors across 26 runs), and webp screenshot caps cut the biggest context
-  # cost at the source. Deliberately NOT --strict-mcp-config: strict also drops
-  # the claude.ai connectors, and losing the Linear MCP severs the control
-  # plane (verified empirically 2026-08-04 — 0 Linear tools under strict).
+  # --strict-mcp-config makes config/mcp/claude.json the ONLY source of MCP
+  # servers: no user scope, no project .mcp.json, no claude.ai connectors. What
+  # an unattended agent can reach is now declared in git and moves by PR.
+  #
+  # That deliberately drops the Linear MCP too — tools/linear.mjs replaces it,
+  # which is why FACTORY_ROOT above is load-bearing rather than a convenience.
+  # It also drops what nobody chose to grant: sessions were loading a client law
+  # firm's connector (51 tools) and Gmail (16) into agents running unattended
+  # under bypassPermissions.
   (
     cd "$REPO_PATH"
     $RUN_CAP $ENV_PREFIX claude -p "$PROMPT" \
       --output-format stream-json --verbose \
       --max-budget-usd "$BUDGET" \
       --fallback-model sonnet \
-      --mcp-config "$ROOT/config/mcp/claude.json" \
+      --mcp-config "$ROOT/config/mcp/claude.json" --strict-mcp-config \
       $MODEL_ARGS $READONLY_ARGS
   ) 2>&1 | (cd "$ROOT" && bun runners/report.mjs --log "$LOG" --harness claude)
 else
