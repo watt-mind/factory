@@ -5,6 +5,11 @@
  *   bun build/emit.mjs           # regenerate plugins/ and dist/
  *   bun build/emit.mjs --check   # CI: fail if the tree isn't reproducible
  *   bun build/emit.mjs --link    # symlink this machine's harnesses at shared/
+ *   bun run link-repos           # symlink plugins/core/commands/ into every
+ *                                 # configured repo's .claude/commands/ — run
+ *                                 # this whenever a /factory-* command is
+ *                                 # added or removed, or product repos keep
+ *                                 # running against a stale command set
  *
  * Why a build step at all: the CONTENT is harness-neutral (SKILL.md is a shared
  * format; command bodies are markdown) but the PACKAGING is not. Claude wants a

@@ -8,6 +8,7 @@
     "emit": "bun build/emit.mjs",
     "check": "bun build/emit.mjs --check",
     "link": "bun build/emit.mjs --link",
+    "link-repos": "bun build/emit.mjs --link-repos",
     "sync-floor": "bun build/emit.mjs --sync-floor",
     "economics": "bun orchestrator/economics.mjs",
     "schedule": "bun deploy/gen.mjs",

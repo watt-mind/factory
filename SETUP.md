@@ -13,9 +13,12 @@ Do this **before** loading any launchd job. A launchd process inherits no intera
 ```bash
 bun build/emit.mjs           # regenerate plugins/ and dist/
 bun build/emit.mjs --link    # symlink ~/.codex, ~/.gemini, ~/.cursor at shared/
+bun run link-repos           # symlink plugins/core/commands/ into every repo in config/repos.yaml
 ```
 
-Symlinks rather than copies: `git pull` then updates every harness at once, and there's no copy to drift. `--link` refuses to overwrite a real file, so it won't clobber anything you wrote by hand.
+Symlinks rather than copies: `git pull` then updates every harness at once, and there's no copy to drift. `--link`/`--link-repos` refuse to overwrite a real file, so neither will clobber anything you wrote by hand.
+
+**`bun run link-repos` is not optional for headless dispatch.** `runners/run-agent.sh` invokes `claude -p`, which reads project commands from `<repo>/.claude/commands/` directly — it does not go through the marketplace plugin in step 4 below (that route needs an interactive session; see the comment above `--link-repos` in `build/emit.mjs`). Skip this and a repo's headless commands silently run against whatever command set was symlinked in last, however old. **Re-run it every time a `/factory-*` command is added, renamed, or removed** — nothing else notices the drift; OPS-69 is exactly this bug (`factory-unblock` merged, never linked into cashsaas/bj29/legalease, first headless run failed with `Unknown command: /factory-unblock`).
 
 ## 3. Scheduling — deliberately empty
 

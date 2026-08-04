@@ -43,9 +43,10 @@ The **content** is portable; only the **packaging** isn't. `SKILL.md` is a forma
 bun build/emit.mjs           # regenerate everything
 bun build/emit.mjs --check   # CI: fail if the tree drifted from shared/
 bun build/emit.mjs --link    # symlink this machine's harnesses at shared/
+bun run link-repos           # symlink plugins/core/commands/ into every repo in config/repos.yaml
 ```
 
-`--link` symlinks rather than copies, so a `git pull` updates every harness at once and there is no copy to go stale. It refuses to overwrite a real file.
+`--link`/`--link-repos` symlink rather than copy, so a `git pull` updates every harness (or repo) at once and there is no copy to go stale. Both refuse to overwrite a real file. `link-repos` matters specifically for headless dispatch — `runners/run-agent.sh` reads commands straight from `<repo>/.claude/commands/`, not the marketplace plugin — so re-run it whenever a `/factory-*` command changes (see SETUP.md §2).
 
 > [!IMPORTANT]
 > **The plugin is a convenience layer, not the safety floor.** It reaches Claude Code only, and a cloud sandbox without GitHub auth for this private repo gets nothing — failing closed without knowing it.
