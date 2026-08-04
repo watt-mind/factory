@@ -25,7 +25,7 @@ import { ROOT } from "../lib/schedule.mjs";
 import { todaysSpendUSD } from "../lib/spend.mjs";
 import {
   buildTicketRows, latestLogForTicket, tailFormattedLines, formatSpend,
-  formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge,
+  formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge, visibleWindow,
 } from "./watch-lib.mjs";
 
 const LOG_DIR = path.join(homedir(), ".factory/logs");
@@ -125,6 +125,33 @@ function StageStrip({ stages }) {
   );
 }
 
+const SHORTCUTS = [
+  ["↑ ↓", "select a ticket"],
+  ["← →", "switch repo"],
+  ["o", "open the selected ticket in Linear (desktop app, browser fallback)"],
+  ["r", "refresh queue + spend now"],
+  ["x", "run the stale-claim reaper (dry run) for this repo's team"],
+  ["y", "confirm reaper --apply — only offered when the dry run found stale claims"],
+  ["?", "this help"],
+  ["esc", "close an open pane; quit when none is open"],
+  ["q", "quit"],
+];
+
+function HelpPane() {
+  return (
+    <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Text bold color="cyan">keyboard shortcuts</Text>
+      {SHORTCUTS.map(([keys, what]) => (
+        <Text key={keys}>
+          <Text bold color="cyan">{keys.padEnd(6)}</Text>
+          {what}
+        </Text>
+      ))}
+      <Text dimColor>esc close</Text>
+    </Box>
+  );
+}
+
 /**
  * Runs orchestrator/reaper.mjs and takes over the main pane while the output
  * is up. Dry runs happen on `x` alone; the `stale` count parsed from that dry
@@ -163,12 +190,20 @@ async function runReaperProcess(team, apply) {
   return { out, err };
 }
 
-function TicketList({ rows, ready, selected }) {
+function TicketList({ rows, ready, selected, height }) {
+  // Budget in rows: 1 header, 2 per ticket, 3 for the ready section, 2 for
+  // the more-above/below markers. Never let the list outgrow the pane — an
+  // overgrown frame is what pushes the TUI into terminal scrollback.
+  const readyReserve = ready?.length > 0 ? 3 : 0;
+  const maxRows = Math.max(1, Math.floor((height - 1 - readyReserve - 2) / 2));
+  const [start, end] = visibleWindow(rows.length, selected, maxRows);
   return (
     <Box flexDirection="column" width="42%" marginRight={1}>
       <Text dimColor>in flight</Text>
       {rows.length === 0 && <Text dimColor>  nothing running or in review</Text>}
-      {rows.map((t, i) => {
+      {start > 0 && <Text dimColor>  ▲ {start} more</Text>}
+      {rows.slice(start, end).map((t, idx) => {
+        const i = start + idx;
         const isSel = i === selected;
         const dot = t.status === "running" ? "●" : "◐";
         const dotColor = t.status === "running" ? "green" : "yellow";
@@ -182,6 +217,7 @@ function TicketList({ rows, ready, selected }) {
           </Box>
         );
       })}
+      {end < rows.length && <Text dimColor>  ▼ {rows.length - end} more</Text>}
       {ready?.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text dimColor>ready to dispatch</Text>
@@ -192,13 +228,14 @@ function TicketList({ rows, ready, selected }) {
   );
 }
 
-function LogTail({ ticket, lines }) {
+function LogTail({ ticket, lines, height }) {
+  const shown = lines.slice(-Math.max(1, height - 1));
   return (
     <Box flexDirection="column" width="58%">
       <Text dimColor>{ticket ? `log tail — ${ticket}` : "log tail"}</Text>
       {!ticket && <Text dimColor>  select a ticket to tail its log</Text>}
       {ticket && lines.length === 0 && <Text dimColor>  no log yet</Text>}
-      {lines.map((line, i) => (
+      {shown.map((line, i) => (
         <Text key={i} wrap="truncate-end">{line}</Text>
       ))}
     </Box>
@@ -215,11 +252,16 @@ function App() {
   const [spend, setSpend] = useState(0);
   const [reaper, setReaper] = useState(null); // { phase, team, lines, stale }
   const [stages, setStages] = useState(null);
+  const [showHelp, setShowHelp] = useState(false);
   const rowIdxRef = useRef(rowIdx);
   rowIdxRef.current = rowIdx;
   const pollRef = useRef(null);
   const { stdout } = useStdout();
-  const width = Math.max(70, Math.min(140, stdout?.columns ?? 100));
+  const width = Math.max(70, stdout?.columns ?? 100);
+  const height = Math.max(12, stdout?.rows ?? 40);
+  // Rows left for the ticket-list/log panes: borders 2, title 1, tabs 2,
+  // queue strip 1, stage strip 1, pane margins 2, footer 1.
+  const paneHeight = Math.max(4, height - 10);
 
   useEffect(() => {
     let cancelled = false;
@@ -297,6 +339,11 @@ function App() {
 
   useInput((input, key) => {
     if (input === "q" || (key.ctrl && input === "c")) process.exit(0);
+    if (showHelp) {
+      if (key.escape || input === "?") setShowHelp(false);
+      return;
+    }
+    if (input === "?") { setShowHelp(true); return; }
     if (reaper) {
       // The pane owns the keyboard while it's up: esc closes it (instead of
       // quitting), y confirms --apply, and only off a dry run that found work.
@@ -324,18 +371,20 @@ function App() {
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={width}>
+    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={width} height={height}>
       <Text bold>factory — foreground monitor</Text>
       <RepoTabs repos={summaries.map((s) => s.repo)} selected={repoIdx} />
       <QueueStrip summary={summary} />
       <StageStrip stages={stages} />
-      <Box marginTop={1} marginBottom={1}>
-        {reaper ? (
+      <Box marginTop={1} marginBottom={1} flexGrow={1}>
+        {showHelp ? (
+          <HelpPane />
+        ) : reaper ? (
           <ReaperPane reaper={reaper} />
         ) : (
           <>
-            <TicketList rows={rows} ready={summary?.startable} selected={rowIdx} />
-            <LogTail ticket={selectedTicket} lines={logLines} />
+            <TicketList rows={rows} ready={summary?.startable} selected={rowIdx} height={paneHeight} />
+            <LogTail ticket={selectedTicket} lines={logLines} height={paneHeight} />
           </>
         )}
       </Box>
@@ -345,11 +394,16 @@ function App() {
           {error ? <Text color="red">  ! {error.slice(0, 50)}</Text> : null}
         </Text>
         <Text dimColor>
-          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ↑↓ select · ←→ repo · o open · r refresh · x reaper · q quit
+          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ? shortcuts · q quit
         </Text>
       </Box>
     </Box>
   );
 }
 
+// Fullscreen: take over the terminal's alternate screen buffer (the htop/vim
+// behaviour), so the shell prompt and scrollback are untouched underneath and
+// come back intact on exit — however the process ends.
+process.stdout.write("\x1b[?1049h\x1b[H");
+process.on("exit", () => process.stdout.write("\x1b[?1049l"));
 render(<App />);

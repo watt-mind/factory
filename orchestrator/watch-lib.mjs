@@ -149,6 +149,19 @@ export function stageStatuses(logDir, repo, { now = Date.now(), activeMs = 90_00
   });
 }
 
+/**
+ * The [start, end) slice of a list that fits `max` rows while keeping
+ * `selected` visible — the selection stays centred once the list scrolls.
+ * This is what keeps a long ticket list scrolling INSIDE the TUI instead of
+ * overflowing the terminal and pushing frames into scrollback.
+ */
+export function visibleWindow(count, selected, max) {
+  if (max <= 0) return [0, 0];
+  if (count <= max) return [0, count];
+  const start = Math.max(0, Math.min(selected - Math.floor(max / 2), count - max));
+  return [start, start + max];
+}
+
 /** "42s" / "7m" / "3h12m" / "never" — coarse on purpose, it's a glance. */
 export function formatAge(ms) {
   if (ms == null) return "never";

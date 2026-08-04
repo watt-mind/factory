@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   parseLogLine, formatEntry, tailFormattedLines, latestLogForTicket, buildTicketRows, formatSpend,
-  formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge,
+  formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge, visibleWindow,
 } from "./watch-lib.mjs";
 
 test("ignores blank lines and non-JSON noise", () => {
@@ -203,4 +203,12 @@ test("formatAge is coarse and never negative-weird", () => {
   expect(formatAge(7 * 60_000)).toBe("7m");
   expect(formatAge(3 * 3600_000 + 12 * 60_000)).toBe("3h12m");
   expect(formatAge(2 * 3600_000)).toBe("2h");
+});
+
+test("visibleWindow keeps the selection in view and clamps at both ends", () => {
+  expect(visibleWindow(5, 2, 10)).toEqual([0, 5]);      // fits — no scrolling
+  expect(visibleWindow(20, 0, 6)).toEqual([0, 6]);      // top
+  expect(visibleWindow(20, 10, 6)).toEqual([7, 13]);    // centred mid-list
+  expect(visibleWindow(20, 19, 6)).toEqual([14, 20]);   // bottom clamp
+  expect(visibleWindow(20, 5, 0)).toEqual([0, 0]);      // degenerate pane
 });
