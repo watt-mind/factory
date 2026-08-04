@@ -80,3 +80,28 @@ describe("lastActivity timestamp parsing", () => {
     expect(activity).toEqual(new Date("2026-08-03T11:00:00Z"));
   });
 });
+
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { latestReaperRunMs } from "./reaper.mjs";
+
+describe("reaper run log discovery", () => {
+  test("latestReaperRunMs picks the newest reaper log and ignores other files", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "reaper-"));
+    writeFileSync(path.join(dir, "reaper-20260804-120000.log"), "old");
+    writeFileSync(path.join(dir, "bj29-factory-merge-20260804-120000.jsonl"), "not a reaper log");
+    const t0 = latestReaperRunMs(dir);
+    expect(t0).not.toBeNull();
+    writeFileSync(path.join(dir, "reaper-20260804-130000.log"), "new");
+    expect(latestReaperRunMs(dir)).toBeGreaterThanOrEqual(t0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("latestReaperRunMs returns null when the dir is missing or empty", () => {
+    expect(latestReaperRunMs("/no/such/dir")).toBeNull();
+    const dir = mkdtempSync(path.join(tmpdir(), "reaper-"));
+    expect(latestReaperRunMs(dir)).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

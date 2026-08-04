@@ -25,9 +25,48 @@
  *     bun orchestrator/reaper.mjs --any-assignee      # audit unlabeled ones too
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+
+export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
+
+/**
+ * When the reaper last ran, from its own log files' mtimes — null when never.
+ * run.mjs uses this at startup to decide whether the factory has been off
+ * long enough that stale claims may have piled up unreaped.
+ */
+export function latestReaperRunMs(logDir = REAPER_LOG_DIR) {
+  let best = null;
+  try {
+    for (const f of readdirSync(logDir)) {
+      if (!/^reaper-\d{8}-\d{6}\.log$/.test(f)) continue;
+      const m = statSync(path.join(logDir, f)).mtimeMs;
+      if (best === null || m > best) best = m;
+    }
+  } catch { /* no log dir yet */ }
+  return best;
+}
+
+/**
+ * Tee console output to ~/.factory/logs/reaper-<stamp>.log so every run —
+ * supervisor tick, watch.jsx keybinding, or bare CLI — leaves a record. A
+ * reclaim nobody was watching used to leave no trace beyond the Linear
+ * comment. Logging must never break the run: append failures are swallowed.
+ */
+function teeToLogFile() {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+  const file = path.join(REAPER_LOG_DIR, `reaper-${stamp}.log`);
+  try { mkdirSync(REAPER_LOG_DIR, { recursive: true }); } catch { return; }
+  const wrap = (orig) => (...args) => {
+    orig(...args);
+    try { appendFileSync(file, args.join(" ") + "\n"); } catch { /* keep running */ }
+  };
+  console.log = wrap(console.log.bind(console));
+  console.error = wrap(console.error.bind(console));
+}
 
 export const IN_PROGRESS = "in progress";
 export const RECLAIM_TO = "todo";
@@ -332,8 +371,10 @@ Options:
     process.exit(0);
   }
 
+  teeToLogFile();
+
   const mode = args.apply ? "APPLY" : "DRY RUN";
-  console.log(`=== Stale-claim reaper [${mode}] threshold=${args.minutes}min ===\n`);
+  console.log(`=== Stale-claim reaper [${mode}] threshold=${args.minutes}min${args.team ? ` team=${args.team}` : ""} ===\n`);
 
   const teams = await fetchTeams();
   let issues = await fetchInProgress(args.team, args.anyAssignee);

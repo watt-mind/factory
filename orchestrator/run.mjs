@@ -27,6 +27,7 @@
  */
 import { spawn } from "node:child_process";
 import { loadSchedule, toSeconds, ROOT } from "../lib/schedule.mjs";
+import { latestReaperRunMs } from "./reaper.mjs";
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -177,6 +178,26 @@ function shutdown() {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// Startup backstop: the reaper matters most at exactly the moment the factory
+// comes back up — agents crash while the supervisor is down, and their stale
+// claims sit unreaped until something runs it. If this session doesn't include
+// the linear-reaper job and no reaper has run anywhere in the last hour
+// (known from its own logs in ~/.factory/logs/reaper-*.log), run one pass
+// before the first job pass. Dry unless the supervisor itself is --apply —
+// starting a watched dry session must not silently unassign tickets.
+const REAPER_BACKSTOP_MIN = 60;
+if (!selected.some((j) => j.name === "linear-reaper")) {
+  const last = latestReaperRunMs();
+  const ageMin = last === null ? Infinity : (Date.now() - last) / 60_000;
+  if (ageMin > REAPER_BACKSTOP_MIN) {
+    const ageStr = last === null ? "never" : `${Math.round(ageMin)}m ago`;
+    console.log(`${c.dim(clock())} ${c.yellow("reaper")} last ran ${ageStr} — backstop ${APPLY ? "apply" : "dry"} pass first`);
+    const { code, out } = await probe(`bun orchestrator/reaper.mjs${APPLY ? " --apply" : ""}`);
+    for (const l of out.split("\n")) if (l.trim()) console.log(c.dim(`  │ ${l}`));
+    if (code !== 0) console.log(`${c.dim(clock())} ${c.red("reaper backstop failed")} ${c.dim(`exit ${code}`)}`);
+  }
+}
 
 // Start the first pass, but DO NOT await it before scheduling.
 //
