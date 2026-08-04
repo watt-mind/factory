@@ -159,3 +159,19 @@ repos:
 
     # What "verified" means. Agents run this before any PR.
     verify: npm run typecheck && npm run lint && npm run format:check
+
+    # Surfaces where a path match alone requires human review. This is narrow on
+    # purpose: ordinary BI UI, analytics, and documentation work stays eligible
+    # for the normal merge policy judgment.
+    escalate_paths:
+      # Schema changes can be destructive; retain migration history as protected.
+      - schema.prisma
+      - migrations/**
+      # Production image, compose deployment, and CI/CD workflow changes.
+      - Dockerfile
+      - docker-compose.yml
+      - .github/workflows/**
+      # Credential configuration and the authentication/authorization boundary.
+      - .env.example
+      - src/auth/**
+      - src/server/serverMiddleware.ts
