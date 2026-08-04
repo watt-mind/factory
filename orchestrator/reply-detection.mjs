@@ -70,11 +70,49 @@ export function answeredIdentifiers(heldNodes, labelIds, graceMs = REPLY_GRACE_M
   return answered;
 }
 
+/**
+ * Everything the digest wants to say about one held issue, from the same raw
+ * shape answeredIdentifiers reads (comments + history; comments may carry
+ * `body` when the caller's query asked for it):
+ *
+ *   heldAtMs   when ai:blocked was last added; null when no add event is in
+ *              the history window (label applied at creation, or paged out)
+ *   question   newest comment at hold time (within the grace window) — the
+ *              agent's blocking question; null when the hold has no comment
+ *   reply      newest comment after the grace window — someone answered;
+ *              null when nobody has
+ *
+ * Pure; returns null for issues that aren't in a hold state at all.
+ */
+export function holdInfo(node, labelIds, graceMs = REPLY_GRACE_MS) {
+  if (!["Triage", "Blocked"].includes(node?.state?.name)) return null;
+  const adds = (node.history?.nodes ?? [])
+    .filter((h) => (h.addedLabelIds ?? []).some((id) => labelIds.has(id)))
+    .map((h) => Date.parse(h.createdAt));
+  const heldAtMs = adds.length ? Math.max(...adds) : null;
+  const comments = (node.comments?.nodes ?? [])
+    .map((n) => ({ atMs: Date.parse(n.createdAt), body: n.body ?? null }))
+    .sort((a, b) => a.atMs - b.atMs);
+  let question = null;
+  let reply = null;
+  if (heldAtMs != null) {
+    for (const c of comments) {
+      if (c.atMs <= heldAtMs + graceMs) question = c;
+      else reply = c;
+    }
+  } else if (comments.length) {
+    // No add event to anchor on: the newest comment is the best guess at the
+    // question, and reply detection stays conservatively off.
+    question = comments[comments.length - 1];
+  }
+  return { identifier: node.identifier, heldAtMs, question, reply };
+}
+
 // ai:blocked is a workspace label today, but collecting every id matching the
 // name keeps this correct if it ever becomes per-team. Fetched once per
 // process, shared across repos.
 let _blockedLabelIds = null;
-async function blockedLabelIds() {
+export async function blockedLabelIds() {
   if (!_blockedLabelIds) {
     const r = await gql(LABEL_IDS_QUERY, { name: AI_BLOCKED });
     _blockedLabelIds = new Set((r?.issueLabels?.nodes ?? []).map((n) => n.id));
