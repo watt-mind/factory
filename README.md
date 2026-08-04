@@ -34,6 +34,7 @@ The **content** is portable; only the **packaging** isn't. `SKILL.md` is a forma
 | :--- | :--- | :--- | :--- |
 | Claude Code | `CLAUDE.md` → `AGENTS.md` | plugin `skills/` | plugin `commands/` |
 | Codex | `AGENTS.md` (native) | `~/.codex/skills/` | `~/.codex/prompts/` |
+| Pi | `AGENTS.md` (native) | `dist/pi/skills/` | `dist/pi/prompts/` |
 | Gemini CLI | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/` | — |
 | Antigravity | shares `~/.gemini/` | via Gemini | — |
 | Cursor | `.cursor/rules/` | — | `~/.cursor/commands/` |

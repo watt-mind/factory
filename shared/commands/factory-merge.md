@@ -28,7 +28,7 @@ Then check CI with `gh pr checks <PR> --watch --fail-fast` — it returns the mo
 
 - **MERGE** — CI green, no blocking findings. Minor/polish findings don't block: file them to Linear `Triage` per §8 and merge anyway.
 - **FIX** — CI red, merge conflicts, or blocking review findings that are mechanical to fix (a real bug, missing error handling, a failing test).
-- **ESCALATE** — never auto-merge, regardless of CI or review outcome: diffs touching auth/authz, payments/money, credentials/secrets handling, destructive DB migrations, prod infra config, or anything in a `CLNT` repo touching security. Also escalate when the fix would require changing the ticket's intent. Report these to me with the findings, **notify me** rather than only writing it in the final report, and stop there.
+- **ESCALATE** — never auto-merge, regardless of CI or review outcome: diffs touching auth/authz, payments/money, credentials/secrets handling, destructive DB migrations, prod infra config, or anything in a `CLNT` repo touching security. Also escalate when the fix would require changing the ticket's intent. Report these to me with the findings, add **`ai:escalated`** to the Linear ticket, **notify me** — `python3 ~/Develop/hdkiller/scripts/notify.py "ESCALATED PR#<n> (<TICKET>): <why, in one sentence>"` — rather than only writing it in the final report, and stop there.
 
   Then label the PR `escalated` on GitHub (`gh pr edit <PR> --add-label escalated`, creating the label if the repo lacks it). An escalated PR stays open by design, waiting on me — and the merge gate counts open PRs, so without the label every tick would re-review it and re-escalate it forever. Removing the label is my signal that it is yours again.
 
@@ -49,12 +49,12 @@ Match the repo's existing merge style from `git log` (this workflow's repos gene
 So:
 
 1. Take the PRs you classified MERGE and read each one's changed files (`gh pr diff <PR> --name-only`).
-2. Form a batch of PRs whose file sets are **pairwise disjoint**, up to **5**. Any PR sharing a file with one already in the batch waits for the next batch.
+2. Form a batch of PRs whose file sets are **pairwise disjoint**, up to **8** (matches the repo's dispatch concurrency cap — batching should be able to clear what one dispatch cycle produces). Any PR sharing a file with one already in the batch waits for the next batch.
 3. Merge the batch back to back, without waiting for base CI between them.
 4. Then wait **once** for base CI on the batch (`gh run watch <run> --exit-status`), plus the smoke check where the repo has one.
 5. Green: move every ticket in the batch to `Done` and clean up. Red: you have at most 5 suspects and their file sets are disjoint, so the failing job names the culprit. Revert that one merge (`git revert -m 1 <merge-sha>`, push, re-verify), keep the rest, and report what you reverted and why.
 
-Cap the batch at 5 even when more are disjoint: a red base after 5 is still a diagnosable morning, and after 15 it is an outage with a haystack.
+Cap the batch at 8 even when more are disjoint: a red base after 8 is still a diagnosable morning, and after 15+ it is an outage with a haystack.
 
 Two PRs that share a file still go one at a time, base CI in between, exactly as before. That is the case the old serial-always rule was written for.
 
@@ -68,7 +68,7 @@ If base CI or the smoke check breaks after a batch, stop merging further batches
 
 ## File what you find — every PR, every verdict
 
-Reviewing diffs is where follow-up work surfaces. Anything the review reveals that doesn't block this merge — defects elsewhere, missing test coverage, tech debt, refactor opportunities, UX rough edges, improvement ideas — gets a Linear issue in `Triage` **at the moment you spot it**: correct team/project, `type:*` + `area:*` labels, evidence-based priority, linked to the PR and ticket that surfaced it. A finding mentioned only in this report or a PR comment is a finding lost. Filing is cheap; err on the side of filing. This applies to escalated and left-open PRs too, not just merged ones.
+Reviewing diffs is where follow-up work surfaces. Anything the review reveals that doesn't block this merge — defects elsewhere, missing test coverage, tech debt, refactor opportunities, UX rough edges, improvement ideas — gets a Linear issue in `Triage` **at the moment you spot it**: correct team/project, `type:*` + `area:*` + `source:agent` labels, evidence-based priority, linked to the PR and ticket that surfaced it. A finding mentioned only in this report or a PR comment is a finding lost. Filing is cheap; err on the side of filing. This applies to escalated and left-open PRs too, not just merged ones.
 
 ## Final report
 

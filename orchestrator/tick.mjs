@@ -273,32 +273,57 @@ async function runTicket(t) {
     // Flags differ per harness; the PROMPT does not. That is the whole reason
     // the command bodies are harness-neutral markdown, and why run-agent.sh
     // can already drive agy. Mirrors run-agent.sh's non-claude invocation.
-    const harnessArgs = HARNESS === "claude"
-      ? [
-          "-p", promptFor(t.identifier),
-          "--output-format", "stream-json", "--verbose",
-          "--max-budget-usd", budget,
-          "--fallback-model", "sonnet",
-          // The frontmatter's `model:` used to be applied by the slash command;
-          // inlining the body means passing it explicitly or silently downgrading.
-          ...(COMMAND_MODEL ? ["--model", COMMAND_MODEL] : []),
-        ]
-      : [
-          "-p", promptFor(t.identifier),
-          "--output-format", "stream-json",
-          "--dangerously-skip-permissions",
-          // agy does not take its repo context from the working directory the
-          // way claude does — it looks for an IDE "active workspace" and, not
-          // finding one headless, asks which repository to use and stops. It
-          // then reports status SUCCESS for having asked. --add-dir is what
-          // actually points it at the worktree.
-          "--add-dir", wt,
-          // agy's print mode defaults to 5 minutes — far shorter than a real
-          // ticket. Left at the default the run is cut off mid-work and looks
-          // like a hang rather than a timeout.
-          "--print-timeout", `${Math.max(1, maxMin - 2)}m`,
-        ];
-    const envArgs = ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT", HARNESS, ...harnessArgs];
+    let harnessArgs = [];
+    if (HARNESS === "claude") {
+      harnessArgs = [
+        "-p", promptFor(t.identifier),
+        "--output-format", "stream-json", "--verbose",
+        "--max-budget-usd", budget,
+        "--fallback-model", "sonnet",
+        ...(COMMAND_MODEL ? ["--model", COMMAND_MODEL] : []),
+      ];
+    } else if (HARNESS === "codex") {
+      const model = COMMAND_MODEL && !["sonnet", "opus", "haiku"].includes(COMMAND_MODEL.toLowerCase()) ? COMMAND_MODEL : null;
+      harnessArgs = [
+        "exec", "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-C", wt,
+        ...(model ? ["--model", model] : []),
+        promptFor(t.identifier),
+      ];
+    } else if (HARNESS === "pi") {
+      const model = COMMAND_MODEL && !["sonnet", "opus", "haiku"].includes(COMMAND_MODEL.toLowerCase()) ? COMMAND_MODEL : null;
+      harnessArgs = [
+        "-p",
+        "--mode", "json",
+        ...(model ? ["--model", model] : []),
+        promptFor(t.identifier),
+      ];
+    } else {
+      harnessArgs = [
+        "-p", promptFor(t.identifier),
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
+        "--add-dir", wt,
+        "--print-timeout", `${Math.max(1, maxMin - 2)}m`,
+      ];
+    }
+
+    const harnessBin = (HARNESS === "pi" && !Bun.which("pi")) ? "npx" : HARNESS;
+    const piPreArgs = (HARNESS === "pi" && !Bun.which("pi")) ? ["pi"] : [];
+    const envArgs = [
+      "-u", "ANTHROPIC_API_KEY",
+      "-u", "GEMINI_API_KEY",
+      "-u", "GOOGLE_API_KEY",
+      "-u", "GOOGLE_GENAI_API_KEY",
+      "-u", "OPENAI_API_KEY",
+      "-u", "MISTRAL_API_KEY",
+      "-u", "DEEPSEEK_API_KEY",
+      "-u", "GROQ_API_KEY",
+      "-u", "CLAUDECODE",
+      "-u", "CLAUDE_CODE_ENTRYPOINT",
+      harnessBin, ...piPreArgs, ...harnessArgs
+    ];
     const [bin, args] = TIMEOUT_BIN
       ? [TIMEOUT_BIN, ["-k", "30s", `${maxMin}m`, "env", ...envArgs]]
       : ["env", envArgs];
@@ -308,6 +333,7 @@ async function runTicket(t) {
 
     let buf = "";
     let recorded = false;
+    let turnCount = 0;
     const tag = c.cyan(`[${t.identifier}]`);
     const processLine = (line) => {
       if (!line.trim().startsWith("{")) return;
@@ -320,10 +346,33 @@ async function runTicket(t) {
           }
         }
       }
-      // agy reports the same facts under different names: {event:"step_update"}
-      // for tool calls and a nested {event:"result", result:{status:"SUCCESS",
-      // response, num_turns}} envelope. Normalise rather than branching twice.
-      if (HARNESS !== "claude") {
+      if (HARNESS === "codex") {
+        if (e.type === "turn.started" || e.type === "turn.created") turnCount++;
+        if (e.type === "item.started" && (e.item?.type === "command_execution" || e.item?.type === "call")) {
+          const d = String(e.item.command ?? "").replace(/\s+/g, " ").slice(0, 66);
+          console.log(`${c.dim(clock())} ${tag} bash ${c.dim(d)}`);
+        } else if (e.type === "item.started" && e.item?.type === "mcp_tool_call") {
+          const d = String(e.item.tool ?? "mcp").replace(/\s+/g, " ").slice(0, 66);
+          console.log(`${c.dim(clock())} ${tag} ${d}`);
+        }
+        if (e.type === "turn.completed") {
+          e = { type: "result", subtype: "success", is_error: false, num_turns: turnCount || 1, total_cost_usd: 0, result: "finished" };
+        }
+      } else if (HARNESS === "pi") {
+        if (e.type === "message" && e.message?.role === "assistant") {
+          for (const p of e.message.content ?? []) {
+            if (p.type === "toolCall") {
+              turnCount++;
+              const d = String(p.input?.path ?? p.input?.command ?? p.input?.pattern ?? JSON.stringify(p.input ?? {})).replace(/\s+/g, " ").slice(0, 66);
+              console.log(`${c.dim(clock())} ${tag} ${p.name ?? "tool"} ${c.dim(d)}`);
+            }
+          }
+        }
+        if (e.type === "result" && e.result) {
+          const ok = e.result.exitCode === 0;
+          e = { type: "result", subtype: ok ? "success" : "failed", is_error: !ok, num_turns: turnCount || 1, total_cost_usd: 0, result: ok ? "finished" : "failed" };
+        }
+      } else if (HARNESS !== "claude") {
         const s = e.event === "step_update" ? (e.step_update ?? {}) : null;
         if (s?.step_type === "tool" && s.state === "ACTIVE") {
           const par = s.tool_info?.parameters ?? {};
@@ -340,17 +389,11 @@ async function runTicket(t) {
         const turns = e.num_turns ?? 0;
         const ok = e.subtype === "success" && !e.is_error && turns > 0;
         console.log(`${c.dim(clock())} ${tag} ${ok ? c.green("done") : c.red("FAILED")} ${c.dim(`${turns} turns ~$${(e.total_cost_usd ?? 0).toFixed(2)}`)}`);
-        // Report what the session actually said. "run ended success" on its own
-        // reads as a contradiction next to FAIL, and hid an "Unknown command"
-        // for a whole batch.
         const said = String(e.result ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
         results.push({
           id: t.identifier, ok, log,
           why: ok ? undefined : `${turns} turns, ended ${e.subtype ?? "?"}${e.is_error ? " (error)" : ""}${said ? ` — ${said}` : ""}`,
         });
-        // Zero turns means the session never got started — a bad prompt, a
-        // missing binary, auth. Nothing about this ticket would make the next
-        // one behave differently, so it counts against the breaker.
         if (turns === 0) noteEnvFailure("session ended without taking a turn");
         else if (ok) envFailures = 0;
         recorded = true;

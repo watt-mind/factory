@@ -87,8 +87,9 @@ TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 if [[ -z "$BUDGET" ]]; then
   BUDGET="$(cd "$ROOT" && bun -e '
     const p = Bun.YAML.parse(await Bun.file("config/policy.yaml").text());
-    console.log(p?.budget?.per_ticket_usd ?? 15);
-  ')"
+    const key = process.argv[1] === "factory-merge" ? "merge_usd" : "per_ticket_usd";
+    console.log(p?.budget?.[key] ?? p?.budget?.per_ticket_usd ?? 15);
+  ' "$COMMAND")"
 fi
 
 PROMPT="/${COMMAND}${ARGS:+ $ARGS}"
@@ -109,6 +110,10 @@ READONLY_ARGS=""
 if [[ "$READONLY" == "1" ]]; then
   if [[ "$HARNESS" == "claude" ]]; then
     READONLY_ARGS="--disallowedTools Edit Write NotebookEdit"
+  elif [[ "$HARNESS" == "pi" ]]; then
+    READONLY_ARGS="-r"
+  elif [[ "$HARNESS" == "codex" ]]; then
+    READONLY_ARGS="-s read-only"
   else
     # Don't let --read-only look enforced when it isn't. agy has no
     # per-tool deny list; --sandbox restricts the terminal but would also break
@@ -119,27 +124,31 @@ if [[ "$READONLY" == "1" ]]; then
   fi
 fi
 
-# ANTHROPIC_API_KEY, if set, takes precedence over the claude.ai login: runs get
-# billed per token instead of drawing on the subscription, AND claude.ai
-# connectors (including the Linear MCP) are disabled. Default to the
-# subscription; --use-api opts in deliberately.
-ENV_PREFIX="env"
+# All LLM API keys are unset by default so agents run under subscription/login auth:
+# runs draw on subscription allowances instead of API per-token billing.
+UNSET_KEYS=("-u" "ANTHROPIC_API_KEY" "-u" "GEMINI_API_KEY" "-u" "GOOGLE_API_KEY" "-u" "GOOGLE_GENAI_API_KEY" "-u" "OPENAI_API_KEY" "-u" "MISTRAL_API_KEY" "-u" "DEEPSEEK_API_KEY" "-u" "GROQ_API_KEY")
+
 if [[ "$USE_API" == "1" ]]; then
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "--use-api given but ANTHROPIC_API_KEY is not set" >&2; exit 2; }
   AUTH_NOTE="ANTHROPIC_API_KEY (billed per token; connectors disabled)"
+  ENV_PREFIX="env"
 else
-  ENV_PREFIX="env -u ANTHROPIC_API_KEY"
+  ENV_PREFIX="env ${UNSET_KEYS[*]}"
   AUTH_NOTE="subscription"
 fi
 
 if [[ "$DRY" == "1" ]]; then
   echo "would run in $REPO_PATH:"
-  echo "  claude -p '$PROMPT' --max-budget-usd $BUDGET $MODEL_ARGS $READONLY_ARGS"
+  echo "  $HARNESS -p '$PROMPT' --max-budget-usd $BUDGET $MODEL_ARGS $READONLY_ARGS"
   echo "  auth: $AUTH_NOTE"
   exit 0
 fi
 
-command -v "$HARNESS" >/dev/null || { echo "$HARNESS CLI not on PATH" >&2; exit 127; }
+if [[ "$HARNESS" == "pi" ]]; then
+  command -v pi >/dev/null || command -v npx >/dev/null || { echo "neither pi nor npx CLI on PATH" >&2; exit 127; }
+else
+  command -v "$HARNESS" >/dev/null || { echo "$HARNESS CLI not on PATH" >&2; exit 127; }
+fi
 
 LOG_DIR="$HOME/.factory/logs"
 mkdir -p "$LOG_DIR"
@@ -186,9 +195,8 @@ echo
 # child exits 1 with no useful message.
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
-# stream-json, not json: `json` buffers everything until the end, so a watched
-# run shows a blank terminal for minutes and then a wall of text. report.mjs
-# renders each step live and still parses the final envelope for the exit code.
+# stream-json / json output format. report.mjs renders each step live and
+# still parses the final envelope for the exit code.
 set +e
 if [[ "$HARNESS" == "claude" ]]; then
   (
@@ -203,29 +211,44 @@ else
   # Other harnesses do not read .claude/commands, so the slash command would
   # not resolve. Pass the command BODY as the prompt instead — it is plain
   # markdown, which is why the content was made harness-neutral in the first
-  # place. This also removes the "command not installed" failure class here.
-  BODY="$(cd "$ROOT" && bun -e '
-    const f = `shared/commands/${process.argv[1]}.md`;
+  # place.
+  BODY="$(cd "$ROOT" && FACTORY_CMD="$COMMAND" FACTORY_ARGS="$ARGS" bun -e '
+    const f = `shared/commands/${process.env.FACTORY_CMD}.md`;
     let t = await Bun.file(f).text();
     t = t.replace(/^---\n[\s\S]*?\n---\n/, "");            // drop frontmatter
-    t = t.replaceAll("$ARGUMENTS", process.argv[2] ?? "");
+    t = t.replaceAll("$ARGUMENTS", process.env.FACTORY_ARGS ?? "");
     console.log(t);
-  ' "$COMMAND" "$ARGS")"
-  (
-    cd "$REPO_PATH"
-    # agy's print mode defaults to a 5-minute timeout, which is far shorter
-    # than a real stage: triage explores a codebase, dispatch compiles. Left at
-    # the default the run is cut off mid-work and looks like a hang.
-    # agy takes its repo context from --add-dir, not from cwd: headless it finds
-    # no IDE "active workspace", asks which repository to target, and stops —
-    # reporting SUCCESS for having asked.
-    $RUN_CAP $ENV_PREFIX "$HARNESS" -p "$BODY" \
-      --output-format stream-json \
-      --dangerously-skip-permissions \
-      --add-dir "$REPO_PATH" \
-      --print-timeout "$(( MAX_MIN - 2 ))m" \
-      $MODEL_ARGS
-  ) 2>&1 | (cd "$ROOT" && bun runners/report.mjs --log "$LOG" --harness "$HARNESS")
+  ')"
+
+  if [[ "$HARNESS" == "codex" ]]; then
+    (
+      cd "$REPO_PATH"
+      printf "%s\n" "$BODY" | $RUN_CAP $ENV_PREFIX codex exec --json \
+        --dangerously-bypass-approvals-and-sandbox \
+        -C "$REPO_PATH" \
+        $MODEL_ARGS $READONLY_ARGS \
+        -
+    ) 2>&1 | (cd "$ROOT" && bun runners/report.mjs --log "$LOG" --harness codex)
+  elif [[ "$HARNESS" == "pi" ]]; then
+    PI_BIN="pi"
+    command -v pi >/dev/null || PI_BIN="npx pi"
+    (
+      cd "$REPO_PATH"
+      printf "%s\n" "$BODY" | $RUN_CAP $ENV_PREFIX $PI_BIN -p \
+        --mode json \
+        $MODEL_ARGS $READONLY_ARGS
+    ) 2>&1 | (cd "$ROOT" && bun runners/report.mjs --log "$LOG" --harness pi)
+  else
+    (
+      cd "$REPO_PATH"
+      printf "%s\n" "$BODY" | $RUN_CAP $ENV_PREFIX "$HARNESS" -p - \
+        --output-format stream-json \
+        --dangerously-skip-permissions \
+        --add-dir "$REPO_PATH" \
+        --print-timeout "$(( MAX_MIN - 2 ))m" \
+        $MODEL_ARGS
+    ) 2>&1 | (cd "$ROOT" && bun runners/report.mjs --log "$LOG" --harness "$HARNESS")
+  fi
 fi
 STATUS=${PIPESTATUS[1]}
 set -e

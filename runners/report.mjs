@@ -76,6 +76,64 @@ function handle(line) {
   let e;
   try { e = JSON.parse(t); } catch { return; }
 
+  // ---- Codex ----------------------------------------------------------
+  if (HARNESS === "codex") {
+    if (e.type === "turn.started" || e.type === "turn.created") { turns++; return; }
+    if (e.type === "item.started" || e.type === "item.completed") {
+      const item = e.item ?? {};
+      if (e.type === "item.started" && (item.type === "command_execution" || item.type === "call")) {
+        const name = "bash";
+        toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1);
+        console.log(`  ${c.dim(clock())} ${c.cyan(name)} ${oneLine(item.command, 90)}`);
+      } else if (e.type === "item.started" && item.type === "mcp_tool_call") {
+        const name = item.tool ?? "mcp";
+        toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1);
+        console.log(`  ${c.dim(clock())} ${c.cyan(name)} ${describeTool(name, item.arguments ?? {})}`);
+      } else if (e.type === "item.completed" && item.type === "agent_message" && item.text) {
+        console.log(`  ${c.dim(clock())} ${oneLine(item.text, 160)}`);
+      }
+      return;
+    }
+    if (e.type === "turn.completed") {
+      const usage = e.usage ?? {};
+      const totalTok = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+      envelope = { status: "SUCCESS", num_turns: turns || 1, duration_seconds: 0, usage: { total_tokens: totalTok } };
+    }
+    return;
+  }
+
+  // ---- Pi -------------------------------------------------------------
+  if (HARNESS === "pi") {
+    if (e.type === "session") {
+      console.log(c.dim(`  ${clock()} session ${String(e.id).slice(0, 8)}`));
+      return;
+    }
+    if (e.type === "message" && e.message?.role === "assistant") {
+      for (const part of e.message.content ?? []) {
+        if (part.type === "toolCall") {
+          turns++;
+          const name = part.name ?? "tool";
+          toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1);
+          console.log(`  ${c.dim(clock())} ${c.cyan(name)} ${describeTool(name, part.input)}`);
+        } else if (part.type === "text" && part.text?.trim()) {
+          console.log(`  ${c.dim(clock())} ${oneLine(part.text, 160)}`);
+        }
+      }
+      return;
+    }
+    if (e.type === "result" && e.result) {
+      const res = e.result;
+      const ok = res.exitCode === 0;
+      envelope = {
+        status: ok ? "SUCCESS" : "FAILED",
+        num_turns: turns || 1,
+        duration_seconds: 0,
+        usage: { total_tokens: res.tokens?.total ?? 0 },
+      };
+    }
+    return;
+  }
+
   // ---- Antigravity (agy) ----------------------------------------------
   if (HARNESS !== "claude") {
     if (e.event === "init") {

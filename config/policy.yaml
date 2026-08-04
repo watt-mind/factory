@@ -28,6 +28,12 @@ budget:
   # --args): they bound how much of a window one tick can consume.
   per_ticket_usd: 15.00     # generous — a triage run that explores a codebase
                             # legitimately passes $5 notional
+  merge_usd: 40.00          # a merge pass reviews N open PRs, not one ticket —
+                            # sized for a backlog, not a single diff. Added
+                            # 2026-08-04 after a $15 cap on legalease's opus
+                            # merge session ran out mid-review with a 13-PR
+                            # backlog still open; run-agent.sh applies this
+                            # instead of per_ticket_usd for factory-merge only.
   per_day_usd: 1000.00      # enforced in every gate (lib/spend.mjs): today's
                             # logs are summed per tick; at the cap it drains —
                             # running tickets finish, nothing new starts.
@@ -73,6 +79,9 @@ notify:
   # Push these. Everything else goes to Linear and the end-of-run report — a
   # channel that pings on every merge gets muted, and then the blocker
   # notification is lost with it.
+  # Mechanism: python3 ~/Develop/hdkiller/scripts/notify.py "<EVENT> <TICKET>: <sentence>"
+  # (Telegram push to the human; a Linear comment or report line is NOT notifying.)
+  command: python3 ~/Develop/hdkiller/scripts/notify.py
   on:
     - ticket_blocked
     - pr_escalated

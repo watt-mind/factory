@@ -26,9 +26,9 @@ defaults:
   #   bun orchestrator/run.mjs --repo legalease --only triage,dispatch,merge --apply
   # in two terminals, each stoppable on its own.
   repo: bj29
-  # Which agent CLI runs the stages. `agy` (Antigravity) is a different
-  # provider's quota, so a second supervisor on it adds capacity without
-  # drawing further on the Claude allowance.
+  # Which agent CLI runs the stages: `claude`, `codex`, `pi`, `agy` (Antigravity).
+  # Using different harnesses leverages different providers/quotas, so a second
+  # supervisor adds capacity without drawing further on the Claude allowance.
   harness: claude
   label_prefix: com.wattmind
   log_dir: ~/Library/Logs
