@@ -34,10 +34,10 @@ budget:
                             # merge session ran out mid-review with a 13-PR
                             # backlog still open; run-agent.sh applies this
                             # instead of per_ticket_usd for factory-merge only.
-  per_day_usd: 1000.00      # enforced in every gate (lib/spend.mjs): today's
+  per_day_usd: 2000.00      # enforced in every gate (lib/spend.mjs): today's
                             # logs are summed per tick; at the cap it drains —
                             # running tickets finish, nothing new starts.
-                            # Raised to 1000 on 2026-08-04.
+                            # Raised to 1000 on 2026-08-04, then to 2000 same day.
   on_exhausted: drain
 
 limits:
