@@ -46,6 +46,12 @@ export function parseOwnedPaths(description = "") {
 
   return out
     .map((s) => s.replace(/`/g, "").replace(/[,;]$/, "").trim())
+    // Tickets routinely annotate a path with its change kind — "(new)",
+    // "(modified)", "(deleted)" — right after the backtick. Left in place that
+    // annotation is prose, not part of the path, and used to sink the whole
+    // line: `foo.ts (new)` has a space, so it read as prose and got dropped,
+    // silently downgrading a perfectly good path to "no Owned Paths".
+    .map((s) => s.replace(/\s*\([^()]*\)\s*$/, "").trim())
     .filter(Boolean)
     .filter((s) => !s.startsWith("#"))
     // A path has no spaces and looks like a path: a separator, a wildcard, or an

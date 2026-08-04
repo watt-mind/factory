@@ -124,3 +124,11 @@ test("indented code blocks work too", () => {
   const desc = "## Owned Paths\n\n    src/main.ts\n    src/**/*.test.ts\n\n## Next";
   expectEqual(parseOwnedPaths(desc), ["src/main.ts", "src/**/*.test.ts"]);
 });
+
+test("a trailing change-kind annotation doesn't sink the path (CLNT-765/768/764 shape)", () => {
+  const desc = "## Owned Paths\n\n* `src/analytics/kpis/avgBasePriceByProduct.ts` (new)\n* `src/analytics/kpis/existing.ts` (modified)\n";
+  expectEqual(parseOwnedPaths(desc), [
+    "src/analytics/kpis/avgBasePriceByProduct.ts",
+    "src/analytics/kpis/existing.ts",
+  ]);
+});
