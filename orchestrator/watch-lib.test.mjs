@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   parseLogLine, formatEntry, tailFormattedLines, latestLogForTicket, buildTicketRows, formatSpend,
-  formatIssueCounts, parseReaperOutput, linearDeepLink,
+  formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge,
 } from "./watch-lib.mjs";
 
 test("ignores blank lines and non-JSON noise", () => {
@@ -161,4 +161,46 @@ test("linearDeepLink maps linear.app URLs to the desktop scheme, null otherwise"
     .toBe("linear://watt-mind/issue/CLNT-810/clean-up-blog-routing");
   expect(linearDeepLink("https://example.com/issue/X-1")).toBeNull();
   expect(linearDeepLink(undefined)).toBeNull();
+});
+
+test("stageStatuses: fresh log = active, old log = idle with the last result", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  const result = JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 4, total_cost_usd: 0.5, result: "ok" });
+  writeFileSync(path.join(dir, "bj29-factory-triage-20260804-120000.jsonl"), result);
+  writeFileSync(path.join(dir, "bj29-CLNT-1-20260804-120000.jsonl"), result);
+  const now = Date.now();
+
+  // Written milliseconds ago -> triage and dispatch active, merge never ran.
+  const live = stageStatuses(dir, "bj29", { now });
+  expect(live.map((s) => [s.stage, s.active])).toEqual([["triage", true], ["dispatch", true], ["merge", false]]);
+  expect(live[2].ageMs).toBeNull();
+
+  // Same files viewed from 10 minutes later -> idle, with the parsed result.
+  const idle = stageStatuses(dir, "bj29", { now: now + 10 * 60_000 });
+  expect(idle[0].active).toBe(false);
+  expect(idle[0].lastResult?.ok).toBe(true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stageStatuses: dispatch ignores factory-stage logs; failures surface", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  const fail = JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 2, total_cost_usd: 0.1, result: "boom" });
+  writeFileSync(path.join(dir, "bj29-factory-merge-20260804-120000.jsonl"), fail);
+  const later = { now: Date.now() + 10 * 60_000 };
+  const s = stageStatuses(dir, "bj29", later);
+  expect(s[1]).toEqual({ stage: "dispatch", active: false, ageMs: null, lastResult: null });
+  expect(s[2].lastResult?.ok).toBe(false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stageStatuses tolerates a missing log dir", () => {
+  expect(stageStatuses("/no/such/dir", "bj29").every((s) => s.ageMs === null)).toBe(true);
+});
+
+test("formatAge is coarse and never negative-weird", () => {
+  expect(formatAge(null)).toBe("never");
+  expect(formatAge(42_000)).toBe("42s");
+  expect(formatAge(7 * 60_000)).toBe("7m");
+  expect(formatAge(3 * 3600_000 + 12 * 60_000)).toBe("3h12m");
+  expect(formatAge(2 * 3600_000)).toBe("2h");
 });

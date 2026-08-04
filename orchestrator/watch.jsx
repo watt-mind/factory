@@ -25,7 +25,7 @@ import { ROOT } from "../lib/schedule.mjs";
 import { todaysSpendUSD } from "../lib/spend.mjs";
 import {
   buildTicketRows, latestLogForTicket, tailFormattedLines, formatSpend,
-  formatIssueCounts, parseReaperOutput, linearDeepLink,
+  formatIssueCounts, parseReaperOutput, linearDeepLink, stageStatuses, formatAge,
 } from "./watch-lib.mjs";
 
 const LOG_DIR = path.join(homedir(), ".factory/logs");
@@ -92,6 +92,35 @@ function QueueStrip({ summary }) {
       <StatChip label="blocked" value={summary.blocked} tone={summary.blocked ? "bad" : undefined} />
       <StatChip label="PRs" value={summary.openPRs} tone={summary.openPRs ? "warn" : undefined} />
       <StatChip label="done" value={formatIssueCounts(summary.done, summary.total, summary.countCapped)} />
+    </Box>
+  );
+}
+
+/**
+ * triage -> dispatch -> merge, with a live dot on whatever is running right
+ * now (log written < 90s ago) and "how long since it last ran, and did it
+ * end well" for the rest.
+ */
+function StageStrip({ stages }) {
+  if (!stages) return null;
+  return (
+    <Box>
+      <Text dimColor>stages </Text>
+      {stages.map((s) => {
+        const failed = s.lastResult && !s.lastResult.ok;
+        return (
+          <Box key={s.stage} marginRight={2}>
+            {s.active ? (
+              <Text color="green">● {s.stage}</Text>
+            ) : (
+              <Text dimColor>
+                ○ {s.stage} <Text>{formatAge(s.ageMs)}</Text>
+                {failed ? <Text color="red" bold> FAIL</Text> : null}
+              </Text>
+            )}
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -185,6 +214,7 @@ function App() {
   const [logLines, setLogLines] = useState([]);
   const [spend, setSpend] = useState(0);
   const [reaper, setReaper] = useState(null); // { phase, team, lines, stale }
+  const [stages, setStages] = useState(null);
   const rowIdxRef = useRef(rowIdx);
   rowIdxRef.current = rowIdx;
   const pollRef = useRef(null);
@@ -226,6 +256,14 @@ function App() {
   const summary = summaries[repoIdx];
   const rows = buildTicketRows(summary ?? {});
   const selectedTicket = rows[rowIdx]?.identifier ?? null;
+
+  useEffect(() => {
+    if (!summary?.repo) { setStages(null); return; }
+    const scan = () => setStages(stageStatuses(LOG_DIR, summary.repo));
+    scan();
+    const id = setInterval(scan, LOG_POLL_MS);
+    return () => clearInterval(id);
+  }, [summary?.repo]);
 
   useEffect(() => {
     const tail = () => {
@@ -290,6 +328,7 @@ function App() {
       <Text bold>factory — foreground monitor</Text>
       <RepoTabs repos={summaries.map((s) => s.repo)} selected={repoIdx} />
       <QueueStrip summary={summary} />
+      <StageStrip stages={stages} />
       <Box marginTop={1} marginBottom={1}>
         {reaper ? (
           <ReaperPane reaper={reaper} />
