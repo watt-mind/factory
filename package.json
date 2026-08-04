@@ -4,11 +4,18 @@
   "type": "module",
   "scripts": {
     "supervise": "bun orchestrator/run.mjs",
+    "watch": "bun orchestrator/watch.jsx",
     "emit": "bun build/emit.mjs",
     "check": "bun build/emit.mjs --check",
     "link": "bun build/emit.mjs --link",
     "schedule": "bun deploy/gen.mjs",
     "test": "bun test"
   },
-  "engines": { "bun": ">=1.3" }
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.2.8"
+  }
 }

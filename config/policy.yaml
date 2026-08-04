@@ -28,15 +28,10 @@ budget:
   # --args): they bound how much of a window one tick can consume.
   per_ticket_usd: 15.00     # generous — a triage run that explores a codebase
                             # legitimately passes $5 notional
-  per_day_usd: 600.00       # enforced in every gate (lib/spend.mjs): today's
+  per_day_usd: 1000.00      # enforced in every gate (lib/spend.mjs): today's
                             # logs are summed per tick; at the cap it drains —
                             # running tickets finish, nothing new starts.
-                            # Raised from 200 on 2026-08-04: a day of building
-                            # and testing the loop itself passed it by lunch,
-                            # and it is a runaway guard in notional units, not
-                            # a wallet. The binding limit on subscription auth
-                            # is the 5-hour usage window, which nothing here
-                            # can see — that is what the per-tick caps are for.
+                            # Raised to 1000 on 2026-08-04.
   on_exhausted: drain
 
 limits:

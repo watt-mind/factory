@@ -19,6 +19,7 @@ plugins/core/                     GENERATED — the Claude Code plugin
 dist/{codex,gemini,cursor}/       GENERATED — the other harnesses
 dist/AGENTS.floor.md              GENERATED — paste/sync into each repo's AGENTS.md
 orchestrator/                     dispatch logic (owned-paths collision, tick)
+orchestrator/watch.jsx            read-only TUI: queue + in-flight tickets + live log tail
 config/schedule.yaml              ONE source of truth for cadences
 config/policy.yaml                budgets, concurrency, escalation
 deploy/gen.mjs                    schedule.yaml -> launchd plists
@@ -243,7 +244,7 @@ Only then start the supervisor on a cadence.
 | Tickets per tick | `--args` in `config/schedule.yaml` | triage 3, dispatch 2 |
 | Concurrent tickets | `max_in_flight` in `config/repos.yaml` | 3 |
 | Spend per run | `--budget`, else `budget.per_ticket_usd` in `config/policy.yaml` | $5 |
-| Daily spend | `budget.per_day_usd` | $60 |
+| Daily spend | `budget.per_day_usd` | $1000 |
 | Which repos | `--repo` on each job | `bj29` only |
 
 ### Auth and "budget" on a subscription
@@ -281,6 +282,17 @@ Three properties, in order of how much they matter:
 bun deploy/gen.mjs             # render enabled jobs (currently: none)
 bun deploy/gen.mjs --install   # copy to ~/Library/LaunchAgents and load
 ```
+
+### The monitor — a bird's-eye view across repos
+
+`orchestrator/run.mjs` shows you one job's full output; `orchestrator/watch.jsx` shows you the state across every repo at once — queue depth, which tickets are in flight or in review, and a live tail of the selected ticket's session log. Read-only: it never spawns an agent or writes anything, it only re-reads what `queue.mjs` and `~/.factory/logs/*.jsonl` already expose.
+
+```bash
+bun run watch                  # or: bun orchestrator/watch.jsx
+bun orchestrator/watch.jsx --repo bj29
+```
+
+`↑`/`↓` selects a ticket, `←`/`→` switches repo, `q` quits.
 
 Never hand-edit a generated plist — the next regeneration silently reverts it.
 

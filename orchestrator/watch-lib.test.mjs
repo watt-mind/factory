@@ -1,0 +1,135 @@
+/**
+ * bun test
+ *
+ * The log parser is the one part of watch.jsx that can silently show nothing
+ * (or crash on a malformed line) without anyone noticing until they need it —
+ * it gets real tests. Fixtures are trimmed real lines from both harnesses'
+ * ~/.factory/logs output.
+ */
+import { test, expect } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  parseLogLine, formatEntry, tailFormattedLines, latestLogForTicket, buildTicketRows, formatSpend,
+} from "./watch-lib.mjs";
+
+test("ignores blank lines and non-JSON noise", () => {
+  expect(parseLogLine("")).toEqual([]);
+  expect(parseLogLine("   ")).toEqual([]);
+  expect(parseLogLine("not json")).toEqual([]);
+});
+
+test("ignores malformed JSON instead of throwing", () => {
+  expect(() => parseLogLine('{"type":"assistant", broken')).not.toThrow();
+  expect(parseLogLine('{"type":"assistant", broken')).toEqual([]);
+});
+
+test("claude: extracts a tool_use call from an assistant message", () => {
+  const line = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm run lint" } }] },
+  });
+  expect(parseLogLine(line)).toEqual([{ kind: "tool", tool: "Bash", detail: "npm run lint" }]);
+});
+
+test("claude: a text-only assistant message yields no entries", () => {
+  const line = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "thinking..." }] } });
+  expect(parseLogLine(line)).toEqual([]);
+});
+
+test("claude: a successful result", () => {
+  const line = JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 12, total_cost_usd: 1.5, result: "done" });
+  const [entry] = parseLogLine(line);
+  expect(entry.kind).toBe("result");
+  expect(entry.ok).toBe(true);
+  expect(formatEntry(entry)).toBe("done — 12 turns ~$1.50");
+});
+
+test("claude: a failed result includes the trimmed message", () => {
+  const line = JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 3, total_cost_usd: 0.4, result: "Unknown command" });
+  const [entry] = parseLogLine(line);
+  expect(entry.ok).toBe(false);
+  expect(formatEntry(entry)).toBe("FAILED — 3 turns ~$0.40 — Unknown command");
+});
+
+test("agy: extracts an ACTIVE tool step_update", () => {
+  const line = JSON.stringify({
+    event: "step_update",
+    step_update: { step_type: "tool", state: "ACTIVE", tool_name: "run_command", tool_info: { parameters: { CommandLine: "bun test" } } },
+  });
+  expect(parseLogLine(line)).toEqual([{ kind: "tool", tool: "run_command", detail: "bun test" }]);
+});
+
+test("agy: a DONE step_update produces no entry (only ACTIVE tool steps do)", () => {
+  const line = JSON.stringify({ event: "step_update", step_update: { step_type: "tool", state: "DONE", tool_name: "run_command" } });
+  expect(parseLogLine(line)).toEqual([]);
+});
+
+test("agy: a wrapped result event", () => {
+  const line = JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 5, total_cost_usd: 2, response: "ok" } });
+  const [entry] = parseLogLine(line);
+  expect(entry.ok).toBe(true);
+  expect(formatEntry(entry)).toBe("done — 5 turns ~$2.00");
+});
+
+test("agy: an ERROR status formats as failed", () => {
+  const line = JSON.stringify({ event: "result", result: { status: "ERROR", num_turns: 1, total_cost_usd: 0, error: "quota reached" } });
+  const [entry] = parseLogLine(line);
+  expect(entry.ok).toBe(false);
+});
+
+test("tailFormattedLines reads a file, formats every entry, and caps at maxEntries", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  const file = path.join(dir, "sample.jsonl");
+  const lines = [];
+  for (let i = 0; i < 5; i++) {
+    lines.push(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: `f${i}.ts` } }] } }));
+  }
+  writeFileSync(file, lines.join("\n"));
+  expect(tailFormattedLines(file, 2)).toEqual(["Read f3.ts", "Read f4.ts"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("tailFormattedLines returns [] for a missing file rather than throwing", () => {
+  expect(tailFormattedLines("/no/such/file.jsonl")).toEqual([]);
+  expect(tailFormattedLines(null)).toEqual([]);
+});
+
+test("latestLogForTicket picks the newest matching file by mtime", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  writeFileSync(path.join(dir, "bj29-CLNT-1-20260101000000..jsonl"), "{}");
+  await new Promise((r) => setTimeout(r, 5));
+  writeFileSync(path.join(dir, "bj29-CLNT-1-20260102000000..jsonl"), "{}");
+  writeFileSync(path.join(dir, "bj29-CLNT-2-20260103000000..jsonl"), "{}"); // different ticket, must not match
+  const found = latestLogForTicket(dir, "bj29", "CLNT-1");
+  expect(found).toBe(path.join(dir, "bj29-CLNT-1-20260102000000..jsonl"));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("latestLogForTicket returns null when nothing matches", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
+  expect(latestLogForTicket(dir, "bj29", "CLNT-999")).toBeNull();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("buildTicketRows tags running and in-review tickets and preserves order", () => {
+  const summary = {
+    inProgressTickets: [{ identifier: "CLNT-1", title: "a" }],
+    inReviewTickets: [{ identifier: "CLNT-2", title: "b" }, { identifier: "CLNT-3", title: "c" }],
+  };
+  expect(buildTicketRows(summary)).toEqual([
+    { identifier: "CLNT-1", title: "a", status: "running" },
+    { identifier: "CLNT-2", title: "b", status: "review" },
+    { identifier: "CLNT-3", title: "c", status: "review" },
+  ]);
+});
+
+test("buildTicketRows tolerates a summary with no tickets", () => {
+  expect(buildTicketRows({})).toEqual([]);
+});
+
+test("formatSpend rounds to cents", () => {
+  expect(formatSpend(4.2, 40)).toBe("$4.20 / $40.00");
+  expect(formatSpend(7 * 1.1, 10)).toBe("$7.70 / $10.00");
+});
