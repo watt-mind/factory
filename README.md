@@ -297,6 +297,31 @@ bun orchestrator/watch.jsx --repo bj29
 
 Never hand-edit a generated plist — the next regeneration silently reverts it.
 
+### Measuring the runs — friction and economics
+
+The transcripts under `~/.factory/logs/*.jsonl` are the record of what agents *actually did*, which is why both of these measure rather than ask. An agent that fought a broken tool for ten minutes will not reliably write that down; its transcript shows the same failing call three runs running.
+
+```bash
+bun orchestrator/friction.mjs                # what wasted the agents' TIME
+bun orchestrator/economics.mjs               # what consumed CONTEXT and the usage window
+bun orchestrator/economics.mjs --since 2d --top 20
+bun orchestrator/economics.mjs --json        # for a dashboard
+bun orchestrator/economics.mjs --roll        # append to the permanent rollup
+```
+
+`economics.mjs` exists because a per-run cost figure hides the three things that actually decide how much work fits in a day:
+
+- **Context burn.** A tool result is not paid for once — it stays in the window and is re-sent on every later turn. A 600KB screenshot taken at turn 5 of a 40-turn run costs roughly 35 times its size in cache traffic. The report weights every payload by the turns that followed it, which ranks tools very differently than raw payload does.
+- **Cache reuse.** `cache_read` is 0.1x and `cache_write` is 1.25x, so a session that keeps invalidating its prefix costs an order of magnitude more than one that appends. The read:write ratio is the single best health number; below 1:8 something is thrashing.
+- **Waste.** Runs that returned nothing still held a dispatch slot and real minutes, and appear in no cost field at all.
+
+**`--roll` is the half that matters over time.** Transcripts are large (350MB for two days) and will eventually be pruned; the rollup at `~/.factory/metrics/runs.jsonl` is the small permanent record — one line per run, append-only, keyed by log filename so re-running is idempotent. It carries the per-run tool mix and failure shapes, so it still answers questions after the transcripts behind it are gone. Run it after each batch and the history accumulates on its own.
+
+> [!IMPORTANT]
+> **Every harness streams a different schema, and a parser that only knows Claude fails silently.** codex, agy and pi report no cost field, so summing `total_cost_usd` scored them as `$0 / 0 turns / no result` — indistinguishable from a harness that genuinely did nothing. On 2026-08-04 that hid 109 codex and 50 agy runs (35% of all runs) from `lib/spend.mjs`, and the per-day gate was measuring two thirds of the factory while reporting it as the whole.
+>
+> So all four schemas normalise into one `Run` record in `lib/transcript.mjs`, the budget gate imports the same parser, and harnesses that report no cost get priced from their token counts and labelled as the estimate they are. Being wrong by a constant factor is fine; being blind to a whole harness is not. Tests: `bun test lib/transcript.test.mjs` — the fixture per harness is the point.
+
 ## Why `Owned Paths` and not keyword matching
 
 `orchestrator/owned-paths.mjs` decides whether two tickets can run at once by intersecting their `Owned Paths` globs. Every `ai:agent-ready` ticket already carries that section, so the machine-readable answer exists — guessing from title keywords both over-fires ("Fix login button copy" vs "Rewrite auth middleware" share vocabulary but no files) and under-fires ("Onboarding wizard polish" vs "Profile page spacing" share files but no words).
