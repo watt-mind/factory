@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync, readdirSync, ex
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { FLOOR_BEGIN, spliceFloor, floorIsCurrent } from "../lib/floor.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED = path.join(ROOT, "shared");
@@ -105,11 +106,59 @@ for (const f of commands) {
   emit(path.join(CURSOR, "commands", path.basename(f)), body.trimStart());
 }
 
+// ------------------------------------------------------------- Pi ------------
+// dist/pi/ — skills and prompts for the Pi coding agent.
+const PI = path.join(ROOT, "dist", "pi");
+for (const s of skillDirs)
+  for (const f of listFiles(path.join(SHARED, "skills", s)))
+    emit(path.join(PI, "skills", s, path.relative(path.join(SHARED, "skills", s), f)), read(f));
+for (const f of commands) {
+  const { fm, body } = splitFrontmatter(read(f));
+  emit(path.join(PI, "prompts", path.basename(f)),
+    `# ${path.basename(f, ".md")}\n\n${fm.description ? `> ${fm.description}\n\n` : ""}${body.trimStart()}`);
+}
+
 // ------------------------------------------------- universal floor block ------
 // Every harness reads AGENTS.md or can be pointed at it, and unlike a plugin it
 // travels with the checkout — so this is the only layer a cloud sandbox is
 // guaranteed to get.
 emit(path.join(ROOT, "dist", "AGENTS.floor.md"), floor);
+
+// ---------------------------------------------------------- floor in repos ---
+// Emitting dist/AGENTS.floor.md is not delivery. Until 2026-08-04 that was the
+// last step, and the floor had reached NONE of the four configured repos — the
+// exact failure this repo exists to prevent, in its own output. Transcripts show
+// what that cost: ~100 `sleep N` calls and repeated unquoted-glob crashes, both
+// of which the floor explicitly forbids, plus 156 re-reads of linear.md by
+// agents with no local copy of the protocol to work from.
+//
+// So the floor is SPLICED into each repo's AGENTS.md between its markers.
+// Marker-delimited rather than whole-file so a repo keeps its own content, and
+// idempotent so running it twice is a no-op.
+/** [{name, path, state}] — state is ok | stale | missing | no-checkout. */
+function floorStatus() {
+  const cfg = Bun.YAML.parse(readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"));
+  return (cfg.repos ?? []).map((repo) => {
+    const repoPath = String(repo.path).replace(/^~/, homedir());
+    const agents = path.join(repoPath, "AGENTS.md");
+    if (!existsSync(repoPath)) return { ...repo, agents, state: "no-checkout" };
+    if (!existsSync(agents)) return { ...repo, agents, state: "missing" };
+    const body = read(agents);
+    if (!body.includes(FLOOR_BEGIN)) return { ...repo, agents, state: "missing" };
+    return { ...repo, agents, state: floorIsCurrent(body, floor) ? "ok" : "stale" };
+  });
+}
+
+if (process.argv.includes("--sync-floor")) {
+  console.log("\nsyncing the floor into each configured repo's AGENTS.md:");
+  for (const r of floorStatus()) {
+    if (r.state === "no-checkout") { console.log(`  skip     ${r.name} — no checkout at ${r.path}`); continue; }
+    if (r.state === "ok") { console.log(`  current  ${r.name}`); continue; }
+    writeFileSync(r.agents, spliceFloor(existsSync(r.agents) ? read(r.agents) : "", floor));
+    console.log(`  ${r.state === "stale" ? "updated " : "added   "} ${r.name}  -> ${r.path}/AGENTS.md`);
+  }
+  console.log("\nCommit AGENTS.md in each repo — the floor only protects a sandbox if it is checked in.");
+}
 
 // ------------------------------------------------------------------ check ----
 if (CHECK) {
@@ -139,6 +188,24 @@ if (CHECK) {
     process.exit(1);
   }
   console.log(`ok — ${expected.length} generated files match shared/`);
+
+  // A reproducible dist/ proves the floor was WRITTEN, not that it was
+  // DELIVERED. Checking only the former passed green on 2026-08-04 while all
+  // four repos carried no floor at all — the check was measuring the half that
+  // could not fail. Repos are reported separately and never fail the build:
+  // they are other checkouts on this machine, not this repo's tree, and a
+  // missing sibling clone must not break factory CI.
+  const repos = floorStatus().filter((r) => r.state !== "no-checkout");
+  const behind = repos.filter((r) => r.state !== "ok");
+  if (!repos.length) {
+    console.log("floor delivery: no configured repo checked out here — not verified");
+  } else if (behind.length) {
+    console.log(`\n! floor delivery: ${behind.length} of ${repos.length} repo(s) are not carrying the current floor`);
+    for (const r of behind) console.log(`    ${r.state.padEnd(8)} ${r.name}  ${r.path}/AGENTS.md`);
+    console.log("  Fix: bun build/emit.mjs --sync-floor   (then commit AGENTS.md in each repo)");
+  } else {
+    console.log(`floor delivery: ${repos.length} repo(s) carrying the current floor`);
+  }
   process.exit(0);
 }
 
@@ -147,6 +214,7 @@ console.log(`  claude  plugins/core/  (${commands.length} commands, ${skillDirs.
 console.log(`  codex   dist/codex/    (${skillDirs.length} skills, ${commands.length} prompts)`);
 console.log(`  gemini  dist/gemini/   (${skillDirs.length} skills)  — also Antigravity`);
 console.log(`  cursor  dist/cursor/   (${commands.length} commands)`);
+console.log(`  pi      dist/pi/       (${skillDirs.length} skills, ${commands.length} prompts)`);
 console.log(`  floor   dist/AGENTS.floor.md`);
 
 // -------------------------------------------------------------- link repos ---

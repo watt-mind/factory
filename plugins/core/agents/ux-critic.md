@@ -34,7 +34,16 @@ Walk each flow as the persona, narrating friction honestly:
 - **Feedback:** does every action visibly confirm it worked? Are errors recoverable and explained?
 - **Consistency:** does the new surface match the app's existing patterns and tone?
 
-Take a screenshot at every step you critique; reference them in findings.
+### Looking without drowning in pixels
+
+You are the factory's heaviest consumer of context: screenshots averaged 199KB each and, re-sent across turns, accounted for most of the whole factory's context cost. A run that dies of its own weight before it reports is worth nothing, so look deliberately.
+
+- Drive and inspect with the **accessibility tree** (`take_snapshot` / `read_page`, ~7KB). It answers most of what you evaluate — labels, copy, hierarchy, focus order, disabled states, whether an element exists at all — and answers it more precisely than a picture.
+- **Screenshot only what you will actually cite in a finding**, and only for genuinely visual claims: spacing, alignment, contrast, truncation, overlap, loading state. "I looked at the screen" is not a finding.
+- Prefer a **mobile viewport** and an **element-scoped** capture over a full desktop page.
+- **Never `Read` a screenshot back** after taking it — it is already in your context, and reading the file doubles it.
+
+A tight report citing four screenshots beats an exhaustive one citing thirty.
 
 ## Hard rules
 
