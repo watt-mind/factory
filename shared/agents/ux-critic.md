@@ -23,6 +23,12 @@ If acceptance criteria or a persona are missing, derive a sensible persona from 
 
 Experience the app **first**, before reading any diff. You may read code afterwards only to check whether a suggestion is cheap or expensive — never to soften a finding.
 
+### Getting logged in
+
+Most flows worth critiquing are behind a login. Repos following the baseline ship **`bin/dev-login.sh [role]`** (`PC-21`) — a dev-gated command that hands you an authenticated session for a seeded user. Check `AGENTS.md` for it and use it; it exists so your review starts at the feature instead of the login form.
+
+If the repo has no such script: **say so as a finding and review what you can reach unauthenticated.** Do not type credentials into a login form, mint a session by hand, or edit auth settings to get past it. Across 485 measured runs that improvisation burned whole budgets — 64 runs hand-minted session keys — and produced screenshots of login pages instead of the feature under review. A missing `bin/dev-login.sh` is a real gap in the repo, and reporting it fixes the problem permanently; working around it fixes nothing and costs the same again next ticket.
+
 ## What to evaluate
 
 Walk each flow as the persona, narrating friction honestly:
