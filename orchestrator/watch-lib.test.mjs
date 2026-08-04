@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   parseLogLine, formatEntry, tailFormattedLines, latestLogForTicket, buildTicketRows, formatSpend,
-  formatIssueCounts, parseReaperOutput,
+  formatIssueCounts, parseReaperOutput, linearDeepLink,
 } from "./watch-lib.mjs";
 
 test("ignores blank lines and non-JSON noise", () => {
@@ -154,4 +154,11 @@ test("parseReaperOutput treats a clean queue or garbage as nothing to reclaim", 
   expect(parseReaperOutput("=== No stale claims among 4 in progress. ===")).toEqual({ stale: 0 });
   expect(parseReaperOutput("")).toEqual({ stale: 0 });
   expect(parseReaperOutput(null)).toEqual({ stale: 0 });
+});
+
+test("linearDeepLink maps linear.app URLs to the desktop scheme, null otherwise", () => {
+  expect(linearDeepLink("https://linear.app/watt-mind/issue/CLNT-810/clean-up-blog-routing"))
+    .toBe("linear://watt-mind/issue/CLNT-810/clean-up-blog-routing");
+  expect(linearDeepLink("https://example.com/issue/X-1")).toBeNull();
+  expect(linearDeepLink(undefined)).toBeNull();
 });

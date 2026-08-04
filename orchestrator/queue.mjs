@@ -58,7 +58,7 @@ const QUERY = `
       state: { type: { nin: ["completed", "canceled"] } }
     }) {
       nodes {
-        identifier title description priority
+        identifier title description priority url
         state { name type }
         assignee { name }
         labels(first: 20) { nodes { name } }
@@ -193,11 +193,12 @@ for (const repo of repos) {
     blocked: blocked.length,
     slotsFree,
     startable: free.map((t) => t.identifier),
-    // Identifier + title only — enough for a monitor (orchestrator/watch.jsx)
-    // to render a ticket list without re-querying Linear itself.
-    inProgressTickets: inProgress.map((t) => ({ identifier: t.identifier, title: t.title })),
-    inReviewTickets: inReview.map((t) => ({ identifier: t.identifier, title: t.title })),
-    blockedTickets: blocked.map((t) => ({ identifier: t.identifier, title: t.title })),
+    // Identifier + title + url — enough for a monitor (orchestrator/watch.jsx)
+    // to render a ticket list and deep-link into Linear without re-querying
+    // Linear itself.
+    inProgressTickets: inProgress.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
+    inReviewTickets: inReview.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
+    blockedTickets: blocked.map((t) => ({ identifier: t.identifier, title: t.title, url: t.url })),
   });
 
   if (quiet) continue;

@@ -95,6 +95,17 @@ export function formatIssueCounts(done, total, capped) {
 }
 
 /**
+ * The desktop-app deep link for a Linear issue URL. Linear's macOS app
+ * registers the linear:// scheme; handing `open` an https://linear.app URL
+ * lands in the browser instead. Anything that isn't a linear.app URL comes
+ * back null so the caller falls back to opening the https URL as-is.
+ */
+export function linearDeepLink(url) {
+  const m = /^https:\/\/linear\.app\/(.+)$/.exec(String(url ?? ""));
+  return m ? `linear://${m[1]}` : null;
+}
+
+/**
  * What a reaper.mjs run concluded, parsed from its stdout. The number gates the
  * TUI's confirm step: --apply is only offered when the dry run found something
  * to reclaim, so a stray keypress on a clean queue can never write to Linear.

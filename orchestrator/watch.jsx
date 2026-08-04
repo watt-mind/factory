@@ -25,7 +25,7 @@ import { ROOT } from "../lib/schedule.mjs";
 import { todaysSpendUSD } from "../lib/spend.mjs";
 import {
   buildTicketRows, latestLogForTicket, tailFormattedLines, formatSpend,
-  formatIssueCounts, parseReaperOutput,
+  formatIssueCounts, parseReaperOutput, linearDeepLink,
 } from "./watch-lib.mjs";
 
 const LOG_DIR = path.join(homedir(), ".factory/logs");
@@ -268,6 +268,16 @@ function App() {
     }
     if (key.escape) process.exit(0);
     if (input === "r") { pollRef.current?.(); setSpend(todaysSpendUSD(LOG_DIR)); }
+    if (input === "o") {
+      const url = rows[rowIdx]?.url;
+      if (url) {
+        // Desktop app first; if the linear:// handler isn't registered, `open`
+        // exits non-zero and the https URL goes to the browser instead.
+        const deep = linearDeepLink(url);
+        const p = Bun.spawn(["open", deep ?? url], { stdout: "ignore", stderr: "ignore" });
+        if (deep) p.exited.then((code) => { if (code !== 0) Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" }); });
+      }
+    }
     if (input === "x" && summary?.team) startReaper(summary.team, false);
     if (key.leftArrow) { setRepoIdx((i) => Math.max(0, i - 1)); setRowIdx(0); }
     if (key.rightArrow) { setRepoIdx((i) => Math.max(0, Math.min(summaries.length - 1, i + 1))); setRowIdx(0); }
@@ -296,7 +306,7 @@ function App() {
           {error ? <Text color="red">  ! {error.slice(0, 50)}</Text> : null}
         </Text>
         <Text dimColor>
-          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ↑↓ select · ←→ repo · r refresh · x reaper · q quit
+          {lastPoll ? `updated ${lastPoll}` : "loading…"}  ↑↓ select · ←→ repo · o open · r refresh · x reaper · q quit
         </Text>
       </Box>
     </Box>
