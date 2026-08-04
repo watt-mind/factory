@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { answeredIdentifiers, REPLY_GRACE_MS } from "./reply-detection.mjs";
+import { answeredIdentifiers, holdInfo, REPLY_GRACE_MS } from "./reply-detection.mjs";
 
 const LABEL_ID = "label-ai-blocked";
 const IDS = new Set([LABEL_ID]);
@@ -61,5 +61,47 @@ describe("answeredIdentifiers", () => {
     const bare = { identifier: "BARE", state: { name: "Blocked" } };
     expect(answeredIdentifiers([bare], IDS)).toEqual(new Set());
     expect(answeredIdentifiers(null, IDS)).toEqual(new Set());
+  });
+});
+
+describe("holdInfo", () => {
+  const withBodies = ({ comments, ...spec }) => ({
+    ...issue(spec),
+    comments: { nodes: comments.map(([ms, body]) => ({ createdAt: iso(T0 + ms), body })) },
+  });
+
+  test("splits the blocking question from the reply", () => {
+    const node = withBodies({ adds: [0], comments: [[-1500, "need a decision on X"], [60 * 60_000, "go with option A"]] });
+    const info = holdInfo(node, IDS);
+    expect(info.heldAtMs).toBe(T0);
+    expect(info.question.body).toBe("need a decision on X");
+    expect(info.reply.body).toBe("go with option A");
+  });
+
+  test("a label-then-comment hold keeps its comment as the question, not a reply", () => {
+    const node = withBodies({ adds: [0], comments: [[10_000, "blocked: which env?"]] });
+    const info = holdInfo(node, IDS);
+    expect(info.question.body).toBe("blocked: which env?");
+    expect(info.reply).toBeNull();
+  });
+
+  test("no add event: newest comment is the question guess, heldAtMs null, no reply ever", () => {
+    const node = withBodies({ adds: [], comments: [[0, "old"], [60 * 60_000, "newest"]] });
+    const info = holdInfo(node, IDS);
+    expect(info.heldAtMs).toBeNull();
+    expect(info.question.body).toBe("newest");
+    expect(info.reply).toBeNull();
+  });
+
+  test("non-hold states return null", () => {
+    expect(holdInfo(issue({ state: "In Progress", adds: [0], comments: [0] }), IDS)).toBeNull();
+    expect(holdInfo(undefined, IDS)).toBeNull();
+  });
+
+  test("agrees with answeredIdentifiers on the grace boundary", () => {
+    const at = issue({ id: "AT", adds: [0], comments: [REPLY_GRACE_MS] });
+    const past = issue({ id: "PAST", adds: [0], comments: [REPLY_GRACE_MS + 1] });
+    expect(holdInfo(at, IDS).reply).toBeNull();
+    expect(holdInfo(past, IDS).reply).not.toBeNull();
   });
 });

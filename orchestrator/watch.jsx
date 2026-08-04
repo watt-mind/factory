@@ -8,13 +8,19 @@
  *   bun orchestrator/watch.jsx
  *   bun orchestrator/watch.jsx --repo bj29
  *
- * Never spawns an agent, and writes nowhere with ONE deliberate exception:
- * pressing `x` runs the stale-claim reaper for the selected repo's team —
- * dry-run first, and `--apply` only after a second explicit `y`, only when the
- * dry run found something to reclaim. Everything else re-reads the same state
- * queue.mjs and the log files already expose. This is the bird's-eye view
- * across repos and in-flight tickets; run.mjs is still the place to watch one
- * job's full dry/apply output.
+ * Read-only, with TWO deliberate exceptions:
+ *   `x` runs the stale-claim reaper for the selected repo's team — dry-run
+ *       first, `--apply` only after a second explicit `y`, only when the dry
+ *       run found something to reclaim;
+ *   `u` launches the unblock sweep agent (factory-unblock) for the selected
+ *       repo — immediately, no dry step: the sweep is Linear-write-only and
+ *       rule-bound to touch nothing without new evidence, so the guard lives
+ *       in the command, not in a confirm keystroke. It shows up in the agents
+ *       section like any stage agent, tailable from here.
+ * (`b` shows the blocked-tickets digest, which is read-only like the rest.)
+ * Everything else re-reads the same state queue.mjs and the log files already
+ * expose. This is the bird's-eye view across repos and in-flight tickets;
+ * run.mjs is still the place to watch one job's full dry/apply output.
  */
 import React, { useEffect, useRef, useState } from "react";
 import { render, Box, Text, useInput, useStdout } from "ink";
@@ -146,6 +152,8 @@ const SHORTCUTS = [
   ["r", "refresh queue + spend now"],
   ["x", "run the stale-claim reaper (dry run) for this repo's team"],
   ["y", "confirm reaper --apply — only offered when the dry run found stale claims"],
+  ["b", "blocked-tickets digest for this repo — every hold, its question, its age"],
+  ["u", "launch the unblock sweep agent for this repo (spawns immediately, no dry run)"],
   ["?", "this help"],
   ["esc", "close an open pane; quit when none is open"],
   ["q", "quit"],
@@ -188,6 +196,53 @@ function ReaperPane({ reaper }) {
         <Text key={i} wrap="truncate-end">{line}</Text>
       ))}
       <Text dimColor>{canApply ? "y reclaim these · " : ""}esc close</Text>
+    </Box>
+  );
+}
+
+/**
+ * Blocked-tickets digest (`b`) — read-only output of orchestrator/digest.mjs,
+ * shown in place of the ticket panes. Long digests scroll off; the CLI is the
+ * place for the full report, this is the glance.
+ */
+function DigestPane({ digest, height }) {
+  const title = {
+    running: `blocked digest (${digest.repo})…`,
+    done: `blocked digest (${digest.repo})`,
+    error: "blocked digest — failed",
+  }[digest.phase];
+  const shown = digest.lines.slice(0, Math.max(1, height - 2));
+  return (
+    <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor={digest.phase === "error" ? "red" : "cyan"} paddingX={1}>
+      <Text bold color={digest.phase === "error" ? "red" : "cyan"}>{title}</Text>
+      {digest.lines.length === 0 && <Text dimColor>running…</Text>}
+      {shown.map((line, i) => (
+        <Text key={i} wrap="truncate-end">{line}</Text>
+      ))}
+      {digest.lines.length > shown.length && <Text dimColor>… {digest.lines.length - shown.length} more — run `bun orchestrator/digest.mjs` for the full report</Text>}
+      <Text dimColor>esc close</Text>
+    </Box>
+  );
+}
+
+/**
+ * Confirmation that `u` actually spawned the sweep. The run itself is not
+ * awaited here — run-agent.sh writes `<repo>-factory-unblock-<stamp>.jsonl`,
+ * so the agents section picks it up within a poll and its log is tailable
+ * like any stage agent's.
+ */
+function UnblockPane({ unblock }) {
+  const failed = unblock.phase === "error";
+  return (
+    <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor={failed ? "red" : "green"} paddingX={1}>
+      <Text bold color={failed ? "red" : "green"}>
+        {failed ? "unblock sweep — failed to launch" : `unblock sweep launched (${unblock.repo})`}
+      </Text>
+      {unblock.lines.map((line, i) => (
+        <Text key={i} wrap="truncate-end">{line}</Text>
+      ))}
+      {!failed && <Text dimColor>it will appear under agents shortly — select it there to tail its log</Text>}
+      <Text dimColor>esc close</Text>
     </Box>
   );
 }
@@ -289,6 +344,8 @@ function App() {
   const [logLines, setLogLines] = useState([]);
   const [spend, setSpend] = useState(0);
   const [reaper, setReaper] = useState(null); // { phase, team, lines, stale }
+  const [digest, setDigest] = useState(null); // { phase, repo, lines }
+  const [unblock, setUnblock] = useState(null); // { phase, repo, lines }
   const [stages, setStages] = useState(null);
   const [agents, setAgents] = useState([]);
   const [ticketAges, setTicketAges] = useState({});
@@ -387,6 +444,42 @@ function App() {
     }
   };
 
+  const startDigest = async (repo) => {
+    setDigest({ phase: "running", repo, lines: [] });
+    try {
+      const p = Bun.spawn(["bun", "orchestrator/digest.mjs", "--repo", repo], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([
+        new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
+      ]);
+      const text = (code === 0 ? out : out + `\n${err}`).trimEnd();
+      setDigest({ phase: code === 0 ? "done" : "error", repo, lines: text.split("\n").filter((l) => l.trim() !== "") });
+    } catch (e) {
+      setDigest({ phase: "error", repo, lines: [String(e.message ?? e)] });
+    }
+  };
+
+  // No dry step and no confirm, on purpose (the header says why). Launch is
+  // fire-and-forget: the sweep's own log under ~/.factory/logs is the record,
+  // and the agents section is where to watch it. Only a spawn that dies within
+  // 3s (harness missing, bad flags) is reported back here.
+  const startUnblock = (repo) => {
+    try {
+      const p = Bun.spawn(["bash", "runners/run-agent.sh", "--repo", repo, "--command", "factory-unblock", "--read-only", "--args", "10"],
+        { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+      setUnblock({ phase: "launched", repo, lines: [] });
+      const born = Date.now();
+      p.exited.then(async (code) => {
+        if (code !== 0 && Date.now() - born < 3000) {
+          const err = await new Response(p.stderr).text();
+          const out = await new Response(p.stdout).text();
+          setUnblock({ phase: "error", repo, lines: (out + "\n" + err).trim().split("\n").slice(-8) });
+        }
+      });
+    } catch (e) {
+      setUnblock({ phase: "error", repo, lines: [String(e.message ?? e)] });
+    }
+  };
+
   useInput((input, key) => {
     if (input === "q" || (key.ctrl && input === "c")) process.exit(0);
     if (showHelp) {
@@ -394,6 +487,14 @@ function App() {
       return;
     }
     if (input === "?") { setShowHelp(true); return; }
+    if (digest) {
+      if (key.escape) setDigest(null);
+      return;
+    }
+    if (unblock) {
+      if (key.escape) setUnblock(null);
+      return;
+    }
     if (reaper) {
       // The pane owns the keyboard while it's up: esc closes it (instead of
       // quitting), y confirms --apply, and only off a dry run that found work.
@@ -414,6 +515,8 @@ function App() {
       }
     }
     if (input === "x" && summary?.team) startReaper(summary.team, false);
+    if (input === "b" && summary?.repo) startDigest(summary.repo);
+    if (input === "u" && summary?.repo) startUnblock(summary.repo);
     if (key.leftArrow) { setRepoIdx((i) => Math.max(0, i - 1)); setRowIdx(0); }
     if (key.rightArrow) { setRepoIdx((i) => Math.max(0, Math.min(summaries.length - 1, i + 1))); setRowIdx(0); }
     if (key.upArrow) setRowIdx(Math.max(0, selIdx - 1));
@@ -435,6 +538,10 @@ function App() {
           <HelpPane />
         ) : reaper ? (
           <ReaperPane reaper={reaper} />
+        ) : digest ? (
+          <DigestPane digest={digest} height={paneHeight} />
+        ) : unblock ? (
+          <UnblockPane unblock={unblock} />
         ) : (
           <>
             <TicketList stageAgents={stageAgents} rows={rows} ready={summary?.startable} ages={ticketAges} selected={selIdx} height={paneHeight} />

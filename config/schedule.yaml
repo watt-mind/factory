@@ -113,6 +113,40 @@ jobs:
       Compiles once so that N worktrees don't. Cheapest thing to run before a
       dispatch batch; the gate only fires when the cache is >=15 commits behind.
 
+  # 1c. UNBLOCK. `ai:blocked` used to be a one-way door; reply detection
+  #     (OPS-65) catches answered questions, and these two catch the rest:
+  #     the digest surfaces every hold's question in one read-only report, and
+  #     the sweep re-examines holds for evidence that resolved them without a
+  #     comment (dependency merged, credential documented, code moved on).
+  #
+  #     BOTH ARE MANUAL-START BY DESIGN (OPS-67), not just disabled-for-now:
+  #     the digest from the watch TUI's `b` or this CLI, the sweep from the
+  #     TUI's `u` (spawns immediately, no dry step — it is Linear-write-only
+  #     and rule-bound to touch nothing without new evidence) or run-agent.sh.
+  #     Listed here so the verbs have one canonical spelling and don't become
+  #     orphans like the reaper once was.
+  - name: unblock-digest
+    every: 24h
+    dry_command: bun orchestrator/digest.mjs
+    command: bun orchestrator/digest.mjs
+    enabled: false
+    why: >
+      Read-only report of every ai:blocked ticket with its blocking question,
+      hold age, and ANSWERED markers. There is no push channel for it yet, so
+      scheduling it would print to a log nobody reads — run it when you want
+      the picture.
+  - name: unblock
+    every: 24h
+    dry_command: bun orchestrator/digest.mjs --repo {{repo}}
+    command: runners/run-agent.sh --harness {{harness}} --repo {{repo}} --command factory-unblock --read-only --args "10"
+    enabled: false
+    why: >
+      Agent pass over held tickets, oldest first: releases a hold only on new
+      evidence (dependency Done, answer now in docs, premise gone from the
+      code) and otherwise leaves silently — never re-derives or re-comments a
+      hold. Read-only against the repo; writes only to Linear. Manual-start
+      until it has earned schedule trust like everything else here.
+
   # 2. EXECUTE. Rolling dispatch under the per-repo in-flight cap; Owned Paths
   #    decide what can run together. The gate refuses to spawn when the cap is
   #    full or nothing is startable, so an agent never wakes to learn nothing.
