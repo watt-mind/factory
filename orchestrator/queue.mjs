@@ -131,9 +131,16 @@ for (const repo of repos) {
 
   // What dispatch would actually pick up, honouring Owned Paths against what is
   // already running. Sorted the way §7 sorts: priority asc, then created asc.
+  //
+  // report_only repos have no worktree tooling — dispatch must never target
+  // them (see config/repos.yaml). Forcing slotsFree to 0 here is what keeps
+  // the dispatch gate closed for them; without it the gate reports "work
+  // available" from Linear state alone, run.mjs spawns tick.mjs, and tick.mjs
+  // immediately exits 2 because the repo can't be dispatched — a FAIL every
+  // tick for a repo that was never eligible to begin with.
   const inFlightPaths = inProgress.flatMap((i) => parseOwnedPaths(i.description ?? ""));
   const sorted = [...ready].sort((a, b) => (a.priority || 99) - (b.priority || 99));
-  const slotsFree = Math.max(0, (repo.max_in_flight ?? defaultCap) - inProgress.length);
+  const slotsFree = repo.report_only ? 0 : Math.max(0, (repo.max_in_flight ?? defaultCap) - inProgress.length);
   const free = [];
   const busyPaths = [...inFlightPaths];
   for (const t of sorted) {
@@ -159,6 +166,11 @@ for (const repo of repos) {
     blocked: blocked.length,
     slotsFree,
     startable: free.map((t) => t.identifier),
+    // Identifier + title only — enough for a monitor (orchestrator/watch.jsx)
+    // to render a ticket list without re-querying Linear itself.
+    inProgressTickets: inProgress.map((t) => ({ identifier: t.identifier, title: t.title })),
+    inReviewTickets: inReview.map((t) => ({ identifier: t.identifier, title: t.title })),
+    blockedTickets: blocked.map((t) => ({ identifier: t.identifier, title: t.title })),
   });
 
   if (quiet) continue;
@@ -166,6 +178,8 @@ for (const repo of repos) {
   if (free.length) {
     console.log(c.dim(`\n  dispatch would start (cap ${repo.max_in_flight}, ${inProgress.length} running, ${slotsFree} slot(s) free):`));
     for (const t of free) console.log(`    ${c.green(t.identifier.padEnd(10))} ${t.title.slice(0, 60)}`);
+  } else if (repo.report_only && ready.length) {
+    console.log(c.dim(`\n  report_only — dispatch is disabled here by design (${ready.length} ready ticket(s) would otherwise start)`));
   } else if (ready.length && slotsFree === 0) {
     // Distinguish "no room" from "nothing fits". Reporting the Owned Paths
     // reason when the cap is simply full sends you reading glob sets for a

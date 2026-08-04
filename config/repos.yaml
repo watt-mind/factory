@@ -92,8 +92,9 @@ repos:
   #   - dispatch must never target them; concurrent agents there share ports and
   #     databases
   #
-  # They graduate to full entries when CW-363 (coach-wattz) and CLNT-609
-  # (legalease) land their worktree scripts.
+  # coach-wattz graduates when CW-363 lands its worktree scripts. legalease
+  # (CLNT-609) and cashsaas (CLNT-791) already have — their entries below carry
+  # worktree_up/down/warm like bj29's, and are no longer report_only.
   # --------------------------------------------------------------------------
 
   - name: coach-wattz
@@ -148,5 +149,13 @@ repos:
     team: CLNT
     project: CashMap
     base: develop
+
+    # Worktrees — satisfies PC-15 (CLNT-791): bin/worktree-up.sh/down.sh/warm.sh,
+    # deterministic per-ticket ports + database, seeded warm template.
+    worktree_up: bin/worktree-up.sh
+    worktree_down: bin/worktree-down.sh
+    worktree_warm: bin/worktree-warm.sh
     worktree_root: ~/Develop/.worktrees/cashsaas
-    report_only: true            # PC-15 pending — no ticket yet
+
+    # What "verified" means. Agents run this before any PR.
+    verify: npm run typecheck && npm run lint && npm run format:check
