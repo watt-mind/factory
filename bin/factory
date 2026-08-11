@@ -85,6 +85,16 @@ case "$cmd" in
     # FACTORY_NOTIFY_SCRIPT is for tests or a deliberate local override only.
     exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" "$@"
     ;;
+  security)
+    # Local security harness (OPS-165): Gitleaks + Semgrep + Actionlint on the
+    # repo containing cwd (or the given path). Per-repo scan tuning comes from
+    # config/repos.yaml `security:` blocks, resolved here so the check script
+    # stays a plain env-driven tool.
+    _target="$PWD"
+    for _a in "$@"; do case "$_a" in -*) ;; *) _target="$_a"; break ;; esac; done
+    eval "$(bun "$ROOT/tools/security-env.mjs" "$_target" 2>/dev/null || true)"
+    exec bash "$ROOT/lib/security-check.sh" "$@"
+    ;;
   emit)
     # Swift default: regenerate dist/plugins and link every harness + repos.
     if [[ $# -eq 0 ]]; then
@@ -116,6 +126,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   tick          orchestrator/tick.mjs
   run           runners/run-agent.sh
   notify        ~/Develop/hdkiller/scripts/notify.py (human interrupt channel)
+  security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
   emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
 
 Works from any cwd (worktrees included).

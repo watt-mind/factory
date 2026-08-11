@@ -217,6 +217,21 @@ repos:
       - "**/migrations/**"
       - .github/workflows/**
 
+  # Infra docs source of truth. report_only: docs repo, no worktree tooling.
+  # The security block tunes `factory security` (OPS-165): this PRIVATE repo
+  # intentionally stores operational credentials in docs/ (allowlisted in its
+  # in-repo .gitleaks.toml — CI and the pre-commit hook need that file, so it
+  # stays in-repo), and its scripts/ call fixed API endpoints via urllib,
+  # which the dynamic-urllib audit rule false-positives on.
+  - name: hdkiller
+    path: ~/Develop/hdkiller
+    github: hdkiller/hdkiller
+    team: OPS
+    base: master
+    report_only: true
+    security:
+      semgrep_args: "--exclude-rule python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected"
+
   # Shared ESLint presets (@watt-mind/eslint-config) — tier 2 of the
   # code-security baseline (OPS-164). Stub until the package lands; report_only
   # because a single-package repo needs no worktree isolation, and verify
