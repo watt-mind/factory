@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { retriggerEnvelope } from "../templates";
 import { useListKeys, useNow } from "../hooks";
 import { setContextActions } from "../palette";
 import type { AdmittedEvent } from "../types";
@@ -23,10 +24,12 @@ export function Events({
   connected,
   focusStatus,
   onFocusConsumed,
+  onTriggerAgain,
 }: {
   connected: boolean;
   focusStatus: string | null;
   onFocusConsumed: () => void;
+  onTriggerAgain: (envelope: Record<string, unknown>) => void;
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
@@ -100,6 +103,10 @@ export function Events({
           ? [{ label: `Requeue ${sel.eventId}`, hint: "q", run: () => requeue.mutate(sel) }]
           : []),
         { label: `Replay ${sel.eventId} through intake`, run: () => replay.mutate(sel.envelope) },
+        {
+          label: `Trigger ${sel.type} again (new event id)…`,
+          run: () => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now())),
+        },
       ]);
     }
     return () => setContextActions([]);
@@ -236,6 +243,14 @@ export function Events({
               onClick={() => replay.mutate(sel.envelope)}
             >
               Replay through intake
+            </Button>
+            {/* Distinct from replay: a fresh delivery identity, so it admits
+                a NEW event instead of deduping to a no-op (OPS-214). */}
+            <Button
+              disabled={!connected}
+              onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
+            >
+              Trigger again…
             </Button>
           </div>
           <VerbError error={requeue.error ?? replay.error} />

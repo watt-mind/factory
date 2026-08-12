@@ -157,10 +157,24 @@ confirmation that states it overrides the attempt budget and is recorded.
 `409` (`IllegalTransition`, `attempts_exhausted`) renders as an inline
 explanation, not a toast that evaporates.
 
-### 4.4 Inject — `POST /replay`
+### 4.4 Inject — `POST /replay` (templates: OPS-214)
 
 Dev parity with `cli.mjs inject`: a dialog with a JSON textarea for an event
 envelope, client-side-validated against the envelope shape before submitting.
+
+**Templates are derived, never hand-maintained (OPS-214).** One chip per
+registered event type; the payload skeleton is built from that event's agent
+*input schema* (required fields only; enums seed their first value, numbers
+their minimum, `minItems` arrays one element, patterned strings a
+recognisable placeholder). A newly registered event type therefore appears
+with no UI change, and a template can never propose a payload the runtime
+would reject for shape. Ids and `occurredAt` are generated per dialog
+opening; the JSON stays fully editable — the template is a starting point,
+not a cage. An unregistered `type` warns once (it is admissible, but parks
+as `human_needed`) and injects on the second click. The Events view offers
+**Trigger again**, which clones an envelope under a *fresh* identity —
+deliberately distinct from Replay, which reuses the delivery id and dedups
+to a no-op.
 The response distinguishes `admitted` from `duplicate` — a duplicate is a
 success ("§5.1 working as designed"), displayed as such, not an error.
 

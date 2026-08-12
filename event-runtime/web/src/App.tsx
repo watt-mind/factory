@@ -29,6 +29,7 @@ export function App() {
   const view = route[0];
   const [, cycleTheme] = useTheme();
   const [injectOpen, setInjectOpen] = useState(false);
+  const [injectSeed, setInjectSeed] = useState<Record<string, unknown> | undefined>(undefined);
   const [focusRunId, setFocusRunId] = useState<string | null>(null);
   const [focusProposalId, setFocusProposalId] = useState<string | null>(null);
   const [focusEventStatus, setFocusEventStatus] = useState<string | null>(null);
@@ -222,6 +223,10 @@ export function App() {
             connected={connected}
             focusStatus={focusEventStatus}
             onFocusConsumed={() => setFocusEventStatus(null)}
+            onTriggerAgain={(envelope) => {
+              setInjectSeed(envelope);
+              setInjectOpen(true);
+            }}
           />
         ) : (
           <Overview
@@ -235,7 +240,15 @@ export function App() {
       </main>
 
       <CommandPalette actions={paletteActions} onJumpRun={jumpToRun} onJumpProposal={jumpToProposal} />
-      {injectOpen && <InjectDialog onClose={() => setInjectOpen(false)} />}
+      {injectOpen && (
+        <InjectDialog
+          initialEnvelope={injectSeed}
+          onClose={() => {
+            setInjectOpen(false);
+            setInjectSeed(undefined);
+          }}
+        />
+      )}
       <ToastContainer />
     </div>
   );
