@@ -149,6 +149,7 @@ function eventsView(db, status) {
     occurredAt: row.occurred_at,
     receivedAt: row.received_at,
     correlationId: row.correlation_id,
+    causationId: row.causation_id,
     planFailures: row.plan_failures,
     lastPlanError: row.last_plan_error,
     admittedAt: row.admitted_at,
@@ -248,6 +249,11 @@ function agentsView(registry) {
       outputSchemaFile: def.output_schema,
       outputSchema: def.outputSchema,
       pins: def.pins,
+      // Closed-execution shape (OPS-223/OPS-208): what a mutating definition
+      // is actually allowed to run. Null for LLM agents.
+      command: def.command ?? null,
+      actionRegistry: def.actionRegistry ?? null,
+      hosts: def.hosts ? Object.keys(def.hosts) : null,
       eventTypes: Object.entries(registry.eventTypes)
         .filter(([, mapping]) => mapping.agent === def.ref)
         .map(([type, mapping]) => ({
@@ -256,6 +262,18 @@ function agentsView(registry) {
           idempotencyScope: mapping.idempotencyScope,
           proposalTtlSeconds: mapping.proposalTtlSeconds ?? null,
         })),
+    })),
+    // Recommendation edges (OPS-223) — the capability map's defining relation:
+    // which artifact value on which agent routes to which follow-up event type.
+    edges: registry.edges ?? {},
+    // Every registered route, including types whose agent has no edges — the
+    // graph needs the full topology, not just what agents happen to mention.
+    eventTypes: Object.entries(registry.eventTypes).map(([type, mapping]) => ({
+      type,
+      agent: mapping.agent,
+      adapter: mapping.adapter,
+      idempotencyScope: mapping.idempotencyScope,
+      proposalTtlSeconds: mapping.proposalTtlSeconds ?? null,
     })),
     contracts: {
       "factory.event/v1": registry.schemas.envelope,

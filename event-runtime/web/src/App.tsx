@@ -7,6 +7,7 @@ import { InjectDialog } from "./components/InjectDialog";
 import { ToastContainer } from "./components/ui";
 import { Agents } from "./views/Agents";
 import { Events } from "./views/Events";
+import { Graph } from "./views/Graph";
 import { Overview } from "./views/Overview";
 import { Proposals } from "./views/Proposals";
 import { Runs } from "./views/Runs";
@@ -20,6 +21,7 @@ const NAV = [
   { key: "proposals", label: "Proposals", go: "p" },
   { key: "runs", label: "Runs", go: "r" },
   { key: "agents", label: "Agents", go: "t" },
+  { key: "graph", label: "Graph", go: "g" },
 ] as const;
 
 export function App() {
@@ -190,7 +192,7 @@ export function App() {
           </div>
           <div className="mt-1.5 text-(--text-faint)">
             <span className="mono">⌘K</span> commands · <span className="mono">g</span>+
-            <span className="mono">o/e/p/r/t</span> navigate
+            <span className="mono">o/e/p/r/t/g</span> navigate
           </div>
         </div>
       </nav>
@@ -211,6 +213,8 @@ export function App() {
             onFocusConsumed={() => setFocusRunId(null)}
             onJumpAgent={jumpToAgent}
           />
+        ) : view === "graph" ? (
+          <Graph />
         ) : view === "agents" ? (
           <Agents focusAgentRef={focusAgentRef} onFocusConsumed={() => setFocusAgentRef(null)} />
         ) : view === "events" ? (

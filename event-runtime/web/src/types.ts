@@ -183,11 +183,32 @@ export interface AgentDef {
   outputSchemaFile: string;
   outputSchema: unknown;
   pins: Record<string, string>;
+  /** Closed-execution shape: fixed argv (command adapter) or action registry. */
+  command: string[] | null;
+  actionRegistry: Record<string, { remote: string }> | null;
+  hosts: string[] | null;
   eventTypes: AgentEventRoute[];
+}
+
+/** One recommendation edge: an artifact value routing to a follow-up event type. */
+export interface RecommendationRule {
+  recommendationField: string;
+  edges: Record<string, { eventType: string; input: Record<string, string> }>;
+}
+
+/** Every registered route, independent of which agent mentions it. */
+export interface EventRoute {
+  type: string;
+  agent: string;
+  adapter: string;
+  idempotencyScope: string[];
+  proposalTtlSeconds: number | null;
 }
 
 export interface AgentsView {
   agents: AgentDef[];
+  edges: Record<string, RecommendationRule>;
+  eventTypes: EventRoute[];
   contracts: Record<string, unknown>;
 }
 
