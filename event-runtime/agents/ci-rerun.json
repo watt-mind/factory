@@ -1,0 +1,37 @@
+{
+  "id": "ci-rerun",
+  "version": 1,
+  "prompt": "agents/ci-rerun.md",
+  "input_schema": "schemas/ci-rerun.input.json",
+  "output_schema": "schemas/command-result.output.json",
+  "output_contract": "factory.command-result/v1",
+  "command": [
+    "gh",
+    "run",
+    "rerun",
+    "{runId}",
+    "--failed",
+    "--repo",
+    "{repo}"
+  ],
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "gh:write"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 120,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/ci-rerun.md": "sha256:1e357287cb35d28f110040f665733cb6db76d8fcc2c2bd43d412148ed3d27ad6",
+    "schemas/ci-rerun.input.json": "sha256:5a310db030e328bef28f48a403e00f00bc3f61c5ce9d3c963e3ea72afd1b42b7",
+    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+  }
+}

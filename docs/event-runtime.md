@@ -57,7 +57,7 @@ machinery it earns. Anything no listed event type needs stays unbuilt.
 | :--- | :--- | :--- | :--- |
 | `factory.status-report.requested` | operator webhook / replay CLI | intake, dedup, planner, approval, ephemeral workspace, schema verification, receipts | slice 1 |
 | `keephq.disk-alert.raised` | Keep HQ infra alert webhook | two-node DAG (diagnose → remediate), semantic verification against declared evidence (`evidenceSetHash`), typed remediation plans from a **closed action registry**, first infra-mutating executor behind watched approval (OPS-208) | slice 2 |
-| `github.workflow-run.failed` | GitHub webhook | log-derived evidence, artifact retention, correlation with an external PR | later |
+| `github.workflow-run.failed` | GitHub webhook / replay CLI | first discovered chain (OPS-223): typed `ci-doctor` diagnosis → recommendation edges → watched closed-command follow-ups (`gh run rerun`, notify); command adapter and edge registry | shipped |
 | `sentry.issue.created` | Sentry webhook | *(dropped as a slice — Sentry already feeds Linear directly, so classifying here validates nothing operationally new; revisit only if that intake moves)* | — |
 | `clock.tick.<loop>` | scheduler | admitted, audited timer events; per-loop migration of the standing loops | later, per loop |
 | repository-mutating events | GitHub / Linear | shared claim, capacity, Owned Paths, and approval authority with the ticket dispatcher (§3) | last |

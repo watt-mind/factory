@@ -1,0 +1,28 @@
+{
+  "id": "ci-doctor",
+  "version": 1,
+  "prompt": "agents/ci-doctor.md",
+  "input_schema": "schemas/ci-doctor.input.json",
+  "output_schema": "schemas/ci-doctor.output.json",
+  "output_contract": "factory.ci-doctor/v1",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "gh:read"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/ci-doctor.md": "sha256:08ac4640a8a3c51b13731e23398f21cd448d326b03746d7b6ec570835d519469",
+    "schemas/ci-doctor.input.json": "sha256:c2b79435ab29e8a0f08e262b4ae2d5bac86ae335c86b9fd4e8c210b037319113",
+    "schemas/ci-doctor.output.json": "sha256:fa0d9eefc2ed4f68b97d5d7b9ec91f36a233bff945bba71b3d9e6e8343167680"
+  }
+}

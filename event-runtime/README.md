@@ -53,6 +53,20 @@ Dev loop: `cd event-runtime/web && bunx vite` (proxies /api to the control
 API). Keyboard-first: `⌘K` palette, `g o/p/r` to navigate, `j/k` + `Enter` on
 lists, `a`/`x` to approve/reject the selected proposal.
 
+## Discovered chains (OPS-223)
+
+Agents never spawn agents: a completed run whose artifact carries a typed
+recommendation (per `edges.json`) emits an internal event through the same
+intake — `eventId chain-<runId>` (once per run, ever), `correlationId`
+inherited, `causationId` = the source run — and the planner proposes the
+follow-up, **watched like everything else**. First chain: `ci-doctor@1`
+diagnoses a failed GitHub Actions run (`github.workflow-run.failed`) and
+recommends `FLAKE|ENV → ci-rerun@1` (closed command template
+`gh run rerun … --failed`, once-per-run by idempotency) or
+`TICKET → ci-notify@1` (`factory notify "CI RED …"`). Mutating definitions
+are admitted only as closed command templates (`lib/adapters/command.mjs`) —
+enforceable by construction, no shell, no model (§14).
+
 ## Demo environments and e2e (OPS-217)
 
 `bin/worktree-up.sh` provisions an **isolated, seeded** runtime — the part
@@ -128,6 +142,8 @@ spec (§12).
 | `lib/worker.mjs` | single worker: lease, execute, verify, publish with fencing (§8) |
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
 | `lib/adapters/` | adapter registry: `claude` (real), `fake` (tests) (§6) |
+| `lib/chain.mjs` `edges.json` | discovered chains: typed recommendation → internal event → watched proposal (OPS-223) |
+| `lib/adapters/command.mjs` | closed-template command executor — the only admissible mutating agent form (§14) |
 | `lib/artifacts.mjs` | content-addressed artifact/transcript store, streamed via `GET /artifacts/:sha256` |
 | `lib/api.mjs` `cli.mjs` | loopback control API + CLI client (§12–§13) |
 | `web/` | web control plane: Vite/React app + `serve.mjs` static/proxy server |

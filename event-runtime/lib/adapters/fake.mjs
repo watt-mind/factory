@@ -23,9 +23,47 @@ function repoRow(name, overrides = {}) {
 }
 
 /**
+ * ci-doctor artifacts for chain tests/demos: the verdict rides in on the repo
+ * name's suffix — `wm/x-ticket` → TICKET, `wm/x-env` → ENV, else FLAKE.
+ */
+function ciDoctorArtifact(input) {
+  const repo = String(input?.repo ?? "");
+  const verdict = repo.endsWith("-ticket") ? "TICKET" : repo.endsWith("-env") ? "ENV" : "FLAKE";
+  return {
+    verdict,
+    culprit: "job Verify, step Setup bun",
+    summary: `fake diagnosis of ${repo} run ${input?.runId}`,
+    evidenceLines: ["socket hang up", "##[error]Error: socket hang up"],
+  };
+}
+
+/**
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean }>}
  */
 export async function execute({ spec, def, workspaceDir, timeoutMs, env }) {
+  // Contract-shaped fakes for the chain slice (OPS-223) — behavior keyed on
+  // the spec's output contract so planner/verifier/chain run unmodified.
+  if (spec.outputContract === "factory.ci-doctor/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: ciDoctorArtifact(spec.input),
+      evidence: { commands: ["fake"] },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.command-result/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: { command: ["fake"], exitCode: 0, outputTail: "" },
+      evidence: { command: ["fake"] },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+
   const mode = spec.input?.repos?.[0];
 
   switch (mode) {

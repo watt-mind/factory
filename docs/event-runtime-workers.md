@@ -133,7 +133,7 @@ the direction to build toward, ahead of general declared workflows (slice
 **per-edge earned automation** — each recommendation edge (a specific
 `A-recommendation → B` mapping) is watched individually and earns
 auto-approval on its own record; mutating edges may simply never earn it.
-First use case: to be selected before any implementation ticket is cut.
+First use case: **shipped (OPS-223)** — the CI failure doctor: `github.workflow-run.failed` → `ci-doctor@1` verdict → `FLAKE|ENV → ci-rerun@1` / `TICKET → ci-notify@1`, every edge watched; the edge registry (`edges.json`), chain resolver (`lib/chain.mjs`), and closed-template command adapter are the §6 cut-line 6 machinery.
 
 ## 6. Ticket cut-lines (when the operator says go)
 

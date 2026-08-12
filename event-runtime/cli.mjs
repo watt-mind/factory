@@ -15,6 +15,7 @@
  */
 import { readFileSync } from "node:fs";
 import * as claude from "./lib/adapters/claude.mjs";
+import * as command from "./lib/adapters/command.mjs";
 import * as fake from "./lib/adapters/fake.mjs";
 import { apiClient } from "./lib/client.mjs";
 import {
@@ -23,6 +24,7 @@ import {
 import { openDb } from "./lib/db.mjs";
 import { newWorkerId } from "./lib/ids.mjs";
 import { publishOutbox } from "./lib/outbox.mjs";
+import { resolveChains } from "./lib/chain.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { startApi } from "./lib/api.mjs";
@@ -86,7 +88,7 @@ async function serve(args) {
   const port = flagValue(args, "--port") ? Number(flagValue(args, "--port")) : DEFAULT_PORT;
   if (!Number.isInteger(port) || port < 0) fail(`serve: invalid --port ${flagValue(args, "--port")}`);
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
-  const adapters = { claude, fake };
+  const adapters = { claude, command, fake };
   if (adapterOverride && !adapters[adapterOverride]) {
     fail(`serve: unknown --adapter-override "${adapterOverride}" (have: ${Object.keys(adapters).join(", ")})`);
   }
@@ -145,6 +147,12 @@ async function serve(args) {
         sink: (e) => log(`result event ${e.type} (${e.eventId}) artifact ${e.payload?.artifactHash ?? "-"}`),
         now: Date.now(),
       });
+      // Discovered chains (OPS-223): a completed run with a registered
+      // recommendation edge emits an internal event through the same intake;
+      // the next planning pass proposes the follow-up, watched like anything.
+      const chains = resolveChains(db, registry, { now: Date.now() });
+      if (chains.emitted > 0) log(`chain: emitted ${chains.emitted} follow-up event(s) — planning`);
+      for (const err of chains.errors) log(`chain error: ${err}`);
     } catch (err) {
       log(`tick error: ${err.message}`);
     } finally {

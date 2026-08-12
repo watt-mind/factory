@@ -1,0 +1,33 @@
+{
+  "id": "ci-notify",
+  "version": 1,
+  "prompt": "agents/ci-notify.md",
+  "input_schema": "schemas/ci-notify.input.json",
+  "output_schema": "schemas/command-result.output.json",
+  "output_contract": "factory.command-result/v1",
+  "command": [
+    "factory",
+    "notify",
+    "CI RED {repo} run {runId}: {summary}"
+  ],
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "notify:telegram"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 60,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/ci-notify.md": "sha256:c12a7d0613ed8fc030f29447f495fd0d70c55ec099f42ac9c08e07629283510d",
+    "schemas/ci-notify.input.json": "sha256:56dce2eea1f7c4b8e18fc1b2cbdfd6f121d4f8115c6218fcc60817e810d425f2",
+    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+  }
+}

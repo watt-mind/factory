@@ -1,0 +1,11 @@
+{
+  "title": "ci-notify input — the diagnosis to escalate",
+  "type": "object",
+  "required": ["repo", "runId", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+    "runId": { "type": ["string", "integer"] },
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}

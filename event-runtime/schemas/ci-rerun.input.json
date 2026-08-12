@@ -1,0 +1,10 @@
+{
+  "title": "ci-rerun input — the run to re-run",
+  "type": "object",
+  "required": ["repo", "runId"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+    "runId": { "type": ["string", "integer"] }
+  }
+}

@@ -8,7 +8,7 @@
  * promptVersion is provenance recorded at planning time, not a second
  * identity.
  */
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { hashBytes } from "./canonical.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
@@ -27,8 +27,17 @@ function loadAgentDef(root, file) {
   for (const field of ["id", "version", ...PINNED_FIELDS, "workspace", "capabilities", "limits"]) {
     if (def[field] === undefined) throw new RegistryError(`${file}: missing "${field}"`);
   }
+  // §14 enforcement path: a mutating definition is admitted only when it is
+  // enforceable by construction — a fixed argv template (the closed action
+  // registry), never a model. LLM agents stay read-only in the MVP (§3).
   if (def.mutating !== false) {
-    throw new RegistryError(`${file}: mutating agents are not admitted in the MVP (docs/event-runtime.md §3)`);
+    const closedTemplate =
+      Array.isArray(def.command) && def.command.length > 0 && def.command.every((e) => typeof e === "string");
+    if (!closedTemplate) {
+      throw new RegistryError(
+        `${file}: mutating agents are admitted only as closed command templates (docs/event-runtime.md §14; OPS-223)`,
+      );
+    }
   }
   const pins = def.pins ?? {};
   for (const field of PINNED_FIELDS) {
@@ -78,7 +87,32 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
     agentResult: JSON.parse(readFileSync(path.join(root, "schemas", "factory.agent-result.v1.json"), "utf8")),
   };
 
-  return { root, agents, eventTypes, schemas };
+  // Recommendation edges (OPS-223): validated fail-closed at load — a chain
+  // may only connect registered agents through registered event types, and
+  // input mappings may only draw from the source run's input or artifact.
+  let edges = {};
+  const edgesFile = path.join(root, "edges.json");
+  if (existsSync(edgesFile)) {
+    edges = JSON.parse(readFileSync(edgesFile, "utf8"));
+    for (const [agentRef, rule] of Object.entries(edges)) {
+      if (!agents.has(agentRef)) throw new RegistryError(`edges.json: unregistered source agent ${agentRef}`);
+      if (typeof rule.recommendationField !== "string" || !rule.recommendationField) {
+        throw new RegistryError(`edges.json: ${agentRef} has no recommendationField`);
+      }
+      for (const [value, edge] of Object.entries(rule.edges ?? {})) {
+        if (!eventTypes[edge.eventType]) {
+          throw new RegistryError(`edges.json: ${agentRef}.${value} targets unregistered event type ${edge.eventType}`);
+        }
+        for (const expr of Object.values(edge.input ?? {})) {
+          if (typeof expr === "string" && expr.startsWith("$.") && !/^\$\.(input|artifact)(\.|$)/.test(expr)) {
+            throw new RegistryError(`edges.json: ${agentRef}.${value} input path "${expr}" — only $.input.* and $.artifact.* are allowed`);
+          }
+        }
+      }
+    }
+  }
+
+  return { root, agents, eventTypes, schemas, edges };
 }
 
 export function getAgent(registry, ref) {
