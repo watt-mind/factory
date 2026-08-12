@@ -1,0 +1,24 @@
+{
+  "title": "factory.disk-diagnosis/v1 output artifact — typed verdict + remediation plan",
+  "type": "object",
+  "required": ["recommendation", "mount", "usedPct", "plan", "analysis"],
+  "additionalProperties": false,
+  "properties": {
+    "recommendation": { "enum": ["NOOP", "REMEDIATE"] },
+    "mount": { "type": "string", "pattern": "^/[A-Za-z0-9/._-]*$" },
+    "usedPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": {
+          "action": { "enum": ["docker-builder-prune", "docker-system-prune", "journal-vacuum-3d"] },
+          "expectedReclaimBytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "analysis": { "type": "string", "minLength": 1 }
+  }
+}

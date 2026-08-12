@@ -53,6 +53,45 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, env }) {
     });
     return { exitCode: 0, timedOut: false };
   }
+  if (spec.outputContract === "factory.disk-diagnosis/v1") {
+    // Stale-alert semantics ride on the alert's own number: < 85% → NOOP.
+    const stale = (spec.input?.usedPct ?? 100) < 85;
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: stale
+        ? { recommendation: "NOOP", mount: spec.input.mount, usedPct: spec.input.usedPct, plan: [], analysis: "fake: disk healthy at diagnose time" }
+        : {
+            recommendation: "REMEDIATE",
+            mount: spec.input.mount,
+            usedPct: spec.input.usedPct,
+            plan: [{ action: "docker-builder-prune", expectedReclaimBytes: 1_000_000 }],
+            analysis: "fake: docker build cache is eating the disk",
+          },
+      evidence: { commands: ["fake df"], outputs: { df: "fake" } },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.disk-remediation/v1") {
+    // mount "/bad" → a lying artifact, so tests can prove the verifier fails closed.
+    const lying = spec.input?.mount === "/bad";
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        host: spec.input.host,
+        mount: spec.input.mount,
+        actions: (spec.input.actions ?? []).map((a) => a.action),
+        beforeUsedBytes: 5_000_000,
+        afterUsedBytes: 4_000_000,
+        reclaimedBytes: lying ? 9_999_999 : 1_000_000,
+      },
+      evidence: { probeBefore: "5000000", probeAfter: "4000000", commands: ["fake"], outputs: {} },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
   if (spec.outputContract === "factory.command-result/v1") {
     writeResult(workspaceDir, {
       schemaVersion: "factory.agent-result/v1",

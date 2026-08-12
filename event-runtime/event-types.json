@@ -2,25 +2,51 @@
   "factory.status-report.requested": {
     "agent": "factory-status-report@1",
     "adapter": "claude",
-    "idempotencyScope": ["correlationId", "inputHash"],
+    "idempotencyScope": [
+      "correlationId",
+      "inputHash"
+    ],
     "proposalTtlSeconds": 1800
   },
   "github.workflow-run.failed": {
     "agent": "ci-doctor@1",
     "adapter": "claude",
-    "idempotencyScope": ["inputHash"],
+    "idempotencyScope": [
+      "inputHash"
+    ],
     "proposalTtlSeconds": 1800
   },
   "factory.ci-rerun.requested": {
     "agent": "ci-rerun@1",
     "adapter": "command",
-    "idempotencyScope": ["inputHash"],
+    "idempotencyScope": [
+      "inputHash"
+    ],
     "proposalTtlSeconds": 1800
   },
   "factory.ci-escalate.requested": {
     "agent": "ci-notify@1",
     "adapter": "command",
-    "idempotencyScope": ["inputHash"],
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "keephq.disk-alert.raised": {
+    "agent": "disk-diagnose@1",
+    "adapter": "claude",
+    "idempotencyScope": [
+      "subject",
+      "correlationId"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "keephq.disk-remediate.requested": {
+    "agent": "disk-remediate@1",
+    "adapter": "actions",
+    "idempotencyScope": [
+      "inputHash"
+    ],
     "proposalTtlSeconds": 1800
   }
 }

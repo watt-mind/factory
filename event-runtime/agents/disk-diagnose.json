@@ -1,0 +1,29 @@
+{
+  "id": "disk-diagnose",
+  "version": 1,
+  "prompt": "agents/disk-diagnose.md",
+  "input_schema": "schemas/disk-diagnose.input.json",
+  "output_schema": "schemas/disk-diagnose.output.json",
+  "output_contract": "factory.disk-diagnosis/v1",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "ssh:read:lab",
+      "ssh:read:web"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/disk-diagnose.md": "sha256:606e047275affafd71a93fd167348836e6c76a5fa16982ac8d07b0c2b2e63098",
+    "schemas/disk-diagnose.input.json": "sha256:e97b9b0bf65fdc4ae621cf23acf1b83710f9c2e74d2c8955f4ac532a67146f64",
+    "schemas/disk-diagnose.output.json": "sha256:934dfbd1a4e72ec1de1d1d1f85cfcbdd8a5dbbb3a779e8df1c70d9d68bd77ce7"
+  }
+}

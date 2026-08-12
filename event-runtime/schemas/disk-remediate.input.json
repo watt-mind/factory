@@ -1,0 +1,23 @@
+{
+  "title": "disk-remediate input — the approved action list",
+  "type": "object",
+  "required": ["host", "mount", "actions"],
+  "additionalProperties": false,
+  "properties": {
+    "host": { "enum": ["lab", "web"] },
+    "mount": { "type": "string", "pattern": "^/[A-Za-z0-9/._-]*$" },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": {
+          "action": { "enum": ["docker-builder-prune", "docker-system-prune", "journal-vacuum-3d"] },
+          "expectedReclaimBytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

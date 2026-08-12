@@ -14,6 +14,7 @@
  * runtime state.
  */
 import { readFileSync } from "node:fs";
+import * as actions from "./lib/adapters/actions.mjs";
 import * as claude from "./lib/adapters/claude.mjs";
 import * as command from "./lib/adapters/command.mjs";
 import * as fake from "./lib/adapters/fake.mjs";
@@ -88,7 +89,7 @@ async function serve(args) {
   const port = flagValue(args, "--port") ? Number(flagValue(args, "--port")) : DEFAULT_PORT;
   if (!Number.isInteger(port) || port < 0) fail(`serve: invalid --port ${flagValue(args, "--port")}`);
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
-  const adapters = { claude, command, fake };
+  const adapters = { actions, claude, command, fake };
   if (adapterOverride && !adapters[adapterOverride]) {
     fail(`serve: unknown --adapter-override "${adapterOverride}" (have: ${Object.keys(adapters).join(", ")})`);
   }

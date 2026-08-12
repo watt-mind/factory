@@ -1,0 +1,54 @@
+{
+  "id": "disk-remediate",
+  "version": 1,
+  "prompt": "agents/disk-remediate.md",
+  "input_schema": "schemas/disk-remediate.input.json",
+  "output_schema": "schemas/disk-remediation.output.json",
+  "output_contract": "factory.disk-remediation/v1",
+  "exec": [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "{target}",
+    "{remote}"
+  ],
+  "hosts": {
+    "lab": "root@100.110.36.96",
+    "web": "hdkiller@100.93.81.56"
+  },
+  "probeRemote": "df --output=used -B1 {mount} | tail -1",
+  "actionRegistry": {
+    "docker-builder-prune": {
+      "remote": "sudo docker builder prune -af"
+    },
+    "docker-system-prune": {
+      "remote": "sudo docker system prune -af"
+    },
+    "journal-vacuum-3d": {
+      "remote": "sudo journalctl --vacuum-time=3d"
+    }
+  },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "infra:exec:lab",
+      "infra:exec:web"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 900,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/disk-remediate.md": "sha256:f886a34a264a2c83356b9e5cc5a96df7e994dbbbebd278afa5b4564c4b99c1e8",
+    "schemas/disk-remediate.input.json": "sha256:35468a6619856bdb6b751260f941c770b9dab144a0881cf4cdd3eac0a759966f",
+    "schemas/disk-remediation.output.json": "sha256:2ead535aeab711c998a5f074ff0408acd9799ff18d95635f66bbde6116efb806"
+  }
+}

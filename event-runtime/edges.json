@@ -4,15 +4,38 @@
     "edges": {
       "FLAKE": {
         "eventType": "factory.ci-rerun.requested",
-        "input": { "repo": "$.input.repo", "runId": "$.input.runId" }
+        "input": {
+          "repo": "$.input.repo",
+          "runId": "$.input.runId"
+        }
       },
       "ENV": {
         "eventType": "factory.ci-rerun.requested",
-        "input": { "repo": "$.input.repo", "runId": "$.input.runId" }
+        "input": {
+          "repo": "$.input.repo",
+          "runId": "$.input.runId"
+        }
       },
       "TICKET": {
         "eventType": "factory.ci-escalate.requested",
-        "input": { "repo": "$.input.repo", "runId": "$.input.runId", "summary": "$.artifact.summary" }
+        "input": {
+          "repo": "$.input.repo",
+          "runId": "$.input.runId",
+          "summary": "$.artifact.summary"
+        }
+      }
+    }
+  },
+  "disk-diagnose@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "REMEDIATE": {
+        "eventType": "keephq.disk-remediate.requested",
+        "input": {
+          "host": "$.input.host",
+          "mount": "$.artifact.mount",
+          "actions": "$.artifact.plan"
+        }
       }
     }
   }

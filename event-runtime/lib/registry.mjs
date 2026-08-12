@@ -31,11 +31,17 @@ function loadAgentDef(root, file) {
   // enforceable by construction — a fixed argv template (the closed action
   // registry), never a model. LLM agents stay read-only in the MVP (§3).
   if (def.mutating !== false) {
-    const closedTemplate =
+    const closedArgv =
       Array.isArray(def.command) && def.command.length > 0 && def.command.every((e) => typeof e === "string");
-    if (!closedTemplate) {
+    const closedActionRegistry =
+      def.actionRegistry !== undefined &&
+      def.hosts !== undefined &&
+      Array.isArray(def.exec) &&
+      Object.values(def.actionRegistry).every((a) => typeof a?.remote === "string") &&
+      Object.values(def.hosts).every((t) => typeof t === "string");
+    if (!closedArgv && !closedActionRegistry) {
       throw new RegistryError(
-        `${file}: mutating agents are admitted only as closed command templates (docs/event-runtime.md §14; OPS-223)`,
+        `${file}: mutating agents are admitted only as closed command templates or closed action registries (docs/event-runtime.md §14; OPS-223/OPS-208)`,
       );
     }
   }

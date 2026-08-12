@@ -1,0 +1,12 @@
+{
+  "title": "disk-diagnose input — one Keep HQ disk alert (host allowlist is the enum)",
+  "type": "object",
+  "required": ["host", "mount", "usedPct", "alertId"],
+  "additionalProperties": false,
+  "properties": {
+    "host": { "enum": ["lab", "web"] },
+    "mount": { "type": "string", "pattern": "^/[A-Za-z0-9/._-]*$" },
+    "usedPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "alertId": { "type": "string", "minLength": 1 }
+  }
+}

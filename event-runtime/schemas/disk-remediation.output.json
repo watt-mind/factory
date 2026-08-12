@@ -1,0 +1,18 @@
+{
+  "title": "factory.disk-remediation/v1 output artifact — evidence-verified reclaim",
+  "type": "object",
+  "required": ["host", "mount", "actions", "beforeUsedBytes", "afterUsedBytes", "reclaimedBytes"],
+  "additionalProperties": false,
+  "properties": {
+    "host": { "enum": ["lab", "web"] },
+    "mount": { "type": "string" },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "enum": ["docker-builder-prune", "docker-system-prune", "journal-vacuum-3d"] }
+    },
+    "beforeUsedBytes": { "type": "integer", "minimum": 0 },
+    "afterUsedBytes": { "type": "integer", "minimum": 0 },
+    "reclaimedBytes": { "type": "integer" }
+  }
+}

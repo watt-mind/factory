@@ -67,6 +67,21 @@ recommends `FLAKE|ENV → ci-rerun@1` (closed command template
 are admitted only as closed command templates (`lib/adapters/command.mjs`) —
 enforceable by construction, no shell, no model (§14).
 
+## Slice 2: disk alert → diagnose → approved remediation (OPS-208)
+
+`keephq.disk-alert.raised` (payload `{host, mount, usedPct, alertId}`; dedup
+on host+alertId via subject+correlationId) → `disk-diagnose@1` re-measures
+the disk over read-only SSH — a webhook is a hint, not truth — and produces a
+typed plan: `NOOP` (stale alert, chain ends) or `REMEDIATE` with action IDs
+from the closed registry. The REMEDIATE edge chains to `disk-remediate@1`
+(actions adapter): the operator approves the **concrete action list**, the
+executor resolves IDs to fixed remote commands (`docker builder prune`,
+`docker system prune`, `journalctl --vacuum-time=3d`) over SSH to the host
+allowlist (`lab`, `web`), probes `df` before/after, and the verifier
+**recomputes reclaimed bytes from the probe evidence** — a claim that does
+not match is a ContractViolation, not a success. An unregistered action ID
+refuses before executing anything.
+
 ## Demo environments and e2e (OPS-217)
 
 `bin/worktree-up.sh` provisions an **isolated, seeded** runtime — the part
@@ -142,6 +157,7 @@ spec (§12).
 | `lib/worker.mjs` | single worker: lease, execute, verify, publish with fencing (§8) |
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
 | `lib/adapters/` | adapter registry: `claude` (real), `fake` (tests) (§6) |
+| `lib/adapters/actions.mjs` | closed action-list executor: approved action IDs → fixed SSH commands, probe evidence (OPS-208) |
 | `lib/chain.mjs` `edges.json` | discovered chains: typed recommendation → internal event → watched proposal (OPS-223) |
 | `lib/adapters/command.mjs` | closed-template command executor — the only admissible mutating agent form (§14) |
 | `lib/artifacts.mjs` | content-addressed artifact/transcript store, streamed via `GET /artifacts/:sha256` |

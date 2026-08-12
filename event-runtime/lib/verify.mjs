@@ -93,11 +93,52 @@ function verifyRefused({ spec, candidate, attempt }) {
   return { kind: "refused", reasonCode: candidate.reasonCode, result };
 }
 
+/** Last integer in a raw probe output — `df --output=used -B1` style. */
+function parseProbeBytes(raw) {
+  const match = String(raw ?? "").trim().match(/(\d+)\s*$/);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Semantic verification (§9, slice 2 / OPS-208): closed, data-only predicates
+ * keyed by output contract. These check *truth*, not form — the claimed
+ * numbers must be recomputable from the declared evidence, and a mismatch is
+ * a ContractViolation, never a warning.
+ */
+const SEMANTIC_CHECKS = {
+  "factory.disk-remediation/v1": (candidate) => {
+    const violations = [];
+    const { artifact, evidence } = candidate;
+    if (evidence === undefined) return ["evidence_required: factory.disk-remediation/v1 claims are recomputed from probes"];
+    const before = parseProbeBytes(evidence.probeBefore);
+    const after = parseProbeBytes(evidence.probeAfter);
+    if (before === null) violations.push("evidence_unparseable: probeBefore has no byte count");
+    if (after === null) violations.push("evidence_unparseable: probeAfter has no byte count");
+    if (violations.length > 0) return violations;
+    if (artifact.beforeUsedBytes !== before) {
+      violations.push(`evidence_mismatch: beforeUsedBytes ${artifact.beforeUsedBytes} != probed ${before}`);
+    }
+    if (artifact.afterUsedBytes !== after) {
+      violations.push(`evidence_mismatch: afterUsedBytes ${artifact.afterUsedBytes} != probed ${after}`);
+    }
+    if (artifact.reclaimedBytes !== before - after) {
+      violations.push(`evidence_mismatch: reclaimedBytes ${artifact.reclaimedBytes} != recomputed ${before - after}`);
+    }
+    return violations;
+  },
+};
+
 function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts = [] }) {
   if (candidate.artifact === undefined) throw new ContractViolation(["missing_artifact"]);
 
   const artifactCheck = validate(def.outputSchema, candidate.artifact);
   if (!artifactCheck.valid) throw new ContractViolation(artifactCheck.errors);
+
+  const semantic = SEMANTIC_CHECKS[spec.outputContract];
+  if (semantic) {
+    const semanticViolations = semantic(candidate);
+    if (semanticViolations.length > 0) throw new ContractViolation(semanticViolations);
+  }
 
   // Runtime-injected artifacts (e.g. the adapter's transcript): best-effort —
   // included when present, never a violation when absent, and never allowed
@@ -157,6 +198,7 @@ function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalH
       checks: [
         "schema_valid", "hash_recomputed", "paths_confined", "artifacts_exist",
         ...(evidence !== undefined ? ["evidence_retained"] : []),
+        ...(SEMANTIC_CHECKS[spec.outputContract] ? ["evidence_recomputed"] : []),
       ],
     },
     artifacts: collected,
