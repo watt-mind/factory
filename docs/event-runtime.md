@@ -374,7 +374,7 @@ Every run has an execution directory. It does not necessarily have source code.
 | Workspace type | Use | MVP |
 | :--- | :--- | :---: |
 | `ephemeral` | Empty directory populated only with declared inputs | yes |
-| `artifacts` | New directory materialized from prior accepted artifacts | later |
+| `artifacts` | Declared prior artifacts materialized by content hash, read-only (OPS-372) | yes |
 | `repository` | Read-only checkout pinned to a SHA, from a per-repo bare mirror (tier 1, OPS-228); full worktrees for repo-mutating work are tier 2 and held | tier 1 |
 | `mounted` | Explicit existing directory, normally read-only | later |
 | `container` | Isolated filesystem/volume in Docker or Kubernetes | later |

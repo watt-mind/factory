@@ -8,14 +8,16 @@
  * returns the recorded outcome — and a poison event that keeps throwing is
  * dead-lettered instead of wedging the sweep or silently vanishing.
  */
+import { findArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
-import { DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
+import { artifactsRoot, DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { tx } from "./db.mjs";
 import { newProposalId, newRunId } from "./ids.mjs";
 import { createRun } from "./lifecycle.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
 import { pinRepo } from "./repository.mjs";
 import { validate } from "./schema.mjs";
+import { resolveInputRef } from "./workspace.mjs";
 
 /**
  * §5.4 idempotency key: agent ref, output contract, then the event type's
@@ -107,7 +109,7 @@ function existingOutcome(db, event) {
  *
  * @returns {{ decision: string, proposal?: object, runId?: string, reason?: string }}
  */
-export function planEvent(db, registry, { source, eventId }, { now = Date.now(), policyVersion = "unknown", adapterOverride } = {}) {
+export function planEvent(db, registry, { source, eventId }, { now = Date.now(), policyVersion = "unknown", adapterOverride, artifactStore = artifactsRoot() } = {}) {
   return tx(db, () => {
     const event = db.query(`SELECT * FROM events WHERE source = ? AND event_id = ?`).get(source, eventId);
     if (!event) throw new Error(`no admitted event (${source}, ${eventId})`);
@@ -129,6 +131,21 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     // inputHash, and the receipt). A run therefore names the exact tree it
     // read, and dedup distinguishes "same repo, new commit".
     let payload = envelope.payload;
+    // Declared artifact inputs must exist in the store at plan time (OPS-372):
+    // proposing a run whose bytes are missing wastes an approval, and the
+    // operator should see the failure before deciding, not after.
+    if (def.workspace?.type === "artifacts") {
+      for (const entry of def.workspace.inputs ?? []) {
+        try {
+          const sha = resolveInputRef(payload, entry.from);
+          if (!findArtifact(artifactStore, sha)) {
+            return humanNeeded(db, event, `artifact_missing: ${entry.as} (${sha})`, at, ttlSeconds);
+          }
+        } catch (err) {
+          return humanNeeded(db, event, `artifact_ref_failed: ${err.message}`, at, ttlSeconds);
+        }
+      }
+    }
     if (def.workspace?.type === "repository") {
       try {
         payload = { ...payload, repoPin: pinRepo(payload.repo, payload.ref ?? undefined) };

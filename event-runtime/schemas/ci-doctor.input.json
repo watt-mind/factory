@@ -1,12 +1,32 @@
 {
-  "title": "ci-doctor input — one failed GitHub Actions run",
+  "title": "ci-doctor input \u2014 one failed GitHub Actions run",
   "type": "object",
-  "required": ["repo", "runId"],
+  "required": [
+    "repo",
+    "runId",
+    "logArtifact"
+  ],
   "additionalProperties": false,
   "properties": {
-    "repo": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
-    "runId": { "type": ["string", "integer"] },
-    "headSha": { "type": "string" },
-    "workflowName": { "type": "string" }
+    "repo": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$"
+    },
+    "runId": {
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
+    "headSha": {
+      "type": "string"
+    },
+    "workflowName": {
+      "type": "string"
+    },
+    "logArtifact": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
   }
 }

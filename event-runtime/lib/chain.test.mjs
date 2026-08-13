@@ -69,12 +69,30 @@ describe("buildChainInput", () => {
   });
 });
 
+/**
+ * github.workflow-run.failed now lands on ci-log-capture@1, which stores the
+ * log as an artifact and chains to ci-doctor@2 (OPS-372). Run that first hop
+ * so these tests stay about the *verdict* edges they were written for.
+ */
+async function throughCapture(h, eventId) {
+  const capture = await h.runToCompletion(eventId);
+  expect(resolveChains(h.db, registry).emitted).toBe(1);
+  planAdmittedEvents(h.db, registry, { policyVersion: PV });
+  const diagnose = openProposals(h.db, {}).find((p) => p.spec?.agent === "ci-doctor@2");
+  expect(diagnose).toBeTruthy();
+  const approved = approveProposal(h.db, registry, diagnose.id, { actor: "operator", policyVersion: PV });
+  const summary = await runOnce(h.db, registry, h.adapters, h.workerOpts);
+  expect(summary.terminalState).toBe("COMPLETED");
+  return { capture, diagnoseRunId: approved.runId, diagnoseProposal: diagnose };
+}
+
 describe("discovered chain: ci-doctor → follow-up (OPS-223)", () => {
   test("FLAKE verdict chains to a watched ci-rerun proposal with inherited correlation", async () => {
-    const { db, runToCompletion } = harness();
+    const h = harness();
+    const { db, runToCompletion } = h;
     const envelope = failedRunEnvelope({ eventId: "gh-flake-1" });
     expect(admitEvent(db, registry, envelope).admitted).toBe(true);
-    const { runId } = await runToCompletion("gh-flake-1");
+    const { diagnoseRunId: runId } = await throughCapture(h, "gh-flake-1");
 
     const outcome = resolveChains(db, registry);
     expect(outcome).toEqual({ emitted: 1, skipped: 0, errors: [] });
@@ -101,12 +119,13 @@ describe("discovered chain: ci-doctor → follow-up (OPS-223)", () => {
   });
 
   test("TICKET verdict chains to ci-notify with the diagnosis summary mapped in", async () => {
-    const { db, runToCompletion } = harness();
+    const h = harness();
+    const { db, runToCompletion } = h;
     admitEvent(db, registry, failedRunEnvelope({
       eventId: "gh-ticket-1",
       payload: { repo: "wm/factory-ticket", runId: 777 },
     }));
-    await runToCompletion("gh-ticket-1");
+    await throughCapture(h, "gh-ticket-1");
 
     expect(resolveChains(db, registry).emitted).toBe(1);
     planAdmittedEvents(db, registry, { policyVersion: PV });
@@ -116,9 +135,10 @@ describe("discovered chain: ci-doctor → follow-up (OPS-223)", () => {
   });
 
   test("full chain executes after approval: rerun completes under the command contract", async () => {
-    const { db, runToCompletion, adapters, workerOpts } = harness();
+    const h = harness();
+    const { db, adapters, workerOpts } = h;
     admitEvent(db, registry, failedRunEnvelope({ eventId: "gh-flake-2", payload: { repo: "wm/f2", runId: 2 } }));
-    await runToCompletion("gh-flake-2");
+    await throughCapture(h, "gh-flake-2");
     resolveChains(db, registry);
     planAdmittedEvents(db, registry, { policyVersion: PV });
 
@@ -133,13 +153,14 @@ describe("discovered chain: ci-doctor → follow-up (OPS-223)", () => {
   });
 
   test("duplicate failed-run delivery converges: one doctor run, one chain event", async () => {
-    const { db, runToCompletion } = harness();
+    const h = harness();
+    const { db, runToCompletion } = h;
     admitEvent(db, registry, failedRunEnvelope({ eventId: "gh-dup-1", payload: { repo: "wm/d", runId: 9 } }));
     const dup = admitEvent(db, registry, failedRunEnvelope({ eventId: "gh-dup-1", payload: { repo: "wm/d", runId: 9 } }));
     expect(dup.duplicate).toBe(true);
     await runToCompletion("gh-dup-1");
-    expect(resolveChains(db, registry).emitted).toBe(1);
-    expect(resolveChains(db, registry).emitted).toBe(0);
+    expect(resolveChains(db, registry).emitted).toBe(1); // capture → diagnose
+    expect(resolveChains(db, registry).emitted).toBe(0); // one chain event per run, ever
   });
 });
 
@@ -157,14 +178,14 @@ describe("registry gates (OPS-223)", () => {
 
     writeFileSync(
       path.join(root, "edges.json"),
-      JSON.stringify({ "ci-doctor@1": { recommendationField: "verdict", edges: { FLAKE: { eventType: "not.registered", input: {} } } } }),
+      JSON.stringify({ "ci-doctor@2": { recommendationField: "verdict", edges: { FLAKE: { eventType: "not.registered", input: {} } } } }),
     );
     expect(() => loadRegistry({ root })).toThrow(RegistryError);
 
     writeFileSync(
       path.join(root, "edges.json"),
-      JSON.stringify({ "ci-doctor@1": { recommendationField: "verdict", edges: { FLAKE: { eventType: "factory.ci-rerun.requested", input: { x: "$.secrets.key" } } } } }),
+      JSON.stringify({ "ci-doctor@2": { recommendationField: "verdict", edges: { FLAKE: { eventType: "factory.ci-rerun.requested", input: { x: "$.secrets.key" } } } } }),
     );
-    expect(() => loadRegistry({ root })).toThrow("only $.input.* and $.artifact.*");
+    expect(() => loadRegistry({ root })).toThrow("only $.input.*, $.artifact.* and $.artifactHash.*");
   });
 });

@@ -11,6 +11,8 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson } from "./canonical.mjs";
+import { materializeArtifact } from "./artifacts.mjs";
+import { artifactsRoot } from "./config.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 
 export class PathViolation extends Error {
@@ -47,10 +49,44 @@ export function safeJoin(workspaceDir, relPath) {
  * checkout lives inside this directory, so teardown is still one rm — plus a
  * `git worktree remove` so the mirror does not accumulate stale registrations.
  */
-export function createWorkspace({ root, runId, attempt, input, workspace = {} }) {
+/** One run's declared artifact inputs may not exceed this in total. */
+export const MAX_MATERIALIZED_BYTES = 64 * 1024 * 1024;
+
+/** Resolve "$.input.logArtifact" against the run input; literals pass through. */
+export function resolveInputRef(input, expr) {
+  if (typeof expr !== "string") throw new Error(`artifact input ref must be a string, got ${typeof expr}`);
+  if (!expr.startsWith("$.input.")) return expr;
+  const value = expr
+    .slice("$.input.".length)
+    .split(".")
+    .reduce((acc, key) => (acc === null || acc === undefined ? acc : acc[key]), input);
+  if (typeof value !== "string" || !value) throw new Error(`artifact input ref "${expr}" resolves to nothing`);
+  return value;
+}
+
+export function createWorkspace({ root, runId, attempt, input, workspace = {}, artifactStore = artifactsRoot() }) {
   const dir = path.join(root, `${runId}-a${attempt}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "input.json"), `${canonicalJson(input)}\n`, "utf8");
+
+  // Declared artifact inputs (§7 `artifacts`, OPS-372): the spec names hashes,
+  // the provider writes bytes, the agent reads files. An agent can never ask
+  // the store for something the spec did not declare.
+  const materialized = [];
+  if (workspace.type === "artifacts") {
+    let total = 0;
+    for (const entry of workspace.inputs ?? []) {
+      const sha256 = resolveInputRef(input, entry.from);
+      const out = materializeArtifact({
+        storeRoot: artifactStore, sha256hex: sha256, workspaceDir: dir, as: entry.as,
+      });
+      total += out.sizeBytes;
+      if (total > MAX_MATERIALIZED_BYTES) {
+        throw new Error(`artifact inputs exceed ${MAX_MATERIALIZED_BYTES} bytes for this run`);
+      }
+      materialized.push({ as: entry.as, sha256, sizeBytes: out.sizeBytes });
+    }
+  }
 
   let checkout = null;
   if (workspace.type === "repository") {
@@ -62,7 +98,7 @@ export function createWorkspace({ root, runId, attempt, input, workspace = {} })
       subdir,
     });
   }
-  return { dir, checkout };
+  return { dir, checkout, materialized };
 }
 
 /**

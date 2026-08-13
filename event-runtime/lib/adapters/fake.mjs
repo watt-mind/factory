@@ -7,7 +7,7 @@
  * validates against the real factory-status-report input schema and the rest
  * of the pipeline (planner, verifier, lifecycle) runs unmodified.
  */
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { TRACE_EVENTS_CAP } from "../trace.mjs";
 
@@ -57,13 +57,37 @@ function ciDoctorArtifact(input) {
 export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace }) {
   // Contract-shaped fakes for the chain slice (OPS-223) — behavior keyed on
   // the spec's output contract so planner/verifier/chain run unmodified.
-  if (spec.outputContract === "factory.ci-doctor/v1") {
+  if (spec.outputContract === "factory.ci-log/v1") {
+    writeFileSync(path.join(workspaceDir, "failed.log"), `fake CI log for run ${spec.input?.runId}\nsocket hang up\n`, "utf8");
     writeResult(workspaceDir, {
       schemaVersion: "factory.agent-result/v1",
       terminalState: "completed",
       reasonCode: "ok",
-      artifact: ciDoctorArtifact(spec.input),
-      evidence: { commands: ["fake"] },
+      artifact: { command: ["fake"], exitCode: 0, outputTail: "", captured: "failed.log" },
+      evidence: { command: ["fake"] },
+      artifacts: [{ kind: "ci-log", path: "failed.log" }],
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.ci-doctor/v1") {
+    // Prove the artifact was materialized: the fake reads the file the
+    // workspace provider was supposed to write, and refuses if it is absent.
+    const logPath = path.join(workspaceDir, "failed.log");
+    if (!existsSync(logPath)) {
+      writeResult(workspaceDir, {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "refused",
+        reasonCode: "missing_input",
+      });
+      return { exitCode: 0, timedOut: false };
+    }
+    const logText = readFileSync(logPath, "utf8");
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: { ...ciDoctorArtifact(spec.input), evidenceLines: [logText.trim().split("\n").at(-1) ?? "empty"] },
+      evidence: { commands: ["fake"], logBytes: logText.length },
     });
     return { exitCode: 0, timedOut: false };
   }

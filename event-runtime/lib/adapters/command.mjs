@@ -13,7 +13,7 @@
  * the worker records FAILED with `agent_exit_<code>` as usual.
  */
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const KILL_GRACE_MS = 10_000;
@@ -55,6 +55,14 @@ export async function execute({ spec, def, workspaceDir, timeoutMs }) {
     const collect = (chunk) => {
       output = (output + chunk.toString()).slice(-OUTPUT_TAIL_CHARS);
     };
+    // `captureStdout` keeps the WHOLE stream as a declared artifact (OPS-372).
+    // The tail above is a preview for the artifact body; a CI log truncated to
+    // 2000 chars is useless to a downstream agent, which is the entire reason
+    // artifact inputs exist.
+    const capture = def.captureStdout
+      ? createWriteStream(path.join(workspaceDir, def.captureStdout))
+      : null;
+    if (capture) child.stdout.pipe(capture);
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
 
@@ -77,22 +85,39 @@ export async function execute({ spec, def, workspaceDir, timeoutMs }) {
       clearTimeout(termTimer);
       clearTimeout(killTimer);
       if (exitCode === 0 && !timedOut) {
-        writeFileSync(
-          path.join(workspaceDir, "result.json"),
-          `${JSON.stringify(
-            {
-              schemaVersion: "factory.agent-result/v1",
-              terminalState: "completed",
-              reasonCode: "ok",
-              artifact: { command: argv, exitCode: 0, outputTail: output },
-              evidence: { command: argv, outputTail: output },
-            },
-            null,
-            2,
-          )}\n`,
-          "utf8",
-        );
+        const write = () => {
+          const captured = def.captureStdout
+            ? [{ kind: def.captureKind ?? "output", path: def.captureStdout }]
+            : [];
+          writeFileSync(
+            path.join(workspaceDir, "result.json"),
+            `${JSON.stringify(
+              {
+                schemaVersion: "factory.agent-result/v1",
+                terminalState: "completed",
+                reasonCode: "ok",
+                artifact: {
+                  command: argv,
+                  exitCode: 0,
+                  outputTail: output,
+                  ...(def.captureStdout ? { captured: def.captureStdout } : {}),
+                },
+                evidence: { command: argv, outputTail: output },
+                ...(captured.length ? { artifacts: captured } : {}),
+              },
+              null,
+              2,
+            )}\n`,
+            "utf8",
+          );
+          resolve({ exitCode, timedOut });
+        };
+        // The capture stream must be flushed before the verifier hashes it.
+        if (capture) capture.end(write);
+        else write();
+        return;
       }
+      capture?.end();
       resolve({ exitCode, timedOut });
     });
   });

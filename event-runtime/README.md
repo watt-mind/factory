@@ -57,6 +57,38 @@ Dev loop: `cd event-runtime/web && bunx vite` (proxies /api to the control
 API). Keyboard-first: `⌘K` palette, `g o/p/r` to navigate, `j/k` + `Enter` on
 lists, `a`/`x` to approve/reject the selected proposal.
 
+## Artifact inputs (OPS-372)
+
+Agents consume prior runs' artifacts **declared and materialized, never
+pulled**: a spec names artifacts by content hash (resolved at plan time, so
+they land in `inputHash` and the receipt), and the `artifacts` workspace
+provider writes those bytes into the workspace before the agent starts. There
+is deliberately no "browse the store" API — that would make `inputHash` a lie
+about what a run read and hand agents ambient access to everything ever
+produced.
+
+```jsonc
+"workspace": { "type": "artifacts", "inputs": [{ "from": "$.input.logArtifact", "as": "failed.log" }] }
+```
+
+A chain passes the **hash**, not the bytes: `$.artifactHash.<kind>` in an edge
+resolves against the upstream result's stored artifacts. Producers declare
+them the usual way; a command-adapter definition can set `captureStdout` to
+keep a command's whole output (a CI log is useless truncated to the 2000-char
+tail the evidence field keeps).
+
+Retention: artifacts referenced by an accepted result are never deleted;
+unreferenced ones are pruned after a week by the serve loop, and store
+size/orphan counts appear in `status`. A run's materialized inputs are capped
+(64 MB) so one agent cannot fill the disk another agent then gets called to
+clean up.
+
+First chain: `github.workflow-run.failed` → `ci-log-capture@1` (stores the
+failed-job log) → `ci-doctor@2` reads `./failed.log` instead of calling
+GitHub — the diagnosis is reproducible against exactly those bytes, and a
+multi-megabyte log lives in the store rather than blowing the inline-evidence
+limit.
+
 ## Discovered chains (OPS-223)
 
 Agents never spawn agents: a completed run whose artifact carries a typed
@@ -180,6 +212,7 @@ spec (§12).
 | `lib/worker.mjs` | single worker: lease, execute, verify, publish with fencing (§8) |
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
 | `lib/adapters/` | adapter registry: `claude` (real), `fake` (tests) (§6) |
+| `lib/artifacts.mjs` | content-addressed store: collect, serve, materialize declared inputs, retention (OPS-372) |
 | `lib/workers.mjs` | worker registry, heartbeats, placement predicate (OPS-233) |
 | `lib/repos.mjs` `lib/repository.mjs` | repos.yaml reader; mirror + pinned read-only checkout (OPS-228) |
 | `lib/adapters/actions.mjs` | closed action-list executor: approved action IDs → fixed SSH commands, probe evidence (OPS-208) |

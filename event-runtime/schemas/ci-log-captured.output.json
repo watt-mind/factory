@@ -1,0 +1,12 @@
+{
+  "title": "factory.ci-log/v1 output artifact — a captured CI log",
+  "type": "object",
+  "required": ["command", "exitCode", "captured"],
+  "additionalProperties": false,
+  "properties": {
+    "command": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "exitCode": { "const": 0 },
+    "outputTail": { "type": "string" },
+    "captured": { "type": "string", "minLength": 1 }
+  }
+}

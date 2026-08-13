@@ -9,8 +9,8 @@
     "proposalTtlSeconds": 1800
   },
   "github.workflow-run.failed": {
-    "agent": "ci-doctor@1",
-    "adapter": "claude",
+    "agent": "ci-log-capture@1",
+    "adapter": "command",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -76,6 +76,14 @@
   "factory.janitor-apply.requested": {
     "agent": "janitor-apply@1",
     "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "factory.ci-diagnose.requested": {
+    "agent": "ci-doctor@2",
+    "adapter": "claude",
     "idempotencyScope": [
       "inputHash"
     ],

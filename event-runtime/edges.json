@@ -1,5 +1,43 @@
 {
-  "ci-doctor@1": {
+  "disk-diagnose@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "REMEDIATE": {
+        "eventType": "keephq.disk-remediate.requested",
+        "input": {
+          "host": "$.input.host",
+          "mount": "$.artifact.mount",
+          "actions": "$.artifact.plan"
+        }
+      }
+    }
+  },
+  "triage-scan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "TRIAGE": {
+        "eventType": "factory.triage-apply.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "plan": "$.artifact.plan"
+        }
+      }
+    }
+  },
+  "ci-log-capture@1": {
+    "recommendationField": "exitCode",
+    "edges": {
+      "0": {
+        "eventType": "factory.ci-diagnose.requested",
+        "input": {
+          "repo": "$.input.repo",
+          "runId": "$.input.runId",
+          "logArtifact": "$.artifactHash.ci-log"
+        }
+      }
+    }
+  },
+  "ci-doctor@2": {
     "recommendationField": "verdict",
     "edges": {
       "FLAKE": {
@@ -22,31 +60,6 @@
           "repo": "$.input.repo",
           "runId": "$.input.runId",
           "summary": "$.artifact.summary"
-        }
-      }
-    }
-  },
-  "disk-diagnose@1": {
-    "recommendationField": "recommendation",
-    "edges": {
-      "REMEDIATE": {
-        "eventType": "keephq.disk-remediate.requested",
-        "input": {
-          "host": "$.input.host",
-          "mount": "$.artifact.mount",
-          "actions": "$.artifact.plan"
-        }
-      }
-    }
-  },
-  "triage-scan@1": {
-    "recommendationField": "recommendation",
-    "edges": {
-      "TRIAGE": {
-        "eventType": "factory.triage-apply.requested",
-        "input": {
-          "repo": "$.artifact.repo",
-          "plan": "$.artifact.plan"
         }
       }
     }

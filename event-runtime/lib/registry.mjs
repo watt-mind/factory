@@ -119,8 +119,8 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
           throw new RegistryError(`edges.json: ${agentRef}.${value} targets unregistered event type ${edge.eventType}`);
         }
         for (const expr of Object.values(edge.input ?? {})) {
-          if (typeof expr === "string" && expr.startsWith("$.") && !/^\$\.(input|artifact)(\.|$)/.test(expr)) {
-            throw new RegistryError(`edges.json: ${agentRef}.${value} input path "${expr}" — only $.input.* and $.artifact.* are allowed`);
+          if (typeof expr === "string" && expr.startsWith("$.") && !/^\$\.(input|artifact|artifactHash)(\.|$)/.test(expr)) {
+            throw new RegistryError(`edges.json: ${agentRef}.${value} input path "${expr}" — only $.input.*, $.artifact.* and $.artifactHash.* are allowed`);
           }
         }
       }

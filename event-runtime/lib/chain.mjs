@@ -90,6 +90,16 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
         outcome.skipped += 1;
         continue;
       }
+      // A chain may pass an artifact by content hash — `$.artifactHash.<kind>`
+      // resolves against the accepted result's stored artifacts (OPS-372).
+      // Values, not bytes, travel through events; the downstream workspace
+      // materializes the bytes from the store.
+      const artifactHash = {};
+      for (const entry of result.artifacts ?? []) {
+        if (entry.kind && entry.sha256 && artifactHash[entry.kind] === undefined) {
+          artifactHash[entry.kind] = entry.sha256;
+        }
+      }
       const envelope = {
         schemaVersion: "factory.event/v1",
         eventId: `chain-${row.run_id}`,
@@ -99,7 +109,11 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
         occurredAt: new Date(now).toISOString(),
         correlationId: row.correlation_id ?? row.origin_event_id,
         causationId: row.run_id,
-        payload: buildChainInput(edge.input, { input: spec.input, artifact: result.artifact ?? {} }),
+        payload: buildChainInput(edge.input, {
+          input: spec.input,
+          artifact: result.artifact ?? {},
+          artifactHash,
+        }),
       };
       const admitted = admitEvent(db, registry, envelope, { now });
       if (admitted.admitted) outcome.emitted += 1;

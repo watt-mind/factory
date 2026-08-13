@@ -157,6 +157,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
 
     const created = createWorkspace({
       root: workspacesRoot, runId, attempt, input: spec.input, workspace: spec.workspace,
+      artifactStore,
     });
     workspaceDir = created.dir;
     checkoutPath = created.checkout?.path ?? null;

@@ -23,6 +23,7 @@ import { ambiguousOpenProposalRuns, approveProposal, openProposals, rejectPropos
 import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
+import { storeStats } from "./artifacts.mjs";
 import { listWorkers, stalledWorkers } from "./workers.mjs";
 
 /**
@@ -146,6 +147,7 @@ function statusView(db, nowMs) {
     .map((row) => ({ source: row.source, eventId: row.event_id, lastError: row.last_plan_error }));
 
   const workers = listWorkers(db, { now: nowMs });
+  const store = storeStats(db, artifactsRoot(), { now: nowMs });
   const stalled = stalledWorkers(db, { now: nowMs });
 
   return {
@@ -157,6 +159,7 @@ function statusView(db, nowMs) {
       busy: workers.filter((w) => w.state === "busy" && !w.stale).length,
       stale: workers.filter((w) => w.stale).length,
     },
+    artifacts: { files: store.files, bytes: store.bytes, orphans: store.orphans, orphanBytes: store.orphanBytes },
     anomalies: {
       expiredOpenProposals: expiredOpen.map((p) => p.id),
       staleLeases,

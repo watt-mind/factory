@@ -26,6 +26,7 @@ import {
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { newWorkerId } from "./lib/ids.mjs";
+import { pruneArtifacts } from "./lib/artifacts.mjs";
 import { publishOutbox } from "./lib/outbox.mjs";
 import { resolveChains } from "./lib/chain.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
@@ -178,6 +179,7 @@ async function serve(args) {
   // all-in-one behaviour for a quick single-process demo.
   const withWorker = args.includes("--with-worker");
 
+  let lastPrune = Date.now();
   let busy = false;
   async function tick() {
     if (busy) return; // never overlap: planning and (optional) execution share this tick
@@ -202,6 +204,14 @@ async function serve(args) {
       // Discovered chains (OPS-223): a completed run with a registered
       // recommendation edge emits an internal event through the same intake;
       // the next planning pass proposes the follow-up, watched like anything.
+      // Artifact GC (OPS-372): unreferenced bytes older than the window go;
+      // anything an accepted result points at is never touched, because a
+      // receipt aiming at a deleted file turns the audit trail into a lie.
+      if (Date.now() - lastPrune > 60 * 60 * 1000) {
+        lastPrune = Date.now();
+        const pruned = pruneArtifacts(db, artifactsRoot(), { now: Date.now() });
+        if (pruned.deleted > 0) log(`artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`);
+      }
       const chains = resolveChains(db, registry, { now: Date.now() });
       if (chains.emitted > 0) log(`chain: emitted ${chains.emitted} follow-up event(s) — planning`);
       for (const err of chains.errors) log(`chain error: ${err}`);
