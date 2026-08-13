@@ -99,6 +99,24 @@ repos:
   # cashsaas (CLNT-791) have graduated to full lifecycle configuration.
   # --------------------------------------------------------------------------
 
+  # --------------------------------------------------------------------------
+  # About `escalate_paths: []` below (WM-47).
+  #
+  # Since WM-15 a MISSING escalate_paths key is exit 3 from escalate.mjs — the
+  # gate could not be evaluated, so the PR is escalated. An explicit empty list
+  # is the opt-out and a real exit 0: "checked, this repo has nothing to match
+  # mechanically". It is not a weaker gate than a populated list — the judgment
+  # rule in policy.yaml (auth, payments, secrets, destructive migrations) applies
+  # to every repo regardless, and path matching cannot see whether a diff CHANGES
+  # security-relevant behaviour anyway.
+  #
+  # Empty here means nobody has written a behaviour-based list yet, not that one
+  # would be wrong. Inventing plausible auth/** and migrations/** globs for a
+  # repo nobody has read is how you get a list that escalates everything and
+  # teaches reviewers to wave things through. Per-repo lists are their own
+  # tickets, on the model of WM-10 for legalease.
+  # --------------------------------------------------------------------------
+
   - name: wm-home
     path: ~/Develop/pets/wm/wm-home
     github: watt-mind/wm-home
@@ -115,6 +133,10 @@ repos:
     smoke_workflow: smoke-prod.yml
     smoke_url: https://watt-mind.com
 
+    # Marketing site: no payments, no accounts, no schema. Nothing to match
+    # mechanically until someone reads it for one (WM-47).
+    escalate_paths: []
+
   - name: coach-wattz
     path: ~/Develop/coach-wattz
     github: watt-mind/coach
@@ -127,6 +149,11 @@ repos:
     worktree_root: ~/Develop/.worktrees/coach-wattz
     report_only: true            # Dispatch remains disabled; janitor may use the teardown script.
 
+    # Explicit opt-out, not a considered list (WM-47). This repo does hold auth
+    # and payment surfaces; the list belongs in its own ticket, written from the
+    # tree rather than guessed at here.
+    escalate_paths: []
+
   - name: watts-mobile
     path: ~/Develop/watts-mobile
     github: watt-mind/watts-mobile
@@ -136,6 +163,10 @@ repos:
     worktree_root: ~/Develop/.worktrees/watts-mobile
     report_only: true            # No isolated worktree lifecycle yet.
     verify: pnpm typecheck && pnpm lint && pnpm test
+
+    # Explicit opt-out (WM-47) — same reasoning as coach-wattz: a real list for
+    # the mobile client's auth and purchase flows is its own ticket.
+    escalate_paths: []
 
   - name: legalease
     path: ~/Develop/legalease
@@ -275,6 +306,11 @@ repos:
     security:
       semgrep_args: "--exclude-rule python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected"
 
+    # Docs and scripts, no deployable application. Credentials living in docs/
+    # are handled by gitleaks and the global secrets rule, not by path matching
+    # (WM-47).
+    escalate_paths: []
+
   # Shared ESLint presets (@watt-mind/eslint-config) — tier 2 of the
   # code-security baseline (OPS-164). Stub until the package lands; report_only
   # because a single-package repo needs no worktree isolation, and verify
@@ -285,6 +321,9 @@ repos:
     team: OPS
     base: main
     report_only: true            # stub (OPS-164) — no package, no worktree tooling yet
+
+    # A lint-preset package has no runtime surface to protect (WM-47).
+    escalate_paths: []
 
   # The factory itself — exists so run-agent.sh can target this checkout
   # (currently only the retro stage: cwd here makes friction.mjs/economics.mjs
@@ -299,3 +338,8 @@ repos:
     deploy_branch: main          # release target is main, not the master fallback
     report_only: true            # never a dispatch target — no worktree tooling
     verify: bun test && bun build/emit.mjs --check
+
+    # The control plane holds no client data and serves no traffic. Its risky
+    # surfaces (policy.yaml, the merge stage) are what a human reviews on every
+    # factory PR anyway, so a path list adds nothing here (WM-47).
+    escalate_paths: []
