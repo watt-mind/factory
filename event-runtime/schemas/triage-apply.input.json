@@ -1,0 +1,25 @@
+{
+  "title": "triage-apply input — the approved per-issue action list",
+  "type": "object",
+  "required": ["repo", "plan"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": { "type": "string", "minLength": 1 },
+    "plan": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["issueId", "action"],
+        "additionalProperties": false,
+        "properties": {
+          "issueId": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "action": {
+            "enum": ["label-agent-ready", "move-to-todo", "needs-detail", "mark-duplicate", "needs-human"]
+          },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}

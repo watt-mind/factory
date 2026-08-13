@@ -11,6 +11,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson } from "./canonical.mjs";
+import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 
 export class PathViolation extends Error {
   constructor(workspaceDir, relPath) {
@@ -40,19 +41,38 @@ export function safeJoin(workspaceDir, relPath) {
 /**
  * Create the attempt's directory and materialize its declared input as
  * canonical JSON — the same bytes the spec's inputHash was computed from.
+ *
+ * A `repository` workspace additionally materializes a read-only source tree
+ * at the SHA pinned into the input at plan time (§7 tier 1, OPS-228). The
+ * checkout lives inside this directory, so teardown is still one rm — plus a
+ * `git worktree remove` so the mirror does not accumulate stale registrations.
  */
-export function createWorkspace({ root, runId, attempt, input }) {
+export function createWorkspace({ root, runId, attempt, input, workspace = {} }) {
   const dir = path.join(root, `${runId}-a${attempt}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "input.json"), `${canonicalJson(input)}\n`, "utf8");
-  return { dir };
+
+  let checkout = null;
+  if (workspace.type === "repository") {
+    const subdir = workspace.checkoutDir ?? "repo";
+    checkout = materializeCheckout({
+      workspaceDir: dir,
+      repoName: input?.repoPin?.repo ?? input?.repo,
+      sha: input?.repoPin?.sha,
+      subdir,
+    });
+  }
+  return { dir, checkout };
 }
 
 /**
  * Remove the workspace unless retention was requested (§7: retain on failure
  * when policy says so). Returns false when retained, true when destroyed.
  */
-export function destroyWorkspace(dir, { retain = false } = {}) {
+export function destroyWorkspace(dir, { retain = false, checkout = null, repoName = null } = {}) {
+  // Deregister a repository checkout even when the directory is retained:
+  // a mirror that keeps stale worktree registrations refuses future adds.
+  if (checkout) releaseCheckout({ checkoutPath: checkout, repoName });
   if (retain) return false;
   rmSync(dir, { recursive: true, force: true });
   return true;

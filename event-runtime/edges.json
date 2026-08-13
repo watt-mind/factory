@@ -38,5 +38,17 @@
         }
       }
     }
+  },
+  "triage-scan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "TRIAGE": {
+        "eventType": "factory.triage-apply.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "plan": "$.artifact.plan"
+        }
+      }
+    }
   }
 }

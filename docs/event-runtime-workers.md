@@ -135,6 +135,38 @@ the direction to build toward, ahead of general declared workflows (slice
 auto-approval on its own record; mutating edges may simply never earn it.
 First use case: **shipped (OPS-223)** — the CI failure doctor: `github.workflow-run.failed` → `ci-doctor@1` verdict → `FLAKE|ENV → ci-rerun@1` / `TICKET → ci-notify@1`, every edge watched; the edge registry (`edges.json`), chain resolver (`lib/chain.mjs`), and closed-template command adapter are the §6 cut-line 6 machinery.
 
+## 5a. Repository access: tier 1 shipped, tier 2 held (OPS-228/OPS-229)
+
+Agents that need a repo split cleanly by whether they *read* code or *build*
+it, and only the second half is expensive.
+
+**Tier 1 — read-only pinned checkout (shipped).** A bare mirror per repo under
+the runtime home, fetched at plan time; each run gets its own detached
+worktree of that mirror at a **SHA resolved at plan time and pinned into the
+run's input** (`repoPin`), so the run names the exact tree it read and dedup
+distinguishes "same repo, new commit". No dependency install, no ports, no
+database — reading code does not need `node_modules`. Repo facts come from
+the factory's existing `config/repos.yaml` (`FACTORY_REPOS_ROOT` overrides
+the checkout it is read from); the runtime is a reader, never a second
+registry. The operator's live checkout is never used: it holds uncommitted
+work an agent would read as truth, concurrent runs would race in it, and even
+a read-only run wants `git fetch`, which writes to `.git`.
+
+**Tier 2 — full worktree (held, deliberately).** Branch, install, ports,
+per-ticket database. Two rules when it is built:
+
+1. **Delegate, never reimplement.** `config/repos.yaml` already declares
+   `worktree_up`/`worktree_down`/`verify` per repo; the provider shells out to
+   them. Git isolates branches, not ports or databases — a second worktree
+   implementation inside the runtime would drift and eventually collide with a
+   dev server.
+2. **The blocker is coordination, not workspaces.** Per event-runtime.md §3,
+   before an event run may claim a ticket or mutate code, both paths must
+   share one claim, capacity, Owned Paths, and approval authority with the
+   ticket dispatcher. Two independent mutation coordinators race even with
+   separate source trees, and both draw on the same unobservable subscription
+   usage window. That is the work to do first — not a workspace provider.
+
 ## 6. Ticket cut-lines (when the operator says go)
 
 1. **Postgres substrate** — port `db.mjs`; same schema; `SKIP LOCKED` in

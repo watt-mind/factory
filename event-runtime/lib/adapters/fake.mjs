@@ -53,6 +53,39 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, env }) {
     });
     return { exitCode: 0, timedOut: false };
   }
+  if (spec.outputContract === "factory.triage-plan/v1") {
+    // Repo "clean" → NOOP; anything else proposes one agent-ready transition.
+    const repo = spec.input?.repo;
+    const clean = repo === "clean";
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: clean
+        ? { recommendation: "NOOP", repo, plan: [], summary: "fake: queue already clean" }
+        : {
+            recommendation: "TRIAGE",
+            repo,
+            plan: [{ issueId: "CLNT-999", action: "label-agent-ready", reason: "fake: fully specified" }],
+            summary: `fake triage of ${repo}`,
+          },
+      evidence: { commands: ["fake"], issuesSeen: 1 },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.triage-applied/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repo: spec.input.repo,
+        applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.issueId, action: i.action })),
+      },
+      evidence: { commands: ["fake"] },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
   if (spec.outputContract === "factory.disk-diagnosis/v1") {
     // Stale-alert semantics ride on the alert's own number: < 85% → NOOP.
     const stale = (spec.input?.usedPct ?? 100) < 85;

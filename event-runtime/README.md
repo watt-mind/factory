@@ -85,6 +85,25 @@ allowlist (`lab`, `web`), probes `df` before/after, and the verifier
 not match is a ContractViolation, not a success. An unregistered action ID
 refuses before executing anything.
 
+## Repository workspaces and the triage chain (OPS-228/OPS-229)
+
+`workspace.type: "repository"` gives an agent a **read-only** source tree:
+a bare mirror per repo (`<home>/mirrors/<repo>.git`, fetched at plan time),
+and per run a detached worktree at the SHA the planner pinned into
+`input.repoPin`. No install, no ports — reading code needs neither. Repo
+facts come from the factory's own `config/repos.yaml`
+(`FACTORY_REPOS_ROOT` to point elsewhere); the operator's live checkout is
+never touched. Full worktrees for *coding* tasks are deliberately not built —
+see [workers doc §5a](../docs/event-runtime-workers.md).
+
+First consumer: `factory.triage.requested` → `triage-scan@1` reads the pinned
+tree plus Linear and emits a typed plan (`TRIAGE` with per-issue actions from
+a closed set, or `NOOP`) → the chain proposes `triage-apply@1` → the operator
+approves the **concrete per-issue action list** → the actions adapter's
+item-list mode resolves each action id to one fixed `tools/linear.mjs`
+invocation. An unregistered action id refuses before applying anything,
+including the valid items beside it.
+
 ## Demo environments and e2e (OPS-217)
 
 `bin/worktree-up.sh` provisions an **isolated, seeded** runtime — the part
@@ -160,6 +179,7 @@ spec (§12).
 | `lib/worker.mjs` | single worker: lease, execute, verify, publish with fencing (§8) |
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
 | `lib/adapters/` | adapter registry: `claude` (real), `fake` (tests) (§6) |
+| `lib/repos.mjs` `lib/repository.mjs` | repos.yaml reader; mirror + pinned read-only checkout (OPS-228) |
 | `lib/adapters/actions.mjs` | closed action-list executor: approved action IDs → fixed SSH commands, probe evidence (OPS-208) |
 | `lib/chain.mjs` `edges.json` | discovered chains: typed recommendation → internal event → watched proposal (OPS-223) |
 | `lib/adapters/command.mjs` | closed-template command executor — the only admissible mutating agent form (§14) |

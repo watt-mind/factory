@@ -21,6 +21,7 @@
 import { spawnSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { FACTORY_ROOT } from "../config.mjs";
 
 const OUTPUT_TAIL_CHARS = 2_000;
 
@@ -46,10 +47,101 @@ function probeBytes(raw) {
   return Number(match[1]);
 }
 
+/** Substitute {field} placeholders across an argv template (item-list mode). */
+function substituteArgv(argv, context) {
+  return argv.map((element) =>
+    element.replace(/\{([A-Za-z0-9_]+)\}/g, (_, field) => {
+      const value = context?.[field];
+      if (value === undefined || value === null || !["string", "number"].includes(typeof value)) {
+        throw new Error(`argv template references missing/non-primitive field "${field}"`);
+      }
+      return String(value);
+    }),
+  );
+}
+
+/**
+ * Item-list mode (OPS-229): the approved plan is a *list*, each item resolved
+ * to a fixed local argv from the closed registry — one registered action per
+ * item, nothing else executable. Used by triage-apply, where each item is a
+ * Linear transition rather than a remote shell command.
+ */
+async function executeItemList({ spec, def, workspaceDir, timeoutMs }) {
+  const log = path.join(workspaceDir, ".actions.log");
+  const fail = (message) => {
+    appendFileSync(log, `REFUSED before execution: ${message}\n`, "utf8");
+    return { exitCode: 1, timedOut: false };
+  };
+
+  const items = spec.input?.[def.itemsField];
+  if (!Array.isArray(items) || items.length === 0) return fail(`no items in input.${def.itemsField}`);
+
+  // Resolve EVERY item before executing ANY: an unregistered action id in the
+  // approved list is a refusal, never a partial application.
+  const resolved = [];
+  try {
+    for (const item of items) {
+      const registered = def.actionRegistry?.[item.action];
+      if (!registered?.argv) throw new Error(`action "${item.action}" is not in the closed action registry`);
+      resolved.push({
+        item,
+        argv: substituteArgv(registered.argv, { ...spec.input, ...item, factoryRoot: FACTORY_ROOT }),
+      });
+    }
+  } catch (err) {
+    return fail(err.message);
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  const applied = [];
+  const outputs = {};
+  for (const { item, argv } of resolved) {
+    const budget = Math.max(1000, deadline - Date.now());
+    const proc = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", timeout: budget, cwd: FACTORY_ROOT });
+    const raw = `${proc.stdout ?? ""}${proc.stderr ?? ""}`.slice(-OUTPUT_TAIL_CHARS);
+    const key = `${item[def.itemKey]}:${item.action}`;
+    outputs[key] = raw;
+    appendFileSync(log, `$ ${key}: ${argv.join(" ")}\n${raw}\n`, "utf8");
+    if (proc.error?.code === "ETIMEDOUT") {
+      appendFileSync(log, `TIMED OUT after ${applied.length}/${resolved.length}\n`, "utf8");
+      return { exitCode: null, timedOut: true };
+    }
+    if (proc.status !== 0) {
+      // Partial application is a real outcome: the log records what landed,
+      // and the attempt fails so nothing claims success it cannot prove.
+      appendFileSync(log, `FAILED on ${key} (exit ${proc.status}) after ${applied.length} applied\n`, "utf8");
+      return { exitCode: proc.status ?? 1, timedOut: false };
+    }
+    applied.push({ issueId: item[def.itemKey], action: item.action });
+  }
+
+  writeFileSync(
+    path.join(workspaceDir, "result.json"),
+    `${JSON.stringify(
+      {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        reasonCode: "ok",
+        artifact: { repo: spec.input.repo, applied },
+        evidence: { commands: resolved.map((r) => r.argv), outputs },
+        artifacts: [{ kind: "log", path: ".actions.log" }],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  return { exitCode: 0, timedOut: false };
+}
+
 /**
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean }>}
  */
 export async function execute({ spec, def, workspaceDir, timeoutMs }) {
+  // Two closed-registry shapes: a per-item local argv list (OPS-229) and the
+  // remote probe → act → probe flow (OPS-208). The definition picks.
+  if (def.itemsField) return executeItemList({ spec, def, workspaceDir, timeoutMs });
+
   const log = path.join(workspaceDir, ".actions.log");
   const fail = (message) => {
     appendFileSync(log, `REFUSED before execution: ${message}\n`, "utf8");

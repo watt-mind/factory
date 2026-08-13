@@ -1,0 +1,26 @@
+{
+  "title": "factory.triage-plan/v1 output artifact — typed, per-issue triage decisions",
+  "type": "object",
+  "required": ["recommendation", "repo", "plan", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "recommendation": { "enum": ["TRIAGE", "NOOP"] },
+    "repo": { "type": "string", "minLength": 1 },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issueId", "action", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "issueId": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "action": {
+            "enum": ["label-agent-ready", "move-to-todo", "needs-detail", "mark-duplicate", "needs-human"]
+          },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}

@@ -39,7 +39,16 @@ function loadAgentDef(root, file) {
       Array.isArray(def.exec) &&
       Object.values(def.actionRegistry).every((a) => typeof a?.remote === "string") &&
       Object.values(def.hosts).every((t) => typeof t === "string");
-    if (!closedArgv && !closedActionRegistry) {
+    // Item-list form (OPS-229): every registered action is a fixed local argv,
+    // applied per approved item — closed by construction, same as the others.
+    const closedItemList =
+      def.actionRegistry !== undefined &&
+      typeof def.itemsField === "string" &&
+      typeof def.itemKey === "string" &&
+      Object.values(def.actionRegistry).every(
+        (a) => Array.isArray(a?.argv) && a.argv.length > 0 && a.argv.every((e) => typeof e === "string"),
+      );
+    if (!closedArgv && !closedActionRegistry && !closedItemList) {
       throw new RegistryError(
         `${file}: mutating agents are admitted only as closed command templates or closed action registries (docs/event-runtime.md §14; OPS-223/OPS-208)`,
       );

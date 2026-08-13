@@ -110,6 +110,8 @@ export async function executeClaimed(db, registry, adapters, claim, {
     .get(runId, attempt)?.lease_owner ?? "worker";
   const retain = spec.workspace?.retainOnFailure === true;
   let workspaceDir = null;
+  let checkoutPath = null;
+  const repoName = spec.input?.repoPin?.repo ?? spec.input?.repo ?? null;
 
   /** Terminal failure-shaped write: transition + attempts row, one tx. */
   const failTerminal = (to, journalReason, reasonCode, { requeue = false } = {}) =>
@@ -137,14 +139,18 @@ export async function executeClaimed(db, registry, adapters, claim, {
         .run(iso(now), runId, attempt);
     });
 
-    workspaceDir = createWorkspace({ root: workspacesRoot, runId, attempt, input: spec.input }).dir;
+    const created = createWorkspace({
+      root: workspacesRoot, runId, attempt, input: spec.input, workspace: spec.workspace,
+    });
+    workspaceDir = created.dir;
+    checkoutPath = created.checkout?.path ?? null;
     db.query(`UPDATE attempts SET workspace_path = ? WHERE run_id = ? AND attempt = ?`)
       .run(workspaceDir, runId, attempt);
 
     const adapter = adapters[spec.adapter];
     if (!adapter) {
       failTerminal("FAILED", "unknown_adapter", "unknown_adapter");
-      destroyWorkspace(workspaceDir, { retain });
+      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
       return { runId, attempt, terminalState: "FAILED", reasonCode: "unknown_adapter" };
     }
     const def = getAgent(registry, spec.agent);
@@ -155,13 +161,13 @@ export async function executeClaimed(db, registry, adapters, claim, {
 
     if (timedOut) {
       failTerminal("TIMED_OUT", "timeout", "timeout");
-      destroyWorkspace(workspaceDir, { retain });
+      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
       return { runId, attempt, terminalState: "TIMED_OUT", reasonCode: "timeout" };
     }
     if (exitCode !== 0) {
       const reasonCode = `agent_exit_${exitCode}`;
       failTerminal("FAILED", reasonCode, reasonCode, { requeue: true });
-      destroyWorkspace(workspaceDir, { retain });
+      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
 
@@ -191,7 +197,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
           });
         }
       });
-      destroyWorkspace(workspaceDir, { retain });
+      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
       return { runId, attempt, terminalState: "FAILED", reasonCode: "contract_violation" };
     }
 
@@ -216,7 +222,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         );
         finishAttempt(db, runId, attempt, "REFUSED", verified.reasonCode, now);
       });
-      destroyWorkspace(workspaceDir);
+      destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
       return { runId, attempt, terminalState: "REFUSED", reasonCode: verified.reasonCode };
     }
 
@@ -267,15 +273,15 @@ export async function executeClaimed(db, registry, adapters, claim, {
     });
 
     if (published.fenced) {
-      destroyWorkspace(workspaceDir);
+      destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
       return { fenced: true };
     }
-    destroyWorkspace(workspaceDir);
+    destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
     return { runId, attempt, terminalState: "COMPLETED", reasonCode: "ok", receipt: published.receipt };
   } catch (err) {
     if (err instanceof IllegalTransition) {
       // Operator moved the run under us (cancel) — stop quietly, publish nothing.
-      if (workspaceDir) destroyWorkspace(workspaceDir);
+      if (workspaceDir) destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
       return { cancelled: true };
     }
     throw err;

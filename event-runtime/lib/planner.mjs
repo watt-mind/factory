@@ -14,6 +14,7 @@ import { tx } from "./db.mjs";
 import { newProposalId, newRunId } from "./ids.mjs";
 import { createRun } from "./lifecycle.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
+import { pinRepo } from "./repository.mjs";
 import { validate } from "./schema.mjs";
 
 /**
@@ -121,7 +122,21 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     const input = validate(def.inputSchema, envelope.payload);
     if (!input.valid) return humanNeeded(db, event, `invalid_input: ${input.errors[0]}`, at, ttlSeconds);
 
-    const idempotencyKey = idempotencyKeyFor(mapping, def, envelope, hashJson(envelope.payload));
+    // §7 tier 1 (OPS-228): a repository workspace resolves its ref to an
+    // immutable SHA *now*, so the pin is inside the spec's input (and its
+    // inputHash, and the receipt). A run therefore names the exact tree it
+    // read, and dedup distinguishes "same repo, new commit".
+    let payload = envelope.payload;
+    if (def.workspace?.type === "repository") {
+      try {
+        payload = { ...payload, repoPin: pinRepo(payload.repo, payload.ref ?? undefined) };
+      } catch (err) {
+        return humanNeeded(db, event, `repo_pin_failed: ${err.message}`, at, ttlSeconds);
+      }
+    }
+
+    const pinnedEnvelope = payload === envelope.payload ? envelope : { ...envelope, payload };
+    const idempotencyKey = idempotencyKeyFor(mapping, def, pinnedEnvelope, hashJson(payload));
     const existingRun = db.query(`SELECT run_id FROM runs WHERE idempotency_key = ?`).get(idempotencyKey);
     if (existingRun) {
       const proposal = insertProposal(db, {
@@ -133,7 +148,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     }
 
     const runId = newRunId();
-    const spec = buildRunSpec(registry, envelope, mapping, { runId, policyVersion, adapterOverride, now });
+    const spec = buildRunSpec(registry, pinnedEnvelope, mapping, { runId, policyVersion, adapterOverride, now });
     const specJson = canonicalJson(spec);
     const specHash = hashJson(spec);
     createRun(db, {

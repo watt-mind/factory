@@ -13,6 +13,9 @@ import { fileURLToPath } from "node:url";
 /** Absolute path of the event-runtime/ directory inside the factory repo. */
 export const RUNTIME_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+/** The factory checkout itself — where config/repos.yaml lives (OPS-228). */
+export const FACTORY_ROOT = path.dirname(RUNTIME_ROOT);
+
 export function runtimeHome() {
   return process.env.FACTORY_EVENT_HOME || path.join(homedir(), ".factory", "event-runtime");
 }
@@ -26,6 +29,11 @@ export function workspacesRoot(home = runtimeHome()) {
 }
 
 /** Durable content-addressed artifact store (§7) — survives its workspaces. */
+/** Bare mirrors backing tier-1 repository workspaces (OPS-228). */
+export function mirrorsRoot(home = runtimeHome()) {
+  return path.join(home, "mirrors");
+}
+
 export function artifactsRoot(home = runtimeHome()) {
   return path.join(home, "artifacts");
 }
@@ -33,6 +41,7 @@ export function artifactsRoot(home = runtimeHome()) {
 export function ensureHome(home = runtimeHome()) {
   mkdirSync(workspacesRoot(home), { recursive: true });
   mkdirSync(artifactsRoot(home), { recursive: true });
+  mkdirSync(mirrorsRoot(home), { recursive: true });
   return home;
 }
 

@@ -1,0 +1,79 @@
+{
+  "id": "triage-apply",
+  "version": 1,
+  "prompt": "agents/triage-apply.md",
+  "input_schema": "schemas/triage-apply.input.json",
+  "output_schema": "schemas/triage-applied.output.json",
+  "output_contract": "factory.triage-applied/v1",
+  "itemsField": "plan",
+  "itemKey": "issueId",
+  "actionRegistry": {
+    "label-agent-ready": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{issueId}",
+        "Todo",
+        "--add",
+        "ai:agent-ready"
+      ]
+    },
+    "move-to-todo": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{issueId}",
+        "Todo"
+      ]
+    },
+    "needs-detail": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "comment",
+        "{issueId}",
+        "triage: {reason}"
+      ]
+    },
+    "mark-duplicate": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "comment",
+        "{issueId}",
+        "triage: possible duplicate — {reason}"
+      ]
+    },
+    "needs-human": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "comment",
+        "{issueId}",
+        "triage: needs a human decision — {reason}"
+      ]
+    }
+  },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/triage-apply.md": "sha256:4ff7a95e86abb5bbc82bdff3202090673a87347e256e40c03bd1d963b2499992",
+    "schemas/triage-apply.input.json": "sha256:9f62f3ba601e031e96a26d4c9ee42f3008b6f12fe3d7c832d63ffa42474688ad",
+    "schemas/triage-applied.output.json": "sha256:5e4d4a2e59423a2aab88357521ff1e37889d50d658bee7278d599400f5dc3365"
+  }
+}

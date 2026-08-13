@@ -1,0 +1,44 @@
+{
+  "title": "triage-scan input \u2014 one repo; repoPin is resolved by the planner (OPS-228)",
+  "type": "object",
+  "required": [
+    "repo"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ref": {
+      "type": "string"
+    },
+    "repoPin": {
+      "type": "object",
+      "required": [
+        "repo",
+        "sha"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "github": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}
