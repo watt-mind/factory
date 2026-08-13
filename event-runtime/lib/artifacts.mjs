@@ -124,3 +124,29 @@ export function pruneArtifacts(db, storeRoot, { olderThanMs = 7 * 24 * 60 * 60 *
   }
   return { deleted, freedBytes };
 }
+
+/**
+ * Resolve a prior run's stored artifact of a given kind (OPS-373).
+ *
+ * The cross-run case: a postmortem consumes a transcript produced by a run it
+ * has no chain relationship with. Resolved at PLAN time so the hash lands in
+ * the spec input, the inputHash, and the receipt — the operator approves a run
+ * pinned to specific bytes, not "whatever that run's transcript happens to be
+ * by the time it executes".
+ */
+export function pinRunArtifact(db, runId, { kind = "transcript" } = {}) {
+  const run = db.query(`SELECT run_id, state, spec_json FROM runs WHERE run_id = ?`).get(runId);
+  if (!run) throw new Error(`unknown run ${runId}`);
+  const row = db
+    .query(`SELECT result_json FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`)
+    .get(runId);
+  if (!row) throw new Error(`run ${runId} has no accepted result — nothing was captured`);
+  const entry = (JSON.parse(row.result_json).artifacts ?? []).find((a) => a.kind === kind);
+  if (!entry?.sha256) throw new Error(`run ${runId} stored no "${kind}" artifact`);
+  return {
+    runId,
+    transcript: entry.sha256,
+    state: run.state,
+    agent: JSON.parse(run.spec_json).agent,
+  };
+}

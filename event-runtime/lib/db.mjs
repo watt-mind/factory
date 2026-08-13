@@ -142,6 +142,34 @@ CREATE INDEX IF NOT EXISTS idx_workers_last_seen ON workers (last_seen);
 CREATE INDEX IF NOT EXISTS idx_attempt_trace_run ON attempt_trace (run_id, seq);
 `;
 
+/**
+ * Put the database in WAL, tolerating a cold-start race (OPS-376).
+ *
+ * Journal mode is persistent, so the steady state needs no lock at all — read
+ * it first and skip the switch when it is already `wal`. Only the genuine
+ * first-time switch needs momentary exclusive access, which `busy_timeout`
+ * does NOT cover: two processes starting together against a brand-new file
+ * (serve and work, as worktree-up.sh launches them) had one win and the other
+ * die with SQLITE_BUSY. A bounded retry converges instead.
+ */
+function enableWal(db, { attempts = 20, waitMs = 50 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (db.query("PRAGMA journal_mode").get()?.journal_mode === "wal") return;
+    try {
+      db.exec("PRAGMA journal_mode = WAL;");
+      return;
+    } catch (err) {
+      // Someone else is mid-switch; they will finish and the read above wins.
+      if (i === attempts - 1) {
+        throw new Error(
+          `could not switch the database to WAL after ${attempts} attempts: ${err.message}`,
+        );
+      }
+      Bun.sleepSync(waitMs);
+    }
+  }
+}
+
 export function openDb(file = dbPath()) {
   if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file, { create: true });
@@ -150,7 +178,7 @@ export function openDb(file = dbPath()) {
   // rather than failing with SQLITE_BUSY_RECOVERY. Ordering matters here —
   // observed live the moment serve and work became separate processes.
   db.exec("PRAGMA busy_timeout = 5000;");
-  db.exec("PRAGMA journal_mode = WAL;");
+  enableWal(db);
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
   return db;

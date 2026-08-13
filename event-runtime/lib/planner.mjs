@@ -8,7 +8,7 @@
  * returns the recorded outcome — and a poison event that keeps throwing is
  * dead-lettered instead of wedging the sweep or silently vanishing.
  */
-import { findArtifact } from "./artifacts.mjs";
+import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { artifactsRoot, DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { tx } from "./db.mjs";
@@ -131,6 +131,19 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     // inputHash, and the receipt). A run therefore names the exact tree it
     // read, and dedup distinguishes "same repo, new commit".
     let payload = envelope.payload;
+    // A run reference resolves to that run's stored transcript at plan time
+    // (OPS-373): the cross-run case, where the bytes come from a run this one
+    // has no chain relationship with.
+    if (
+      def.workspace?.type === "artifacts" &&
+      (def.workspace.inputs ?? []).some((i) => typeof i.from === "string" && i.from.startsWith("$.input.runPin."))
+    ) {
+      try {
+        payload = { ...payload, runPin: pinRunArtifact(db, payload.runId) };
+      } catch (err) {
+        return humanNeeded(db, event, `run_pin_failed: ${err.message}`, at, ttlSeconds);
+      }
+    }
     // Declared artifact inputs must exist in the store at plan time (OPS-372):
     // proposing a run whose bytes are missing wastes an approval, and the
     // operator should see the failure before deciding, not after.

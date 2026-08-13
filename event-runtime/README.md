@@ -89,6 +89,15 @@ GitHub — the diagnosis is reproducible against exactly those bytes, and a
 multi-megabyte log lives in the store rather than blowing the inline-evidence
 limit.
 
+**Cross-run references (OPS-373).** An artifact need not come from the same
+chain. `factory.run-postmortem.requested {runId}` → `run-postmortem@1` reads
+`./transcript.json`, the *earlier* run's captured transcript: the planner
+resolves that run's stored artifact into `input.runPin` at plan time, so the
+operator approves a run pinned to specific bytes rather than "whatever that
+run's transcript is by the time this executes". A run that never stored a
+transcript, or an unknown run id, parks `human_needed` with that exact reason
+instead of proposing a run over nothing.
+
 ## Discovered chains (OPS-223)
 
 Agents never spawn agents: a completed run whose artifact carries a typed

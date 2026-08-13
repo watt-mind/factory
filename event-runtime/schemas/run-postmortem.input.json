@@ -1,0 +1,20 @@
+{
+  "title": "run-postmortem input — one run of this runtime; runPin is resolved by the planner",
+  "type": "object",
+  "required": ["runId"],
+  "additionalProperties": false,
+  "properties": {
+    "runId": { "type": "string", "minLength": 1 },
+    "runPin": {
+      "type": "object",
+      "required": ["runId", "transcript"],
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "type": "string", "minLength": 1 },
+        "transcript": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "state": { "type": "string" },
+        "agent": { "type": "string" }
+      }
+    }
+  }
+}

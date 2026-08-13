@@ -1,0 +1,13 @@
+{
+  "title": "factory.run-postmortem/v1 output artifact — why a run failed",
+  "type": "object",
+  "required": ["runId", "category", "whatHappened", "operatorAction"],
+  "additionalProperties": false,
+  "properties": {
+    "runId": { "type": "string", "minLength": 1 },
+    "category": { "enum": ["agent_error", "environment", "contract_violation", "cut_short", "unclear"] },
+    "whatHappened": { "type": "string", "minLength": 1 },
+    "operatorAction": { "type": "string", "minLength": 1 },
+    "evidenceLines": { "type": "array", "items": { "type": "string" } }
+  }
+}

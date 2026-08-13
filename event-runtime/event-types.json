@@ -88,5 +88,13 @@
       "inputHash"
     ],
     "proposalTtlSeconds": 1800
+  },
+  "factory.run-postmortem.requested": {
+    "agent": "run-postmortem@1",
+    "adapter": "claude",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
   }
 }

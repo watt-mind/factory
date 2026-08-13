@@ -55,8 +55,47 @@ function ciDoctorArtifact(input) {
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean }>}
  */
 export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace }) {
+  // Every real adapter captures the agent's output as a runtime artifact
+  // (worker.mjs RUNTIME_ARTIFACTS). The fake must too, or it models a world
+  // where transcripts do not exist — which is exactly what run-postmortem
+  // consumes (OPS-373).
+  writeFileSync(
+    path.join(workspaceDir, ".transcript.json"),
+    `${JSON.stringify(
+      { adapter: "fake", agent: spec.agent, contract: spec.outputContract, input: spec.input },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
   // Contract-shaped fakes for the chain slice (OPS-223) — behavior keyed on
   // the spec's output contract so planner/verifier/chain run unmodified.
+  if (spec.outputContract === "factory.run-postmortem/v1") {
+    const transcript = path.join(workspaceDir, "transcript.json");
+    if (!existsSync(transcript)) {
+      writeResult(workspaceDir, {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "refused",
+        reasonCode: "missing_input",
+      });
+      return { exitCode: 0, timedOut: false };
+    }
+    const text = readFileSync(transcript, "utf8");
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        runId: spec.input.runId,
+        category: "environment",
+        whatHappened: `fake postmortem of ${spec.input.runId}`,
+        operatorAction: "retry it",
+        evidenceLines: [text.trim().split("\n").at(-1) ?? "empty"],
+      },
+      evidence: { transcriptBytes: text.length },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
   if (spec.outputContract === "factory.ci-log/v1") {
     writeFileSync(path.join(workspaceDir, "failed.log"), `fake CI log for run ${spec.input?.runId}\nsocket hang up\n`, "utf8");
     writeResult(workspaceDir, {
