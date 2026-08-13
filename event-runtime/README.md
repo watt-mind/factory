@@ -26,6 +26,7 @@ bun event-runtime/cli.mjs ps [state]                     # running event process
 bun event-runtime/cli.mjs runs [state]                   # event runs, optionally filtered by state
 bun event-runtime/cli.mjs proposals                   # open proposals with TTL age
 bun event-runtime/cli.mjs agents                      # registered agents and event routing
+bun event-runtime/cli.mjs workers                     # worker processes: host, labels, state, heartbeat
 bun event-runtime/cli.mjs requeue <source> <event-id> # re-plan a dead-lettered/human_needed event
 bun event-runtime/cli.mjs approve <proposal-id>
 bun event-runtime/cli.mjs reject <proposal-id> "<reason>"
@@ -179,6 +180,7 @@ spec (§12).
 | `lib/worker.mjs` | single worker: lease, execute, verify, publish with fencing (§8) |
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
 | `lib/adapters/` | adapter registry: `claude` (real), `fake` (tests) (§6) |
+| `lib/workers.mjs` | worker registry, heartbeats, placement predicate (OPS-233) |
 | `lib/repos.mjs` `lib/repository.mjs` | repos.yaml reader; mirror + pinned read-only checkout (OPS-228) |
 | `lib/adapters/actions.mjs` | closed action-list executor: approved action IDs → fixed SSH commands, probe evidence (OPS-208) |
 | `lib/chain.mjs` `edges.json` | discovered chains: typed recommendation → internal event → watched proposal (OPS-223) |

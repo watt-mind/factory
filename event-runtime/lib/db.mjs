@@ -108,6 +108,19 @@ CREATE TABLE IF NOT EXISTS outbox (
   published_at  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS workers (
+  worker_id   TEXT PRIMARY KEY,
+  host        TEXT NOT NULL,
+  pid         INTEGER NOT NULL,
+  labels_json TEXT NOT NULL DEFAULT '{}',
+  adapters    TEXT NOT NULL DEFAULT '',
+  started_at  TEXT NOT NULL,
+  last_seen   TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'idle',
+  current_run TEXT,
+  stopped_at  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS counters (
   name  TEXT PRIMARY KEY,
   value INTEGER NOT NULL
@@ -116,14 +129,19 @@ CREATE TABLE IF NOT EXISTS counters (
 CREATE INDEX IF NOT EXISTS idx_runs_state ON runs (state);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals (status);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_run ON lifecycle_events (run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_workers_last_seen ON workers (last_seen);
 `;
 
 export function openDb(file = dbPath()) {
   if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file, { create: true });
+  // busy_timeout FIRST: switching journal modes takes a brief exclusive lock,
+  // and a second process opening the database concurrently must wait for it
+  // rather than failing with SQLITE_BUSY_RECOVERY. Ordering matters here —
+  // observed live the moment serve and work became separate processes.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
-  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
   return db;
 }
@@ -131,6 +149,20 @@ export function openDb(file = dbPath()) {
 /** Run `fn` inside one SQLite transaction; returns its result. */
 export function tx(db, fn) {
   return db.transaction(fn)();
+}
+
+/**
+ * A write transaction that takes its lock up front (OPS-233).
+ *
+ * SQLite's default DEFERRED transaction acquires a read lock first and only
+ * upgrades on the first write — so two workers can both SELECT the same
+ * QUEUED run before either writes, and one then loses the upgrade with
+ * SQLITE_BUSY. BEGIN IMMEDIATE serializes claimants at the start, which is
+ * what makes multi-process claiming correct on one machine. (Postgres uses
+ * FOR UPDATE SKIP LOCKED for the same job when workers span hosts.)
+ */
+export function txImmediate(db, fn) {
+  return db.transaction(fn).immediate();
 }
 
 /** Monotonic named counter — fencing tokens come from here (§8). */

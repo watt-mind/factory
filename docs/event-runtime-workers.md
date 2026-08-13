@@ -28,16 +28,34 @@ Two consequences worth stating because they answer real operator questions:
   fencing token already make this safe to change — they were built for the
   multi-worker future, and guard nothing today.
 
-## 2. Stage 1 — worker as a process (same machine)
+## 2. Stage 1 — worker as a process (same machine) — **shipped, OPS-233**
 
 The smallest real step, and a prerequisite for everything after:
 
-- **Substrate: Postgres** replaces SQLite — same schema, same contracts.
-  `claimNext` gains `FOR UPDATE SKIP LOCKED` (§10 names this as the
-  mechanism that is meaningless before a second claimant exists).
+- **Substrate: SQLite, for now.** A correction to this note's original plan:
+  splitting the process does **not** require Postgres. SQLite in WAL mode
+  already supports multiple processes on one machine — what it needed was
+  `BEGIN IMMEDIATE` on the claim (the default deferred transaction lets two
+  workers read the same QUEUED row before either writes) and `busy_timeout`
+  set *before* `journal_mode`, or a second process opening the database
+  fails with `SQLITE_BUSY_RECOVERY`. Postgres with `FOR UPDATE SKIP LOCKED`
+  is the **remote node** requirement (stage 2), not the multi-process one;
+  the claim path is one module so that swap stays an implementation change.
 - **`cli.mjs work`** — a standalone process running the loop `runOnce`
   already contains: claim → workspace → adapter → verify → fenced publish.
-  `serve` keeps API, planner, approval, and outbox, and stops executing.
+  `serve` keeps API, planner, approval, outbox, and the reaper, and no longer
+  executes (`--with-worker` restores the all-in-one for a quick demo).
+- **Worker registry and heartbeats.** Leases prove an *attempt* is held; the
+  registry answers which processes are alive, where, and with what labels —
+  the difference between "busy on a long run" and "died holding a lease".
+  The heartbeat runs on its own timer, never inside the claim loop, because
+  that loop blocks for the whole duration of an agent run.
+- **Bounded graceful drain.** SIGTERM stops claiming and lets the in-flight
+  attempt finish, but only for a grace period (`--drain-timeout`, default
+  60s): waiting out a ten-minute run trains operators to SIGKILL, which
+  orphans the agent process and leaves a lying registry row. On timeout the
+  worker leaves honestly and says what happens next — the lease expires and
+  the reaper requeues.
 - **Concurrency becomes a worker count**, still deliberately small. Two
   `work` processes are the correctness proof (leases and fencing under real
   contention); raising agent-run parallelism beyond that waits for an answer

@@ -57,6 +57,7 @@ export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
     requeue: (source, eventId) =>
       call("POST", "/events/requeue", { body: JSON.stringify({ source, eventId }) }),
     agents: () => call("GET", "/agents"),
+    workers: () => call("GET", "/workers"),
     approve: (id) => call("POST", `/proposals/${encodeURIComponent(id)}/approve`, { body: "{}" }),
     reject: (id, reason) =>
       call("POST", `/proposals/${encodeURIComponent(id)}/reject`, { body: JSON.stringify({ reason }) }),

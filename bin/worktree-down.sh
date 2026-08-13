@@ -40,6 +40,7 @@ fi
 
 RUN_DIR="$(run_dir "$WT")"
 stop_daemon "$RUN_DIR/web.pid" "web server"
+stop_daemon "$RUN_DIR/worker.pid" "worker"
 stop_daemon "$RUN_DIR/serve.pid" "event runtime"
 
 if [[ "$HERE" -eq 1 ]]; then

@@ -15,6 +15,7 @@
  */
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import * as actions from "./lib/adapters/actions.mjs";
 import * as claude from "./lib/adapters/claude.mjs";
 import * as command from "./lib/adapters/command.mjs";
@@ -30,7 +31,8 @@ import { resolveChains } from "./lib/chain.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { startApi } from "./lib/api.mjs";
-import { reapExpiredLeases, runOnce } from "./lib/worker.mjs";
+import { claimNext, executeClaimed, reapExpiredLeases, runOnce } from "./lib/worker.mjs";
+import { deregisterWorker, heartbeat, registerWorker } from "./lib/workers.mjs";
 
 const USAGE = `event-runtime — watched event → agent runtime (docs/event-runtime.md)
 
@@ -47,6 +49,7 @@ usage: bun event-runtime/cli.mjs <command>
   runs [state]                   runs (optionally filtered by state)
   proposals                      open proposals with TTL age
   agents                         registered agent definitions and event routing
+  workers                        worker processes: host, labels, state, heartbeat
   approve <proposal-id>          approve an open proposal
   reject <proposal-id> <reason>  reject an open proposal
   inject <envelope.json|->       replay an event envelope (same intake as the webhook)
@@ -166,9 +169,14 @@ async function serve(args) {
     }
   }
 
+  // The worker is its own process now (OPS-233): restarting the API to
+  // iterate must not kill a running agent. `--with-worker` restores the old
+  // all-in-one behaviour for a quick single-process demo.
+  const withWorker = args.includes("--with-worker");
+
   let busy = false;
   async function tick() {
-    if (busy) return; // runOnce is async — never overlap the single worker (§3)
+    if (busy) return; // never overlap: planning and (optional) execution share this tick
     busy = true;
     try {
       const nowMs = Date.now();
@@ -176,9 +184,11 @@ async function serve(args) {
       announceProposals();
       announceTransitions();
       reapExpiredLeases(db, { now: nowMs, policyVersion: pv });
-      await runOnce(db, registry, adapters, {
-        workspacesRoot: workspacesRoot(), owner, now: Date.now(), policyVersion: pv,
-      });
+      if (withWorker) {
+        await runOnce(db, registry, adapters, {
+          workspacesRoot: workspacesRoot(), owner, now: Date.now(), policyVersion: pv,
+        });
+      }
       announceTransitions();
       // Watched-mode outbox sink (§15): display the result event, stamp it published.
       publishOutbox(db, {
@@ -209,6 +219,11 @@ async function serve(args) {
   server.on("listening", () => {
     log(`environment "${env.name}" — control API on http://${API_HOST}:${port} (db ${dbPath()}, policy ${pv})`);
     if (adapterOverride) log(`adapter override: all new run specs use "${adapterOverride}"`);
+    log(
+      withWorker
+        ? "worker: in-process (--with-worker) — restarting serve interrupts running agents"
+        : "worker: none in this process — start one with: bun event-runtime/cli.mjs work",
+    );
   });
   server.on("error", (err) => fail(`serve: ${err.message}`));
 
@@ -236,6 +251,133 @@ async function serve(args) {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+// ---------------------------------------------------------------------------
+// work — the worker process (OPS-233; docs/event-runtime-workers.md §2)
+// ---------------------------------------------------------------------------
+
+/**
+ * A worker owns exactly one thing: claim → execute → verify → publish. It
+ * never serves the API and never plans, so `serve` can restart under it
+ * freely — the whole point of the split. It talks to the same database, and
+ * on one machine SQLite (WAL + BEGIN IMMEDIATE claims) makes concurrent
+ * claiming correct; Postgres is what remote nodes need, not this.
+ *
+ *   bun event-runtime/cli.mjs work [--label k=v ...] [--adapter-override fake]
+ */
+async function work(args) {
+  const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
+  const adapters = { actions, claude, command, fake };
+  if (adapterOverride && !adapters[adapterOverride]) {
+    fail(`work: unknown --adapter-override "${adapterOverride}" (have: ${Object.keys(adapters).join(", ")})`);
+  }
+
+  // --label node=lab --label can=infra-exec  → placement (§4)
+  const labels = {};
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== "--label") continue;
+    const [key, ...rest] = String(args[i + 1] ?? "").split("=");
+    if (!key || rest.length === 0) fail("work: --label expects key=value");
+    labels[key] = rest.join("=");
+  }
+
+  ensureHome();
+  const db = openDb();
+  const registry = loadRegistry();
+  const pv = policyVersion();
+  const workerId = newWorkerId();
+  const adapterNames = adapterOverride ? [adapterOverride] : Object.keys(adapters);
+
+  registerWorker(db, { workerId, labels, adapters: adapterNames });
+  log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
+  if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
+  if (adapterOverride) log(`adapter override: executing every run with "${adapterOverride}"`);
+
+  let draining = false;
+  let inFlight = null;
+
+  // The heartbeat runs on its own timer, NOT inside the claim loop: that loop
+  // blocks for the whole duration of an agent run (up to the spec timeout),
+  // so a loop-driven heartbeat would mark every legitimately busy worker as
+  // stale — and the doctor's "stalled worker" check exists precisely to tell
+  // busy apart from dead.
+  const beat = setInterval(
+    () => heartbeat(db, workerId, { state: inFlight ? "busy" : "idle", runId: inFlight }),
+    15_000,
+  );
+  beat.unref?.();
+
+  async function loop() {
+    while (!draining) {
+      try {
+        heartbeat(db, workerId, { state: inFlight ? "busy" : "idle", runId: inFlight });
+        const claim = claimNext(db, {
+          owner: workerId, policyVersion: pv, labels,
+          adapters: adapterOverride ? null : adapterNames,
+        });
+        if (!claim) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+        inFlight = claim.runId;
+        heartbeat(db, workerId, { state: "busy", runId: claim.runId });
+        log(`claimed ${claim.runId} attempt ${claim.attempt} (${claim.spec.agent})`);
+        const summary = await executeClaimed(db, registry, adapters, claim, {
+          workspacesRoot: workspacesRoot(), policyVersion: pv,
+          ...(adapterOverride ? { adapterOverride } : {}),
+        });
+        log(`${claim.runId} → ${summary?.terminalState ?? "?"} (${summary?.reasonCode ?? "-"})`);
+      } catch (err) {
+        log(`worker error: ${err.message}`);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      } finally {
+        inFlight = null;
+      }
+    }
+  }
+
+  // Graceful drain: stop claiming, let the attempt in flight finish — the
+  // agent subprocess keeps its own timeout discipline, and killing it here
+  // would be the interruption this split exists to prevent.
+  //
+  // Bounded, though: waiting out a 10-minute agent run trains operators to
+  // SIGKILL, which orphans the agent AND leaves a lying registry row. After
+  // the grace period the worker leaves honestly and says what happens next —
+  // the lease expires and the reaper requeues the run.
+  const drainTimeoutMs = Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
+  const finish = (reason) => {
+    clearInterval(beat);
+    deregisterWorker(db, workerId);
+    log(`worker stopped (${reason})`);
+    process.exit(0);
+  };
+  const drain = (signal) => {
+    if (draining) {
+      // A second signal means "now": the operator has decided.
+      log("second signal — leaving immediately");
+      return finish("forced");
+    }
+    draining = true;
+    if (!inFlight) return finish(signal);
+    log(`draining (${signal}) — finishing ${inFlight}, up to ${drainTimeoutMs / 1000}s`);
+    const deadline = Date.now() + drainTimeoutMs;
+    const poll = setInterval(() => {
+      if (!inFlight) {
+        clearInterval(poll);
+        return finish(signal);
+      }
+      if (Date.now() >= deadline) {
+        clearInterval(poll);
+        log(`drain timeout — leaving ${inFlight} to its lease; the reaper will requeue it`);
+        finish("drain_timeout");
+      }
+    }, 250);
+  };
+  process.on("SIGINT", () => drain("SIGINT"));
+  process.on("SIGTERM", () => drain("SIGTERM"));
+
+  await loop();
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +498,20 @@ async function inspect(client, runId) {
   }
 }
 
+async function workers(client) {
+  const { workers: rows } = await client.workers();
+  if (rows.length === 0) {
+    console.log("no workers have registered — start one with: bun event-runtime/cli.mjs work");
+    return;
+  }
+  console.log(`${pad("WORKER", 26)}${pad("HOST", 18)}${pad("STATE", 10)}${pad("LABELS", 24)}${pad("CURRENT RUN", 42)}LAST SEEN`);
+  for (const w of rows) {
+    const state = w.stale ? `${w.state}!stale` : w.state;
+    const labels = Object.entries(w.labels).map(([k, v]) => `${k}=${v}`).join(",") || "-";
+    console.log(`${pad(w.workerId, 26)}${pad(w.host, 18)}${pad(state, 10)}${pad(labels, 24)}${pad(w.currentRun ?? "-", 42)}${w.lastSeen}`);
+  }
+}
+
 async function agents(client) {
   const { agents: defs } = await client.agents();
   for (const d of defs) {
@@ -389,6 +545,9 @@ async function main() {
     case "serve":
       return serve(args);
 
+    case "work":
+      return work(args);
+
     case "status":
       return withClient(status);
 
@@ -406,6 +565,9 @@ async function main() {
 
     case "agents":
       return withClient(agents);
+
+    case "workers":
+      return withClient(workers);
 
     case "approve": {
       if (!args[0]) fail("usage: approve <proposal-id>");

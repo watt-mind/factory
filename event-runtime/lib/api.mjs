@@ -19,6 +19,7 @@ import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { requeueEvent } from "./planner.mjs";
 import { approveProposal, openProposals, rejectProposal } from "./proposals.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
+import { listWorkers, stalledWorkers } from "./workers.mjs";
 
 /** §14 size limit: a control-plane payload has no business being megabytes. */
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -118,15 +119,27 @@ function statusView(db, nowMs) {
     .all()
     .map((row) => ({ source: row.source, eventId: row.event_id, lastError: row.last_plan_error }));
 
+  const workers = listWorkers(db, { now: nowMs });
+  const stalled = stalledWorkers(db, { now: nowMs });
+
   return {
     events: eventCounts(db),
     proposals: { open: open.length, expired: expiredOpen.length },
     runs: runCounts(db),
+    workers: {
+      live: workers.filter((w) => w.state !== "stopped" && !w.stale).length,
+      busy: workers.filter((w) => w.state === "busy" && !w.stale).length,
+      stale: workers.filter((w) => w.stale).length,
+    },
     anomalies: {
       expiredOpenProposals: expiredOpen.map((p) => p.id),
       staleLeases,
       unpublishedOutbox,
       deadLettered,
+      // A worker holding a run whose heartbeat stopped: its lease may still be
+      // valid, so nothing has reclaimed the run yet (OPS-233).
+      stalledWorkers: stalled.map((w) => ({ workerId: w.workerId, host: w.host, runId: w.currentRun, lastSeen: w.lastSeen })),
+      noWorkers: workers.filter((w) => w.state !== "stopped" && !w.stale).length === 0 && (runCounts(db).byState.QUEUED ?? 0) > 0,
     },
   };
 }
@@ -404,6 +417,10 @@ export function createApi({
         const status = url.searchParams.get("status");
         if (status) return send(res, 200, { proposals: proposalHistory(db, status === "all" ? null : status) });
         return send(res, 200, { proposals: openProposals(db, { now: nowMs }).map(proposalView) });
+      }
+
+      if (route === "GET /workers") {
+        return send(res, 200, { workers: listWorkers(db, { now: nowMs }) });
       }
 
       if (route === "GET /agents") {

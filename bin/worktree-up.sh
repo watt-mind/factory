@@ -113,6 +113,21 @@ else
   echo $! >"$RUN_DIR/serve.pid"
 fi
 
+# The worker is its own process (OPS-233): restarting the runtime or the web
+# server must never interrupt a running agent.
+if pid_alive "$RUN_DIR/worker.pid"; then
+  info "worker already running (pid $(cat "$RUN_DIR/worker.pid"))"
+else
+  info "starting worker (fake adapter)"
+  (
+    cd "$WT" || exit 1
+    exec env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
+      bun event-runtime/cli.mjs work --adapter-override fake \
+      </dev/null >"$RUN_DIR/worker.log" 2>&1
+  ) &
+  echo $! >"$RUN_DIR/worker.pid"
+fi
+
 if pid_alive "$RUN_DIR/web.pid"; then
   info "web server already running (pid $(cat "$RUN_DIR/web.pid"), port $WEB_PORT)"
 else
@@ -158,7 +173,7 @@ $(info "ready — $LABEL")
   event home $HOME_DIR
   control    http://127.0.0.1:$API_PORT      (fake adapter — approvals are harmless)
   web UI     http://127.0.0.1:$WEB_PORT
-  logs       $RUN_DIR/{serve,web}.log
+  logs       $RUN_DIR/{serve,worker,web}.log
 
   status:  FACTORY_EVENT_PORT=$API_PORT bun event-runtime/cli.mjs status
   verify:  cd $WT && bun test event-runtime/ && bun event-runtime/demo/verify.mjs --port $API_PORT

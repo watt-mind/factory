@@ -13,10 +13,11 @@
 import { storeCollected } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { artifactsRoot } from "./config.mjs";
-import { nextCounter, tx } from "./db.mjs";
+import { nextCounter, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
 import { ContractViolation, verifyResult } from "./verify.mjs";
+import { satisfiesPlacement } from "./workers.mjs";
 import { createWorkspace, destroyWorkspace } from "./workspace.mjs";
 
 /**
@@ -65,17 +66,30 @@ function originatingEvent(db, runId) {
  *
  * @returns {{ runId: string, attempt: number, fencingToken: number, spec: object } | null}
  */
-export function claimNext(db, { owner, now = Date.now(), policyVersion = "unknown" } = {}) {
-  return tx(db, () => {
-    const row = db
+export function claimNext(db, { owner, now = Date.now(), policyVersion = "unknown", labels = {}, adapters = null } = {}) {
+  // BEGIN IMMEDIATE, not the default deferred transaction: two workers must
+  // not both read the same QUEUED row before either writes (OPS-233).
+  return txImmediate(db, () => {
+    // Oldest-first, but skip runs this worker may not take — placement
+    // requirements (§4) and adapters it does not have. Filtering in JS keeps
+    // the rule in one predicate; Postgres can push it into SQL later.
+    const candidates = db
       .query(
         `SELECT run_id, spec_json, attempts FROM runs
-         WHERE state = 'QUEUED' ORDER BY created_at, run_id LIMIT 1`,
+         WHERE state = 'QUEUED' ORDER BY created_at, run_id LIMIT 50`,
       )
-      .get();
+      .all();
+    let row = null;
+    let spec = null;
+    for (const candidate of candidates) {
+      const candidateSpec = JSON.parse(candidate.spec_json);
+      if (!satisfiesPlacement(labels, candidateSpec.placement)) continue;
+      if (adapters && !adapters.includes(candidateSpec.adapter)) continue;
+      row = candidate;
+      spec = candidateSpec;
+      break;
+    }
     if (!row) return null;
-
-    const spec = JSON.parse(row.spec_json);
     const attempt = row.attempts + 1;
     const fencingToken = nextCounter(db, "fencing");
     const leaseExpiresAt = iso(now + (spec.timeoutSeconds + LEASE_GRACE_SECONDS) * 1000);
