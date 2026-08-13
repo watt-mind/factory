@@ -24,6 +24,7 @@ import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
 import { storeStats } from "./artifacts.mjs";
+import { scheduleView } from "./schedules.mjs";
 import { listWorkers, stalledWorkers } from "./workers.mjs";
 
 /**
@@ -128,7 +129,7 @@ function runCounts(db) {
 }
 
 /** §13 status + doctor view: aggregates plus anomalies, all read-only SQL. */
-function statusView(db, nowMs) {
+function statusView(db, registry, nowMs) {
   const open = openProposals(db, { now: nowMs });
   const expiredOpen = open.filter((p) => p.expired);
   const staleLeases = db
@@ -147,6 +148,7 @@ function statusView(db, nowMs) {
     .map((row) => ({ source: row.source, eventId: row.event_id, lastError: row.last_plan_error }));
 
   const workers = listWorkers(db, { now: nowMs });
+  const schedules = scheduleView(db, registry, { now: nowMs });
   const store = storeStats(db, artifactsRoot(), { now: nowMs });
   const stalled = stalledWorkers(db, { now: nowMs });
 
@@ -168,6 +170,11 @@ function statusView(db, nowMs) {
       // A worker holding a run whose heartbeat stopped: its lease may still be
       // valid, so nothing has reclaimed the run yet (OPS-233).
       stalledWorkers: stalled.map((w) => ({ workerId: w.workerId, host: w.host, runId: w.currentRun, lastSeen: w.lastSeen })),
+      // A scheduler's worst failure mode is silence (§9): an enabled loop
+      // that has not ticked for more than two intervals is not running.
+      stoppedSchedules: schedules
+        .filter((s) => s.stopped || s.error)
+        .map((s) => ({ loop: s.loop, every: s.every, lastSlot: s.lastSlot, intervalsLate: s.intervalsLate, error: s.error })),
       noWorkers: workers.filter((w) => w.state !== "stopped" && !w.stale).length === 0 && (runCounts(db).byState.QUEUED ?? 0) > 0,
       // Two or more open proposals on one run: cancel fail-closes and leaves
       // them open (OPS-245). Unreachable on the TTL replan path.
@@ -507,7 +514,7 @@ export function createApi({
       }
 
       if (route === "GET /status") {
-        return send(res, 200, { env, ...statusView(db, nowMs) });
+        return send(res, 200, { env, ...statusView(db, registry, nowMs) });
       }
 
       if (route === "GET /events") {
@@ -518,6 +525,10 @@ export function createApi({
         const status = url.searchParams.get("status");
         if (status) return send(res, 200, { proposals: proposalHistory(db, status === "all" ? null : status) });
         return send(res, 200, { proposals: openProposals(db, { now: nowMs }).map(proposalView) });
+      }
+
+      if (route === "GET /schedules") {
+        return send(res, 200, { schedules: scheduleView(db, registry, { now: nowMs }) });
       }
 
       if (route === "GET /workers") {

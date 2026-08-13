@@ -96,5 +96,13 @@
       "inputHash"
     ],
     "proposalTtlSeconds": 1800
+  },
+  "clock.tick.reaper": {
+    "agent": "reaper@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "correlationId"
+    ],
+    "proposalTtlSeconds": 3600
   }
 }

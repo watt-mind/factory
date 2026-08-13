@@ -59,7 +59,7 @@ machinery it earns. Anything no listed event type needs stays unbuilt.
 | `keephq.disk-alert.raised` | Keep HQ infra alert webhook / replay CLI | two-node chain (diagnose → remediate) via the discovered-chain machinery, semantic verification recomputing reclaimed bytes from before/after probe evidence, typed remediation plans from a **closed action registry** (`lib/adapters/actions.mjs`), first infra-mutating executor behind watched approval (OPS-208) | shipped (watched) |
 | `github.workflow-run.failed` | GitHub webhook / replay CLI | first discovered chain (OPS-223): typed `ci-doctor` diagnosis → recommendation edges → watched closed-command follow-ups (`gh run rerun`, notify); command adapter and edge registry | shipped |
 | `sentry.issue.created` | Sentry webhook | *(dropped as a slice — Sentry already feeds Linear directly, so classifying here validates nothing operationally new; revisit only if that intake moves)* | — |
-| `clock.tick.<loop>` | scheduler | admitted, audited timer events; per-loop migration of the standing loops — **specified in [event-runtime-schedules.md](event-runtime-schedules.md)** (OPS-380), not yet built | specified |
+| `clock.tick.<loop>` | scheduler | admitted, audited timer events; per-loop migration of the standing loops — **[event-runtime-schedules.md](event-runtime-schedules.md)** (OPS-380/OPS-381) | shipped, loops off by default |
 | repository-mutating events | GitHub / Linear | shared claim, capacity, Owned Paths, and approval authority with the ticket dispatcher (§3) | last |
 
 Clock events are called out deliberately. [architecture.md](architecture.md)

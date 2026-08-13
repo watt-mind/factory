@@ -1,0 +1,10 @@
+{
+  "reaper": {
+    "every": "60m",
+    "eventType": "clock.tick.reaper",
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  }
+}

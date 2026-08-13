@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { hashBytes } from "./canonical.mjs";
+import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 
 export class RegistryError extends Error {
@@ -127,7 +128,40 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
     }
   }
 
-  return { root, agents, eventTypes, schemas, edges };
+  // Schedules (OPS-381): validated fail-closed at load — an unparseable
+  // cadence or an unregistered event type must be a startup error, not a
+  // surprise at 03:00 when nothing fires.
+  let schedules = {};
+  const schedulesFile = path.join(root, "schedules.json");
+  if (existsSync(schedulesFile)) {
+    schedules = JSON.parse(readFileSync(schedulesFile, "utf8"));
+    for (const [loop, schedule] of Object.entries(schedules)) {
+      if (!/^[a-z][a-z0-9-]*$/.test(loop)) throw new RegistryError(`schedules.json: bad loop name "${loop}"`);
+      try {
+        parseCadence(schedule.every);
+      } catch (err) {
+        throw new RegistryError(`schedules.json: ${loop}: ${err.message}`);
+      }
+      if (!eventTypes[schedule.eventType]) {
+        throw new RegistryError(`schedules.json: ${loop} fires unregistered event type ${schedule.eventType}`);
+      }
+      const catchUp = schedule.catchUp ?? "none";
+      if (!CATCH_UP_MODES.includes(catchUp)) {
+        throw new RegistryError(`schedules.json: ${loop} has unknown catchUp "${catchUp}" (${CATCH_UP_MODES.join(", ")})`);
+      }
+      const approval = schedule.approval ?? "watched";
+      if (!APPROVAL_MODES.includes(approval)) {
+        throw new RegistryError(`schedules.json: ${loop} has unknown approval "${approval}" (${APPROVAL_MODES.join(", ")})`);
+      }
+      // Unattended approval on a loop that is not even switched on is almost
+      // certainly a half-finished edit; refuse it rather than let it lurk.
+      if (approval === "auto" && !schedule.enabled) {
+        throw new RegistryError(`schedules.json: ${loop} declares approval "auto" but is not enabled — decide one`);
+      }
+    }
+  }
+
+  return { root, agents, eventTypes, schemas, edges, schedules };
 }
 
 export function getAgent(registry, ref) {

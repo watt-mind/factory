@@ -58,6 +58,7 @@ export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
       call("POST", "/events/requeue", { body: JSON.stringify({ source, eventId }) }),
     agents: () => call("GET", "/agents"),
     workers: () => call("GET", "/workers"),
+    schedules: () => call("GET", "/schedules"),
     /** Factory repo registry from config/repos.yaml (OPS-299). */
     repos: () => call("GET", "/repos"),
     /**

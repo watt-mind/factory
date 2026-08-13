@@ -17,6 +17,7 @@ import { createRun } from "./lifecycle.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
 import { pinRepo } from "./repository.mjs";
 import { validate } from "./schema.mjs";
+import { loopInFlight } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
 
 /**
@@ -123,6 +124,21 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     const ttlSeconds = mapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS;
 
     const def = getAgent(registry, mapping.agent);
+
+    // §5 singleton: a scheduled loop whose previous run is still in flight
+    // plans a typed NOOP, never a second queued run. A reaper that takes 70
+    // minutes must not accumulate a backlog of reapers.
+    const loop = envelope.payload?.loop;
+    const schedule = loop ? registry.schedules?.[loop] : null;
+    if (schedule && schedule.singleton !== false && loopInFlight(db, mapping.agent)) {
+      const proposal = insertProposal(db, {
+        id: newProposalId(), event, decision: "noop", status: "resolved",
+        reason: "previous_run_in_flight", at, ttlSeconds,
+      });
+      setEventStatus(db, event, "noop");
+      return { decision: "noop", proposal, reason: "previous_run_in_flight" };
+    }
+
     const input = validate(def.inputSchema, envelope.payload);
     if (!input.valid) return humanNeeded(db, event, `invalid_input: ${input.errors[0]}`, at, ttlSeconds);
 

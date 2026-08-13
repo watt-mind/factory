@@ -1,6 +1,6 @@
 # Event runtime: scheduled clock events
 
-Status: **specified; not implemented**. Tracking: OPS-380.
+Status: **implemented** (OPS-381). Tracking: OPS-380 (this spec), OPS-381 (implementation).
 Parent: [event-runtime.md](event-runtime.md) §2 (`clock.tick.<loop>`), §3
 (isolation and capacity), §5.4 (idempotency), §12 (approval).
 

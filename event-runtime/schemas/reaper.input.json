@@ -1,0 +1,12 @@
+{
+  "title": "reaper input — a clock tick (docs/event-runtime-schedules.md §3)",
+  "type": "object",
+  "required": ["loop", "slot"],
+  "additionalProperties": false,
+  "properties": {
+    "loop": { "type": "string", "minLength": 1 },
+    "slot": { "type": "string", "minLength": 1 },
+    "cadenceSeconds": { "type": "integer", "minimum": 1 },
+    "skippedSlots": { "type": "integer", "minimum": 0 }
+  }
+}

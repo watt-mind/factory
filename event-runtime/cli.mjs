@@ -28,9 +28,11 @@ import { openDb } from "./lib/db.mjs";
 import { newWorkerId } from "./lib/ids.mjs";
 import { pruneArtifacts } from "./lib/artifacts.mjs";
 import { publishOutbox } from "./lib/outbox.mjs";
+import { autoApproveScheduled, emitDueTicks, scheduleView } from "./lib/schedules.mjs";
 import { resolveChains } from "./lib/chain.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
+import { approveProposal } from "./lib/proposals.mjs";
 import { startApi } from "./lib/api.mjs";
 import { claimNext, executeClaimed, reapExpiredLeases, runOnce } from "./lib/worker.mjs";
 import { deregisterWorker, heartbeat, registerWorker } from "./lib/workers.mjs";
@@ -53,6 +55,7 @@ usage: bun event-runtime/cli.mjs <command>
   proposals                      open proposals with TTL age
   agents                         registered agent definitions and event routing
   workers                        worker processes: host, labels, state, heartbeat
+  schedule                       recurring loops: cadence, approval, last fire, next due
   repos                          factory repos: team, base, dispatch vs report-only
   approve <proposal-id>          approve an open proposal
   reject <proposal-id> <reason>  reject an open proposal
@@ -186,7 +189,22 @@ async function serve(args) {
     busy = true;
     try {
       const nowMs = Date.now();
+      // Scheduled loops (OPS-381): a tick is an event, admitted through the
+      // same intake as a webhook. The eventId is the slot, so restarting
+      // serve mid-interval cannot double-fire.
+      const ticks = emitDueTicks(db, registry, { now: nowMs });
+      for (const t of ticks.emitted) {
+        log(`tick ${t.loop} @ ${t.slot}${t.skipped > 0 ? ` (stands for ${t.skipped} skipped slot(s))` : ""}`);
+      }
+      for (const err of ticks.errors) log(`schedule error: ${err}`);
+
       planAdmittedEvents(db, registry, { now: nowMs, policyVersion: pv, adapterOverride });
+
+      // Earned automation (§6): only loops that declare approval "auto", and
+      // always recorded with the scheduler as actor.
+      const auto = autoApproveScheduled(db, registry, approveProposal, { now: nowMs, policyVersion: pv });
+      for (const a of auto.approved) log(`schedule approved ${a.loop} → run ${a.runId} (actor: schedule)`);
+      for (const err of auto.errors) log(`schedule approval error: ${err}`);
       announceProposals();
       announceTransitions();
       reapExpiredLeases(db, { now: nowMs, policyVersion: pv });
@@ -581,6 +599,21 @@ async function repos(client) {
   }
 }
 
+async function schedule(client) {
+  const { schedules } = await client.schedules();
+  if (schedules.length === 0) {
+    console.log("no schedules registered (event-runtime/schedules.json)");
+    return;
+  }
+  console.log(`${pad("LOOP", 16)}${pad("EVERY", 8)}${pad("ENABLED", 9)}${pad("APPROVAL", 10)}${pad("CATCHUP", 9)}${pad("LAST SLOT", 26)}${pad("NEXT DUE", 26)}STATE`);
+  for (const s of schedules) {
+    const state = s.error ? `error: ${s.error}` : s.stopped ? `STOPPED (${s.intervalsLate} intervals late)` : s.enabled ? "ok" : "off";
+    console.log(
+      `${pad(s.loop, 16)}${pad(s.every, 8)}${pad(s.enabled ? "yes" : "no", 9)}${pad(s.approval, 10)}${pad(s.catchUp, 9)}${pad(s.lastSlot ?? "-", 26)}${pad(s.nextDue ?? "-", 26)}${state}`,
+    );
+  }
+}
+
 async function agents(client) {
   const { agents: defs } = await client.agents();
   for (const d of defs) {
@@ -637,6 +670,9 @@ async function main() {
 
     case "workers":
       return withClient(workers);
+
+    case "schedule":
+      return withClient(schedule);
 
     case "repos":
       return withClient(repos);

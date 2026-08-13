@@ -27,6 +27,7 @@ bun event-runtime/cli.mjs runs [state]                   # event runs, optionall
 bun event-runtime/cli.mjs proposals                   # open proposals with TTL age
 bun event-runtime/cli.mjs agents                      # registered agents and event routing
 bun event-runtime/cli.mjs workers                     # worker processes: host, labels, state, heartbeat
+bun event-runtime/cli.mjs schedule                    # recurring loops: cadence, last fire, next due
 bun event-runtime/cli.mjs requeue <source> <event-id> # re-plan a dead-lettered/human_needed event
 bun event-runtime/cli.mjs approve <proposal-id>
 bun event-runtime/cli.mjs reject <proposal-id> "<reason>"
@@ -56,6 +57,41 @@ bun event-runtime/web/serve.mjs                        # http://127.0.0.1:7382 (
 Dev loop: `cd event-runtime/web && bunx vite` (proxies /api to the control
 API). Keyboard-first: `⌘K` palette, `g o/p/r` to navigate, `j/k` + `Enter` on
 lists, `a`/`x` to approve/reject the selected proposal.
+
+## Scheduled loops (OPS-381)
+
+A tick is an **event**, not a job (docs/event-runtime-schedules.md). `serve`
+emits `clock.tick.<loop>` on a cadence and the ordinary intake → planner →
+proposal path takes over, so a recurring job gets the same dedup, audit
+trail, and approval gate as a webhook. `config/schedule.yaml`, launchd, and
+the orchestrator are untouched — this is a second, independent mechanism.
+
+```jsonc
+// event-runtime/schedules.json
+"reaper": { "every": "60m", "eventType": "clock.tick.reaper",
+            "catchUp": "none", "singleton": true,
+            "approval": "watched", "enabled": false }
+```
+
+- **Slots, not instants.** `eventId = clock:<loop>:<slot>`, so restarting
+  `serve` three times in one interval admits one tick.
+- **Catch-up** is declared per loop: `none` (default — one reaper now is what
+  six would have achieved, and the tick records how many slots it stands
+  for), `last`, or `all`.
+- **Singleton**: a loop whose previous run is still in flight plans a typed
+  NOOP (`previous_run_in_flight`), never a backlog.
+- **Approval is earned**: `watched` by default; `approval: auto` records
+  `actor: "schedule"` in the journal — never `"operator"`, because a run
+  nobody looked at must not be indistinguishable from one a human approved.
+- **Deterministic commands first** (§3 capacity): the reaper is
+  `orchestrator/reaper.mjs`, not an LLM — a scheduled agent would draw on the
+  same unobservable usage window as interactive sessions.
+
+`cli.mjs schedule` shows cadence, last fire, next due and whether a loop has
+stopped; an enabled loop silent for more than two intervals is a doctor
+anomaly, because silence is the failure mode a scheduler must not have. The
+shipped `reaper` loop is `enabled: false`: switching it on is a deliberate
+act.
 
 ## Artifact inputs (OPS-372)
 
@@ -222,6 +258,7 @@ spec (§12).
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
 | `lib/adapters/` | adapter registry: `claude` (real), `fake` (tests) (§6) |
 | `lib/artifacts.mjs` | content-addressed store: collect, serve, materialize declared inputs, retention (OPS-372) |
+| `lib/schedules.mjs` `schedules.json` | clock ticks: slots, catch-up, singleton, earned auto-approval (OPS-381) |
 | `lib/workers.mjs` | worker registry, heartbeats, placement predicate (OPS-233) |
 | `lib/repos.mjs` `lib/repository.mjs` | repos.yaml reader; mirror + pinned read-only checkout (OPS-228) |
 | `lib/adapters/actions.mjs` | closed action-list executor: approved action IDs → fixed SSH commands, probe evidence (OPS-208) |
