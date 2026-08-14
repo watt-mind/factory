@@ -68,6 +68,24 @@
       }
     }
   },
+  "ship-scan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "SHIP": {
+        "eventType": "factory.ship-apply.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "base": "$.artifact.base",
+          "deployBranch": "$.artifact.deployBranch",
+          "headSha": "$.artifact.headSha",
+          "deployHeadSha": "$.artifact.deployHeadSha",
+          "changelog": "$.artifact.changelog",
+          "plan": "$.artifact.plan"
+        }
+      }
+    }
+  },
   "ci-log-capture@1": {
     "recommendationField": "exitCode",
     "edges": {

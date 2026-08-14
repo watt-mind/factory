@@ -13,6 +13,8 @@ import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as fake from "./lib/adapters/fake.mjs";
+import { resolveChains } from "./lib/chain.mjs";
 import { RUNTIME_ROOT } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { admitEvent } from "./lib/intake.mjs";
@@ -21,6 +23,7 @@ import { approveProposal, getProposal, openProposals } from "./lib/proposals.mjs
 import { RegistryError, loadRegistry } from "./lib/registry.mjs";
 import { runState } from "./lib/lifecycle.mjs";
 import { SCHEDULE_SOURCE } from "./lib/schedules.mjs";
+import { runOnce } from "./lib/worker.mjs";
 
 const registry = loadRegistry();
 
@@ -392,5 +395,167 @@ describe("ship-apply approval is structurally human-only (WM-111)", () => {
     // The human operator's approval — the deploy-branch decision — succeeds.
     const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
     expect(approved).toEqual({ approved: true, runId: proposal.run_id });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chain e2e on the fake adapter. The shared fake (lib/adapters/fake.mjs) does
+// not know the ship contracts, so a local wrapper answers them the same way
+// the merge tests answer theirs — repo-keyed, contract-shaped — and delegates
+// everything else to the fake. The local runtime demo (port 7620) plays no
+// part here.
+// ---------------------------------------------------------------------------
+
+const FAKE_HEAD_SHA = "d".repeat(40);
+const FAKE_DEPLOY_HEAD_SHA = "e".repeat(40);
+
+function writeResult(workspaceDir, result) {
+  writeFileSync(path.join(workspaceDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
+}
+
+function shipScanArtifact(repo) {
+  const base = { repo, github: `watt-mind/${repo}`, changelog: [], plan: [] };
+  if (repo === "clean") {
+    return { ...base, recommendation: "NOOP", summary: "fake: nothing to ship", noopReason: "not_ahead" };
+  }
+  return {
+    ...base,
+    recommendation: "SHIP",
+    base: "develop",
+    deployBranch: "master",
+    headSha: FAKE_HEAD_SHA,
+    deployHeadSha: FAKE_DEPLOY_HEAD_SHA,
+    changelog: [{ sha: FAKE_HEAD_SHA, subject: "feat(app): fake thing (CLNT-901)", ticket: "CLNT-901" }],
+    plan: [
+      { action: "open_rc_pr", title: "release: develop → master (2026-08-14)", body: "- feat(app): fake thing\nCLNT-901" },
+      { action: "merge_rc_pr" },
+      { action: "smoke_check", url: `https://${repo}.projects.watt-mind.com`, smokeBranch: "develop", revisionField: "" },
+    ],
+    summary: `fake release candidate for ${repo}: 1 commit, CI green`,
+  };
+}
+
+const shipFake = {
+  async execute(opts) {
+    const { spec, workspaceDir } = opts;
+    if (spec.outputContract === "factory.ship-plan/v1") {
+      writeResult(workspaceDir, {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        reasonCode: "ok",
+        artifact: shipScanArtifact(spec.input.repo),
+        evidence: { commands: ["fake"], aheadBy: 1 },
+      });
+      return { exitCode: 0, timedOut: false };
+    }
+    if (spec.outputContract === "factory.ship-applied/v1") {
+      writeResult(workspaceDir, {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        reasonCode: "ok",
+        artifact: {
+          repo: spec.input.repo,
+          applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.action, action: i.action })),
+        },
+        evidence: { commands: ["fake"] },
+      });
+      return { exitCode: 0, timedOut: false };
+    }
+    return fake.execute(opts);
+  },
+};
+
+function harness() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-e2e-"));
+  const db = openDb(path.join(dir, "runtime.db"));
+  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-e2e-ws-"));
+  const adapters = { claude: shipFake, actions: shipFake, command: shipFake };
+  const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
+
+  async function approveNext(agentRef) {
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    const proposal = openProposals(db, {}).find((p) => p.spec?.agent === agentRef);
+    expect(proposal).toBeTruthy();
+    const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
+    const summary = await runOnce(db, registry, adapters, workerOpts);
+    return { proposal, runId: approved.runId, summary };
+  }
+  return { db, approveNext };
+}
+
+const shipEnvelope = (repo, eventId) => ({
+  schemaVersion: "factory.event/v1",
+  eventId,
+  type: "factory.ship.requested",
+  source: "operator",
+  subject: repo,
+  occurredAt: "2026-08-14T09:00:00Z",
+  correlationId: eventId,
+  payload: { repo },
+});
+
+describe("ship chain: scan → human-approved apply (WM-111)", () => {
+  test("a SHIP recommendation chains the pinned plan into a watched ship-apply proposal the human approves", async () => {
+    const { db, approveNext } = harness();
+    admitEvent(db, registry, shipEnvelope("bj29", "ship-1"));
+
+    const scan = await approveNext("ship-scan@1");
+    expect(scan.summary.terminalState).toBe("COMPLETED");
+
+    expect(resolveChains(db, registry).emitted).toBe(1);
+    const chainEvent = db
+      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
+      .get(`chain-${scan.runId}`);
+    expect(chainEvent.type).toBe("factory.ship-apply.requested");
+    expect(chainEvent.correlation_id).toBe("ship-1"); // inherited from the origin
+    expect(chainEvent.causation_id).toBe(scan.runId); // caused by the scan run
+
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    const apply = openProposals(db, {}).find((p) => p.spec?.agent === "ship-apply@1");
+    expect(apply.status).toBe("open"); // never applied without the human
+    expect(apply.spec.input).toEqual({
+      repo: "bj29",
+      github: "watt-mind/bj29",
+      base: "develop",
+      deployBranch: "master",
+      headSha: FAKE_HEAD_SHA, // the pin the probes hold the release to
+      deployHeadSha: FAKE_DEPLOY_HEAD_SHA,
+      changelog: [{ sha: FAKE_HEAD_SHA, subject: "feat(app): fake thing (CLNT-901)", ticket: "CLNT-901" }],
+      plan: [
+        { action: "open_rc_pr", title: "release: develop → master (2026-08-14)", body: "- feat(app): fake thing\nCLNT-901" },
+        { action: "merge_rc_pr" },
+        { action: "smoke_check", url: "https://bj29.projects.watt-mind.com", smokeBranch: "develop", revisionField: "" },
+      ],
+    });
+
+    // The chained proposal itself rejects the auto path — this approval IS
+    // the human deploy-branch decision, and no schedule can take it.
+    expect(() =>
+      approveProposal(db, registry, apply.id, { actor: SCHEDULE_SOURCE, policyVersion: PV }),
+    ).toThrow(/human_approval_only/);
+    expect(getProposal(db, apply.id).status).toBe("open");
+
+    const applied = await approveNext("ship-apply@1");
+    expect(applied.summary.terminalState).toBe("COMPLETED");
+    const row = db.query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`).get(applied.runId);
+    expect(JSON.parse(row.result_json).artifact.applied).toEqual([
+      { issueId: "open_rc_pr", action: "open_rc_pr" },
+      { issueId: "merge_rc_pr", action: "merge_rc_pr" },
+      { issueId: "smoke_check", action: "smoke_check" },
+    ]);
+    expect(JSON.parse(row.receipt_json).runId).toBe(applied.runId); // accepted with a receipt
+  });
+
+  test("a NOOP converges quietly — nothing chained, nothing proposed, nothing to approve", async () => {
+    const { db, approveNext } = harness();
+    admitEvent(db, registry, shipEnvelope("clean", "ship-2"));
+    const scan = await approveNext("ship-scan@1");
+    expect(scan.summary.terminalState).toBe("COMPLETED");
+    const result = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(scan.runId).result_json);
+    expect(result.artifact.noopReason).toBe("not_ahead");
+
+    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(openProposals(db, {}).find((p) => p.spec?.agent === "ship-apply@1")).toBeUndefined();
   });
 });
