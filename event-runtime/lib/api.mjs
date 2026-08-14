@@ -15,7 +15,7 @@ import http from "node:http";
 import path from "node:path";
 import { findArtifact } from "./artifacts.mjs";
 import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, webhookSecret } from "./config.mjs";
-import { admitEvent, verifyWebhook } from "./intake.mjs";
+import { admitEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { planEvent, requeueEvent } from "./planner.mjs";
@@ -483,6 +483,7 @@ export function createApi({
   db,
   registry,
   secret = webhookSecret(),
+  githubSecret = githubWebhookSecret(),
   now = () => Date.now(),
   policyVersion = "unknown",
   env = { name: environmentName(), home: runtimeHome(), adapter: null },
@@ -550,6 +551,50 @@ export function createApi({
         // Fail closed: nothing is parsed, nothing is written (§14).
         if (!verdict.ok) return send(res, 401, { error: verdict.reason });
         return admit(db, registry, res, raw, nowMs, onEvent);
+      }
+
+      // GitHub webhook intake (WM-112). The route seam lives here because
+      // intake.mjs has no HTTP layer; verification and translation are
+      // intake's. GitHub signs the raw body only (no timestamp) with its own
+      // header, so this is a separate path with a dedicated secret — the
+      // factory-envelope path above is byte-for-byte unchanged. Benign
+      // non-events answer 2xx `ignored` so GitHub does not disable the hook.
+      if (route === "POST /github") {
+        const raw = await readBody(req);
+        const verdict = verifyGitHubWebhook({
+          rawBody: raw,
+          signature: req.headers["x-hub-signature-256"],
+          secret: githubSecret,
+        });
+        if (!verdict.ok) return send(res, 401, { error: verdict.reason });
+        const parsed = parseJson(raw);
+        if (parsed.error) return send(res, 422, { errors: [parsed.error] });
+        let repoRegistry;
+        try {
+          repoRegistry = repos();
+        } catch (err) {
+          if (err instanceof RepoError) return send(res, 500, { error: err.message });
+          throw err;
+        }
+        const translated = translateGitHubEvent({
+          event: req.headers["x-github-event"],
+          deliveryId: req.headers["x-github-delivery"],
+          payload: parsed.value,
+          repos: repoRegistry,
+          now: nowMs,
+        });
+        if (!translated.ok) {
+          if (translated.ignored) return send(res, 200, { admitted: false, ignored: true, reason: translated.reason });
+          return send(res, 422, { errors: [translated.reason] });
+        }
+        const outcome = admitEvent(db, registry, translated.envelope, { now: nowMs });
+        if (!outcome.admitted && !outcome.duplicate) return send(res, 422, { errors: outcome.errors });
+        if (outcome.admitted) onEvent("admitted");
+        return send(res, 200, {
+          admitted: outcome.admitted,
+          duplicate: outcome.duplicate,
+          eventId: outcome.event.event_id,
+        });
       }
 
       if (route === "POST /replay") {
