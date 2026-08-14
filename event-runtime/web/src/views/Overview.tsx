@@ -26,6 +26,59 @@ import {
 const FEED_CAP = 50;
 
 /**
+ * One collapsed activity-feed row (WM-100): a consecutive span of state
+ * transitions belonging to the same run, keyed by its most recent entry.
+ */
+export interface ActivityGroup {
+  /** seq of the most recent entry in the span — stable render key. */
+  seq: number;
+  runId: string;
+  /** Starting state of the span (the `from` of its oldest transition). */
+  from: string | null;
+  /** Last (most recent) state — carries the state color badge. */
+  to: string;
+  /** Number of transitions collapsed into this row. */
+  count: number;
+  /** Actor / reason / attempt of the most recent transition. */
+  actor: string;
+  reason: string | null;
+  attempt: number | null;
+  /** Timestamp of the most recent transition. */
+  at: string;
+}
+
+/**
+ * Collapse consecutive transitions of the same run into one row (WM-100).
+ * `entries` is newest-first (as kept by useJournalFeed); the output preserves
+ * that order. A run interleaved with other runs' activity produces a separate
+ * group per consecutive span — only adjacent same-run entries merge.
+ */
+export function groupJournalEntries(entries: JournalEntry[]): ActivityGroup[] {
+  const groups: ActivityGroup[] = [];
+  for (const e of entries) {
+    const open = groups[groups.length - 1];
+    if (open && open.runId === e.runId) {
+      // `e` is older than the entries already merged: extend the span's start.
+      open.from = e.from;
+      open.count += 1;
+    } else {
+      groups.push({
+        seq: e.seq,
+        runId: e.runId,
+        from: e.from,
+        to: e.to,
+        count: 1,
+        actor: e.actor,
+        reason: e.reason,
+        attempt: e.attempt,
+        at: e.at,
+      });
+    }
+  }
+  return groups;
+}
+
+/**
  * Live activity feed off GET /journal: first fetch seeds the latest entries,
  * then each 2 s poll asks only for `since=<last head>` and prepends what is
  * new — an append-only log consumed incrementally, capped at FEED_CAP shown.
@@ -464,23 +517,28 @@ export function Overview({
                   : "No lifecycle activity yet."}
             </div>
           ) : (
-            <div className="rounded-md border border-(--border) px-3 py-1" aria-live="off">
-              {feed.entries.map((e) => (
-                <div key={e.seq} className="flex items-baseline gap-2 border-b border-(--border) py-1.5 last:border-0">
-                  <Ago iso={e.at} now={now} className="mono w-[52px] shrink-0 text-(--text-faint)" />
+            <div
+              className="max-h-[420px] overflow-y-auto rounded-md border border-(--border) px-3 py-1"
+              aria-live="off"
+            >
+              {groupJournalEntries(feed.entries).map((g) => (
+                <div key={g.seq} className="flex items-baseline gap-2 border-b border-(--border) py-1.5 last:border-0">
+                  <Ago iso={g.at} now={now} className="mono w-[52px] shrink-0 text-(--text-faint)" />
                   <JumpLink
-                    onClick={() => onJumpRun(e.runId)}
-                    title={e.runId}
+                    onClick={() => onJumpRun(g.runId)}
+                    title={g.runId}
                     className="max-w-36 shrink-0 truncate"
                   >
-                    {e.runId}
+                    {g.runId}
                   </JumpLink>
                   <span className="shrink-0">
-                    {e.from ?? "·"} → <StateBadge state={e.to} />
+                    {g.from ?? "·"} → {g.count > 1 ? "… → " : ""}
+                    <StateBadge state={g.to} />
                   </span>
                   <span className="truncate text-(--text-faint)">
-                    by {e.actor}
-                    {e.reason ? ` (${e.reason})` : ""}
+                    by {g.actor}
+                    {g.reason ? ` (${g.reason})` : ""}
+                    {g.count > 1 ? ` · ${g.count} transitions` : ""}
                   </span>
                 </div>
               ))}
