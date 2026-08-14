@@ -183,7 +183,7 @@ export function ActorRef({ actor, className }: { actor: string; className?: stri
 const isTextArtifact = (k: string) =>
   /^(transcript|diff|report|evidence)$/i.test(k) || /\.(txt|json|jsonl|md|log)$/i.test(k);
 
-function ArtifactRow({ a }: { a: ArtifactRef }) {
+export function ArtifactRow({ a }: { a: ArtifactRef }) {
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -233,7 +233,7 @@ function ArtifactRow({ a }: { a: ArtifactRef }) {
             </button>
           )}
           <a
-            href={artifactUrl(a.sha256)}
+            href={artifactUrl(a.sha256, a.kind)}
             target="_blank"
             rel="noreferrer"
             className="text-(--accent) hover:underline"

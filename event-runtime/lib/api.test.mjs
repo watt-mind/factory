@@ -623,6 +623,21 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(res.headers.get("content-type")).toContain("text/plain");
       expect(await res.text()).toBe("fake report for with-artifact\n");
 
+      expect(res.headers.get("content-disposition")).toBeNull();
+
+      const named = await fetch(`http://127.0.0.1:${port}/artifacts/${report.sha256}?name=report`);
+      expect(named.status).toBe(200);
+      expect(named.headers.get("content-disposition")).toBe(
+        `inline; filename="report-${report.sha256.slice(0, 12)}"`,
+      );
+
+      const hostile = await fetch(
+        `http://127.0.0.1:${port}/artifacts/${report.sha256}?name=${encodeURIComponent('a/b\\"c\r\nx')}`,
+      );
+      expect(hostile.headers.get("content-disposition")).toBe(
+        `inline; filename="a_b__c__x-${report.sha256.slice(0, 12)}"`,
+      );
+
       expect((await fetch(`http://127.0.0.1:${port}/artifacts/${"0".repeat(64)}`)).status).toBe(404);
       expect((await fetch(`http://127.0.0.1:${port}/artifacts/not-a-hash`)).status).toBe(404);
     } finally {

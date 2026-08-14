@@ -103,5 +103,6 @@ export const api = {
   workers: () => call<{ workers: Worker[] }>("GET", "/workers"),
 };
 
-/** Browser URL for a stored artifact's bytes (streamed by the control API). */
-export const artifactUrl = (sha256: string) => `/api/artifacts/${encodeURIComponent(sha256)}`;
+/** Browser URL for a stored artifact's bytes (streamed by the control API); `name` becomes the save-as filename. */
+export const artifactUrl = (sha256: string, name?: string) =>
+  `/api/artifacts/${encodeURIComponent(sha256)}${name ? `?name=${encodeURIComponent(name)}` : ""}`;

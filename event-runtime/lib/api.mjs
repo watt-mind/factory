@@ -703,9 +703,17 @@ export function createApi({
       if (req.method === "GET" && artifactGet) {
         const found = findArtifact(artifactsRoot(env.home), artifactGet[1]);
         if (!found) return send(res, 404, { error: `no artifact ${artifactGet[1]}` });
+        // Optional ?name= gives the browser a save-as filename instead of the
+        // bare hash. Sanitized to a header-safe charset; the sha12 suffix keeps
+        // two same-named artifacts distinguishable on disk.
+        const rawName = url.searchParams.get("name");
+        const safeName = rawName ? rawName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) : "";
         res.writeHead(200, {
           "content-type": looksLikeText(found.file) ? "text/plain; charset=utf-8" : "application/octet-stream",
           "content-length": found.sizeBytes,
+          ...(safeName
+            ? { "content-disposition": `inline; filename="${safeName}-${artifactGet[1].slice(0, 12)}"` }
+            : {}),
         });
         createReadStream(found.file).pipe(res);
         return;
