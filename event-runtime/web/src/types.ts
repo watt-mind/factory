@@ -306,6 +306,8 @@ export interface StatusView {
   runs: { byState: Partial<Record<RunState, number>> };
   /** Fleet counts; `live` and `busy` exclude stale workers, as the API does. */
   workers: { live: number; busy: number; stale: number };
+  /** Artifact store rollup; `orphans` counts files no result references. Cached ~10s server-side (`at` = when computed). */
+  artifacts: { files: number; bytes: number; orphans: number; orphanBytes: number; at?: string };
   anomalies: {
     expiredOpenProposals: string[];
     staleLeases: number;

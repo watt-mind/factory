@@ -11,6 +11,7 @@ import {
   Button,
   Disclosure,
   EVENT_STATUS_HUES,
+  humanSize,
   JsonBlock,
   JumpLink,
   Section,
@@ -371,6 +372,22 @@ export function Overview({
                 value={s.workers.stale}
                 hue={s.workers.stale > 0 ? "var(--hue-warn)" : undefined}
                 onClick={() => onNavigate("workers")}
+              />
+            </div>
+          </div>
+
+          {/* Stage 3: Artifact store health */}
+          <div>
+            <div className="mb-1.5 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
+              4. Artifact Store
+            </div>
+            <div className="grid grid-cols-3 gap-2 lg:max-w-md">
+              <StatTile label="artifacts · files" value={s.artifacts.files} />
+              <StatTile label="artifacts · size" value={humanSize(s.artifacts.bytes)} />
+              <StatTile
+                label="artifacts · orphans"
+                value={s.artifacts.orphans}
+                hue={s.artifacts.orphanBytes > 0 ? "var(--hue-warn)" : undefined}
               />
             </div>
           </div>
