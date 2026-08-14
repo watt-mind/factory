@@ -17,7 +17,13 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
 
   beforeAll(async () => {
     home = mkdtempSync(path.join(os.tmpdir(), "evrt-seed-test-"));
-    port = String(59100 + (process.pid % 500));
+    // Ask the OS for a genuinely free port instead of pid-modulo arithmetic:
+    // on a shared self-hosted runner a leftover server from an earlier
+    // (aborted) job can squat any precomputed port, and the seed then fails
+    // in milliseconds against a stranger's already-seeded state (WM-89).
+    const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+    port = String(probe.port);
+    probe.stop(true);
 
     serveChild = spawn("bun", [CLI, "serve", "--adapter-override", "fake", "--port", port], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
