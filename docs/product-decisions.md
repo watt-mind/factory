@@ -36,6 +36,19 @@ container every agent must live in, and not a replacement for the nav rail.
 - Pinning a specific run as a document tab on the same strip is OPS-357
   (v2) — not this decision.
 
+## Factory self-dispatch (OPS-463)
+
+Decided 2026-08-14. The factory repo is an ordinary dispatch target:
+`report_only` removed, `worktree_up`/`worktree_down` point at
+`bin/worktree-up.sh`/`bin/worktree-down.sh` (isolated checkout, ports, runtime
+home, demo runtime), `max_in_flight: 20` for throughput, Linear routing
+WM / Factory. No `worktree_warm` — `bin/worktree-warm.sh` does not exist in
+this repo and the field is optional; do not invent it. Containment is process,
+not trust: dispatched tickets never touch the live control plane's runtime
+home, and a merged change only runs after the operator pulls and restarts
+(architecture §4). Loop schedules for factory are follow-up scope, not part of
+this decision.
+
 ## Janitor Dry + Apply (OPS-301)
 
 See that ticket. Dry is default; Apply is behind a typed confirm of the repo

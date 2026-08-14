@@ -225,8 +225,10 @@ describe("dispatch-completion edge: a finished dispatch re-fires the work-scan (
 
 /** The repos in config/repos.yaml that are NOT report_only, enumerated by hand
  *  from the actual file — dispatch doc §5: report_only repos are never loop
- *  targets. Everything else there (coach-wattz, watts-mobile, proxies,
- *  hdkiller, eslint-config, factory) is report_only. */
+ *  targets. coach-wattz, watts-mobile, proxies, hdkiller and eslint-config
+ *  are report_only. factory is dispatchable since OPS-463 but its loop
+ *  schedules are deliberate follow-up scope, so it is asserted absent below
+ *  alongside the report_only set rather than listed here. */
 const DISPATCHABLE = ["bj29", "wm-home", "legalease", "cashsaas"];
 
 const loopEntry = (eventType, repo, every) => ({
@@ -248,7 +250,7 @@ describe("loop schedules ship disabled (WM-112)", () => {
     }
   });
 
-  test("no loop targets a report_only repo, and no loop anywhere declares approval auto", () => {
+  test("no loop targets a report_only repo (nor factory, whose loops are follow-up scope), and no loop anywhere declares approval auto", () => {
     for (const repo of ["coach-wattz", "watts-mobile", "proxies", "hdkiller", "eslint-config", "factory"]) {
       expect(registry.schedules[`work-${repo}`]).toBeUndefined();
       expect(registry.schedules[`merge-${repo}`]).toBeUndefined();

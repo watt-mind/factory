@@ -1,8 +1,8 @@
 # Per-repo facts the loop needs. One entry only, on purpose.
 #
-# BJ29 is currently the only repo authorized for automated dispatch. Repos
-# need industrialized worktrees before dispatch can be enabled; a repo may still
-# configure its teardown script while remaining `report_only` for dispatch.
+# Repos need industrialized worktrees before dispatch can be enabled; a repo
+# may still configure its teardown script while remaining `report_only` for
+# dispatch. Entries without `report_only: true` are dispatch targets.
 
 repos:
   - name: bj29
@@ -344,19 +344,37 @@ repos:
     # A lint-preset package has no runtime surface to protect (WM-47).
     escalate_paths: []
 
-  # The factory itself — exists so run-agent.sh can target this checkout
-  # (currently only the retro stage: cwd here makes friction.mjs/economics.mjs
-  # and docs/friction-log.md resolve naturally). report_only keeps dispatch
-  # from ever claiming product tickets into the control plane; retro edits
-  # shared/ in place and its changes land by ordinary commit/PR, not worktree.
+  # The factory itself — self-dispatch authorized by OPS-463. The old
+  # report_only rationale ("no worktree tooling") is obsolete: bin/worktree-up.sh
+  # and bin/worktree-down.sh give each dispatched ticket an isolated checkout,
+  # ports, runtime home, and demo runtime — never the live control plane's home.
+  # A dispatched change only takes effect after PR → CI → merge → the operator
+  # pulls and restarts; the deploy branch (main) stays human.
+  # NOTE (OPS-463 AC deviation): no worktree_warm here on purpose — the AC named
+  # bin/worktree-warm.sh, but that script does not exist in this repo and the
+  # field is optional. Do not add it until the script does.
+  # run-agent.sh still targets this checkout for the retro stage (cwd here makes
+  # friction.mjs/economics.mjs and docs/friction-log.md resolve naturally).
   - name: factory
     path: ~/Develop/factory
     github: watt-mind/factory
-    team: OPS
+
+    # Linear routing (linear.md §1-2) — factory tickets moved to WM / Factory
+    # on 2026-08-05; the earlier team: OPS routing was stale.
+    team: WM
+    project: Factory
+
     base: develop
     deploy_branch: main          # release target is main, not the master fallback
+
+    # Worktrees — MANDATORY here, this repo ships the scripts.
+    worktree_up: bin/worktree-up.sh
+    worktree_down: bin/worktree-down.sh
     worktree_root: ~/Develop/.worktrees/factory
-    report_only: true            # never a dispatch target — no worktree tooling
+
+    # Cap on concurrent ticket agents; per repo, not per supervisor, like bj29.
+    max_in_flight: 20
+
     verify: bun test && bun build/emit.mjs --check
 
     # The control plane holds no client data and serves no traffic. Its risky
