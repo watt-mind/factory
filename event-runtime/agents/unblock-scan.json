@@ -1,0 +1,30 @@
+{
+  "id": "unblock-scan",
+  "version": 1,
+  "prompt": "agents/unblock-scan.md",
+  "input_schema": "schemas/unblock-scan.input.json",
+  "output_schema": "schemas/unblock-scan.output.json",
+  "output_contract": "factory.unblock-plan/v1",
+  "workspace": {
+    "type": "repository",
+    "checkoutDir": "repo",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:read",
+      "repo:read"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 900,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/unblock-scan.md": "sha256:6a06493735dd5dafaf9a176390bf8d4930096bf32ca1e8cfce6c49f80a1d591c",
+    "schemas/unblock-scan.input.json": "sha256:68ea3a420c8f51a6a50046e2a7cf4a1f1579b0aeb1d603820e2d4237d5bb9c43",
+    "schemas/unblock-scan.output.json": "sha256:1ccccd541b192dc4a300a1a5ebfe36485fb2ed97effc4f0d6bfcc1ab7e757c65"
+  }
+}

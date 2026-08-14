@@ -1,0 +1,26 @@
+{
+  "title": "factory.unblock-plan/v1 output artifact — typed, per-issue hold releases backed by new evidence",
+  "type": "object",
+  "required": ["recommendation", "repo", "plan", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "recommendation": { "enum": ["UNBLOCK", "NOOP"] },
+    "repo": { "type": "string", "minLength": 1 },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issueId", "action", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "issueId": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "action": {
+            "enum": ["release-hold", "release-to-triage", "comment-evidence"]
+          },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}

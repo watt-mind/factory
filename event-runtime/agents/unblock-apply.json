@@ -1,0 +1,65 @@
+{
+  "id": "unblock-apply",
+  "version": 1,
+  "prompt": "agents/unblock-apply.md",
+  "input_schema": "schemas/unblock-apply.input.json",
+  "output_schema": "schemas/unblock-applied.output.json",
+  "output_contract": "factory.unblock-applied/v1",
+  "itemsField": "plan",
+  "itemKey": "issueId",
+  "actionRegistry": {
+    "release-hold": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{issueId}",
+        "Todo",
+        "--remove",
+        "ai:blocked",
+        "--add",
+        "ai:agent-ready"
+      ]
+    },
+    "release-to-triage": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{issueId}",
+        "Triage",
+        "--remove",
+        "ai:blocked"
+      ]
+    },
+    "comment-evidence": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "comment",
+        "{issueId}",
+        "unblock: {reason}"
+      ]
+    }
+  },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/unblock-apply.md": "sha256:5f12a41ac1e9b696672f095177fc6061d49040bb837a725d06a91fd9fa8e2193",
+    "schemas/unblock-apply.input.json": "sha256:a983e831d67dbb30352697e457a7197f18776e1de184731be7ed88b9ea1d8f41",
+    "schemas/unblock-applied.output.json": "sha256:4b1ed38f71ca16a56bc7bc2582c629580fe7b57614ea2b12b0c289c9e6bf611b"
+  }
+}

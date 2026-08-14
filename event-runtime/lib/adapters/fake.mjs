@@ -147,6 +147,42 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace
     });
     return { exitCode: 0, timedOut: false };
   }
+  if (spec.outputContract === "factory.unblock-plan/v1") {
+    // Repo "clean" → NOOP; anything else releases one hold with evidence.
+    const repo = spec.input?.repo;
+    const clean = repo === "clean";
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: clean
+        ? { recommendation: "NOOP", repo, plan: [], summary: "fake: no hold has new evidence" }
+        : {
+            recommendation: "UNBLOCK",
+            repo,
+            plan: [
+              { issueId: "CLNT-998", action: "release-to-triage", reason: "fake: dependency merged" },
+              { issueId: "CLNT-998", action: "comment-evidence", reason: "fake: dependency merged" },
+            ],
+            summary: `fake unblock of ${repo}`,
+          },
+      evidence: { commands: ["fake"], holdsSeen: 1 },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.unblock-applied/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repo: spec.input.repo,
+        applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.issueId, action: i.action })),
+      },
+      evidence: { commands: ["fake"] },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
   if (spec.outputContract === "factory.triage-applied/v1") {
     writeResult(workspaceDir, {
       schemaVersion: "factory.agent-result/v1",
