@@ -94,7 +94,10 @@ export function safeChildEnvironment(env = {}) {
 }
 
 /**
- * Build argv for spawning claude (OPS-407, WM-62, WM-108).
+ * Build argv for spawning claude (OPS-407, WM-62, WM-108, WM-137).
+ * Mutating runs (`mutating !== false`) pass `--dangerously-skip-permissions`
+ * to prevent Claude Code's auto-classifier from blocking unattended tool calls (WM-137).
+ * Read-only runs (`mutating: false`) enforce repository write protections via `--settings`.
  * Enforces --allowedTools and --strict-mcp-config with the repo's declared MCP servers.
  * A definition declaring `limits.budget_usd` gets `--max-budget-usd` — the
  * runaway guard tick.mjs passes every ticket process (policy.yaml `budget`:
@@ -106,6 +109,9 @@ export function safeChildEnvironment(env = {}) {
  */
 export function buildClaudeArgv({ prompt, def, allowedTools = deriveAllowedTools(def), mcpConfig, settingsPath, model }) {
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+  if (def?.mutating !== false) {
+    args.push("--dangerously-skip-permissions");
+  }
   if (typeof model === "string" && model !== "" && model !== DEFAULT_MODEL) {
     args.push("--model", model);
   }

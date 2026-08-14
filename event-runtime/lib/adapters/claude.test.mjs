@@ -171,7 +171,7 @@ describe("deriveAllowedTools (OPS-407)", () => {
   });
 });
 
-describe("buildClaudeArgv (OPS-407, WM-62)", () => {
+describe("buildClaudeArgv (OPS-407, WM-62, WM-137)", () => {
   test("generates a sandbox policy that permits output but denies repository writes", () => {
     const settings = buildClaudeSettings({
       spec: { workspace: { type: "repository", checkoutDir: "repo" } },
@@ -186,6 +186,33 @@ describe("buildClaudeArgv (OPS-407, WM-62)", () => {
       allowUnsandboxedCommands: false,
       filesystem: { denyWrite: ["/private/tmp/run-a1/repo"] },
     });
+  });
+
+  test("mutating runs include --dangerously-skip-permissions and omit --settings (WM-137)", () => {
+    const mutatingDef = { mutating: true, capabilities: { tools: ["Bash", "Read", "Write"] } };
+    const argv = buildClaudeArgv({ prompt: "Fix issue", def: mutatingDef });
+
+    expect(argv).toContain("--dangerously-skip-permissions");
+    expect(argv).not.toContain("--settings");
+    expect(argv).toContain("--allowedTools");
+    expect(argv).toContain("Bash,Read,Write");
+  });
+
+  test("read-only runs omit --dangerously-skip-permissions and include --settings (WM-137)", () => {
+    const readOnlyDef = { mutating: false };
+    const argv = buildClaudeArgv({ prompt: "Inspect repo", def: readOnlyDef, settingsPath: "/tmp/policy.json" });
+
+    expect(argv).not.toContain("--dangerously-skip-permissions");
+    expect(argv).toContain("--settings");
+    expect(argv).toContain("/tmp/policy.json");
+    expect(argv).toContain("--allowedTools");
+    expect(argv).toContain("Read,Grep,Glob,Bash,Write,Edit");
+  });
+
+  test("default definition with unspecified mutating passes --dangerously-skip-permissions (WM-137)", () => {
+    const def = {};
+    const argv = buildClaudeArgv({ prompt: "Default run", def });
+    expect(argv).toContain("--dangerously-skip-permissions");
   });
 
   test("constructs argv with --allowedTools, --mcp-config, and --strict-mcp-config", () => {
@@ -664,6 +691,68 @@ if (behavior === "emit_denial_then_recovery") {
       },
     });
     expect(outcome.policyDenials).toEqual([{ tool: "Bash", rule: "Claude requested permissions to use Bash, but you haven't granted it yet." }]);
+  });
+
+  test("mutating dispatch execution passes --dangerously-skip-permissions and omits settings policy (WM-137)", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const mutatingDef = {
+      ref: "dispatch@1",
+      promptPath: promptFile,
+      mutating: true,
+      capabilities: { tools: ["Bash", "Read", "Write", "Edit"] },
+    };
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: mutatingDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        ANTHROPIC_API_KEY: "sk-must-be-stripped",
+        FACTORY_TEST_BEHAVIOR: "normal",
+        FACTORY_TEST_RECORD_FILE: recordFile,
+      },
+    });
+
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false, policyDenials: [] });
+    const record = JSON.parse(readFileSync(recordFile, "utf8"));
+    expect(record.argv).toContain("--dangerously-skip-permissions");
+    expect(record.argv).not.toContain("--settings");
+    expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(existsSync(path.join(workspaceDir, ".claude-policy.json"))).toBe(false);
+  });
+
+  test("read-only dispatch execution enforces settings policy and omits --dangerously-skip-permissions (WM-137)", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const readOnlyDef = {
+      ref: "status-report@1",
+      promptPath: promptFile,
+      mutating: false,
+      capabilities: { tools: ["Read", "Grep"] },
+    };
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: readOnlyDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        ANTHROPIC_API_KEY: "sk-must-be-stripped",
+        FACTORY_TEST_BEHAVIOR: "normal",
+        FACTORY_TEST_RECORD_FILE: recordFile,
+      },
+    });
+
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false, policyDenials: [] });
+    const record = JSON.parse(readFileSync(recordFile, "utf8"));
+    expect(record.argv).not.toContain("--dangerously-skip-permissions");
+    expect(record.argv).toContain("--settings");
+    expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(existsSync(path.join(workspaceDir, ".claude-policy.json"))).toBe(true);
   });
 
   test("spawn error (e.g. claude not on PATH) rejects promise", async () => {
