@@ -19,7 +19,7 @@ import {
   copyText,
   notify,
 } from "../components/ui";
-import { ActorRef, ArtifactRow, TERMINAL } from "./Runs";
+import { ActorRef, ArtifactRow, RunFailureBanner, TERMINAL } from "./Runs";
 
 /**
  * Full-page run view (`#/run/:id`, webui doc §10.11) — the trace at a
@@ -172,6 +172,9 @@ export function RunFull({
             {detail.isError ? "Could not load run detail." : "Loading run…"}
           </div>
         ) : (
+          <>
+          {/* The failure first, full width under the header (WM-93) — renders nothing for other states. */}
+          <RunFailureBanner state={d.run.state} lifecycle={d.lifecycle} className="mx-6 mt-6 mb-0" />
           <div className="flex flex-col gap-8 p-6 xl:flex-row">
             {/* Main column: the trace, at a readable measure — the point of the page. */}
             <main className="min-w-0 flex-1 xl:max-w-[900px]">
@@ -330,6 +333,7 @@ export function RunFull({
               )}
             </aside>
           </div>
+          </>
         )}
       </div>
 
