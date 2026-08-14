@@ -723,6 +723,179 @@ export function Dialog({
   );
 }
 
+/** Segmented tab strip (WM-76). Disabled tabs stay clickable so the owner can state why. */
+export function Tabs({
+  tabs,
+  active,
+  onSelect,
+  label,
+}: {
+  tabs: { id: string; label: ReactNode; disabled?: boolean; title?: string }[];
+  active: string;
+  onSelect: (id: string) => void;
+  label: string;
+}) {
+  return (
+    <div role="tablist" aria-label={label} className="inline-flex gap-0.5 rounded-md border border-(--border) bg-(--surface-0) p-0.5">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          role="tab"
+          aria-selected={active === t.id}
+          aria-disabled={t.disabled || undefined}
+          title={t.title}
+          onClick={() => onSelect(t.id)}
+          className={`rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
+            active === t.id
+              ? "bg-(--surface-3) text-(--text)"
+              : t.disabled
+                ? "text-(--text-faint) opacity-60"
+                : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Read-only value badge (schema `const` fields). */
+export function Pill({ children, title }: { children: ReactNode; title?: string }) {
+  return (
+    <span
+      title={title}
+      className="mono inline-flex items-center rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[11px] text-(--text-dim)"
+    >
+      {children}
+    </span>
+  );
+}
+
+/** Text input with datalist suggestions and free write-in (WM-76 repo picker). */
+export function SuggestInput({
+  id,
+  value,
+  onChange,
+  suggestions,
+  placeholder,
+  ariaLabel,
+}: {
+  id?: string;
+  value: string;
+  onChange: (value: string) => void;
+  suggestions?: string[] | null;
+  placeholder?: string;
+  ariaLabel?: string;
+}) {
+  const listId = useId();
+  return (
+    <>
+      <input
+        id={id}
+        type="text"
+        value={value}
+        list={suggestions && suggestions.length > 0 ? listId : undefined}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+        spellCheck={false}
+        className="mono w-full rounded-md border border-(--border) bg-(--surface-0) px-2 py-1 text-[12px] text-(--text) outline-none focus:border-(--border-strong)"
+      />
+      {suggestions && suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((s) => (
+            <option key={s} value={s} />
+          ))}
+        </datalist>
+      )}
+    </>
+  );
+}
+
+/** Chip list editor for arrays of strings: add via input (Enter or +), remove per chip. */
+export function ChipInput({
+  id,
+  values,
+  onChange,
+  suggestions,
+  placeholder,
+}: {
+  id?: string;
+  values: string[];
+  onChange: (values: string[]) => void;
+  suggestions?: string[] | null;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState("");
+  const listId = useId();
+  const add = (raw: string) => {
+    const v = raw.trim();
+    if (!v) return;
+    if (!values.includes(v)) onChange([...values, v]);
+    setDraft("");
+  };
+  return (
+    <div className="rounded-md border border-(--border) bg-(--surface-0) p-1.5">
+      {values.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1">
+          {values.map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onChange(values.filter((x) => x !== v))}
+              title={`Remove ${v}`}
+              aria-label={`Remove ${v}`}
+              className="group inline-flex cursor-pointer items-center gap-1 rounded-md border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[11px] hover:border-(--border-strong) hover:bg-(--surface-3)"
+            >
+              <span className="mono">{v}</span>
+              <span aria-hidden className="text-(--text-faint) group-hover:text-(--text)">
+                ×
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-1">
+        <input
+          id={id}
+          type="text"
+          value={draft}
+          list={suggestions && suggestions.length > 0 ? listId : undefined}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            e.stopPropagation();
+            add(draft);
+          }}
+          placeholder={placeholder ?? "add…"}
+          spellCheck={false}
+          className="mono w-full rounded border-0 bg-transparent px-1 py-0.5 text-[12px] text-(--text) outline-none placeholder:text-(--text-faint)"
+        />
+        {suggestions && suggestions.length > 0 && (
+          <datalist id={listId}>
+            {suggestions
+              .filter((s) => !values.includes(s))
+              .map((s) => (
+                <option key={s} value={s} />
+              ))}
+          </datalist>
+        )}
+        <button
+          type="button"
+          onClick={() => add(draft)}
+          disabled={!draft.trim()}
+          className="rounded border border-(--border) px-1.5 py-0.5 text-[11px] text-(--text-dim) hover:bg-(--surface-2) disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          add
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Inline verb-failure line: 404/409 are normal raced outcomes (spec §6). */
 export function VerbError({ error }: { error: unknown }) {
   if (!error) return null;
