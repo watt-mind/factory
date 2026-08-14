@@ -1,0 +1,104 @@
+{
+  "title": "ship-apply input — the approved, double-SHA-pinned release plan whose watched approval IS the human deploy-branch decision",
+  "type": "object",
+  "required": ["repo", "github", "base", "deployBranch", "headSha", "deployHeadSha", "changelog", "plan"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short repo name as configured in config/repos.yaml — substituted into the SMOKE RED notification"
+    },
+    "github": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "description": "GitHub owner/name slug the release commands run against — anchored so it substitutes safely into the closed argv templates"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "description": "Integration branch (the release PR's head) — anchored branch name"
+    },
+    "deployBranch": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "description": "Deploy branch (the release PR's base) — anchored branch name. Merging it is permanently the human's watched approval (docs/event-runtime-dispatch.md §7)"
+    },
+    "headSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Base tip the scan reviewed — open_rc_pr and merge_rc_pr probe the live heads and refuse if this pin no longer matches"
+    },
+    "deployHeadSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Deploy tip at scan time — merge_rc_pr refuses if the deploy branch moved off this pin since the scan"
+    },
+    "changelog": {
+      "type": "array",
+      "description": "The scan's ship-list, carried along so the approved spec records exactly what the human agreed to ship",
+      "items": {
+        "type": "object",
+        "required": ["sha", "subject"],
+        "additionalProperties": false,
+        "properties": {
+          "sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$",
+            "description": "Commit SHA (full or abbreviated)"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit subject line"
+          },
+          "ticket": {
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]+$",
+            "description": "Linear ticket pulled from the subject, when present"
+          }
+        }
+      }
+    },
+    "plan": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Approved release actions from the ship-scan proposal, applied in order — a failed item stops the plan",
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": ["open_rc_pr", "merge_rc_pr", "smoke_check"],
+            "description": "Closed-registry action to apply — anything else refuses the whole plan before executing any item"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "open_rc_pr: release PR title — passed as a single argv element, never spliced into script text"
+          },
+          "body": {
+            "type": "string",
+            "description": "open_rc_pr: release PR body (the changelog; ticket IDs on their own lines, never Fixes)"
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https?://[^\\s]+$",
+            "description": "smoke_check: deployment metadata endpoint or origin (an origin is queried at /version.json, exactly as factory status does)"
+          },
+          "smokeBranch": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+            "description": "smoke_check: branch the deployment tracks — the endpoint must serve this branch's live tip"
+          },
+          "revisionField": {
+            "type": "string",
+            "pattern": "^[A-Za-z_]*$",
+            "description": "smoke_check: configured deployment.revision_field, or empty for the default candidates"
+          }
+        }
+      }
+    }
+  }
+}

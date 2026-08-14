@@ -1,0 +1,74 @@
+{
+  "id": "ship-apply",
+  "version": 1,
+  "prompt": "agents/ship-apply.md",
+  "input_schema": "schemas/ship-apply.input.json",
+  "output_schema": "schemas/ship-applied.output.json",
+  "output_contract": "factory.ship-applied/v1",
+  "itemsField": "plan",
+  "itemKey": "action",
+  "actionRegistry": {
+    "open_rc_pr": {
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu\nactual=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\nif [ \"$actual\" != \"$3\" ]; then\n  echo \"refusing open_rc_pr: base $2 head is $actual, not the scanned $3 — a moved base needs a fresh ship scan, not a release PR\" >&2\n  exit 1\nfi\nexisting=\"$(gh pr list --repo \"$1\" --base \"$4\" --head \"$2\" --state open --json number --jq length)\"\nif [ \"$existing\" != \"0\" ]; then\n  echo \"reusing the existing open release PR ($2 -> $4)\"\n  exit 0\nfi\nexec gh pr create --repo \"$1\" --base \"$4\" --head \"$2\" --title \"$5\" --body \"$6\"",
+        "open_rc_pr",
+        "{github}",
+        "{base}",
+        "{headSha}",
+        "{deployBranch}",
+        "{title}",
+        "{body}"
+      ]
+    },
+    "merge_rc_pr": {
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu\ndeploy_actual=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\nif [ \"$deploy_actual\" != \"$3\" ]; then\n  echo \"refusing merge_rc_pr: deploy branch $2 head is $deploy_actual, not the scanned $3 — the deploy branch moved since the scan; re-scan, never merge blind\" >&2\n  exit 1\nfi\npr=\"$(gh pr list --repo \"$1\" --base \"$2\" --head \"$4\" --state open --json number --jq \".[0].number // empty\")\"\nif [ -z \"$pr\" ]; then\n  echo \"refusing merge_rc_pr: no open release PR $4 -> $2 on $1\" >&2\n  exit 1\nfi\npr_head=\"$(gh pr view \"$pr\" --repo \"$1\" --json headRefOid --jq .headRefOid)\"\nif [ \"$pr_head\" != \"$5\" ]; then\n  echo \"refusing release PR #$pr: head $pr_head is not the scanned $5 — a moved head needs a fresh ship scan, not a merge\" >&2\n  exit 1\nfi\ngh pr checks \"$pr\" --repo \"$1\" --watch --fail-fast\nexec gh pr merge \"$pr\" --repo \"$1\" --merge",
+        "merge_rc_pr",
+        "{github}",
+        "{deployBranch}",
+        "{deployHeadSha}",
+        "{base}",
+        "{headSha}"
+      ]
+    },
+    "smoke_check": {
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu\nexpected=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\ndeadline=$(( $(date +%s) + ${SHIP_SMOKE_DEADLINE_SECONDS:-600} ))\ndeployed=\"\"\nwhile :; do\n  deployed=\"$(SMOKE_URL=\"$3\" SMOKE_REVISION_FIELD=\"$6\" FACTORY_ROOT_DIR=\"$4\" bun -e 'const { deployedRevision, metadataUrl } = await import(process.env.FACTORY_ROOT_DIR + \"/lib/repo-status.mjs\"); const res = await fetch(metadataUrl(process.env.SMOKE_URL), { headers: { accept: \"application/json\" } }); if (!res.ok) { console.error(\"endpoint answered \" + res.status); process.exit(1); } const rev = deployedRevision(await res.json(), process.env.SMOKE_REVISION_FIELD || null); if (!rev) { console.error(\"endpoint did not expose a revision\"); process.exit(1); } console.log(rev.value);')\" || deployed=\"\"\n  if [ -n \"$deployed\" ] && [ \"${#deployed}\" -ge 7 ]; then\n    case \"$expected\" in\n      \"$deployed\"*) echo \"smoke green: $2 serves $deployed\"; exit 0 ;;\n    esac\n  fi\n  if [ \"$(date +%s)\" -ge \"$deadline\" ]; then break; fi\n  sleep 15\ndone\nfactory notify \"SMOKE RED $5: $3 serves ${deployed:-no revision}, expected $2@$expected — deploy did not verify; never auto-revert, the human decides\"\necho \"smoke red: $3 serves ${deployed:-no revision}, expected $expected\" >&2\nexit 1",
+        "smoke_check",
+        "{github}",
+        "{smokeBranch}",
+        "{url}",
+        "{factoryRoot}",
+        "{repo}",
+        "{revisionField}"
+      ]
+    }
+  },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "gh:write",
+      "notify:telegram"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 3600,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/ship-apply.md": "sha256:0c3d40d2b6b6dbe9b3cb27b8ec85017b7bba4c0b71f92845899df8d51a24caa3",
+    "schemas/ship-apply.input.json": "sha256:34c7691643e63e88e4bf68e3f42bba19012be0dc061cda38bfabcda3c4dd17d3",
+    "schemas/ship-applied.output.json": "sha256:e73f513f50197b344ff320f2f881464028991c6dfb7689790fe3039456ce821b"
+  }
+}

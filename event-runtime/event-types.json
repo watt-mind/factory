@@ -209,6 +209,15 @@
     ],
     "proposalTtlSeconds": 1800
   },
+  "factory.ship-apply.requested": {
+    "agent": "ship-apply@1",
+    "adapter": "actions",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800,
+    "humanApprovalOnly": true
+  },
   "factory.ticket.dispatched": {
     "observe": true
   },

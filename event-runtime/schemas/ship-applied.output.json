@@ -1,0 +1,33 @@
+{
+  "title": "factory.ship-applied/v1 output artifact — which release steps actually ran",
+  "type": "object",
+  "required": ["repo", "applied"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Echo of the short repo name from the input"
+    },
+    "applied": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Every release step that actually ran, in order — a failed step ends the list and fails the attempt (a red smoke is a failed attempt, never a silent success)",
+      "items": {
+        "type": "object",
+        "required": ["issueId", "action"],
+        "additionalProperties": false,
+        "properties": {
+          "issueId": {
+            "enum": ["open_rc_pr", "merge_rc_pr", "smoke_check"],
+            "description": "The item-list adapter records the item key under the fixed name issueId (lib/adapters/actions.mjs); ship-apply's itemKey is the action itself — a release plan has one step per action, not one per ticket"
+          },
+          "action": {
+            "enum": ["open_rc_pr", "merge_rc_pr", "smoke_check"],
+            "description": "Registered action id that ran for this step"
+          }
+        }
+      }
+    }
+  }
+}

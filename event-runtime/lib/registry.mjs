@@ -172,6 +172,15 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
       if (approval === "auto" && !schedule.enabled) {
         throw new RegistryError(`schedules.json: ${loop} declares approval "auto" but is not enabled — decide one`);
       }
+      // The ship chain's deploy-branch merge is PERMANENTLY watched: that
+      // approval IS the human master decision, so the config that would
+      // delete it cannot load, whoever writes it and however good the track
+      // record looks (docs/event-runtime-dispatch.md §7, WM-111).
+      if (approval === "auto" && eventTypes[schedule.eventType]?.humanApprovalOnly === true) {
+        throw new RegistryError(
+          `schedules.json: ${loop} declares approval "auto" but ${schedule.eventType} is humanApprovalOnly — the deploy-branch decision is permanently the human's watched approval (docs/event-runtime-dispatch.md §7, WM-111)`,
+        );
+      }
       // A static payload rides along on every tick (repo-scoped loops need
       // {repo}). Tick fields always win the merge, so a payload claiming
       // loop/slot identity is a config error, not a spoofing vector.

@@ -16,6 +16,15 @@ import { runState, transition } from "./lifecycle.mjs";
 import { buildRunSpec } from "./planner.mjs";
 import { getEventType } from "./registry.mjs";
 
+/**
+ * The one human actor in the MVP (lib/api.mjs §14). An event type flagged
+ * `humanApprovalOnly` (docs/event-runtime-dispatch.md §7, WM-111) accepts an
+ * approval from this actor and no other — the ship chain's deploy-branch
+ * decision is permanently the human's, and the earned-automation ratchet must
+ * not be able to consume it.
+ */
+const HUMAN_ACTOR = "operator";
+
 function isExpired(proposal, now) {
   return now - Date.parse(proposal.created_at) > proposal.ttl_seconds * 1000;
 }
@@ -98,12 +107,25 @@ export function approveProposal(db, registry, id, { actor, now = Date.now(), pol
     if (proposal.decision !== "run") throw new Error(`proposal ${id} decision is '${proposal.decision}' — only 'run' proposals are approvable`);
 
     const envelope = loadEnvelope(db, proposal);
+    // Structural no-auto-approval (docs/event-runtime-dispatch.md §7, WM-111):
+    // a humanApprovalOnly event type rejects every non-operator actor —
+    // schedule auto-approval included — fail-closed, before any state moves.
+    // This is the single choke point every approval path goes through
+    // (operator API/CLI and autoApproveScheduled both call approveProposal),
+    // so there is no code path that approves around it.
+    const mapping = getEventType(registry, envelope.type);
+    if (mapping?.humanApprovalOnly === true && actor !== HUMAN_ACTOR) {
+      const err = new Error(
+        `proposal ${id}: event type ${envelope.type} is humanApprovalOnly — actor "${actor}" cannot approve it; this watched approval IS the human deploy-branch decision (human_approval_only; docs/event-runtime-dispatch.md §7, WM-111)`,
+      );
+      err.code = "human_approval_only";
+      throw err;
+    }
     if (!isExpired(proposal, now)) {
       return approveRun(db, proposal, envelope, { actor, now, policyVersion, reason: "approved" });
     }
 
     // Expired: re-plan against current registry state, reusing the runId.
-    const mapping = getEventType(registry, envelope.type);
     if (!mapping) throw new Error(`proposal ${id} expired and event type ${envelope.type} is no longer registered`);
     const fresh = buildRunSpec(registry, envelope, mapping, {
       runId: proposal.run_id, policyVersion, adapterOverride, now,
