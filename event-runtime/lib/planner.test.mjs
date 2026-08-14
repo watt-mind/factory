@@ -92,6 +92,10 @@ describe("planEvent", () => {
       policyVersion: "git:test",
       outputContract: "factory.status-report/v1",
       capabilities: ["linear:read"],
+      // Model-tier routing (WM-135): the committed definition declares
+      // standard, policy maps it to sonnet, the planner pins the resolution.
+      modelTier: "standard",
+      model: "sonnet",
       timeoutSeconds: 600,
       maxAttempts: 1,
       idempotencyKey: `factory-status-report@1:factory.status-report/v1:workflow-01:${hashJson(payload)}`,

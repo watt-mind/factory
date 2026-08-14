@@ -5,6 +5,7 @@
   "input_schema": "schemas/run-postmortem.input.json",
   "output_schema": "schemas/run-postmortem.output.json",
   "output_contract": "factory.run-postmortem/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "artifacts",
     "inputs": [

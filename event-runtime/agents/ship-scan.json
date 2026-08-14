@@ -5,6 +5,7 @@
   "input_schema": "schemas/ship-scan.input.json",
   "output_schema": "schemas/ship-scan.output.json",
   "output_contract": "factory.ship-plan/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "ephemeral",
     "retainOnFailure": true

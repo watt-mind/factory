@@ -5,6 +5,7 @@
   "input_schema": "schemas/disk-diagnose.input.json",
   "output_schema": "schemas/disk-diagnose.output.json",
   "output_contract": "factory.disk-diagnosis/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "ephemeral",
     "retainOnFailure": true

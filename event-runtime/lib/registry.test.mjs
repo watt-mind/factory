@@ -104,11 +104,11 @@ describe("registry", () => {
     const defFile = path.join(root, "agents", "factory-status-report.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "standard" }));
-    const registry = loadRegistry({ root, modelTiers: { claude: { standard: "sonnet" } } });
+    const registry = loadRegistry({ root, modelTiers: { claude: { strong: "default", standard: "sonnet" } } });
     expect(getAgent(registry, "factory-status-report@1").model_tier).toBe("standard");
     // A definition that declares nothing is untouched — adapter default.
-    expect(getAgent(registry, "ci-doctor@2").model_tier).toBeUndefined();
-    expect(getAgent(registry, "ci-doctor@2").model).toBeUndefined();
+    expect(getAgent(registry, "reconcile@1").model_tier).toBeUndefined();
+    expect(getAgent(registry, "reconcile@1").model).toBeUndefined();
   });
 
   test("model_tier outside the closed enum fails at load (WM-135)", () => {
@@ -117,7 +117,9 @@ describe("registry", () => {
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     for (const bad of ["medium", "opus-4", 3, null]) {
       writeFileSync(defFile, JSON.stringify({ ...def, model_tier: bad }));
-      expect(() => loadRegistry({ root, modelTiers: { claude: { standard: "sonnet" } } })).toThrow(/"model_tier"/);
+      expect(() => loadRegistry({ root, modelTiers: { claude: { strong: "default", standard: "sonnet" } } })).toThrow(
+        /"model_tier"/,
+      );
     }
   });
 
@@ -138,8 +140,9 @@ describe("registry", () => {
     const defFile = path.join(root, "agents", "reconcile.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "light" }));
-    // reconcile routes via the command adapter — no tier map needed.
-    const registry = loadRegistry({ root, modelTiers: {} });
+    // reconcile routes via the command adapter — "light" needs no mapping
+    // there, even though the map below deliberately lacks it.
+    const registry = loadRegistry({ root, modelTiers: { claude: { strong: "default", standard: "sonnet" } } });
     expect(resolveModel(getAgent(registry, "reconcile@1"), "command", registry.modelTiers)).toBeNull();
   });
 
@@ -147,15 +150,16 @@ describe("registry", () => {
     const root = tempRegistry();
     const defFile = path.join(root, "agents", "factory-status-report.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
+    const tiers = { claude: { strong: "default", standard: "sonnet" } };
     writeFileSync(defFile, JSON.stringify({ ...def, model: "" }));
-    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/"model"/);
+    expect(() => loadRegistry({ root, modelTiers: tiers })).toThrow(/"model"/);
     writeFileSync(defFile, JSON.stringify({ ...def, model: 42 }));
-    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/"model"/);
+    expect(() => loadRegistry({ root, modelTiers: tiers })).toThrow(/"model"/);
 
     // Both fields allowed; the override wins, and it also satisfies load even
     // though "light" has no mapping — the tier is never consulted.
     writeFileSync(defFile, JSON.stringify({ ...def, model: "claude-opus-4-1", model_tier: "light" }));
-    const registry = loadRegistry({ root, modelTiers: {} });
+    const registry = loadRegistry({ root, modelTiers: tiers });
     const loaded = getAgent(registry, "factory-status-report@1");
     expect(resolveModel(loaded, "claude", registry.modelTiers)).toBe("claude-opus-4-1");
   });

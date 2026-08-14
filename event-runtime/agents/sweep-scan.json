@@ -5,6 +5,7 @@
   "input_schema": "schemas/sweep-scan.input.json",
   "output_schema": "schemas/sweep-scan.output.json",
   "output_contract": "factory.sweep-plan/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "repository",
     "checkoutDir": "repo",

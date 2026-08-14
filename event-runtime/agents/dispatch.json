@@ -5,6 +5,7 @@
   "input_schema": "schemas/dispatch.input.json",
   "output_schema": "schemas/dispatch.output.json",
   "output_contract": "factory.dispatch-result/v1",
+  "model_tier": "strong",
   "workspace": {
     "type": "worktree",
     "checkoutDir": "repo",

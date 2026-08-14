@@ -5,6 +5,7 @@
   "input_schema": "schemas/triage-scan.input.json",
   "output_schema": "schemas/triage-scan.output.json",
   "output_contract": "factory.triage-plan/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "repository",
     "checkoutDir": "repo",

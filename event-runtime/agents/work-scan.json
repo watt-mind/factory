@@ -5,6 +5,7 @@
   "input_schema": "schemas/work-scan.input.json",
   "output_schema": "schemas/work-scan.output.json",
   "output_contract": "factory.work-plan/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "repository",
     "checkoutDir": "repo",

@@ -5,6 +5,7 @@
   "input_schema": "schemas/unblock-scan.input.json",
   "output_schema": "schemas/unblock-scan.output.json",
   "output_contract": "factory.unblock-plan/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "repository",
     "checkoutDir": "repo",

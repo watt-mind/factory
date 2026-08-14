@@ -5,6 +5,7 @@
   "input_schema": "schemas/merge-scan.input.json",
   "output_schema": "schemas/merge-scan.output.json",
   "output_contract": "factory.merge-plan/v1",
+  "model_tier": "strong",
   "workspace": {
     "type": "ephemeral",
     "retainOnFailure": true

@@ -374,6 +374,29 @@ repo pin, mirror fetch, or worktree materialization happens. The declared
 scope rides in the RunSpec (so the proposal an operator approves names it) and
 is readable in `GET /registry`.
 
+**Model-tier routing (`model_tier`, WM-135).** A definition may declare an
+optional `"model_tier": "strong" | "standard" | "light"` — a statement of
+intent, never a concrete model id. What each tier means is operator policy:
+the `models:` block in `config/policy.yaml`, keyed per adapter
+(`models.claude.standard: sonnet`), so retiering the fleet is a one-line
+policy PR instead of an edit fanned across definitions. The literal value
+`default` is a sentinel meaning "pass no model flag — ride the CLI's own
+default"; any other value is passed verbatim as `--model`. The **planner
+resolves tier → model at plan time and pins the result into the RunSpec**
+(`modelTier` + `model`, the same pattern as `repoPin`), so the proposal the
+operator approves, the stored run, and `inspect`/receipt output all name the
+exact model; `GET /agents` and `cli.mjs agents` show the declared tier and the
+per-route resolved value. Resolution order: per-definition `"model"` override
+(the one escape hatch for an exact id — both fields may coexist, the override
+wins) > tier map > adapter default (absent fields = no spec fields = today's
+behavior). A declared tier with no mapping for a routed model-consuming
+adapter is a **load error, fail closed** — never a silent fall-through to the
+adapter default. Only the `claude` adapter consumes models; on
+`command`/`actions`/`fake` routes a declared tier is recorded as not
+applicable (`model: null`), never an error. Tier assignments are intent the
+runtime cannot yet audit: per-run usage observability (WM-66) is what will
+show whether a tier is over- or under-provisioned and inform re-mapping.
+
 **Adapters are a registry, not a flag.** `"adapter": "claude"` in the run spec
 names an entry in a small adapter registry, one per harness the runtime has
 actually tested. The emit pipeline targets several harnesses (Claude Code,

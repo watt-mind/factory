@@ -704,9 +704,9 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(def.mutating).toBe(false);
       // Model-tier routing (WM-135): declared intent plus the per-route
       // resolved value, straight off the committed registry + policy map.
-      expect(def.modelTier).toBeNull();
+      expect(def.modelTier).toBe("standard");
       expect(def.model).toBeNull();
-      expect(def.eventTypes[0].resolvedModel).toBeNull();
+      expect(def.eventTypes[0].resolvedModel).toBe("sonnet");
       const commandDef = defs.find((d) => d.ref === "reconcile@1");
       expect(commandDef.modelTier).toBeNull();
       expect(commandDef.eventTypes[0].resolvedModel).toBeNull();

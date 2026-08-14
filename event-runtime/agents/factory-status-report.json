@@ -5,6 +5,7 @@
   "input_schema": "schemas/factory-status-report.input.json",
   "output_schema": "schemas/factory-status-report.output.json",
   "output_contract": "factory.status-report/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "ephemeral",
     "retainOnFailure": true

@@ -5,6 +5,7 @@
   "input_schema": "schemas/ci-doctor.input.json",
   "output_schema": "schemas/ci-doctor.output.json",
   "output_contract": "factory.ci-doctor/v1",
+  "model_tier": "standard",
   "workspace": {
     "type": "artifacts",
     "inputs": [
