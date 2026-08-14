@@ -7,12 +7,33 @@ import {
   buildClaudeSettings,
   deriveAllowedTools,
   execute,
+  isHarnessDenial,
   KILL_GRACE_MS,
   mapStreamEvent,
   PROMPT_SUFFIX,
   READ_ONLY_TOOLS,
   WRITE_TOOLS,
 } from "./claude.mjs";
+
+describe("isHarnessDenial (WM-127)", () => {
+  test("matches the harness's own refusal shapes", () => {
+    expect(isHarnessDenial("Claude requested permissions to use Bash, but you haven't granted it yet.")).toBe(true);
+    expect(isHarnessDenial("Claude requested permissions to use mcp__linear__create_issue, but you haven't granted it yet.")).toBe(true);
+    expect(isHarnessDenial("Permission to use Bash has been denied.")).toBe(true);
+    expect(isHarnessDenial("Sandbox denied write to /tmp/run-a1/repo/x")).toBe(true);
+  });
+
+  test("does not match permission-flavored stderr from commands the harness allowed", () => {
+    // The run_38deabb4 misclassification: git push over SSH without agent access.
+    expect(isHarnessDenial("git@ssh.github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.")).toBe(false);
+    expect(isHarnessDenial("bash: /etc/hosts: Permission denied")).toBe(false);
+    expect(isHarnessDenial("sudo: a terminal is required to read the password; permission denied")).toBe(false);
+    expect(isHarnessDenial("EACCES: permission denied, open '/var/log/system.log'")).toBe(false);
+    expect(isHarnessDenial("remote: Write access to repository not granted.\nfatal: unable to access: The requested URL returned error: 403")).toBe(false);
+    expect(isHarnessDenial("curl: (22) The requested URL returned error: 403 Forbidden — request blocked by firewall permissions")).toBe(false);
+    expect(isHarnessDenial(null)).toBe(false);
+  });
+});
 
 describe("mapStreamEvent", () => {
   test("assistant text block → assistant_text", () => {
@@ -279,10 +300,68 @@ if (behavior === "emit_policy_denial") {
   process.stdout.write(
     JSON.stringify({
       type: "user",
-      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true, content: "Sandbox denied write to repo/nope" }] },
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true, content: "Claude requested permissions to use Bash, but you haven't granted it yet." }] },
     }) + "\\n",
   );
   process.exit(1);
+}
+
+// run_38deabb4's transcript shape: git push fails with SSH publickey stderr in
+// an error tool_result, the agent retries over gh auth and finishes clean.
+if (behavior === "emit_ssh_denied" || behavior === "emit_ssh_denied_then_recovery") {
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_push", name: "Bash", input: { command: "git push -u origin HEAD" } }],
+      },
+    }) + "\\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_push", is_error: true, content: "git@ssh.github.com: Permission denied (publickey).\\r\\nfatal: Could not read from remote repository.\\n\\nPlease make sure you have the correct access rights\\nand the repository exists." }] },
+    }) + "\\n",
+  );
+  if (behavior === "emit_ssh_denied") process.exit(1);
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_retry", name: "Bash", input: { command: "git -c credential.helper='!gh auth git-credential' push -u origin HEAD" } }],
+      },
+    }) + "\\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_retry", content: "branch pushed" }] },
+    }) + "\\n",
+  );
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, usage: {} }) + "\\n");
+  process.exit(0);
+}
+
+if (behavior === "emit_denial_then_recovery") {
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "WebFetch", input: { url: "https://example.com" } }],
+      },
+    }) + "\\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true, content: "Claude requested permissions to use WebFetch, but you haven't granted it yet." }] },
+    }) + "\\n",
+  );
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, usage: {} }) + "\\n");
+  process.exit(0);
 }
 `;
   writeFileSync(stubClaudePath, stubScript, { mode: 0o755 });
@@ -499,9 +578,64 @@ if (behavior === "emit_policy_denial") {
     expect(outcome).toEqual({
       exitCode: 1,
       timedOut: false,
-      policyDenials: [{ tool: "Bash", rule: "Sandbox denied write to repo/nope" }],
+      policyDenials: [{ tool: "Bash", rule: "Claude requested permissions to use Bash, but you haven't granted it yet." }],
     });
     expect(traceEvents.some((e) => e.kind === "lifecycle" && e.payload.note === "policy_denial" && e.payload.tool === "Bash")).toBe(true);
+  });
+
+  test("SSH publickey stderr in an error tool_result is not a policy denial (WM-127)", async () => {
+    const traceEvents = [];
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir: ws(),
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "emit_ssh_denied",
+      },
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+    // The harness allowed and executed the push; the command failed on its
+    // own. The run must fail as an ordinary agent exit, never policy_denied.
+    expect(outcome).toEqual({ exitCode: 1, timedOut: false, policyDenials: [] });
+    expect(traceEvents.some((e) => e.kind === "lifecycle" && e.payload.note === "policy_denial")).toBe(false);
+  });
+
+  test("SSH publickey stderr followed by a recovered push and clean exit completes (WM-127, run_38deabb4)", async () => {
+    const traceEvents = [];
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir: ws(),
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "emit_ssh_denied_then_recovery",
+      },
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false, policyDenials: [] });
+    expect(traceEvents.some((e) => e.kind === "lifecycle" && e.payload.note === "policy_denial")).toBe(false);
+  });
+
+  test("a genuine denial the model recovers from does not fail a clean exit; trace keeps the evidence (WM-127)", async () => {
+    const traceEvents = [];
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir: ws(),
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "emit_denial_then_recovery",
+      },
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+    // Evidence, not verdict: the observation stays in the lifecycle trace,
+    // but a run that ends exit 0 with a valid result is not failed for it.
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false, policyDenials: [] });
+    expect(traceEvents.some((e) => e.kind === "lifecycle" && e.payload.note === "policy_denial" && e.payload.tool === "WebFetch")).toBe(true);
   });
 
   test("returns a policy denial even when no trace sink is attached", async () => {
@@ -515,7 +649,7 @@ if (behavior === "emit_policy_denial") {
         FACTORY_TEST_BEHAVIOR: "emit_policy_denial",
       },
     });
-    expect(outcome.policyDenials).toEqual([{ tool: "Bash", rule: "Sandbox denied write to repo/nope" }]);
+    expect(outcome.policyDenials).toEqual([{ tool: "Bash", rule: "Claude requested permissions to use Bash, but you haven't granted it yet." }]);
   });
 
   test("spawn error (e.g. claude not on PATH) rejects promise", async () => {

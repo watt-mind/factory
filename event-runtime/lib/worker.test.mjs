@@ -150,11 +150,12 @@ describe("worker", () => {
     const spec = queueRun(db, makeSpec({ adapter: "policy" }));
     const policyAdapter = {
       execute: async () => ({
-        // A model could recover after the denial; accepting its output would
-        // erase evidence of a policy breach, so exit 0 must still fail.
-        exitCode: 0,
+        // Adapters report policyDenials only when they are the verdict — the
+        // claude adapter suppresses them on a clean exit (WM-127), so a
+        // non-empty list here means the run failed at a refused tool call.
+        exitCode: 1,
         timedOut: false,
-        policyDenials: [{ tool: "Bash", rule: "Sandbox denied write" }],
+        policyDenials: [{ tool: "Bash", rule: "Claude requested permissions to use Bash, but you haven't granted it yet." }],
       }),
     };
 

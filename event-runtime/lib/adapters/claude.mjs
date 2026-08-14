@@ -122,6 +122,30 @@ function clip(text) {
   return s.length > TEXT_PREVIEW_CHARS ? `${s.slice(0, TEXT_PREVIEW_CHARS)}…[truncated]` : s;
 }
 
+/**
+ * Harness-authored refusal shapes only (WM-127). An error tool_result carries
+ * arbitrary command output — `git@ssh.github.com: Permission denied
+ * (publickey)`, `sudo: a password is required`, EACCES traces — and matching
+ * any of that produced receipts blaming the harness for denials it never
+ * issued (run_38deabb4). Each pattern here is anchored to the start of a
+ * message Claude Code itself writes into the tool_result when its policy
+ * layer refuses the call. The trade-off is deliberate: a missed shape
+ * degrades to a truthful generic `agent_exit_*`; a false positive lies about
+ * causality. Extend only with strings confirmed from the CLI.
+ */
+export const HARNESS_DENIAL_PATTERNS = [
+  // -p + --allowedTools: call to a tool the run never granted (CLI 2.1.232).
+  /^\s*Claude requested permissions to use .{1,120}, but you haven't granted it yet/,
+  // A permissions.deny rule (the generated settings policy) refusing a tool.
+  /^\s*Permission to use .{1,120} has been denied/,
+  // The generated sandbox policy blocking an operation.
+  /^\s*Sandbox denied/,
+];
+
+export function isHarnessDenial(content) {
+  return typeof content === "string" && HARNESS_DENIAL_PATTERNS.some((re) => re.test(content));
+}
+
 /** Flatten a tool_result content value (string or content-block array) to text. */
 function contentText(content) {
   if (typeof content === "string") return content;
@@ -251,7 +275,7 @@ export async function execute({
             }
             onTrace?.(event.kind, event.payload);
             const content = typeof event.payload?.content === "string" ? event.payload.content : "";
-            if (event.kind === "tool_result" && event.payload?.isError && /(?:permission|sandbox).{0,80}(?:denied|blocked)|(?:denied|blocked).{0,80}(?:permission|sandbox)/i.test(content)) {
+            if (event.kind === "tool_result" && event.payload?.isError && isHarnessDenial(content)) {
               const denial = { tool: toolNames.get(event.payload?.toolUseId) ?? lastTool ?? "unknown", rule: clip(content) };
               policyDenials.push(denial);
               // Keep the registry's closed trace-kind set. The payload turns
@@ -301,7 +325,12 @@ export async function execute({
       clearTimeout(termTimer);
       if (killTimer) clearTimeout(killTimer);
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
-      resolve({ exitCode, timedOut, policyDenials });
+      // A denial observed mid-run is evidence, not a verdict: the model can
+      // recover (run_38deabb4 retried a failed push over gh auth, opened its
+      // PR, and exited clean). A clean exit outranks the observation — report
+      // denials to the worker only when the run also failed; the lifecycle
+      // trace events above keep the evidence visible either way.
+      resolve({ exitCode, timedOut, policyDenials: exitCode === 0 ? [] : policyDenials });
     });
   });
 }
