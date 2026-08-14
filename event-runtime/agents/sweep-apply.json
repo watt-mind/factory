@@ -1,0 +1,59 @@
+{
+  "id": "sweep-apply",
+  "version": 1,
+  "prompt": "agents/sweep-apply.md",
+  "input_schema": "schemas/sweep-apply.input.json",
+  "output_schema": "schemas/sweep-applied.output.json",
+  "output_contract": "factory.sweep-applied/v1",
+  "itemsField": "plan",
+  "itemKey": "issueId",
+  "actionRegistry": {
+    "retire-shipped": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{issueId}",
+        "Canceled"
+      ]
+    },
+    "mark-duplicate": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{issueId}",
+        "Duplicate"
+      ]
+    },
+    "comment-evidence": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "comment",
+        "{issueId}",
+        "sweep: {reason}"
+      ]
+    }
+  },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/sweep-apply.md": "sha256:d57dcb300c70ee223ed3c948a4aacdf4e5eb3afb5710fca8d8a3994f5111a2e5",
+    "schemas/sweep-apply.input.json": "sha256:5af257704ff1a7a6753e27bbe6916cc0b0946c8b4a23250bf592dd139273ec44",
+    "schemas/sweep-applied.output.json": "sha256:75524150caebdaeffeb1dee800169a0ac423d3d6549d5491185eefe5351dacfd"
+  }
+}

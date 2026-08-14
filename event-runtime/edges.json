@@ -36,6 +36,18 @@
       }
     }
   },
+  "sweep-scan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "SWEEP": {
+        "eventType": "factory.sweep-apply.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "plan": "$.artifact.plan"
+        }
+      }
+    }
+  },
   "ci-log-capture@1": {
     "recommendationField": "exitCode",
     "edges": {

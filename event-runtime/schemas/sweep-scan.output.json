@@ -1,0 +1,26 @@
+{
+  "title": "factory.sweep-plan/v1 output artifact — typed, per-issue retirements, each backed by cited evidence",
+  "type": "object",
+  "required": ["recommendation", "repo", "plan", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "recommendation": { "enum": ["SWEEP", "NOOP"] },
+    "repo": { "type": "string", "minLength": 1 },
+    "plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issueId", "action", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "issueId": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "action": {
+            "enum": ["retire-shipped", "mark-duplicate", "comment-evidence"]
+          },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}

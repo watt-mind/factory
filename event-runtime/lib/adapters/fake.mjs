@@ -183,6 +183,42 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace
     });
     return { exitCode: 0, timedOut: false };
   }
+  if (spec.outputContract === "factory.sweep-plan/v1") {
+    // Repo "clean" → NOOP; anything else retires one shipped ticket with evidence.
+    const repo = spec.input?.repo;
+    const clean = repo === "clean";
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: clean
+        ? { recommendation: "NOOP", repo, plan: [], summary: "fake: nothing retirable with evidence" }
+        : {
+            recommendation: "SWEEP",
+            repo,
+            plan: [
+              { issueId: "CLNT-997", action: "retire-shipped", reason: "fake: shipped in PR #1" },
+              { issueId: "CLNT-997", action: "comment-evidence", reason: "fake: shipped in PR #1" },
+            ],
+            summary: `fake sweep of ${repo}`,
+          },
+      evidence: { commands: ["fake"], issuesSeen: 1 },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.sweep-applied/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repo: spec.input.repo,
+        applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.issueId, action: i.action })),
+      },
+      evidence: { commands: ["fake"] },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
   if (spec.outputContract === "factory.triage-applied/v1") {
     writeResult(workspaceDir, {
       schemaVersion: "factory.agent-result/v1",
