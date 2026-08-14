@@ -111,6 +111,23 @@
       }
     }
   },
+  "dispatch@1": {
+    "recommendationField": "outcome",
+    "edges": {
+      "PR_OPEN": {
+        "eventType": "factory.work.requested",
+        "input": {
+          "repo": "$.input.repo"
+        }
+      },
+      "NOT_CLAIMED": {
+        "eventType": "factory.work.requested",
+        "input": {
+          "repo": "$.input.repo"
+        }
+      }
+    }
+  },
   "ci-doctor@2": {
     "recommendationField": "verdict",
     "edges": {
