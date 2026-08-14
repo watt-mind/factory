@@ -170,20 +170,31 @@ registry. The operator's live checkout is never used: it holds uncommitted
 work an agent would read as truth, concurrent runs would race in it, and even
 a read-only run wants `git fetch`, which writes to `.git`.
 
-**Tier 2 — full worktree (held, deliberately).** Branch, install, ports,
-per-ticket database. Two rules when it is built:
+**Tier 2 — full worktree (designed, WM-107; unbuilt).** Branch, install,
+ports, per-ticket database. This tier was held while its blocker was
+unresolved; the coordination design now exists —
+[event-runtime-dispatch.md](event-runtime-dispatch.md) — and the two rules
+stand as the rules that design satisfies:
 
 1. **Delegate, never reimplement.** `config/repos.yaml` already declares
    `worktree_up`/`worktree_down`/`verify` per repo; the provider shells out to
-   them. Git isolates branches, not ports or databases — a second worktree
-   implementation inside the runtime would drift and eventually collide with a
-   dev server.
-2. **The blocker is coordination, not workspaces.** Per event-runtime.md §3,
-   before an event run may claim a ticket or mutate code, both paths must
-   share one claim, capacity, Owned Paths, and approval authority with the
-   ticket dispatcher. Two independent mutation coordinators race even with
-   separate source trees, and both draw on the same unobservable subscription
-   usage window. That is the work to do first — not a workspace provider.
+   them (dispatch design §5). Git isolates branches, not ports or databases —
+   a second worktree implementation inside the runtime would drift and
+   eventually collide with a dev server. Delegation covers the repo-owned
+   worktree scripts, **not** the harness spawn: the run itself goes through
+   the runtime's own `claude` adapter, never by shelling to `run-agent.sh`
+   (dispatch design §6).
+2. **Coordination first, workspaces second.** Per event-runtime.md §3, before
+   an event run may claim a ticket or mutate code, both paths must share one
+   claim, capacity, Owned Paths, and approval authority with the ticket
+   dispatcher. Two independent mutation coordinators race even with separate
+   source trees, and both draw on the same unobservable subscription usage
+   window. The dispatch design answers each: the Linear assignee stays the
+   only ticket lock, the dispatcher's cap and worker-lease ledger count both
+   paths, `orchestrator/owned-paths.mjs` is imported as the one collision
+   oracle, and watched proposals gate every mutation — with the deploy-branch
+   merge permanently human. Building the provider before those land would
+   recreate the race this rule exists to prevent.
 
 ## 6. Ticket cut-lines (when the operator says go)
 

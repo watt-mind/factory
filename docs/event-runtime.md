@@ -63,7 +63,7 @@ machinery it earns. Anything no listed event type needs stays unbuilt.
 | `github.workflow-run.failed` | GitHub webhook / replay CLI | first discovered chain (OPS-223): typed `ci-doctor` diagnosis → recommendation edges → watched closed-command follow-ups (`gh run rerun`, notify); command adapter and edge registry | shipped |
 | `sentry.issue.created` | Sentry webhook | *(dropped as a slice — Sentry already feeds Linear directly, so classifying here validates nothing operationally new; revisit only if that intake moves)* | — |
 | `clock.tick.<loop>` | scheduler | admitted, audited timer events; per-loop migration of the standing loops — **[event-runtime-schedules.md](event-runtime-schedules.md)** (OPS-380/OPS-381) | shipped, loops off by default |
-| repository-mutating events | GitHub / Linear | shared claim, capacity, Owned Paths, and approval authority with the ticket dispatcher (§3) | last |
+| repository-mutating events | GitHub / Linear | shared claim, capacity, Owned Paths, and approval authority with the ticket dispatcher (§3, designed in [event-runtime-dispatch.md](event-runtime-dispatch.md)) | last |
 
 Clock events are called out deliberately. [architecture.md](architecture.md)
 §2.7 keeps every timer in `config/schedule.yaml` disabled until a loop earns its
@@ -116,17 +116,23 @@ The MVP must not:
 - change `build/emit.mjs` or participate in the emit pipeline;
 - change `orchestrator/run.mjs`, `orchestrator/tick.mjs`, or their schedules;
 - change `config/schedule.yaml` or the launchd state;
-- create worktrees, mutate repository source, or merge code;
 - share mutable workspaces with interactive or ticket agents; or
 - feed a result into the existing dispatcher automatically.
 
-Two boundaries have moved deliberately since this was written, and are stated
+Three boundaries have moved deliberately since this was written, and are stated
 rather than absorbed. **Timers:** the runtime has its own in-process scheduler
 ([event-runtime-schedules.md](event-runtime-schedules.md)); it touches neither
 launchd nor `config/schedule.yaml`, and every loop ships `enabled: false`.
 **Linear writes:** `triage-apply@1` and the scheduled `reaper@1` mutate ticket
 state through closed action registries, so the runtime now writes to the same
-control plane the dispatcher reads.
+control plane the dispatcher reads. **Repository mutation:** this list
+originally also forbade "create worktrees, mutate repository source, or merge
+code"; that rule is replaced — by design, not yet by code — with the
+coordination rules in
+[event-runtime-dispatch.md](event-runtime-dispatch.md): one ticket claim
+(the Linear assignee), one capacity budget, one Owned Paths oracle, and one
+approval authority shared with the ticket dispatcher, with the ship chain's
+deploy-branch merge permanently a human approval.
 
 Starting the API, planner, or worker is always explicit. Stopping all three has
 no effect on skill invocation, emit checks, queue scans, or ticket dispatch.
@@ -135,6 +141,10 @@ This isolation is safe while event runs are read-only. Before an event run may
 claim a ticket or modify code, both paths must share one distributed claim,
 capacity, Owned Paths, workspace, and approval authority. Two independent
 mutation coordinators would race even if their source trees were separate.
+That sharing is now designed —
+[event-runtime-dispatch.md](event-runtime-dispatch.md) (WM-107) records each
+decision with its rejected alternatives — and unbuilt until the WM-108..WM-112
+chains land it.
 
 **Capacity is shared even when state is not.** The moment both paths run, their
 agent processes draw on the same machine and the same subscription usage
@@ -394,7 +404,7 @@ Every run has an execution directory. It does not necessarily have source code.
 | :--- | :--- | :---: |
 | `ephemeral` | Empty directory populated only with declared inputs | yes |
 | `artifacts` | Declared prior artifacts materialized by content hash, read-only (OPS-372) | yes |
-| `repository` | Read-only checkout pinned to a SHA, from a per-repo bare mirror (tier 1, OPS-228); full worktrees for repo-mutating work are tier 2 and held | tier 1 |
+| `repository` | Read-only checkout pinned to a SHA, from a per-repo bare mirror (tier 1, OPS-228); full worktrees for repo-mutating work are tier 2 — designed ([event-runtime-dispatch.md](event-runtime-dispatch.md)), unbuilt | tier 1 |
 | `mounted` | Explicit existing directory, normally read-only | later |
 | `container` | Isolated filesystem/volume in Docker or Kubernetes | later |
 | `persistent` | Named, versioned workspace protected by a single-writer lease | later |
