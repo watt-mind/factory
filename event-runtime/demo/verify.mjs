@@ -18,6 +18,7 @@
  */
 import { createHash } from "node:crypto";
 import { apiClient } from "../lib/client.mjs";
+import { loadRegistry } from "../lib/registry.mjs";
 
 const args = process.argv.slice(2);
 const i = args.indexOf("--port");
@@ -235,8 +236,11 @@ check("GET /workers returns live worker(s)", workers.some((w) => w.state !== "st
 const { schedules } = await client.schedules();
 check("GET /schedules lists registered schedules", schedules.length >= 1);
 
+// Compare against the committed registry, not a hand-counted literal — a new
+// agent definition must not fail the e2e for being new (WM-72).
+const registeredCount = loadRegistry().agents.size;
 const { agents } = await client.agents();
-check("GET /agents lists registered agents (13 total)", agents.length === 13, `found ${agents.length}`);
+check(`GET /agents lists registered agents (${registeredCount} total)`, agents.length === registeredCount, `found ${agents.length}`);
 
 const journalRes = await client.journal();
 check("GET /journal returns lifecycle journal entries", (journalRes?.entries?.length ?? 0) >= 10);
