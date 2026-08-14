@@ -1,0 +1,13 @@
+{
+  "title": "merge-scan input — one repo whose open PRs to review for merging",
+  "type": "object",
+  "required": ["repo"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short repo name as configured in config/repos.yaml — not the GitHub owner/name slug"
+    }
+  }
+}

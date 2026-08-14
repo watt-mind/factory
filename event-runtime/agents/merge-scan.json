@@ -1,0 +1,29 @@
+{
+  "id": "merge-scan",
+  "version": 1,
+  "prompt": "agents/merge-scan.md",
+  "input_schema": "schemas/merge-scan.input.json",
+  "output_schema": "schemas/merge-scan.output.json",
+  "output_contract": "factory.merge-plan/v1",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "gh:read",
+      "linear:read"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 900,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/merge-scan.md": "sha256:f29375b1efa61e88550ef951ca8be7a5928833f8d5601ec5ad8b02ab9a10e30b",
+    "schemas/merge-scan.input.json": "sha256:b24950b7d9c5cdd07b0af6d2f0179f6ceea30af004c2299cd6efa60b163affa8",
+    "schemas/merge-scan.output.json": "sha256:f2d098a07e56fc68ba5d3781d42abe271292fbae9ff0913e2934fab14d7799c7"
+  }
+}
