@@ -1,7 +1,7 @@
 import "../test-dom";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { Button, Countdown, DetailPane, notify, ToastContainer } from "./ui";
+import { Button, Countdown, DetailPane, notify, shortId, ToastContainer } from "./ui";
 
 function stackOf(r: ReturnType<typeof render>): HTMLElement {
   const parent = r.getByRole("status").parentElement;
@@ -25,6 +25,23 @@ afterEach(() => {
   });
   jest.useRealTimers();
   cleanup();
+});
+
+describe("shortId (WM-96)", () => {
+  test("shortens a prefixed UUID id to the prefix plus the first 8 body characters", () => {
+    expect(shortId("run_ec9c87f9-4c1d-4f4a-9d7e-2c2f3a1b0c9d")).toBe("run_ec9c87f9");
+    expect(shortId("worker_0f3b2a1c-9e8d-4b7a-8c6d-5e4f3a2b1c0d")).toBe("worker_0f3b2a1c");
+  });
+
+  test("returns ids whose body is already 8 characters or fewer unchanged", () => {
+    expect(shortId("run_failed_1")).toBe("run_failed_1");
+    expect(shortId("run_a")).toBe("run_a");
+  });
+
+  test("returns ids without a prefix unchanged", () => {
+    expect(shortId("plainid-with-no-underscore")).toBe("plainid-with-no-underscore");
+    expect(shortId("")).toBe("");
+  });
 });
 
 describe("ToastContainer", () => {

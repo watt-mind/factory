@@ -129,6 +129,24 @@ function withApi(runs: RunListItem[], detail: RunDetail, fn: () => Promise<void>
   });
 }
 
+describe("Runs table short run ids (WM-96)", () => {
+  test("run id cell displays the short form and carries the full id as title", async () => {
+    const runId = "run_ec9c87f9-4c1d-4f4a-9d7e-2c2f3a1b0c9d";
+    const detail = stubDetail(runId, "COMPLETED", [transition(1, runId, null, "QUEUED", null)]);
+    await withApi([stubListItem(runId, "COMPLETED")], detail, async () => {
+      const { container } = renderRuns(runId);
+
+      const cell = await waitFor(() => {
+        const el = container.querySelector(`td[title="${runId}"]`);
+        if (!el) throw new Error("run id cell with full-id title is missing");
+        return el;
+      });
+      // Short form shown; the full id never rendered as text, only as title.
+      expect(cell.textContent).toBe("run_ec9c87f9");
+    });
+  });
+});
+
 describe("Runs detail failure banner (WM-93)", () => {
   test("FAILED run renders the terminal transition's reason as a banner with a copy affordance", async () => {
     const runId = "run_failed_1";

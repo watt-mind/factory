@@ -40,6 +40,7 @@ import {
   Th,
   copyLink,
   copyText,
+  shortId,
 } from "../components/ui";
 
 /** Four mutually exclusive tokens; `stale` is the loudest because it is a lie detector. */
@@ -427,6 +428,7 @@ export function Workers({
                     className={`mono max-w-52 truncate border-b border-(--border) px-3 py-1.5 ${
                       w.state === "stopped" && !w.stale ? "text-(--text-faint)" : ""
                     }`}
+                    title={w.workerId}
                   >
                     {w.workerId}
                   </td>
@@ -454,15 +456,18 @@ export function Workers({
                     </td>
                   )}
                   {show.has("adapters") && (
-                    <td className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                    <td
+                      className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      title={w.adapters.length > 0 ? w.adapters.join(", ") : undefined}
+                    >
                       {w.adapters.join(", ") || "-"}
                     </td>
                   )}
                   {show.has("run") && (
                     <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
                       {w.currentRun ? (
-                        <JumpLink onClick={() => openRun(w.currentRun!)} title="Open this run">
-                          {w.currentRun}
+                        <JumpLink onClick={() => openRun(w.currentRun!)} title={`Open ${w.currentRun}`}>
+                          {shortId(w.currentRun)}
                         </JumpLink>
                       ) : (
                         "-"
@@ -589,8 +594,8 @@ export function Workers({
               k="currentRun"
               v={
                 sel.currentRun ? (
-                  <JumpLink onClick={() => openRun(sel.currentRun!)} title="Open this run">
-                    {sel.currentRun}
+                  <JumpLink onClick={() => openRun(sel.currentRun!)} title={`Open ${sel.currentRun}`}>
+                    {shortId(sel.currentRun)}
                   </JumpLink>
                 ) : (
                   "-"

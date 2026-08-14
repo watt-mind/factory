@@ -21,6 +21,7 @@ import {
   ago,
   copyText,
   notify,
+  shortId,
 } from "../components/ui";
 
 const FEED_CAP = 50;
@@ -529,13 +530,16 @@ export function Overview({
                     title={g.runId}
                     className="max-w-36 shrink-0 truncate"
                   >
-                    {g.runId}
+                    {shortId(g.runId)}
                   </JumpLink>
                   <span className="shrink-0">
                     {g.from ?? "·"} → {g.count > 1 ? "… → " : ""}
                     <StateBadge state={g.to} />
                   </span>
-                  <span className="truncate text-(--text-faint)">
+                  <span
+                    className="truncate text-(--text-faint)"
+                    title={`by ${g.actor}${g.reason ? ` (${g.reason})` : ""}${g.count > 1 ? ` · ${g.count} transitions` : ""}`}
+                  >
                     by {g.actor}
                     {g.reason ? ` (${g.reason})` : ""}
                     {g.count > 1 ? ` · ${g.count} transitions` : ""}
@@ -568,13 +572,15 @@ export function Overview({
                       return source && eventId ? (
                         <JumpLink
                           onClick={() => onJumpEvents({ source, eventId })}
-                          title="Open origin event"
+                          title={`Open origin event — ${type}`}
                           className="max-w-[70%] truncate"
                         >
                           {type}
                         </JumpLink>
                       ) : (
-                        <span className="truncate text-(--text-dim)">{type}</span>
+                        <span className="truncate text-(--text-dim)" title={type}>
+                          {type}
+                        </span>
                       );
                     })()}
                     {o.published_at ? (

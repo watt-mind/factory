@@ -51,6 +51,21 @@ export const DECISION_HUES: Record<string, string> = {
   noop: "var(--hue-idle)",
 };
 
+/**
+ * Short display form of a prefixed id: `run_ec9c87f9-…` → `run_ec9c87f9`
+ * (WM-96). Keeps the type prefix up to the first `_` plus the first 8
+ * characters of the body — enough to tell runs apart at a glance. Ids without
+ * a prefix, or already at most 8 characters past it, come back unchanged, so
+ * short human-written ids never lose information. Callers must carry the full
+ * id in a `title` (and keep copy/open verbs on the full id).
+ */
+export function shortId(id: string): string {
+  const sep = id.indexOf("_");
+  if (sep === -1) return id;
+  const body = id.slice(sep + 1);
+  return body.length <= 8 ? id : id.slice(0, sep + 1) + body.slice(0, 8);
+}
+
 export function copyText(text: string, label: string) {
   navigator.clipboard.writeText(text);
   notify(`Copied ${label}`, "info");

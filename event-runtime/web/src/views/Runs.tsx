@@ -44,6 +44,7 @@ import {
   VerbError,
   copyText,
   copyLink,
+  shortId,
 } from "../components/ui";
 
 const STATE_TABS: (RunState | "ALL")[] = [
@@ -678,7 +679,9 @@ export function Runs({
         {/* `flex-wrap`: the token chips are a full-width item, so they take
             their own line under the tabs and the box instead of squeezing them. */}
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto" role="tablist" aria-label="Run state">
+          {/* Wrap, never scroll or clip: at 1280px the strip used to run out of
+              width at CANCELLED with no scrollbar affordance (WM-96). */}
+          <div className="flex min-w-0 flex-1 flex-wrap gap-1" role="tablist" aria-label="Run state">
             {STATE_TABS.map((t) => {
               const byState = statusQ.data?.runs.byState ?? {};
               const count = fetchAll
@@ -746,7 +749,9 @@ export function Runs({
                   aria-selected={r.runId === selectedId}
                   className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
                 >
-                  <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5">{r.runId}</td>
+                  <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5" title={r.runId}>
+                    {shortId(r.runId)}
+                  </td>
                   {show.has("state") && (
                     <td className="border-b border-(--border) px-3 py-1.5">
                       <StateBadge state={r.state} />
@@ -772,14 +777,23 @@ export function Runs({
                     </td>
                   )}
                   {show.has("reason") && (
-                    <td className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                    <td
+                      className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      title={r.reasonCode ?? undefined}
+                    >
                       {r.reasonCode ?? "-"}
                     </td>
                   )}
                   {show.has("origin") && (
-                    <td className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                    <td
+                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      title={r.eventId ?? undefined}
+                    >
                       {r.eventId && r.eventSource ? (
-                        <JumpLink onClick={() => onJumpEvent(r.eventSource!, r.eventId!)} title="Open origin event">
+                        <JumpLink
+                          onClick={() => onJumpEvent(r.eventSource!, r.eventId!)}
+                          title={`Open origin event ${r.eventId}`}
+                        >
                           {r.eventId}
                         </JumpLink>
                       ) : (
@@ -872,7 +886,7 @@ export function Runs({
                 title={`Open ${sel.runId}`}
                 className="truncate"
               >
-                {sel.runId}
+                {shortId(sel.runId)}
               </JumpLink>
             </span>
           }
