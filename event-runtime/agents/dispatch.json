@@ -1,0 +1,40 @@
+{
+  "id": "dispatch",
+  "version": 1,
+  "prompt": "agents/dispatch.md",
+  "input_schema": "schemas/dispatch.input.json",
+  "output_schema": "schemas/dispatch.output.json",
+  "output_contract": "factory.dispatch-result/v1",
+  "workspace": {
+    "type": "worktree",
+    "checkoutDir": "repo",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write",
+      "repo:write",
+      "github:write"
+    ],
+    "tools": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 2700,
+    "attempts": 1,
+    "budget_usd": 15
+  },
+  "mutating": true,
+  "pins": {
+    "agents/dispatch.md": "sha256:cf84c0cc41ce4ed84cd179f8bc8f52f73919e8187073254b86ee58c27a7e0828",
+    "schemas/dispatch.input.json": "sha256:66898f48608fff53f07f2b59e9df9d41c15aae69615c2383c22d3978ca9807b2",
+    "schemas/dispatch.output.json": "sha256:56ea5a82df4bce92d5f22b60d173a03bbb9e139491abeff3c01a96524ef49a4d"
+  }
+}

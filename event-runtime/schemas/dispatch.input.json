@@ -1,0 +1,53 @@
+{
+  "title": "dispatch input — one repo, one already-queued ticket (WM-108)",
+  "type": "object",
+  "required": [
+    "repo",
+    "ticket"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short repo name as configured in config/repos.yaml — not the GitHub owner/name slug"
+    },
+    "ticket": {
+      "type": "string",
+      "pattern": "^[A-Z]+-[0-9]+$",
+      "description": "Linear issue identifier to implement; must be Todo + ai:agent-ready + unassigned at plan time (docs/event-runtime-dispatch.md §2)"
+    },
+    "repoPin": {
+      "type": "object",
+      "required": [
+        "repo",
+        "sha"
+      ],
+      "additionalProperties": false,
+      "description": "Optional provenance pin recording the base-branch SHA the request was made against; the worktree itself branches from the repo's live base via its own worktree_up, so this is a record, not a checkout instruction",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Echo of the pinned short repo name"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Ref the pin was resolved from, when one was requested"
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Commit SHA of the repo's base branch at request time"
+        },
+        "github": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "GitHub owner/name slug of the repo, or null when it has no GitHub remote"
+        }
+      }
+    }
+  }
+}

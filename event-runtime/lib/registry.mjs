@@ -30,8 +30,13 @@ function loadAgentDef(root, file) {
   }
   // §14 enforcement path: a mutating definition is admitted only when it is
   // enforceable by construction — a fixed argv template (the closed action
-  // registry), never a model. LLM agents stay read-only in the MVP (§3).
+  // registry), never a model. LLM agents stay read-only in the MVP (§3),
+  // with one boundary move stated in docs/event-runtime-dispatch.md §6
+  // (WM-107/WM-108): a mutating LLM agent over a tier-2 `worktree` workspace,
+  // whose enforcement is the coordination design itself — watched proposals,
+  // the shared claim/capacity/Owned Paths gates, and the repo's own scripts.
   if (def.mutating !== false) {
+    const tier2Worktree = def.workspace?.type === "worktree";
     const closedArgv =
       Array.isArray(def.command) && def.command.length > 0 && def.command.every((e) => typeof e === "string");
     const closedActionRegistry =
@@ -49,9 +54,9 @@ function loadAgentDef(root, file) {
       Object.values(def.actionRegistry).every(
         (a) => Array.isArray(a?.argv) && a.argv.length > 0 && a.argv.every((e) => typeof e === "string"),
       );
-    if (!closedArgv && !closedActionRegistry && !closedItemList) {
+    if (!closedArgv && !closedActionRegistry && !closedItemList && !tier2Worktree) {
       throw new RegistryError(
-        `${file}: mutating agents are admitted only as closed command templates or closed action registries (docs/event-runtime.md §14; OPS-223/OPS-208)`,
+        `${file}: mutating agents are admitted only as closed command templates, closed action registries, or tier-2 worktree agents (docs/event-runtime.md §14; docs/event-runtime-dispatch.md §6; OPS-223/OPS-208/WM-108)`,
       );
     }
   }

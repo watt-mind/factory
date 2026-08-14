@@ -161,6 +161,14 @@
     ],
     "proposalTtlSeconds": 1800
   },
+  "factory.dispatch.requested": {
+    "agent": "dispatch@1",
+    "adapter": "claude",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
   "factory.ticket.dispatched": {
     "observe": true
   },

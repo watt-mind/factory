@@ -42,6 +42,21 @@ describe("registry", () => {
     expect(() => loadRegistry({ root })).toThrow(/mutating/);
   });
 
+  test("a mutating LLM agent over a tier-2 worktree workspace is admitted (dispatch design §6, WM-108)", () => {
+    const registry = loadRegistry();
+    const def = getAgent(registry, "dispatch@1");
+    expect(def.mutating).toBe(true);
+    expect(def.workspace.type).toBe("worktree");
+    expect(getEventType(registry, "factory.dispatch.requested").agent).toBe("dispatch@1");
+    // The carve-out is the workspace type, nothing wider: the same def on an
+    // ephemeral workspace must still fail closed.
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "dispatch.json");
+    const raw = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify({ ...raw, workspace: { type: "ephemeral" } }));
+    expect(() => loadRegistry({ root })).toThrow(/mutating/);
+  });
+
   test("schedule payload must be a plain object without reserved tick fields (WM-72)", () => {
     const root = tempRegistry();
     const withPayload = (payload) =>
