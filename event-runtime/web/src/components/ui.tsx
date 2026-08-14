@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import { modal, useNow } from "../hooks";
+import type { Section, SortDir } from "../displayOptions";
 import { tokenizeJson, TOKEN_CLASSES } from "../highlight";
 import { flushHash } from "../hash";
 import {
@@ -287,6 +288,105 @@ export function ListEmpty({
           <div className="mt-2 text-[11px]">{ESC_CLEARS_FILTER}</div>
         )}
         {action && !query.isPending && !query.isError && !filtered && <div className="mt-3">{action}</div>}
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * One sticky header cell (OPS-493). All wired views share this so the group
+ * header rows below can pin at exactly `top-7` — the cell is a fixed h-7 and
+ * the hairline is a shadow, not a border, so the offset never drifts by 1px.
+ * With `onSort` the label is a button cycling natural → reversed → API order.
+ */
+export function Th({
+  label,
+  align,
+  dir,
+  onSort,
+}: {
+  label: string;
+  align?: "right";
+  dir?: SortDir | null;
+  onSort?: () => void;
+}) {
+  const alignCls = align === "right" ? "text-right" : "text-left";
+  const base = `sticky top-0 z-10 h-7 bg-(--surface-0) px-3 font-medium whitespace-nowrap shadow-[inset_0_-1px_0_var(--border)] ${alignCls}`;
+  if (!onSort) return <th className={base}>{label}</th>;
+  return (
+    <th aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : undefined} className={`${base} p-0`}>
+      <button
+        type="button"
+        onClick={onSort}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.stopPropagation()}
+        title={`Sort by ${label.toLowerCase()}`}
+        className={`group/th inline-flex h-7 w-full cursor-pointer items-center gap-1 px-3 font-medium transition-colors hover:text-(--text) ${align === "right" ? "justify-end" : ""} ${dir ? "text-(--text)" : ""}`}
+      >
+        {label}
+        <span
+          aria-hidden
+          className={`text-[9px] transition-opacity ${dir ? "opacity-100" : "opacity-0 group-hover/th:opacity-50"}`}
+        >
+          {dir === "desc" ? "↓" : "↑"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+/**
+ * A Linear-style section header row: chevron, state dot, label, count. The
+ * whole band is one button (Enter/Space toggle for free, `aria-expanded` for
+ * screen readers); it pins just under the `Th` row while its section scrolls.
+ * Sub-group headers indent and give up stickiness — two pinned tiers fight.
+ */
+export function GroupHeaderRow({
+  colSpan,
+  section,
+  collapsed,
+  onToggle,
+  sub,
+}: {
+  colSpan: number;
+  section: Section<unknown>;
+  collapsed: boolean;
+  onToggle: () => void;
+  sub?: boolean;
+}) {
+  const hue = section.hue ?? "var(--text-faint)";
+  return (
+    <tr>
+      <td colSpan={colSpan} className={`p-0 ${sub ? "" : "sticky top-7 z-[5]"}`}>
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          onClick={onToggle}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.stopPropagation()}
+          className={`flex w-full cursor-pointer items-center gap-2 border-b border-(--border) bg-(--surface-1) px-3 text-left transition-colors hover:bg-(--surface-2) ${
+            sub ? "h-7 pl-8" : "h-8"
+          }`}
+        >
+          <span
+            aria-hidden
+            className={`text-[9px] text-(--text-faint) transition-transform duration-150 ${collapsed ? "" : "rotate-90"}`}
+          >
+            ▶
+          </span>
+          {!sub && (
+            <span
+              aria-hidden
+              className="size-2 rounded-full"
+              style={{ background: hue, boxShadow: `0 0 0 3px color-mix(in oklch, ${hue} 18%, transparent)` }}
+            />
+          )}
+          <span className={`font-medium ${sub ? "text-[11.5px] text-(--text-dim)" : "text-[12px] text-(--text)"}`}>
+            {section.label}
+          </span>
+          <span className="tabular-nums text-[11px] text-(--text-faint)">{section.count}</span>
+          {collapsed && section.count > 0 && (
+            <span className="ml-auto pr-1 text-[10px] text-(--text-faint)">collapsed</span>
+          )}
+        </button>
       </td>
     </tr>
   );

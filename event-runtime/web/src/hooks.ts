@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { goPrefixActive } from "./goSequence";
+import {
+  loadDisplayState,
+  saveDisplayState,
+  type DisplayConfig,
+  type DisplayState,
+} from "./displayOptions";
 import type { HashWriter } from "./hash";
 import {
   createHashWriter,
@@ -173,6 +179,37 @@ export function useTabKeys<T extends string>(
   useEffect(() => {
     selectedStatusTab()?.scrollIntoView({ inline: "nearest", block: "nearest" });
   }, [current]);
+}
+
+/**
+ * Per-view display options (OPS-493), persisted like the theme: localStorage
+ * under `evrt-display-<view>`. A view that swaps configs (Proposals'
+ * open/history tabs) gets the new view's persisted state on the same render —
+ * the reset-during-render pattern, so no frame shows tab A's grouping on tab
+ * B's rows.
+ */
+export function useDisplayOptions<T>(
+  config: DisplayConfig<T>,
+): [DisplayState, (next: DisplayState | ((state: DisplayState) => DisplayState)) => void] {
+  const [state, setState] = useState<DisplayState>(() => loadDisplayState(config));
+  const [prevView, setPrevView] = useState(config.view);
+  if (prevView !== config.view) {
+    setPrevView(config.view);
+    setState(loadDisplayState(config));
+  }
+  const configRef = useRef(config);
+  configRef.current = config;
+  const update = useCallback(
+    (next: DisplayState | ((state: DisplayState) => DisplayState)) => {
+      setState((prev) => {
+        const value = typeof next === "function" ? next(prev) : next;
+        saveDisplayState(configRef.current, value);
+        return value;
+      });
+    },
+    [],
+  );
+  return [state, update];
 }
 
 export const THEMES = ["dark", "light", "contrast"] as const;

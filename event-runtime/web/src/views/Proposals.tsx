@@ -1,7 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useListKeys, useNow, useTabKeys } from "../hooks";
+import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import {
+  buildSections,
+  cycleColumnSort,
+  flattenSections,
+  grouped,
+  toggleCollapsed,
+  visibleColumns,
+  type DisplayConfig,
+} from "../displayOptions";
+import { DisplayOptions } from "../components/DisplayOptions";
 import { setContextActions } from "../palette";
 import type { Proposal } from "../types";
 import type { OperatorContext } from "../context";
@@ -26,14 +36,76 @@ import {
   ListEmpty,
   notify,
   PROPOSAL_STATUS_HUES,
+  GroupHeaderRow,
   Section,
   StateBadge,
+  Th,
   VerbError,
   copyText,
   copyLink,
 } from "../components/ui";
 
 const PROPOSAL_TABS = ["open", "history"] as const;
+
+const ttlExpiry = (p: Proposal) => new Date(p.created_at).getTime() + p.ttl_seconds * 1000;
+
+/** Grouping/ordering/columns per tab (OPS-493) — two views, two persisted keys. */
+const OPEN_DISPLAY: DisplayConfig<Proposal> = {
+  view: "proposals-open",
+  groups: [
+    {
+      key: "decision",
+      label: "Decision",
+      get: (p) => p.decision,
+      order: ["run", "human_needed", "noop"],
+      hue: DECISION_HUES,
+    },
+    { key: "agent", label: "Agent", get: (p) => p.agent ?? "" },
+  ],
+  subGroups: ["agent", "decision"],
+  sorts: [
+    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
+    { key: "ttl", label: "Time left", get: ttlExpiry, column: "ttl" },
+    { key: "agent", label: "Agent", get: (p) => p.agent ?? "", column: "agent" },
+  ],
+  columns: [
+    { key: "agent", label: "Agent", always: true },
+    { key: "decision", label: "Decision" },
+    { key: "ttl", label: "TTL" },
+    { key: "origin", label: "Origin" },
+    { key: "created", label: "Created" },
+    { key: "reason", label: "Reason" },
+  ],
+};
+
+const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
+  view: "proposals-history",
+  groups: [
+    {
+      key: "status",
+      label: "Status",
+      get: (p) => p.status,
+      order: ["approved", "rejected", "superseded", "resolved"],
+      hue: PROPOSAL_STATUS_HUES,
+    },
+    { key: "agent", label: "Agent", get: (p) => p.agent ?? "" },
+  ],
+  subGroups: ["agent", "status"],
+  sorts: [
+    { key: "decided", label: "Decided", get: (p) => p.decided_at ?? "", defaultDir: "desc", column: "decided" },
+    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
+    { key: "agent", label: "Agent", get: (p) => p.agent ?? "", column: "agent" },
+  ],
+  columns: [
+    { key: "agent", label: "Agent", always: true },
+    { key: "status", label: "Status" },
+    { key: "decidedBy", label: "Decided by" },
+    { key: "decided", label: "Decided" },
+    { key: "origin", label: "Origin" },
+    { key: "created", label: "Created" },
+    { key: "reason", label: "Reason" },
+  ],
+};
 
 /**
  * Proposals (webui spec §4.2) — the watched-approval centerpiece. The full
@@ -169,9 +241,29 @@ export function Proposals({
   // cell — never doubled — and stays quiet while loading or the API is down.
   const escClearsFilter = filter.trim() !== "" || expiredFilter;
 
+  // Display options (OPS-493): partition into sections, order inside them,
+  // and feed keyboard navigation only the rows of open sections.
+  const displayConfig = tab === "open" ? OPEN_DISPLAY : HISTORY_DISPLAY;
+  const [display, setDisplay] = useDisplayOptions(displayConfig);
+  const sections = useMemo(
+    () => buildSections(visible, displayConfig, display),
+    [visible, displayConfig, display],
+  );
+  const flat = useMemo(
+    () => flattenSections(sections, display.collapsed),
+    [sections, display.collapsed],
+  );
+  const cols = visibleColumns(displayConfig, display);
+  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
+
   const selectedId = focusProposalId;
-  const selectedIndex = useMemo(() => visible.findIndex((p) => p.id === selectedId), [visible, selectedId]);
-  const sel = selectedIndex >= 0 ? visible[selectedIndex] : null;
+  // Keyboard index walks the open sections; the detail pane keys off the row
+  // itself so collapsing the group under a selection never closes the pane.
+  const selectedIndex = useMemo(() => flat.findIndex((p) => p.id === selectedId), [flat, selectedId]);
+  const sel = useMemo(
+    () => (selectedId ? (visible.find((p) => p.id === selectedId) ?? null) : null),
+    [visible, selectedId],
+  );
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -283,9 +375,9 @@ export function Proposals({
   };
 
   useListKeys({
-    count: visible.length,
+    count: flat.length,
     selected: selectedIndex,
-    onSelect: (i) => onSelectProposal(visible[i]?.id ?? null),
+    onSelect: (i) => onSelectProposal(flat[i]?.id ?? null),
     onClose: () => {
       if (sel) onSelectProposal(null);
       else if (filter || expiredOnly) {
@@ -383,6 +475,9 @@ export function Proposals({
               )}
             </button>
           )}
+          <span className="ml-auto">
+            <DisplayOptions config={displayConfig} state={display} onChange={setDisplay} />
+          </span>
           {/* Last in the row: the token chips are a full-width item, so anything
               after the filter box would be pushed onto a third line the moment
               a chip appears. */}
@@ -401,48 +496,42 @@ export function Proposals({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Agent</th>
-              {tab === "open" ? (
-                <>
-                  <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Decision</th>
-                  <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">TTL</th>
-                </>
-              ) : (
-                <>
-                  <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Status</th>
-                  <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Decided by</th>
-                  <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Decided</th>
-                </>
-              )}
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Origin</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Created</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Reason</th>
+              {cols.map((c) => {
+                const sort = displayConfig.sorts.find((s) => s.column === c.key);
+                return (
+                  <Th
+                    key={c.key}
+                    label={c.label}
+                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
+                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {visible.map((p, i) => {
+            {(() => {
               const tdCls = "border-b border-(--border) px-3 py-1.5";
-              return (
-              <tr
-                key={p.id}
-                onClick={() => onSelectProposal(p.id)}
-                aria-selected={i === selectedIndex}
-                className={`cursor-pointer hover:bg-(--surface-1) ${staleState(p) ? "row-wash-err" : p.expired ? "row-wash-warn" : ""} ${i === selectedIndex ? "row-selected" : ""}`}
-              >
-                <td className={tdCls}>
-                  {p.agent ? (
-                    <JumpLink
-                      onClick={() => onJumpAgent(p.agent!)}
-                      title={`What is ${p.agent}? Open in Agents`}
-                    >
-                      {p.agent}
-                    </JumpLink>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-                {tab === "open" ? (
-                  <>
+              const renderRow = (p: Proposal) => (
+                <tr
+                  key={p.id}
+                  onClick={() => onSelectProposal(p.id)}
+                  aria-selected={p.id === selectedId}
+                  className={`cursor-pointer hover:bg-(--surface-1) ${staleState(p) ? "row-wash-err" : p.expired ? "row-wash-warn" : ""} ${p.id === selectedId ? "row-selected" : ""}`}
+                >
+                  <td className={tdCls}>
+                    {p.agent ? (
+                      <JumpLink
+                        onClick={() => onJumpAgent(p.agent!)}
+                        title={`What is ${p.agent}? Open in Agents`}
+                      >
+                        {p.agent}
+                      </JumpLink>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  {show.has("decision") && (
                     <td className={tdCls}>
                       <StateBadge state={p.decision} hues={DECISION_HUES} />
                       {p.expired && (
@@ -456,42 +545,85 @@ export function Proposals({
                         </span>
                       )}
                     </td>
+                  )}
+                  {show.has("ttl") && (
                     <td className={tdCls}>
                       <Countdown createdAt={p.created_at} ttlSeconds={p.ttl_seconds} />
                     </td>
-                  </>
-                ) : (
-                  <>
+                  )}
+                  {show.has("status") && (
                     <td className={tdCls}>
                       <StateBadge state={p.status} hues={PROPOSAL_STATUS_HUES} />
                     </td>
+                  )}
+                  {show.has("decidedBy") && (
                     <td className={`${tdCls} text-(--text-dim)`}>{p.decided_by ?? "-"}</td>
+                  )}
+                  {show.has("decided") && (
                     <td className={`${tdCls} text-(--text-faint)`}>
                       <Ago iso={p.decided_at} now={now} />
                     </td>
-                  </>
-                )}
-                <td className={`mono max-w-40 truncate ${tdCls} text-(--text-faint)`} title={originType(p) ?? undefined}>
-                  {p.eventId && p.eventSource ? (
-                    <JumpLink
-                      onClick={() => onJumpEvent(p.eventSource!, p.eventId!)}
-                      title={originType(p) ?? "Open origin event"}
-                    >
-                      {p.eventId}
-                    </JumpLink>
-                  ) : (
-                    (p.eventId ?? "-")
                   )}
-                </td>
-                <td className={`${tdCls} text-(--text-faint)`}>
-                  <Ago iso={p.created_at} now={now} />
-                </td>
-                <td className={`max-w-64 truncate ${tdCls} text-(--text-dim)`}>{p.reason ?? "-"}</td>
-              </tr>
-            );})}
+                  {show.has("origin") && (
+                    <td className={`mono max-w-40 truncate ${tdCls} text-(--text-faint)`} title={originType(p) ?? undefined}>
+                      {p.eventId && p.eventSource ? (
+                        <JumpLink
+                          onClick={() => onJumpEvent(p.eventSource!, p.eventId!)}
+                          title={originType(p) ?? "Open origin event"}
+                        >
+                          {p.eventId}
+                        </JumpLink>
+                      ) : (
+                        (p.eventId ?? "-")
+                      )}
+                    </td>
+                  )}
+                  {show.has("created") && (
+                    <td className={`${tdCls} text-(--text-faint)`}>
+                      <Ago iso={p.created_at} now={now} />
+                    </td>
+                  )}
+                  {show.has("reason") && (
+                    <td className={`max-w-64 truncate ${tdCls} text-(--text-dim)`}>{p.reason ?? "-"}</td>
+                  )}
+                </tr>
+              );
+              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
+              return sections.map((s) => {
+                const closed = display.collapsed.includes(s.key);
+                return (
+                  <Fragment key={s.key}>
+                    <GroupHeaderRow
+                      colSpan={cols.length}
+                      section={s}
+                      collapsed={closed}
+                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    />
+                    {!closed &&
+                      (s.subsections
+                        ? s.subsections.map((child) => {
+                            const childClosed = display.collapsed.includes(child.key);
+                            return (
+                              <Fragment key={child.key}>
+                                <GroupHeaderRow
+                                  colSpan={cols.length}
+                                  section={child}
+                                  collapsed={childClosed}
+                                  onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
+                                  sub
+                                />
+                                {!childClosed && child.rows.map(renderRow)}
+                              </Fragment>
+                            );
+                          })
+                        : s.rows.map(renderRow))}
+                  </Fragment>
+                );
+              });
+            })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={tab === "open" ? 6 : 7}
+                colSpan={cols.length}
                 query={tab === "open" ? query : history}
                 filtered={unfilteredCount > 0}
                 noun="proposals"
