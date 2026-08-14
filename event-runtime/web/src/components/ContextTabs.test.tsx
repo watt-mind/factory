@@ -1,6 +1,7 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import type { OperatorContext } from "../context";
 import type { RepoItem } from "../types";
 import { ContextTabs } from "./ContextTabs";
 
@@ -109,5 +110,26 @@ describe("ContextTabs", () => {
     });
 
     expect(document.activeElement).toBe(input);
+  });
+
+  test("clicking In flight while active toggles back to All (WM-91)", () => {
+    const selected: OperatorContext[] = [];
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory")]}
+        reposError={false}
+        openRepos={["factory"]}
+        active={{ kind: "inflight" }}
+        onSelect={(ctx) => selected.push(ctx)}
+        onOpen={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    const inflightBtn = r.getByRole("button", { name: "In flight" });
+    expect(inflightBtn.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(inflightBtn);
+    expect(selected).toEqual([{ kind: "all" }]);
   });
 });

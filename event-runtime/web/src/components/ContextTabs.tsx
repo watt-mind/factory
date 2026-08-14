@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OperatorContext } from "../context";
-import { INFLIGHT } from "../context";
+import { INFLIGHT, toggleInflight } from "../context";
 import { CONTEXT_TABS_ATTR } from "../hooks";
 import type { RepoItem } from "../types";
 
@@ -200,9 +200,13 @@ export function ContextTabs({
     }
   };
 
+  // Active state uses the accent tokens (not --surface-3) so it stays visible
+  // against --surface-1 in light theme, where the two grays sit too close (WM-91).
   const tabClass = (id: string) =>
     `flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium ${
-      activeId === id ? "bg-(--surface-3) text-(--text)" : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+      activeId === id
+        ? "bg-(--accent-dim) text-(--text) ring-1 ring-inset ring-(--accent)"
+        : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
     }`;
 
   return (
@@ -312,8 +316,11 @@ export function ContextTabs({
           aria-pressed={!activeRunId && active.kind === "inflight"}
           className={tabClass(INFLIGHT)}
           onClick={() => {
-            if (activeRunId && typeof window !== "undefined") window.location.hash = "#/runs?project=inflight";
-            onSelect({ kind: "inflight" });
+            const next = toggleInflight(active);
+            if (activeRunId && typeof window !== "undefined") {
+              window.location.hash = next.kind === "inflight" ? "#/runs?project=inflight" : "#/runs";
+            }
+            onSelect(next);
           }}
           onFocus={() => setTabStopId(INFLIGHT)}
         >

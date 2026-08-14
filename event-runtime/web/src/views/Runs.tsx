@@ -650,6 +650,19 @@ export function Runs({
                         ? "No runs."
                         : `No ${tab} runs.`
                 }
+                action={
+                  // Only In flight can strand an operator with no way back but the
+                  // context strip's All tab — offer the same exit inline (WM-91).
+                  context.kind === "inflight" ? (
+                    <Button
+                      onClick={() => {
+                        if (typeof window !== "undefined") window.location.hash = "#/runs";
+                      }}
+                    >
+                      Show all runs
+                    </Button>
+                  ) : undefined
+                }
               />
             )}
           </tbody>

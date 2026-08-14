@@ -8,6 +8,7 @@ import {
   projectFromContext,
   readContextTabs,
   rememberOpenRepo,
+  toggleInflight,
 } from "./context";
 
 describe("contextFromProject / projectFromContext", () => {
@@ -53,6 +54,14 @@ describe("readContextTabs", () => {
       active: "all",
     });
     expect(CONTEXT_STORAGE_KEY).toBe("factory.contextTabs");
+  });
+});
+
+describe("toggleInflight", () => {
+  test("In flight from any other context; All when already in flight", () => {
+    expect(toggleInflight({ kind: "all" })).toEqual({ kind: "inflight" });
+    expect(toggleInflight({ kind: "repo", name: "bj29" })).toEqual({ kind: "inflight" });
+    expect(toggleInflight({ kind: "inflight" })).toEqual({ kind: "all" });
   });
 });
 

@@ -39,6 +39,11 @@ export function matchesInFlight(state: string, ctx: OperatorContext): boolean {
   return state === "LEASED" || state === "RUNNING";
 }
 
+/** In flight is a toggle: clicking it while active exits to All (WM-91). */
+export function toggleInflight(active: OperatorContext): OperatorContext {
+  return active.kind === "inflight" ? { kind: "all" } : { kind: "inflight" };
+}
+
 export function readContextTabs(raw: string | null): ContextTabsPersisted {
   if (!raw) return { openRepos: [], active: "all" };
   try {
