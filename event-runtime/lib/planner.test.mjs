@@ -222,6 +222,76 @@ describe("planEvent", () => {
   });
 });
 
+describe("planEvent worktree gate (WM-108)", () => {
+  // A synthetic worktree-workspace agent: the real dispatch@1 lands with its
+  // own tests; this proves the gate itself, independent of any one agent.
+  function syntheticRegistry() {
+    const synthetic = { ...registry, agents: new Map(registry.agents), eventTypes: { ...registry.eventTypes } };
+    synthetic.eventTypes["test.worktree.requested"] = {
+      agent: "test-worktree@1",
+      adapter: "claude",
+      idempotencyScope: ["inputHash"],
+    };
+    synthetic.agents.set("test-worktree@1", {
+      id: "test-worktree",
+      version: 1,
+      ref: "test-worktree@1",
+      output_contract: "factory.test/v1",
+      workspace: { type: "worktree" },
+      capabilities: { services: [] },
+      limits: { timeout_seconds: 60, attempts: 1 },
+      mutating: true,
+      inputSchema: { type: "object", required: ["repo", "ticket"], properties: { repo: { type: "string" }, ticket: { type: "string" } } },
+    });
+    return synthetic;
+  }
+
+  function withReposRoot(yaml, fn) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-plan-wt-"));
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  }
+
+  const dispatchEnvelope = (payload) => ({
+    type: "test.worktree.requested",
+    eventId: `wt-${JSON.stringify(payload)}`,
+    correlationId: null,
+    payload,
+  });
+
+  test("a repo with no worktree scripts declared → typed human_needed at plan time, no run", () => {
+    withReposRoot(`repos:\n  - name: noscripts\n    path: /tmp/nowhere\n    base: develop\n`, () => {
+      const synthetic = syntheticRegistry();
+      const db = openDb(":memory:");
+      const ref = admit(db, dispatchEnvelope({ repo: "noscripts", ticket: "WM-1" }));
+      const outcome = planEvent(db, synthetic, ref, { now: NOW });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toBe("no_worktree_scripts");
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
+  test("a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
+    withReposRoot(`repos:\n  - name: real\n    path: /tmp/nowhere\n    base: develop\n`, () => {
+      const synthetic = syntheticRegistry();
+      const db = openDb(":memory:");
+      const ref = admit(db, dispatchEnvelope({ repo: "ghost", ticket: "WM-1" }));
+      const outcome = planEvent(db, synthetic, ref, { now: NOW });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toMatch(/^repo_unknown: /);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+});
+
 describe("buildRunSpec", () => {
   test("is pure and honors adapterOverride", () => {
     const mapping = registry.eventTypes["factory.status-report.requested"];

@@ -15,6 +15,7 @@ import { isBusyError, tx, txImmediate } from "./db.mjs";
 import { newProposalId, newRunId } from "./ids.mjs";
 import { createRun, resolveIdempotency } from "./lifecycle.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
+import { getRepo, loadRepos } from "./repos.mjs";
 import { pinRepo } from "./repository.mjs";
 import { validate } from "./schema.mjs";
 import { loopInFlight } from "./schedules.mjs";
@@ -167,6 +168,24 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
 
     const input = validate(def.inputSchema, envelope.payload);
     if (!input.valid) return humanNeeded(db, event, `invalid_input: ${input.errors[0]}`, at, ttlSeconds);
+
+    // §5 tier 2 (docs/event-runtime-dispatch.md, WM-108): a worktree
+    // workspace delegates to the repo's own scripts, so a repo that declares
+    // none cannot host a mutating run — a typed refusal now, while the
+    // operator can still see why, never a crash at execute. Both reasons are
+    // config states a human must change, hence human_needed (requeue-able
+    // after the fix, like unregistered_event_type) rather than a NOOP.
+    if (def.workspace?.type === "worktree") {
+      let repoConfig;
+      try {
+        repoConfig = getRepo(loadRepos(), envelope.payload?.repo);
+      } catch (err) {
+        return humanNeeded(db, event, `repo_unknown: ${err.message}`, at, ttlSeconds);
+      }
+      if (!repoConfig.worktreeUp || !repoConfig.worktreeDown || !repoConfig.worktreeRoot) {
+        return humanNeeded(db, event, "no_worktree_scripts", at, ttlSeconds);
+      }
+    }
 
     // §7 tier 1 (OPS-228): a repository workspace resolves its ref to an
     // immutable SHA *now*, so the pin is inside the spec's input (and its

@@ -8,11 +8,13 @@
  * enforcement, not a security sandbox (§7): safeJoin exists so a declared
  * artifact path can never name a file outside the workspace, failing closed.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson } from "./canonical.mjs";
 import { materializeArtifact } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
+import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 
 export class PathViolation extends Error {
@@ -21,6 +23,14 @@ export class PathViolation extends Error {
     this.name = "PathViolation";
     this.workspaceDir = workspaceDir;
     this.relPath = relPath;
+  }
+}
+
+/** Tier-2 worktree delegation failure — always typed, never a bare throw. */
+export class WorktreeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "WorktreeError";
   }
 }
 
@@ -64,6 +74,60 @@ export function resolveInputRef(input, expr) {
   return value;
 }
 
+/**
+ * Marker recording a delegated worktree inside its workspace, so teardown can
+ * find the repo's own `worktree_down` without the caller re-plumbing repo
+ * facts through every destroy path. Durable on disk (not module state): a
+ * worker that dies and restarts must still know what to tear down.
+ */
+const WORKTREE_MARKER = ".worktree.json";
+
+/**
+ * Tier-2 mutating workspace (docs/event-runtime-dispatch.md §5, WM-108):
+ * delegate to the `worktree_up` the repo declares in config/repos.yaml —
+ * the runtime NEVER implements worktrees itself (event-runtime-workers.md
+ * §5a rule 1). Git isolates branches, not ports or databases; those live in
+ * the repo-owned script. The planner refuses `no_worktree_scripts` before
+ * proposing, so reaching this without the scripts is a bypassed gate — it
+ * still fails typed, not with a crash mid-spawn.
+ *
+ * The tree lands at `worktree_root/<ticket>` (the dispatcher's convention,
+ * orchestrator/tick.mjs) and is reachable from the workspace at
+ * `./<checkoutDir>` via symlink, mirroring tier 1's `./repo` layout. The
+ * repo's declared `verify` command rides along in the returned record — the
+ * §9 verifier runs it as ordinary code, never trusting the agent's report.
+ */
+function materializeWorktree({ workspaceDir, input, checkoutDir }) {
+  const repoName = input?.repo;
+  const ticket = input?.ticket;
+  if (!repoName || !ticket) {
+    throw new WorktreeError("a worktree workspace needs input.repo and input.ticket");
+  }
+  const repo = getRepo(loadRepos(), repoName);
+  if (!repo.worktreeUp || !repo.worktreeDown || !repo.worktreeRoot) {
+    throw new WorktreeError(
+      `repo "${repoName}" declares no worktree lifecycle in config/repos.yaml (worktree_up/worktree_down/worktree_root) — the planner should have refused this`,
+    );
+  }
+  const up = spawnSync("/bin/bash", [repo.worktreeUp, ticket], { cwd: repo.path, encoding: "utf8" });
+  if (up.status !== 0) {
+    const why = (up.stderr || up.stdout || "").trim().split("\n").pop() || `exit ${up.status}`;
+    throw new WorktreeError(`worktree_up failed for ${repoName}/${ticket}: ${why}`);
+  }
+  const worktreePath = path.join(repo.worktreeRoot, ticket);
+  symlinkSync(worktreePath, path.join(workspaceDir, checkoutDir));
+  const record = {
+    repo: repoName,
+    ticket,
+    path: worktreePath,
+    repoPath: repo.path,
+    down: repo.worktreeDown,
+    verify: repo.verify,
+  };
+  writeFileSync(path.join(workspaceDir, WORKTREE_MARKER), `${canonicalJson(record)}\n`, "utf8");
+  return record;
+}
+
 export function createWorkspace({ root, runId, attempt, input, workspace = {}, artifactStore = artifactsRoot() }) {
   const dir = path.join(root, `${runId}-a${attempt}`);
   mkdirSync(dir, { recursive: true });
@@ -98,7 +162,12 @@ export function createWorkspace({ root, runId, attempt, input, workspace = {}, a
       subdir,
     });
   }
-  return { dir, checkout, materialized };
+
+  let worktree = null;
+  if (workspace.type === "worktree") {
+    worktree = materializeWorktree({ workspaceDir: dir, input, checkoutDir: workspace.checkoutDir ?? "repo" });
+  }
+  return { dir, checkout, materialized, worktree };
 }
 
 /**
@@ -110,6 +179,26 @@ export function destroyWorkspace(dir, { retain = false, checkout = null, repoNam
   // a mirror that keeps stale worktree registrations refuses future adds.
   if (checkout) releaseCheckout({ checkoutPath: checkout, repoName });
   if (retain) return false;
+
+  // Delegated worktree teardown (WM-108): run the repo's own `worktree_down`
+  // on every non-retained path, completion and failure alike. The script owns
+  // the safety property — it refuses dirty trees, and the runtime never adds
+  // `--force` (lib/client.mjs carries the same rule). A refusal or failure
+  // retains the whole workspace, marker included, so the leak is visible to
+  // the janitor instead of an rm quietly orphaning a live dev server.
+  const marker = path.join(dir, WORKTREE_MARKER);
+  if (existsSync(marker)) {
+    let record = null;
+    try {
+      record = JSON.parse(readFileSync(marker, "utf8"));
+    } catch {
+      record = null;
+    }
+    if (!record?.down || !record?.ticket) return false;
+    const down = spawnSync("/bin/bash", [record.down, record.ticket], { cwd: record.repoPath, encoding: "utf8" });
+    if (down.status !== 0) return false;
+  }
+
   rmSync(dir, { recursive: true, force: true });
   return true;
 }
