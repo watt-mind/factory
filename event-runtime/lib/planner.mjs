@@ -8,14 +8,22 @@
  * returns the recorded outcome — and a poison event that keeps throwing is
  * dead-lettered instead of wedging the sweep or silently vanishing.
  */
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
+// Imported as a library, never copied (docs/event-runtime-dispatch.md §4):
+// one collision oracle for both mutation paths, with its safety biases —
+// missing Owned Paths owns everything, ambiguous overlap errs to collision.
+import { effectiveOwnedPaths, pathsCollide } from "../../orchestrator/owned-paths.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
-import { artifactsRoot, DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
+import { artifactsRoot, DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS, FACTORY_ROOT } from "./config.mjs";
 import { isBusyError, tx, txImmediate } from "./db.mjs";
 import { newProposalId, newRunId } from "./ids.mjs";
 import { createRun, resolveIdempotency } from "./lifecycle.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
-import { getRepo, loadRepos } from "./repos.mjs";
+import { getRepo, loadRepos, reposRoot } from "./repos.mjs";
 import { pinRepo } from "./repository.mjs";
 import { validate } from "./schema.mjs";
 import { loopInFlight } from "./schedules.mjs";
@@ -83,6 +91,133 @@ export function buildRunSpec(registry, envelope, mapping, { runId, policyVersion
   };
 }
 
+/** policy.yaml's per-repo cap fallback, read from the same root as repos.yaml. */
+export const DEFAULT_MAX_IN_FLIGHT = 3;
+
+function policyMaxInFlight(root = reposRoot()) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return DEFAULT_MAX_IN_FLIGHT;
+  try {
+    const n = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency?.max_in_flight_per_repo;
+    return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_IN_FLIGHT;
+  } catch {
+    return DEFAULT_MAX_IN_FLIGHT;
+  }
+}
+
+/**
+ * Plan-time Linear reads for the dispatch gate, through the factory's own
+ * Linear surface (tools/linear.mjs — gql retries, backoff, and key loading
+ * live there; a second client would be a second set of bugs). Synchronous
+ * subprocesses because the planner is synchronous code; planEvent calls the
+ * gate BEFORE its write transaction so these round trips never hold the
+ * SQLite write lock. A transport failure throws — planAdmittedEvents turns
+ * that into plan_failures with retry and eventual dead-letter (§13), which is
+ * the right shape for a transient outage, unlike a one-shot refusal.
+ */
+const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
+
+function fetchTicketDefault(ticketId) {
+  try {
+    return JSON.parse(
+      execFileSync("bun", [linearCli(), "get", ticketId, "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    );
+  } catch (err) {
+    const stderr = String(err?.stderr ?? "");
+    if (stderr.includes("no such issue")) return null;
+    throw new Error(`linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`);
+  }
+}
+
+// The same query shape tick.mjs uses for its in-flight set (dispatch doc §4).
+const IN_FLIGHT_QUERY =
+  `query($t:String!,$p:String!){ issues(first:250, filter:{ team:{key:{eq:$t}}, project:{name:{eq:$p}}, state:{name:{eq:"In Progress"}} }){ nodes{ identifier description } } }`;
+
+function fetchInFlightDefault(repoConfig) {
+  try {
+    const out = execFileSync(
+      "bun",
+      [linearCli(), "raw", IN_FLIGHT_QUERY, "--var", `t=${repoConfig.team}`, "--var", `p=${repoConfig.project}`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return JSON.parse(out)?.issues?.nodes ?? [];
+  } catch (err) {
+    const stderr = String(err?.stderr ?? "");
+    throw new Error(`linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`);
+  }
+}
+
+/**
+ * The dispatch gate (docs/event-runtime-dispatch.md §§2–5, WM-108): may a
+ * tier-2 mutating run for {repo, ticket} be PROPOSED right now? Checked
+ * cheapest-first — repo config, then the shared lease ledger, then Linear.
+ *
+ * Refusal semantics follow the doc: durable config states an operator must
+ * change (unknown repo, report_only, missing worktree scripts, missing
+ * team/project, vanished ticket) are `human_needed` — visible in the inbox
+ * and requeue-able after the fix. Transient world states (claimed ticket,
+ * full cap, Owned Paths overlap) are typed NOOPs — a false refusal costs one
+ * NOOP and the next request re-reads a fresh world; parking them as inbox
+ * asks would train the operator to approve stale facts.
+ *
+ * This is the plan-time half of the doc's "checked twice" rule; the
+ * execute-time re-check (claim lock file, lease write, cap and overlap under
+ * the approval TTL) belongs to the executor and is NOT implemented here.
+ *
+ * @returns {null | { decision: "noop" | "human_needed", reason: string }}
+ */
+export function worktreeDispatchGate(payload, {
+  fetchTicket = fetchTicketDefault,
+  fetchInFlight = fetchInFlightDefault,
+  countLeases = (repoName) => liveWorkerLeases(repoName).length,
+  maxInFlightFallback,
+} = {}) {
+  let repo;
+  try {
+    repo = getRepo(loadRepos(), payload?.repo);
+  } catch (err) {
+    return { decision: "human_needed", reason: `repo_unknown: ${err.message}` };
+  }
+  // report_only repos are never tier-2 targets (dispatch doc §5): safe
+  // concurrency of one human, same refusal as tick.mjs.
+  if (repo.reportOnly) return { decision: "human_needed", reason: "repo_report_only" };
+  if (!repo.worktreeUp || !repo.worktreeDown || !repo.worktreeRoot) {
+    return { decision: "human_needed", reason: "no_worktree_scripts" };
+  }
+
+  // One budget for both paths (§3): the repo's cap against the dispatcher's
+  // own lease ledger — files under ~/.factory/worker-leases that count every
+  // live ticket worker, whichever coordinator started it.
+  const cap = repo.maxInFlight ?? maxInFlightFallback ?? policyMaxInFlight();
+  if (countLeases(repo.name) >= cap) return { decision: "noop", reason: "capacity_full" };
+
+  // The Linear assignee stays the only ticket lock (§2). Stricter than
+  // tick.mjs on purpose — any assignee refuses; the asymmetry is recorded in
+  // the doc (§2, §9) and collapses when OPS-40 lands. Do not "fix" either
+  // side to match the other.
+  const ticket = fetchTicket(payload.ticket);
+  if (!ticket) return { decision: "human_needed", reason: "ticket_not_found" };
+  if (ticket.assignee) return { decision: "noop", reason: "ticket_assigned" };
+  if (ticket.state?.name !== "Todo") return { decision: "noop", reason: "ticket_not_todo" };
+  if (!(ticket.labels?.nodes ?? []).some((l) => l.name === "ai:agent-ready")) {
+    return { decision: "noop", reason: "ticket_not_agent_ready" };
+  }
+
+  // One collision oracle (§4): the in-flight set is Linear's In Progress
+  // tickets for the repo's team/project, whichever path claimed them.
+  if (!repo.team || !repo.project) {
+    return { decision: "human_needed", reason: "repo_unconfigured: team/project missing for the in-flight query" };
+  }
+  const inFlight = fetchInFlight(repo);
+  const busy = inFlight
+    .filter((i) => i.identifier !== payload.ticket)
+    .flatMap((i) => effectiveOwnedPaths(i.description ?? ""));
+  if (pathsCollide(effectiveOwnedPaths(ticket.description ?? ""), busy)) {
+    return { decision: "noop", reason: "owned_paths_overlap" };
+  }
+  return null;
+}
+
 function insertProposal(db, { id, event, runId = null, decision, specJson = null, specHash = null, idempotencyKey = null, status, reason = null, at, ttlSeconds }) {
   db.query(
     `INSERT INTO proposals
@@ -125,7 +260,28 @@ function existingOutcome(db, event) {
  *
  * @returns {{ decision: string, proposal?: object, runId?: string, reason?: string }}
  */
-export function planEvent(db, registry, { source, eventId }, { now = Date.now(), policyVersion = "unknown", adapterOverride, artifactStore = artifactsRoot() } = {}) {
+export function planEvent(db, registry, { source, eventId }, { now = Date.now(), policyVersion = "unknown", adapterOverride, artifactStore = artifactsRoot(), dispatch = {} } = {}) {
+  // Dispatch gate for tier-2 worktree agents (WM-108), evaluated BEFORE the
+  // write transaction: its Linear and lease reads must never hold the SQLite
+  // write lock across a network round trip. The verdict is applied inside the
+  // transaction only when the event is still admitted there — a raced plan
+  // simply discards it via the idempotent early return.
+  let worktreeRefusal = null;
+  {
+    const row = db.query(`SELECT status, envelope_json FROM events WHERE source = ? AND event_id = ?`).get(source, eventId);
+    if (row?.status === "admitted") {
+      const preEnvelope = JSON.parse(row.envelope_json);
+      const preMapping = getEventType(registry, preEnvelope.type);
+      const preDef = preMapping && preMapping.observe !== true ? registry.agents.get(preMapping.agent) : null;
+      if (
+        preDef?.workspace?.type === "worktree" &&
+        typeof preEnvelope.payload?.repo === "string" &&
+        typeof preEnvelope.payload?.ticket === "string"
+      ) {
+        worktreeRefusal = worktreeDispatchGate(preEnvelope.payload, dispatch);
+      }
+    }
+  }
   return txImmediate(db, () => {
     const event = db.query(`SELECT * FROM events WHERE source = ? AND event_id = ?`).get(source, eventId);
     if (!event) throw new Error(`no admitted event (${source}, ${eventId})`);
@@ -169,22 +325,20 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     const input = validate(def.inputSchema, envelope.payload);
     if (!input.valid) return humanNeeded(db, event, `invalid_input: ${input.errors[0]}`, at, ttlSeconds);
 
-    // §5 tier 2 (docs/event-runtime-dispatch.md, WM-108): a worktree
-    // workspace delegates to the repo's own scripts, so a repo that declares
-    // none cannot host a mutating run — a typed refusal now, while the
-    // operator can still see why, never a crash at execute. Both reasons are
-    // config states a human must change, hence human_needed (requeue-able
-    // after the fix, like unregistered_event_type) rather than a NOOP.
-    if (def.workspace?.type === "worktree") {
-      let repoConfig;
-      try {
-        repoConfig = getRepo(loadRepos(), envelope.payload?.repo);
-      } catch (err) {
-        return humanNeeded(db, event, `repo_unknown: ${err.message}`, at, ttlSeconds);
+    // Tier-2 dispatch gate verdict (docs/event-runtime-dispatch.md §§2–5,
+    // WM-108), computed above outside this transaction. Refusals are typed
+    // and carry their reason; a null verdict means every check passed at the
+    // moment of the read — the doc's execute-time re-check owns the TTL gap.
+    if (def.workspace?.type === "worktree" && worktreeRefusal) {
+      if (worktreeRefusal.decision === "human_needed") {
+        return humanNeeded(db, event, worktreeRefusal.reason, at, ttlSeconds);
       }
-      if (!repoConfig.worktreeUp || !repoConfig.worktreeDown || !repoConfig.worktreeRoot) {
-        return humanNeeded(db, event, "no_worktree_scripts", at, ttlSeconds);
-      }
+      const proposal = insertProposal(db, {
+        id: newProposalId(), event, decision: "noop", status: "resolved",
+        reason: worktreeRefusal.reason, at, ttlSeconds,
+      });
+      setEventStatus(db, event, "noop");
+      return { decision: "noop", proposal, reason: worktreeRefusal.reason };
     }
 
     // §7 tier 1 (OPS-228): a repository workspace resolves its ref to an
