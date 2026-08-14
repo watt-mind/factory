@@ -277,6 +277,81 @@ describe("cli", () => {
     verifyDb.close();
   });
 
+  test("tick runs notify as an isolated subsystem (WM-65): a throwing notifier step cannot break the tick", async () => {
+    const { tick, TICK_SUBSYSTEMS } = await import("./cli.mjs");
+    const { loadRegistry } = await import("./lib/registry.mjs");
+    expect(TICK_SUBSYSTEMS).toContain("notify");
+
+    const db = openDb(":memory:");
+    const logs = [];
+    let chainsRan = false;
+    await tick({
+      db,
+      registry: loadRegistry(),
+      policyVersion: "git:test",
+      log: (l) => logs.push(l),
+      subsystems: {
+        notify: () => {
+          throw new Error("notifier exploded");
+        },
+        chains: () => {
+          chainsRan = true;
+        },
+      },
+    });
+    expect(logs.some((l) => l.includes("tick notify: notifier exploded"))).toBe(true);
+    expect(chainsRan).toBe(true);
+  });
+
+  test("tick with FACTORY_EVENT_NOTIFY=1 pushes a human_needed park through the stub notifier exactly once", async () => {
+    const { tick } = await import("./cli.mjs");
+    const { loadRegistry } = await import("./lib/registry.mjs");
+    const { chmodSync, readFileSync, writeFileSync, existsSync } = await import("node:fs");
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-tick-notify-"));
+    const outFile = path.join(dir, "pushes.txt");
+    const stub = path.join(dir, "notify-stub.sh");
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${outFile}\n`);
+    chmodSync(stub, 0o755);
+
+    const db = openDb(path.join(dir, "runtime.db"));
+    const at = new Date().toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('test', 'evt-tick', 'linear.ticket.agent_ready', ?, ?, '{}', 'sha256:x', 'human_needed', ?)`,
+    ).run(at, at, at);
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, reason, created_at, ttl_seconds)
+       VALUES ('prop-tick', 'test', 'evt-tick', 'human_needed', 'open', 'no_worktree_scripts', ?, 1800)`,
+    ).run(at);
+
+    const saved = { N: process.env.FACTORY_EVENT_NOTIFY, C: process.env.FACTORY_EVENT_NOTIFY_CMD };
+    process.env.FACTORY_EVENT_NOTIFY = "1";
+    process.env.FACTORY_EVENT_NOTIFY_CMD = stub;
+    const logs = [];
+    try {
+      await tick({ db, registry: loadRegistry(), policyVersion: "git:test", log: (l) => logs.push(l) });
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && !existsSync(outFile)) {
+        await Bun.sleep(50);
+      }
+      expect(readFileSync(outFile, "utf8").trim()).toBe(
+        "BLOCKED linear.ticket.agent_ready evt-tick: no_worktree_scripts",
+      );
+      expect(logs.some((l) => l.includes("notify human_needed test/evt-tick"))).toBe(true);
+      // A second tick pushes nothing new.
+      await tick({ db, registry: loadRegistry(), policyVersion: "git:test", log: () => {} });
+      await Bun.sleep(200);
+      expect(readFileSync(outFile, "utf8").trim().split("\n")).toHaveLength(1);
+    } finally {
+      if (saved.N === undefined) delete process.env.FACTORY_EVENT_NOTIFY;
+      else process.env.FACTORY_EVENT_NOTIFY = saved.N;
+      if (saved.C === undefined) delete process.env.FACTORY_EVENT_NOTIFY_CMD;
+      else process.env.FACTORY_EVENT_NOTIFY_CMD = saved.C;
+      db.close();
+    }
+  });
+
   test("doctor against a dead port says serve is not running, non-zero exit", () => {
     const r = runCli(["doctor"], { FACTORY_EVENT_PORT: DEAD_PORT });
     expect(r.status).not.toBe(0);

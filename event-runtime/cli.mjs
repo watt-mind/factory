@@ -31,6 +31,7 @@ import { pruneArtifacts } from "./lib/artifacts.mjs";
 import { publishOutbox } from "./lib/outbox.mjs";
 import { autoApproveScheduled, emitDueTicks, scheduleView } from "./lib/schedules.mjs";
 import { resolveChains } from "./lib/chain.mjs";
+import { notifyPending } from "./lib/notify.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { approveProposal } from "./lib/proposals.mjs";
@@ -108,7 +109,7 @@ async function withClient(fn) {
 // cannot hitch every 1s tick.
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
-export const TICK_SUBSYSTEMS = ["tick emit", "plan", "auto-approve", "outbox", "GC", "chains"];
+export const TICK_SUBSYSTEMS = ["tick emit", "plan", "auto-approve", "notify", "outbox", "GC", "chains"];
 
 /**
  * One serve-loop pass (OPS-412). Each named subsystem is caught on its own
@@ -165,6 +166,13 @@ export async function tick({
   await runStep("announce", () => {
     announceProposals();
     announceTransitions();
+  });
+
+  // Push channel for states awaiting a human (WM-65): human_needed parks and
+  // aging watched proposals. Off unless FACTORY_EVENT_NOTIFY=1; deliveries
+  // are fire-and-forget so a slow or broken notifier cannot delay the tick.
+  await runStep("notify", () => {
+    notifyPending(db, { now, log: logLine });
   });
 
   await runStep("reap", () => {
