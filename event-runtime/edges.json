@@ -81,6 +81,18 @@
       }
     }
   },
+  "work-scan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "DISPATCH": {
+        "eventType": "factory.dispatch.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "ticket": "$.artifact.ticket"
+        }
+      }
+    }
+  },
   "ci-doctor@2": {
     "recommendationField": "verdict",
     "edges": {
