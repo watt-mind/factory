@@ -115,6 +115,20 @@ export function repoSuggestions(
 }
 
 /**
+ * Human-readable example for a string field's placeholder (WM-76 critique r1).
+ * Mirrors the pattern heuristics templates.ts seedFor used to seed as values:
+ * examples belong in the placeholder, never pre-filled — and never show the
+ * raw regex source.
+ */
+export function placeholderFor(name: string, schema: Record<string, unknown>): string | null {
+  if (typeof schema.pattern !== "string") return null;
+  // Order matters: a path pattern ("^/…") also contains a slash.
+  if (schema.pattern.startsWith("^/")) return "/absolute/path";
+  if (schema.pattern.includes("/")) return name === "repo" ? "watt-mind/factory" : "owner/name";
+  return null;
+}
+
+/**
  * Route validator errors ("$.host: …", `$: missing required property "x"`)
  * to field names; unrouteable errors land under "" (form-level).
  */

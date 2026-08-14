@@ -329,6 +329,28 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
       }
     }));
 
+  test("example-ish seeds surface as placeholders, never as values or regex source (critique r1)", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /ci\.run\.failed/i);
+      const repo = r.getByLabelText("repo") as HTMLInputElement;
+      // The owner/name example must not be a pre-filled value that ships as
+      // plausible garbage — it belongs in the placeholder, human-readable.
+      expect(repo.value).toBe("");
+      expect(repo.getAttribute("placeholder")).toBe("watt-mind/factory");
+      // Pattern-constrained fields never show the raw regex source.
+      const logArtifact = r.getByLabelText("logArtifact") as HTMLInputElement;
+      expect(logArtifact.getAttribute("placeholder") ?? "").not.toContain("^");
+    }));
+
+  test("string arrays with minItems seed zero chips; the minItems warning covers the ask (critique r1)", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /factory\.status\.requested/i);
+      // No bare unlabeled "×" chip from a seeded empty string.
+      expect(r.queryAllByRole("button", { name: /^remove/i }).length).toBe(0);
+      // The requirement is still surfaced, as a validation warning.
+      expect(r.getByText(/fewer than minItems 1/i)).toBeTruthy();
+    }));
+
   test("array-of-objects field renders a JSON sub-editor with parse indicator", () =>
     withSchemaApi(async (r) => {
       await selectTemplate(r, /demo\.requested/i);

@@ -51,19 +51,24 @@ describe("buildSkeleton", () => {
     ).toEqual({ host: "lab", usedPct: 0, flag: false });
   });
 
-  test("arrays with minItems seed one element — an empty array would be a guaranteed 422", () => {
+  test("string arrays seed empty even under minItems — the warning covers the ask; object arrays keep one skeleton element", () => {
     expect(
       buildSkeleton({
-        required: ["repos", "tags"],
+        required: ["repos", "tags", "plan"],
         properties: {
           repos: { type: "array", minItems: 1, items: { type: "string" } },
           tags: { type: "array", items: { type: "string" } },
+          plan: {
+            type: "array",
+            minItems: 1,
+            items: { type: "object", required: ["action"], properties: { action: { type: "string" } } },
+          },
         },
       }),
-    ).toEqual({ repos: [""], tags: [] });
+    ).toEqual({ repos: [], tags: [], plan: [{ action: "" }] });
   });
 
-  test("pattern hints produce a recognisable placeholder, not invented content", () => {
+  test("example-ish pattern hints seed empty values — the form surfaces the example as a placeholder instead", () => {
     expect(
       buildSkeleton({
         required: ["repo", "mount"],
@@ -72,7 +77,7 @@ describe("buildSkeleton", () => {
           mount: { type: "string", pattern: "^/[A-Za-z0-9/._-]*$" },
         },
       }),
-    ).toEqual({ repo: "owner/name", mount: "/" });
+    ).toEqual({ repo: "", mount: "" });
   });
 
   test("nested objects recurse", () => {
@@ -188,7 +193,7 @@ describe("buildTemplates", () => {
       type: "keephq.disk-alert.raised",
       source: "web-trigger",
       occurredAt: "2026-08-13T09:15:00.000Z",
-      payload: { host: "lab", mount: "/", usedPct: 0, alertId: triggerId(NOW) },
+      payload: { host: "lab", mount: "", usedPct: 0, alertId: triggerId(NOW) },
     });
   });
 

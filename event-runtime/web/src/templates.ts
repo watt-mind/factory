@@ -28,21 +28,26 @@ function seedFor(name: string, schema: any, nowMs: number = Date.now()): unknown
     case "boolean":
       return false;
     case "array": {
-      // minItems > 0 means "empty is invalid" — seed one element so the
-      // template is submittable, not a guaranteed 422.
-      const item = seedFor(name, schema.items, nowMs);
-      return (schema.minItems ?? 0) > 0 ? [item] : [];
+      // Arrays of objects under minItems > 0 seed one skeleton element so the
+      // required shape is visible. Arrays of strings seed empty even under
+      // minItems (WM-76 critique r1): a seeded empty-string chip reads as a
+      // rendering glitch, and the minItems validation warning covers the ask.
+      const itemType = Array.isArray(schema.items?.type) ? schema.items.type[0] : schema.items?.type;
+      if ((schema.minItems ?? 0) > 0 && itemType !== "string") {
+        return [seedFor(name, schema.items, nowMs)];
+      }
+      return [];
     }
     case "object":
       return buildSkeleton(schema, nowMs);
     default:
-      // Pattern-constrained strings get a hint the operator can recognise and
-      // replace; anything else stays empty rather than inventing content.
+      // Example-ish pattern hints are placeholders, not values (WM-76
+      // critique r1): a pre-filled "owner/name" renders as real typed text,
+      // satisfies the pattern, and ships as plausible garbage. Seed "" —
+      // validation warns, never blocks — and let the form surface the
+      // example via placeholderFor() (lib/injectForm.ts).
       if (typeof schema.pattern === "string") {
-        // Order matters: a path pattern ("^/…") also contains a slash, so the
-        // absolute-path case must be tested before the owner/name case.
-        if (schema.pattern.startsWith("^/")) return "/";
-        if (schema.pattern.includes("/")) return "owner/name";
+        if (schema.pattern.startsWith("^/") || schema.pattern.includes("/")) return "";
       }
       if (
         schema.format === "date-time" ||

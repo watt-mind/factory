@@ -15,6 +15,7 @@ import {
   errorsByField,
   isAtField,
   isIdField,
+  placeholderFor,
   repoSuggestions,
   schemaFields,
   unknownKeys,
@@ -643,7 +644,7 @@ export function InjectDialog({
               else setField(f.name, v);
             }}
             suggestions={suggestions}
-            placeholder={typeof f.schema.pattern === "string" ? f.schema.pattern : undefined}
+            placeholder={placeholderFor(f.name, f.schema) ?? undefined}
           />
         );
     }
