@@ -288,7 +288,10 @@ export function App() {
         onClose={closeRepo}
       />
       <div className="flex min-h-0 flex-1">
-      <nav className="flex w-52 shrink-0 flex-col border-r border-(--border) bg-(--surface-1)">
+      <nav
+        aria-label="Primary"
+        className="flex w-52 shrink-0 flex-col border-r border-(--border) bg-(--surface-1)"
+      >
         <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-3">
           <div className="flex items-center gap-2">
             <img src="/watt-mind-logo.svg" alt="Watt Mind" className="size-5.5 shrink-0" />
@@ -352,6 +355,7 @@ export function App() {
                 key={n.key}
                 type="button"
                 aria-current={view === n.key || (n.key === "runs" && view === "run") ? "page" : undefined}
+                aria-describedby={badge.count > 0 ? `nav-badge-${n.key}` : undefined}
                 onClick={() => navigate(n.key)}
                 className={`flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-[13px] ${
                   view === n.key || (n.key === "runs" && view === "run")
@@ -361,7 +365,14 @@ export function App() {
               >
                 <span>{n.label}</span>
                 {badge.count > 0 && (
+                  /* aria-hidden keeps the count out of the accessible name —
+                     "Events" must not announce as "Events 6" — while the
+                     aria-describedby reference above still reads it back as
+                     the button's description (accname spec includes hidden
+                     nodes referenced by labelledby/describedby). */
                   <span
+                    id={`nav-badge-${n.key}`}
+                    aria-hidden="true"
                     className="rounded px-1.5 text-[11px] tabular-nums"
                     title={badge.title}
                     style={{
