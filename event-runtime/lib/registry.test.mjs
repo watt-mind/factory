@@ -3,8 +3,11 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { cpSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { RUNTIME_ROOT } from "./config.mjs";
-import { RegistryError, getAgent, getEventType, loadRegistry, updatePins } from "./registry.mjs";
+import {
+  DEFAULT_MODEL, RegistryError, getAgent, getEventType, loadModelTierMap, loadRegistry, resolveModel, updatePins,
+} from "./registry.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry() {
@@ -94,6 +97,97 @@ describe("registry", () => {
     withRepos(["bj29", "not-in-repos-yaml"]);
     const registry = loadRegistry({ root });
     expect(getAgent(registry, "factory-status-report@1").repos).toEqual(["bj29", "not-in-repos-yaml"]);
+  });
+
+  test("model_tier: valid tiers load and are readable; absent field stays absent (WM-135)", () => {
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "factory-status-report.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "standard" }));
+    const registry = loadRegistry({ root, modelTiers: { claude: { standard: "sonnet" } } });
+    expect(getAgent(registry, "factory-status-report@1").model_tier).toBe("standard");
+    // A definition that declares nothing is untouched — adapter default.
+    expect(getAgent(registry, "ci-doctor@2").model_tier).toBeUndefined();
+    expect(getAgent(registry, "ci-doctor@2").model).toBeUndefined();
+  });
+
+  test("model_tier outside the closed enum fails at load (WM-135)", () => {
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "factory-status-report.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    for (const bad of ["medium", "opus-4", 3, null]) {
+      writeFileSync(defFile, JSON.stringify({ ...def, model_tier: bad }));
+      expect(() => loadRegistry({ root, modelTiers: { claude: { standard: "sonnet" } } })).toThrow(/"model_tier"/);
+    }
+  });
+
+  test("declared tier with no mapping for the routed adapter fails closed at load (WM-135)", () => {
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "factory-status-report.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "light" }));
+    // No claude tier map at all, and a map missing this one tier: both refuse.
+    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/no mapping for adapter "claude"/);
+    expect(() => loadRegistry({ root, modelTiers: { claude: { strong: "default" } } })).toThrow(
+      /model_tier "light" has no mapping/,
+    );
+  });
+
+  test("a tier on a command/actions-routed agent is not applicable, never an error (WM-135)", () => {
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "reconcile.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "light" }));
+    // reconcile routes via the command adapter — no tier map needed.
+    const registry = loadRegistry({ root, modelTiers: {} });
+    expect(resolveModel(getAgent(registry, "reconcile@1"), "command", registry.modelTiers)).toBeNull();
+  });
+
+  test("model override: malformed rejected, well-formed wins over the tier (WM-135)", () => {
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "factory-status-report.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify({ ...def, model: "" }));
+    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/"model"/);
+    writeFileSync(defFile, JSON.stringify({ ...def, model: 42 }));
+    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/"model"/);
+
+    // Both fields allowed; the override wins, and it also satisfies load even
+    // though "light" has no mapping — the tier is never consulted.
+    writeFileSync(defFile, JSON.stringify({ ...def, model: "claude-opus-4-1", model_tier: "light" }));
+    const registry = loadRegistry({ root, modelTiers: {} });
+    const loaded = getAgent(registry, "factory-status-report@1");
+    expect(resolveModel(loaded, "claude", registry.modelTiers)).toBe("claude-opus-4-1");
+  });
+
+  test("resolveModel: override > tier map > adapter default; sentinel passes through (WM-135)", () => {
+    const tiers = { claude: { strong: "default", standard: "sonnet", light: "haiku" } };
+    expect(resolveModel({ ref: "x@1", model_tier: "standard" }, "claude", tiers)).toBe("sonnet");
+    expect(resolveModel({ ref: "x@1", model_tier: "strong" }, "claude", tiers)).toBe(DEFAULT_MODEL);
+    expect(resolveModel({ ref: "x@1", model: "haiku", model_tier: "strong" }, "claude", tiers)).toBe("haiku");
+    expect(resolveModel({ ref: "x@1" }, "claude", tiers)).toBeNull(); // nothing declared → adapter default
+    expect(resolveModel({ ref: "x@1", model_tier: "light" }, "command", tiers)).toBeNull(); // not applicable
+    expect(() => resolveModel({ ref: "x@1", model_tier: "light" }, "claude", {})).toThrow(RegistryError);
+  });
+
+  test("loadModelTierMap: reads policy.yaml, validates shape fail-closed, tolerates absence (WM-135)", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "event-policy-"));
+    expect(loadModelTierMap({ root })).toEqual({}); // no policy.yaml at all
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    const write = (yaml) => writeFileSync(path.join(root, "config", "policy.yaml"), yaml);
+
+    write("concurrency:\n  max_in_flight_per_repo: 3\n"); // no models block
+    expect(loadModelTierMap({ root })).toEqual({});
+
+    write("models:\n  claude:\n    strong: default\n    standard: sonnet\n    light: haiku\n");
+    expect(loadModelTierMap({ root })).toEqual({ claude: { strong: "default", standard: "sonnet", light: "haiku" } });
+
+    write("models:\n  claude:\n    strnog: sonnet\n"); // typo'd tier key
+    expect(() => loadModelTierMap({ root })).toThrow(/not a tier/);
+    write("models:\n  claude:\n    standard: 7\n"); // non-string value
+    expect(() => loadModelTierMap({ root })).toThrow(/non-empty model value/);
+    write("models:\n  claude: sonnet\n"); // adapter entry not a map
+    expect(() => loadModelTierMap({ root })).toThrow(/must map tiers/);
   });
 
   test("event type mapped to an unregistered agent fails closed", () => {

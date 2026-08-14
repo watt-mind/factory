@@ -13,6 +13,7 @@ import path from "node:path";
 import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
+import { reposRoot } from "./repos.mjs";
 
 export class RegistryError extends Error {
   constructor(message) {
@@ -22,6 +23,89 @@ export class RegistryError extends Error {
 }
 
 const PINNED_FIELDS = ["prompt", "input_schema", "output_schema"];
+
+// ---------------------------------------------------------------------------
+// Model-tier routing (WM-135). Definitions declare INTENT — a tier from a
+// closed vocabulary — never a concrete model id (the per-definition `model`
+// override is the one escape hatch, and it wins over the tier). The tier →
+// model mapping is operator policy, per adapter, in config/policy.yaml's
+// `models:` block, so retiering the fleet is a one-line policy PR, not an
+// edit fanned across every definition.
+
+export const MODEL_TIERS = ["strong", "standard", "light"];
+
+/**
+ * The sentinel meaning "pass no model flag — use the CLI's own default".
+ * Pinned verbatim into the RunSpec so the proposal an operator approves says
+ * explicitly that the run rides the adapter default.
+ */
+export const DEFAULT_MODEL = "default";
+
+/** Adapters that accept a model at all. command/actions/fake take none: a
+ * declared tier there resolves to null (not applicable), never an error. */
+export const MODEL_ADAPTERS = new Set(["claude"]);
+
+/**
+ * Read the `models:` tier map from config/policy.yaml (same root rule as
+ * repos.yaml: the running factory checkout, FACTORY_REPOS_ROOT to override).
+ * Shape is validated fail-closed — an unknown tier key or a non-string value
+ * is a config error at load, not a surprise at dispatch. A missing file or
+ * absent block is an empty map: fine until some definition declares a tier,
+ * at which point resolution fails closed below.
+ */
+export function loadModelTierMap({ root = reposRoot() } = {}) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return {};
+  let parsed;
+  try {
+    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new RegistryError(`${file}: unparseable policy.yaml — ${err.message}`);
+  }
+  const models = parsed?.models;
+  if (models === undefined || models === null) return {};
+  if (typeof models !== "object" || Array.isArray(models)) {
+    throw new RegistryError(`${file}: "models" must map adapter names to tier maps (WM-135)`);
+  }
+  for (const [adapter, tiers] of Object.entries(models)) {
+    if (typeof tiers !== "object" || tiers === null || Array.isArray(tiers)) {
+      throw new RegistryError(`${file}: models.${adapter} must map tiers to model values (WM-135)`);
+    }
+    for (const [tier, value] of Object.entries(tiers)) {
+      if (!MODEL_TIERS.includes(tier)) {
+        throw new RegistryError(`${file}: models.${adapter}.${tier} is not a tier (${MODEL_TIERS.join(", ")})`);
+      }
+      if (typeof value !== "string" || value.trim() === "") {
+        throw new RegistryError(
+          `${file}: models.${adapter}.${tier} must be a non-empty model value ("${DEFAULT_MODEL}" for the adapter default)`,
+        );
+      }
+    }
+  }
+  return models;
+}
+
+/**
+ * Resolve what model a definition runs on for a given adapter.
+ * Order: per-definition `model` override > policy tier map > adapter default.
+ * Returns null when the adapter takes no model (command/actions/fake — a
+ * declared tier is recorded as not applicable, never an error) or when the
+ * definition declares nothing (adapter default; today's behavior). A declared
+ * tier with no mapping for a model-consuming adapter throws — fail closed,
+ * never a silent fallback.
+ */
+export function resolveModel(def, adapter, modelTiers) {
+  if (!MODEL_ADAPTERS.has(adapter)) return null;
+  if (def?.model !== undefined) return def.model;
+  if (def?.model_tier === undefined) return null;
+  const value = modelTiers?.[adapter]?.[def.model_tier];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new RegistryError(
+      `${def.ref ?? def.id}: model_tier "${def.model_tier}" has no mapping for adapter "${adapter}" — add models.${adapter}.${def.model_tier} to config/policy.yaml (WM-135, fail closed)`,
+    );
+  }
+  return value;
+}
 
 function loadAgentDef(root, file) {
   const def = JSON.parse(readFileSync(file, "utf8"));
@@ -76,6 +160,19 @@ function loadAgentDef(root, file) {
       );
     }
   }
+  // Model-tier routing (WM-135): `model_tier` is a closed enum of intent;
+  // `model` is the exact-id escape hatch. Both may coexist — the override
+  // wins — but each must be well-formed, and whether a declared tier actually
+  // maps to a model for the routed adapter is checked in loadRegistry, where
+  // the adapter is known.
+  if (def.model_tier !== undefined && !MODEL_TIERS.includes(def.model_tier)) {
+    throw new RegistryError(
+      `${file}: "model_tier" must be one of ${MODEL_TIERS.join(", ")} (got ${JSON.stringify(def.model_tier)}) — definitions declare intent, not model ids (WM-135)`,
+    );
+  }
+  if (def.model !== undefined && (typeof def.model !== "string" || def.model.trim() === "")) {
+    throw new RegistryError(`${file}: "model" must be a non-empty string model id — omit the field for tier/default routing (WM-135)`);
+  }
   const pins = def.pins ?? {};
   for (const field of PINNED_FIELDS) {
     const rel = def[field];
@@ -100,7 +197,7 @@ function loadAgentDef(root, file) {
 /**
  * @returns {{ root: string, agents: Map<string, object>, eventTypes: object, schemas: object }}
  */
-export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
+export function loadRegistry({ root = RUNTIME_ROOT, modelTiers = loadModelTierMap() } = {}) {
   const agents = new Map();
   const agentsDir = path.join(root, "agents");
   for (const name of readdirSync(agentsDir).filter((n) => n.endsWith(".json")).sort()) {
@@ -125,6 +222,14 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
     }
     if (!Array.isArray(mapping.idempotencyScope) || mapping.idempotencyScope.length === 0) {
       throw new RegistryError(`event type ${type} declares no idempotency scope (§5.4)`);
+    }
+    // Model-tier routing (WM-135): every routed (agent, adapter) pair must
+    // resolve NOW — a declared tier without a policy mapping is a load error,
+    // never a silent fall-through to the adapter default at dispatch time.
+    try {
+      resolveModel(agents.get(mapping.agent), mapping.adapter, modelTiers);
+    } catch (err) {
+      throw new RegistryError(`event type ${type}: ${err.message}`);
     }
   }
 
@@ -213,7 +318,7 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
     }
   }
 
-  return { root, agents, eventTypes, schemas, edges, schedules };
+  return { root, agents, eventTypes, schemas, edges, schedules, modelTiers };
 }
 
 export function getAgent(registry, ref) {

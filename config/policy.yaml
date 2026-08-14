@@ -49,6 +49,20 @@ budget:
                             # Raised to 1000 on 2026-08-04, then to 2000 same day.
   on_exhausted: drain
 
+models:
+  # Model-tier routing (WM-135). Agent definitions declare INTENT — an
+  # optional "model_tier": strong | standard | light — and this map, keyed per
+  # adapter, decides what each tier means. The planner resolves tier → model
+  # at plan time and pins the value into the RunSpec, so the proposal an
+  # operator approves names the exact model. The literal value "default" is a
+  # sentinel: pass no --model, ride the CLI's own default (today's behavior).
+  # Any other value is passed verbatim as --model. A tier declared by a
+  # definition with no mapping here fails closed at registry load.
+  claude:
+    strong: default        # CLI default — preserves today's dispatch behavior
+    standard: sonnet
+    light: haiku
+
 limits:
   # Hard wall-clock cap the FACTORY enforces, independent of whatever the
   # harness does about its own timeouts. A harness timeout produces a clean
