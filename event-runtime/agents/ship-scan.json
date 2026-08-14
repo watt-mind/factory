@@ -22,7 +22,7 @@
   "mutating": false,
   "pins": {
     "agents/ship-scan.md": "sha256:857d96ee7610f26f7fa1f931ef3bc479b8d7c0d0dbaf0c7b5ee98dc4bd714bd0",
-    "schemas/ship-scan.input.json": "sha256:605e1ecf5f1a122b0d9e79ab2c7957b37b571617658c3db323c096f609f63937",
+    "schemas/ship-scan.input.json": "sha256:78ca9a5df1148baf509348b7a492f7d299c2d519df2c9adc0c875e969db067da",
     "schemas/ship-scan.output.json": "sha256:b5d997d51db38988a35744294f8def899ec05482875a46a6c602497dc6dcb0c8"
   }
 }

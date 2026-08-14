@@ -1,5 +1,5 @@
 {
-  "title": "merge-scan input — one repo whose open PRs to review for merging",
+  "title": "merge-scan input — one repo whose open PRs to review for merging. A clock tick adds {loop, slot, cadenceSeconds, skippedSlots} bookkeeping to the schedule's static {repo} payload — whitelisted here as in repo-loop.input.json (WM-123)",
   "type": "object",
   "required": ["repo"],
   "additionalProperties": false,
@@ -8,6 +8,10 @@
       "type": "string",
       "minLength": 1,
       "description": "Short repo name as configured in config/repos.yaml — not the GitHub owner/name slug"
-    }
+    },
+    "loop": { "type": "string", "minLength": 1 },
+    "slot": { "type": "string", "minLength": 1 },
+    "cadenceSeconds": { "type": "integer", "minimum": 1 },
+    "skippedSlots": { "type": "integer", "minimum": 0 }
   }
 }

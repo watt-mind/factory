@@ -1,5 +1,5 @@
 {
-  "title": "work-scan input — one repo queue to scan; repoPin is resolved by the planner (WM-110)",
+  "title": "work-scan input — one repo queue to scan; repoPin is resolved by the planner (WM-110). A clock tick adds {loop, slot, cadenceSeconds, skippedSlots} bookkeeping to the schedule's static {repo} payload — whitelisted here as in repo-loop.input.json (WM-123)",
   "type": "object",
   "required": [
     "repo"
@@ -46,6 +46,10 @@
           "description": "GitHub owner/name slug of the repo, or null when it has no GitHub remote"
         }
       }
-    }
+    },
+    "loop": { "type": "string", "minLength": 1 },
+    "slot": { "type": "string", "minLength": 1 },
+    "cadenceSeconds": { "type": "integer", "minimum": 1 },
+    "skippedSlots": { "type": "integer", "minimum": 0 }
   }
 }

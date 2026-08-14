@@ -281,13 +281,10 @@ describe("loop schedules ship disabled (WM-112)", () => {
       expect(envelope.payload).toMatchObject({ repo, loop });
       db.close();
     }
-    // Known first-enable precondition, recorded rather than silently shipped:
-    // the tick payload carries {loop, slot, cadenceSeconds, skippedSlots}
-    // alongside the static {repo}, and the three scan input schemas do not yet
-    // whitelist those fields the way repo-loop.input.json does — so a planned
-    // tick lands as a typed human_needed(invalid_input), never a run. Fixing
-    // it means re-pinning agents' definitions, out of this ticket's scope; see
-    // docs/event-runtime-schedules.md §"Repo loops" and the WM-112 report.
+    // WM-112 shipped these loops inert: the scan input schemas rejected the
+    // tick bookkeeping fields, parking every tick as human_needed. WM-123
+    // whitelisted the fields (repo-loop.input.json's approach) — the describe
+    // below proves each tick now plans a real run.
   });
 
   test("a disabled loop never fires — the shipped default is silence", () => {
@@ -295,5 +292,76 @@ describe("loop schedules ship disabled (WM-112)", () => {
     expect(emitDueTicks(db, registry, { now: Date.now() }).emitted).toEqual([]);
     expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
     db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-enable gap closed (WM-123): a real clock tick — payload assembled by
+// emitDueTicks itself, never hand-written here — must plan an actual scan run
+// for each of the three loop heads, not park as human_needed(invalid_input).
+// The scan input schemas whitelist the tick bookkeeping fields exactly the way
+// repo-loop.input.json does.
+// ---------------------------------------------------------------------------
+
+describe("an enabled loop's tick plans a real scan run (WM-123)", () => {
+  /** A fixture registry with exactly one enabled loop for the wt29 test repo. */
+  const oneLoop = (loop, eventType) => ({
+    ...registry,
+    schedules: {
+      [loop]: {
+        every: "30m", eventType, payload: { repo: "wt29" },
+        catchUp: "none", singleton: true, approval: "watched", enabled: true,
+      },
+    },
+  });
+
+  const cases = [
+    ["work-wt29", "factory.work.requested", "work-scan@1"],
+    ["merge-wt29", "factory.merge.requested", "merge-scan@1"],
+    ["ship-wt29", "factory.ship.requested", "ship-scan@1"],
+  ];
+
+  for (const [loop, eventType, agent] of cases) {
+    test(`${eventType} tick carries {repo, loop, slot, cadenceSeconds, skippedSlots} and plans a watched ${agent} run`, () => {
+      const db = openDb(":memory:");
+      const fixture = oneLoop(loop, eventType);
+      const ticks = emitDueTicks(db, fixture, { now: Date.parse("2026-08-14T10:05:00Z") });
+      expect(ticks.errors).toEqual([]);
+      expect(ticks.emitted).toHaveLength(1);
+
+      // Pin the payload shape to what the scheduler actually emits — if
+      // emitDueTicks ever grows a field, this fails before the schema does.
+      const envelope = JSON.parse(db.query(`SELECT envelope_json FROM events`).get().envelope_json);
+      expect(Object.keys(envelope.payload).sort()).toEqual(["cadenceSeconds", "loop", "repo", "skippedSlots", "slot"]);
+
+      expect(planAdmittedEvents(db, fixture, { policyVersion: PV })).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+      const proposal = openProposals(db, {}).find((p) => p.spec?.agent === agent);
+      expect(proposal).toBeTruthy();
+      expect(proposal.decision).toBe("run");
+      expect(db.query(`SELECT status FROM events`).get().status).toBe("planned");
+      db.close();
+    });
+  }
+
+  test("plain {repo} payloads (webhook / injected) still plan unchanged", () => {
+    for (const [, eventType, agent] of cases) {
+      const db = openDb(":memory:");
+      admitEvent(db, registry, {
+        schemaVersion: "factory.event/v1",
+        eventId: `inject-${agent}`,
+        type: eventType,
+        source: "operator",
+        subject: "wt29",
+        occurredAt: "2026-08-14T09:00:00Z",
+        correlationId: `inject-${agent}`,
+        causationId: null,
+        payload: { repo: "wt29" },
+      });
+      expect(planAdmittedEvents(db, registry, { policyVersion: PV })).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+      const proposal = openProposals(db, {}).find((p) => p.spec?.agent === agent);
+      expect(proposal).toBeTruthy();
+      expect(proposal.decision).toBe("run");
+      db.close();
+    }
   });
 });

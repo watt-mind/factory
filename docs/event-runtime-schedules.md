@@ -262,16 +262,15 @@ Notes, stated rather than absorbed:
   re-scanned immediately and the 30-minute tick only catches what no
   completion re-fired. `FAILED` and `BLOCKED` terminate — a run that needs a
   human must not spin the scanner.
-- **First-enable precondition (known gap, WM-112).** A tick's payload carries
-  `{loop, slot, cadenceSeconds, skippedSlots}` alongside the static
-  `{repo}`. The loop-native agents accept those fields
-  (`schemas/repo-loop.input.json`); the three scan input schemas
-  (`work-scan`, `merge-scan`, `ship-scan`) do not yet, so an enabled loop's
-  tick currently plans to a typed `human_needed (invalid_input)` instead of a
-  proposal. Extending those schemas means re-pinning the agents' definitions
-  — out of WM-112's scope, filed as follow-up. Until it lands, the loops are
-  registered, visible, and inert even if enabled; webhook and injected
-  events (whose payloads are exactly `{repo}`) are unaffected.
+- **Tick payloads validate (WM-112's known gap, fixed by WM-123).** A tick's
+  payload carries `{loop, slot, cadenceSeconds, skippedSlots}` alongside the
+  static `{repo}`. Every loop-target input schema whitelists those
+  bookkeeping fields the way `schemas/repo-loop.input.json` always did — the
+  three scan schemas (`work-scan`, `merge-scan`, `ship-scan`) gained them in
+  WM-123, with the agents' definitions re-pinned — so an enabled loop's tick
+  plans an ordinary watched proposal (`loop.test.mjs` proves one real run per
+  loop head). Webhook and injected events (whose payloads are exactly
+  `{repo}`) validate unchanged.
 - **Doctor coverage is automatic.** The §9 silent-loop anomaly
   (`stoppedSchedules` in `GET /status`) iterates `schedules.json` via
   `scheduleView`, so the twelve new loops are covered without any change to
