@@ -371,16 +371,32 @@ export function JumpLink({
   );
 }
 
+/**
+ * Live countdown to `createdAt + ttlSeconds`. Always carries a unit/qualifier
+ * so it can't be misread as a wall-clock time, and exposes the absolute
+ * expiry as a `title` tooltip. Once past expiry it switches to relative age
+ * ("expired 2h ago") instead of a bare "expired" — callers that already show
+ * an expired badge elsewhere (e.g. the Proposals Decision column) should not
+ * also repeat the word "expired" next to this.
+ */
 export function Countdown({ createdAt, ttlSeconds }: { createdAt: string; ttlSeconds: number }) {
   const now = useNow();
-  const left = Math.floor((new Date(createdAt).getTime() + ttlSeconds * 1000 - now) / 1000);
-  if (left <= 0) return <span style={{ color: "var(--hue-err)" }}>expired</span>;
+  const expiryMs = new Date(createdAt).getTime() + ttlSeconds * 1000;
+  const expiryIso = new Date(expiryMs).toISOString();
+  const left = Math.floor((expiryMs - now) / 1000);
+  if (left <= 0) {
+    return (
+      <span className="tabular-nums" style={{ color: "var(--hue-err)" }} title={expiryIso}>
+        expired {ago(expiryIso, now)}
+      </span>
+    );
+  }
   const m = Math.floor(left / 60);
   const s = left % 60;
   const low = left < 300;
   return (
-    <span className="tabular-nums" style={low ? { color: "var(--hue-warn)" } : undefined}>
-      {m}:{String(s).padStart(2, "0")}
+    <span className="tabular-nums" style={low ? { color: "var(--hue-warn)" } : undefined} title={expiryIso}>
+      {m}:{String(s).padStart(2, "0")} left
     </span>
   );
 }

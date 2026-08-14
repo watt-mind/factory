@@ -445,11 +445,6 @@ export function Proposals({
                   <>
                     <td className={tdCls}>
                       <StateBadge state={p.decision} hues={DECISION_HUES} />
-                      {p.expired && (
-                        <span className="ml-2" style={{ color: "var(--hue-warn)" }}>
-                          expired
-                        </span>
-                      )}
                       {staleState(p) && (
                         <span className="ml-2" style={{ color: "var(--hue-err)" }}>
                           run {staleState(p)}
