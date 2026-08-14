@@ -60,13 +60,21 @@ export function deriveAllowedTools(def) {
 }
 
 /**
- * Build argv for spawning claude (OPS-407, WM-62).
+ * Build argv for spawning claude (OPS-407, WM-62, WM-108).
  * Enforces --allowedTools and --strict-mcp-config with the repo's declared MCP servers.
+ * A definition declaring `limits.budget_usd` gets `--max-budget-usd` — the
+ * runaway guard tick.mjs passes every ticket process (policy.yaml `budget`:
+ * notional API-equivalent units on subscription auth, not money). The
+ * dispatch design (§6) requires it before the first tier-2 mutating run.
  */
 export function buildClaudeArgv({ prompt, def, allowedTools = deriveAllowedTools(def), mcpConfig }) {
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
   if (allowedTools && allowedTools.length > 0) {
     args.push("--allowedTools", allowedTools.join(","));
+  }
+  const budget = def?.limits?.budget_usd;
+  if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) {
+    args.push("--max-budget-usd", String(budget));
   }
   if (mcpConfig) {
     args.push("--mcp-config", mcpConfig);

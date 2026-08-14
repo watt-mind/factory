@@ -168,6 +168,17 @@ describe("buildClaudeArgv (OPS-407, WM-62)", () => {
     expect(argv).toContain("/path/to/mcp.json");
     expect(argv).toContain("--strict-mcp-config");
   });
+
+  test("limits.budget_usd → --max-budget-usd; absent or invalid → no flag (WM-108)", () => {
+    const withBudget = buildClaudeArgv({ prompt: "p", def: { mutating: false, limits: { budget_usd: 15 } } });
+    const i = withBudget.indexOf("--max-budget-usd");
+    expect(i).toBeGreaterThan(-1);
+    expect(withBudget[i + 1]).toBe("15");
+
+    expect(buildClaudeArgv({ prompt: "p", def: { mutating: false } })).not.toContain("--max-budget-usd");
+    expect(buildClaudeArgv({ prompt: "p", def: { mutating: false, limits: { budget_usd: 0 } } })).not.toContain("--max-budget-usd");
+    expect(buildClaudeArgv({ prompt: "p", def: { mutating: false, limits: { budget_usd: "15" } } })).not.toContain("--max-budget-usd");
+  });
 });
 
 describe("execute conformance (OPS-427, docs/event-runtime.md §6)", () => {
