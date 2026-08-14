@@ -1,0 +1,116 @@
+{
+  "title": "factory.ship-plan/v1 output artifact — release-candidate assembly: is base ahead, green, and ready for the human deploy-branch decision?",
+  "type": "object",
+  "required": ["recommendation", "repo", "github", "changelog", "plan", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "recommendation": {
+      "enum": ["SHIP", "NOOP"],
+      "description": "SHIP when base is ahead of the deploy branch, its head commit's real checks are green, and the plan is complete; otherwise NOOP with a typed noopReason. There is no auto path: SHIP only chains into a watched ship-apply proposal, and approving THAT proposal is the human deploy decision (docs/event-runtime-dispatch.md §7, WM-111)"
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Echo of the short repo name from the input"
+    },
+    "github": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "description": "GitHub owner/name slug resolved from config/repos.yaml — the repository the apply actions run against"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "description": "Integration branch from config/repos.yaml (usually develop) — the release PR's head"
+    },
+    "deployBranch": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "description": "Deploy branch from config/repos.yaml (usually master) — the release PR's base; merging it is permanently the human's watched approval"
+    },
+    "headSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Base branch tip this scan reviewed — what ships. ship-apply refuses open_rc_pr/merge_rc_pr if the base or PR head moved off this pin"
+    },
+    "deployHeadSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Deploy branch tip at scan time — what it lands on. ship-apply refuses merge_rc_pr if the deploy branch moved off this pin (someone committed to it directly)"
+    },
+    "changelog": {
+      "type": "array",
+      "description": "Commits between the deploy head and the base head (merge commits excluded) — the ship-list the human reads before approving",
+      "items": {
+        "type": "object",
+        "required": ["sha", "subject"],
+        "additionalProperties": false,
+        "properties": {
+          "sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$",
+            "description": "Commit SHA (full or abbreviated) as reported by the compare API"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit subject line, conventionally carrying the (TICKET-ID)"
+          },
+          "ticket": {
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]+$",
+            "description": "Linear ticket pulled from the subject's (TICKET-ID), when present"
+          }
+        }
+      }
+    },
+    "plan": {
+      "type": "array",
+      "description": "Ship actions in execution order — open_rc_pr, merge_rc_pr, then smoke_check where the repo has a deployment block. Empty on NOOP",
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": ["open_rc_pr", "merge_rc_pr", "smoke_check"],
+            "description": "Closed ship-apply action id this item resolves to — anything else refuses the whole plan"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "open_rc_pr only: release PR title, release: <base> → <deployBranch> (<date>)"
+          },
+          "body": {
+            "type": "string",
+            "description": "open_rc_pr only: the changelog with each Linear ticket ID on its own line — never a Fixes line; a release PR references, it doesn't close"
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https?://[^\\s]+$",
+            "description": "smoke_check only: deployment metadata endpoint or origin from the repo's deployment block (an origin is queried at /version.json, same as factory status)"
+          },
+          "smokeBranch": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+            "description": "smoke_check only: branch the deployment tracks (deployment.branch, defaulting to the deploy branch) — the endpoint must serve this branch's live tip"
+          },
+          "revisionField": {
+            "type": "string",
+            "pattern": "^[A-Za-z_]*$",
+            "description": "smoke_check only: configured deployment.revision_field, or empty to use the default revision field candidates"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One line the human reads before taking the deploy decision"
+    },
+    "noopReason": {
+      "enum": ["not_ahead", "ci_red", "ci_pending", "no_checks", "no_deploy_config"],
+      "description": "Typed reason accompanying a NOOP — nothing to ship, base CI red, base CI still running, no real checks on the head commit (no checks is not green), or the repo has no deploy branch distinct from base"
+    }
+  }
+}
