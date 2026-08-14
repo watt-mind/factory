@@ -215,6 +215,20 @@ describe("buildClaudeArgv (OPS-407, WM-62)", () => {
     expect(buildClaudeArgv({ prompt: "p", def: { mutating: false, limits: { budget_usd: 0 } } })).not.toContain("--max-budget-usd");
     expect(buildClaudeArgv({ prompt: "p", def: { mutating: false, limits: { budget_usd: "15" } } })).not.toContain("--max-budget-usd");
   });
+
+  test("planner-pinned model → --model verbatim; default sentinel, null, or absent → no flag (WM-135)", () => {
+    const withModel = buildClaudeArgv({ prompt: "p", def: { mutating: false }, model: "sonnet" });
+    const i = withModel.indexOf("--model");
+    expect(i).toBeGreaterThan(-1);
+    expect(withModel[i + 1]).toBe("sonnet");
+
+    // The "default" sentinel means "ride the CLI default" — no flag at all,
+    // byte-identical argv to a spec that pinned nothing.
+    const unpinned = buildClaudeArgv({ prompt: "p", def: { mutating: false } });
+    expect(buildClaudeArgv({ prompt: "p", def: { mutating: false }, model: "default" })).toEqual(unpinned);
+    expect(buildClaudeArgv({ prompt: "p", def: { mutating: false }, model: null })).toEqual(unpinned);
+    expect(buildClaudeArgv({ prompt: "p", def: { mutating: false }, model: "" })).toEqual(unpinned);
+  });
 });
 
 describe("execute conformance (OPS-427, docs/event-runtime.md §6)", () => {

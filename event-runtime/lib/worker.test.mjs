@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
+import { admitEvent } from "./intake.mjs";
+import { planEvent } from "./planner.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { openDb } from "./db.mjs";
@@ -105,6 +107,52 @@ describe("worker", () => {
     expect(repositoryStatus(repo)).toBe(baseline);
     writeFileSync(path.join(repo, "generated", "agent-write.log"), "new\n");
     expect(repositoryStatus(repo)).not.toBe(baseline);
+  });
+
+  test("e2e (WM-135): tiered claude route plans a spec with the model pinned; the fake adapter executes it, ignoring the model", async () => {
+    const db = openDb(":memory:");
+    // The real status-report definition with a declared tier, on a registry
+    // whose policy map says standard → sonnet.
+    const synthetic = { ...registry, agents: new Map(registry.agents), modelTiers: { claude: { standard: "sonnet" } } };
+    synthetic.agents.set("factory-status-report@1", { ...getAgent(registry, "factory-status-report@1"), model_tier: "standard" });
+
+    const envelope = {
+      schemaVersion: "factory.event/v1",
+      eventId: "wm135-e2e-1",
+      type: "factory.status-report.requested",
+      source: "operator-webhook",
+      subject: "factory",
+      occurredAt: new Date(T0).toISOString(),
+      correlationId: "wm135-corr",
+      causationId: null,
+      payload: { repos: ["ok"] },
+    };
+    const admitted = admitEvent(db, synthetic, envelope, { now: T0 });
+    expect(admitted.admitted).toBe(true);
+
+    const outcome = planEvent(
+      db,
+      synthetic,
+      { source: admitted.event.source, eventId: admitted.event.event_id },
+      { now: T0, policyVersion: "git:test", adapterOverride: "fake" },
+    );
+    expect(outcome.decision).toBe("run");
+    // The pinned resolution is what the operator would approve: the
+    // registered claude route's model, even though execution is the fake.
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.model).toBe("sonnet");
+    expect(spec.modelTier).toBe("standard");
+    expect(spec.adapter).toBe("fake");
+
+    transition(db, { runId: outcome.runId, to: "APPROVED", actor: "test", now: T0 });
+    transition(db, { runId: outcome.runId, to: "QUEUED", actor: "test", now: T0 });
+    const summary = await runOnce(db, synthetic, adapters, opts());
+    expect(summary.runId).toBe(outcome.runId);
+    expect(summary.terminalState).toBe("COMPLETED");
+    // The run's stored spec — what inspect/receipts read — carries the pin.
+    const stored = JSON.parse(db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(outcome.runId).spec_json);
+    expect(stored.model).toBe("sonnet");
+    expect(stored.modelTier).toBe("standard");
   });
 
   test("happy path: COMPLETED, results row, receipt, one completion outbox event, workspace destroyed", async () => {

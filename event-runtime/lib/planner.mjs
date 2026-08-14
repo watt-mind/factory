@@ -22,7 +22,7 @@ import { artifactsRoot, DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS, FACTORY
 import { isBusyError, tx, txImmediate } from "./db.mjs";
 import { newProposalId, newRunId } from "./ids.mjs";
 import { createRun, resolveIdempotency } from "./lifecycle.mjs";
-import { getAgent, getEventType } from "./registry.mjs";
+import { getAgent, getEventType, resolveModel } from "./registry.mjs";
 import { getRepo, loadRepos, reposRoot } from "./repos.mjs";
 import { pinRepo } from "./repository.mjs";
 import { validate } from "./schema.mjs";
@@ -100,6 +100,18 @@ export function buildRunSpec(registry, envelope, mapping, { runId, policyVersion
     // Declared repo scope (WM-64) rides in the spec so the proposal the
     // operator approves names it, same as capabilities.
     ...(def.repos ? { repos: def.repos } : {}),
+    // Model-tier routing (WM-135), the house repoPin pattern: the tier is
+    // resolved HERE, at plan time, and the concrete value is pinned so the
+    // proposal, receipt, and inspect output all name the exact model. Fields
+    // appear only when the definition declares intent — an undeclared
+    // definition's spec is byte-identical to before (regression contract).
+    // Resolution keys off the REGISTERED adapter (mapping.adapter), not the
+    // override: `--adapter-override fake` substitutes execution, and the fake
+    // ignores the model; the spec still records what was routed. A null model
+    // means the routed adapter takes none (not applicable).
+    ...(def.model_tier !== undefined || def.model !== undefined
+      ? { modelTier: def.model_tier ?? null, model: resolveModel(def, mapping.adapter, registry.modelTiers) }
+      : {}),
     timeoutSeconds: def.limits.timeout_seconds,
     maxAttempts: def.limits.attempts,
     idempotencyKey,

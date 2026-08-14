@@ -390,6 +390,126 @@ describe("planEvent repo scoping (WM-64)", () => {
   });
 });
 
+describe("planEvent model pinning (WM-135)", () => {
+  // Synthetic agents again: the resolution semantics belong to the planner,
+  // not to any one shipped definition.
+  function tieredRegistry({ modelTier, model, adapter = "claude", modelTiers } = {}) {
+    const synthetic = {
+      ...registry,
+      agents: new Map(registry.agents),
+      eventTypes: { ...registry.eventTypes },
+      modelTiers: modelTiers ?? { claude: { strong: "default", standard: "sonnet", light: "haiku" } },
+    };
+    synthetic.eventTypes["test.tiered.requested"] = {
+      agent: "test-tiered@1",
+      adapter,
+      idempotencyScope: ["inputHash"],
+    };
+    synthetic.agents.set("test-tiered@1", {
+      id: "test-tiered",
+      version: 1,
+      ref: "test-tiered@1",
+      output_contract: "factory.test/v1",
+      workspace: { type: "ephemeral" },
+      capabilities: { services: [] },
+      limits: { timeout_seconds: 60, attempts: 1 },
+      mutating: false,
+      ...(modelTier !== undefined ? { model_tier: modelTier } : {}),
+      ...(model !== undefined ? { model } : {}),
+      inputSchema: { type: "object" },
+    });
+    return synthetic;
+  }
+
+  const tieredEnvelope = (payload = { subject: "x" }) => ({
+    type: "test.tiered.requested",
+    eventId: `tier-${JSON.stringify(payload)}`,
+    correlationId: null,
+    payload,
+  });
+
+  test("declared tier resolves through the policy map and is pinned into the spec the operator approves", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(db, tieredRegistry({ modelTier: "standard" }), ref, { now: NOW, policyVersion: "git:test" });
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.model).toBe("sonnet");
+    expect(spec.modelTier).toBe("standard");
+  });
+
+  test("tier resolving to the default sentinel pins \"default\" explicitly — visible, not implicit", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(db, tieredRegistry({ modelTier: "strong" }), ref, { now: NOW, policyVersion: "git:test" });
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.model).toBe("default");
+    expect(spec.modelTier).toBe("strong");
+  });
+
+  test("per-definition model override wins over the tier map", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(
+      db,
+      tieredRegistry({ modelTier: "standard", model: "claude-opus-4-1" }),
+      ref,
+      { now: NOW, policyVersion: "git:test" },
+    );
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.model).toBe("claude-opus-4-1");
+    expect(spec.modelTier).toBe("standard");
+  });
+
+  test("a definition declaring nothing produces a spec without model fields — today's behavior (regression)", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(db, tieredRegistry(), ref, { now: NOW, policyVersion: "git:test" });
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect("model" in spec).toBe(false);
+    expect("modelTier" in spec).toBe(false);
+  });
+
+  test("a tier routed via a non-model adapter is recorded as not applicable (model null), never an error", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(
+      db,
+      tieredRegistry({ modelTier: "light", adapter: "fake", modelTiers: {} }),
+      ref,
+      { now: NOW, policyVersion: "git:test" },
+    );
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.model).toBeNull();
+    expect(spec.modelTier).toBe("light");
+  });
+
+  test("adapterOverride does not change resolution: the registered claude route still pins the model", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(db, tieredRegistry({ modelTier: "light" }), ref, {
+      now: NOW,
+      policyVersion: "git:test",
+      adapterOverride: "fake",
+    });
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.adapter).toBe("fake");
+    expect(spec.model).toBe("haiku");
+  });
+
+  test("declared tier with no policy mapping fails the plan closed — never a silent adapter default", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    // Bypassing loadRegistry's own load-time check (synthetic registry): the
+    // planner is the second line of the same fail-closed rule.
+    expect(() =>
+      planEvent(db, tieredRegistry({ modelTier: "light", modelTiers: {} }), ref, { now: NOW, policyVersion: "git:test" }),
+    ).toThrow(/no mapping for adapter "claude"/);
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+  });
+});
+
 describe("buildRunSpec", () => {
   test("is pure and honors adapterOverride", () => {
     const mapping = registry.eventTypes["factory.status-report.requested"];

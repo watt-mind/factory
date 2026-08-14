@@ -21,6 +21,7 @@ import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
+import { DEFAULT_MODEL } from "../registry.mjs";
 
 export const KILL_GRACE_MS = 30_000;
 
@@ -99,9 +100,15 @@ export function safeChildEnvironment(env = {}) {
  * runaway guard tick.mjs passes every ticket process (policy.yaml `budget`:
  * notional API-equivalent units on subscription auth, not money). The
  * dispatch design (§6) requires it before the first tier-2 mutating run.
+ * `model` is the planner-resolved value pinned in the RunSpec (WM-135):
+ * passed verbatim as `--model` unless it is the "default" sentinel or null,
+ * both of which mean "ride the CLI's own default" — today's behavior.
  */
-export function buildClaudeArgv({ prompt, def, allowedTools = deriveAllowedTools(def), mcpConfig, settingsPath }) {
+export function buildClaudeArgv({ prompt, def, allowedTools = deriveAllowedTools(def), mcpConfig, settingsPath, model }) {
   const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+  if (typeof model === "string" && model !== "" && model !== DEFAULT_MODEL) {
+    args.push("--model", model);
+  }
   if (allowedTools && allowedTools.length > 0) {
     args.push("--allowedTools", allowedTools.join(","));
   }
@@ -238,7 +245,7 @@ export async function execute({
   const settings = buildClaudeSettings({ spec, def, workspaceDir });
   const settingsPath = settings ? path.join(workspaceDir, ".claude-policy.json") : null;
   if (settingsPath) writeFileSync(settingsPath, `${JSON.stringify(settings)}\n`, "utf8");
-  const argv = buildClaudeArgv({ prompt, def, mcpConfig, settingsPath });
+  const argv = buildClaudeArgv({ prompt, def, mcpConfig, settingsPath, model: spec?.model });
 
   return new Promise((resolve, reject) => {
     const child = spawn("claude", argv, {

@@ -20,6 +20,7 @@ import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { planEvent, requeueEvent } from "./planner.mjs";
 import { ambiguousOpenProposalRuns, approveProposal, openProposals, rejectProposal } from "./proposals.mjs";
+import { resolveModel } from "./registry.mjs";
 import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
@@ -345,6 +346,10 @@ function agentsView(registry) {
       // Per-agent repo scope (WM-64), the repo analogue of hosts. Null means
       // unrestricted.
       repos: def.repos ?? null,
+      // Model-tier routing (WM-135): declared intent (tier), the exact-id
+      // override, and — per routed adapter below — what the planner would pin.
+      modelTier: def.model_tier ?? null,
+      model: def.model ?? null,
       eventTypes: Object.entries(registry.eventTypes)
         .filter(([, mapping]) => mapping.agent === def.ref)
         .map(([type, mapping]) => ({
@@ -352,6 +357,9 @@ function agentsView(registry) {
           adapter: mapping.adapter,
           idempotencyScope: mapping.idempotencyScope,
           proposalTtlSeconds: mapping.proposalTtlSeconds ?? null,
+          // Resolved at load, so this can no longer throw here. Null when the
+          // adapter takes no model or the definition declares nothing.
+          resolvedModel: resolveModel(def, mapping.adapter, registry.modelTiers),
         })),
     })),
     // Recommendation edges (OPS-223) — the capability map's defining relation:
