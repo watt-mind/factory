@@ -805,4 +805,99 @@ describe("worker", () => {
     const w1Result = await executeClaimed(db, registry, adapters, claim1, { ...o1, now: afterExpiry });
     expect(w1Result.fenced).toBe(true);
   });
+
+  test("worker preserves push credentials for mutating runs and strips them for non-mutating runs (WM-128)", async () => {
+    const db = openDb(":memory:");
+    let capturedMutatingEnv = null;
+    let capturedReadOnlyEnv = null;
+
+    const spyAdapter = {
+      execute: async ({ spec, def, env, workspaceDir }) => {
+        const { safeChildEnvironment } = await import("./adapters/claude.mjs");
+        const effectiveEnv = safeChildEnvironment(env, def);
+        if (def.mutating) {
+          capturedMutatingEnv = effectiveEnv;
+        } else {
+          capturedReadOnlyEnv = effectiveEnv;
+        }
+        const { writeFileSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const isMutating = Boolean(def.mutating);
+        const artifact = isMutating
+          ? {
+              outcome: "PR_OPEN",
+              repo: "bj29",
+              ticket: "WM-128",
+              prUrl: "https://github.com/watt-mind/factory/pull/1",
+              verification: {
+                command: "bun test",
+                passed: true,
+                output: "ok",
+              },
+              summary: "Implemented",
+            }
+          : {
+              repos: [{ name: "ok", triage: 0, agentReady: 0, inProgress: 0, blocked: 0 }],
+              recommendedAction: "wait",
+            };
+        writeFileSync(
+          join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact,
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const customAdapters = { spy: spyAdapter };
+
+    // 1. Mutating run (dispatch@1 has mutating: true)
+    const mutatingSpec = queueRun(
+      db,
+      makeSpec({
+        agent: "dispatch@1",
+        input: { repo: "bj29", ticket: "WM-128" },
+        outputContract: "factory.dispatch-result/v1",
+        adapter: "spy",
+      }),
+    );
+    const mutatingResult = await runOnce(db, registry, customAdapters, opts({
+      env: {
+        SSH_AUTH_SOCK: "/tmp/worker-dispatch.sock",
+        GITHUB_TOKEN: "ghp_worker_dispatch_token",
+        ANTHROPIC_API_KEY: "sk-worker-must-strip",
+      },
+    }));
+    expect(mutatingResult.terminalState).toBe("COMPLETED");
+    expect(capturedMutatingEnv).not.toBeNull();
+    expect(capturedMutatingEnv.SSH_AUTH_SOCK).toBe("/tmp/worker-dispatch.sock");
+    expect(capturedMutatingEnv.GITHUB_TOKEN).toBe("ghp_worker_dispatch_token");
+    expect(capturedMutatingEnv.ANTHROPIC_API_KEY).toBeUndefined();
+
+    // 2. Non-mutating run (factory-status-report@1 has mutating: false)
+    const readOnlySpec = queueRun(
+      db,
+      makeSpec({
+        agent: "factory-status-report@1",
+        input: { repos: ["ok"] },
+        outputContract: "factory.status-report/v1",
+        adapter: "spy",
+      }),
+    );
+    const readOnlyResult = await runOnce(db, registry, customAdapters, opts({
+      env: {
+        SSH_AUTH_SOCK: "/tmp/worker-readonly.sock",
+        GITHUB_TOKEN: "ghp_worker_readonly_token",
+        ANTHROPIC_API_KEY: "sk-worker-must-strip",
+      },
+    }));
+    expect(readOnlyResult.terminalState).toBe("COMPLETED");
+    expect(capturedReadOnlyEnv).not.toBeNull();
+    expect(capturedReadOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
+    expect(capturedReadOnlyEnv.GITHUB_TOKEN).toBeUndefined();
+    expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
+  });
 });

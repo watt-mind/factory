@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  BASE_INHERITED_ENV,
   buildClaudeArgv,
   buildClaudeSettings,
   deriveAllowedTools,
@@ -11,7 +12,9 @@ import {
   KILL_GRACE_MS,
   mapStreamEvent,
   PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
   READ_ONLY_TOOLS,
+  safeChildEnvironment,
   WRITE_TOOLS,
 } from "./claude.mjs";
 
@@ -168,6 +171,73 @@ describe("deriveAllowedTools (OPS-407)", () => {
       },
     };
     expect(deriveAllowedTools(def)).toEqual(["Read", "Write", "Bash"]);
+  });
+});
+
+describe("safeChildEnvironment (WM-128)", () => {
+  const originalEnv = { ...process.env };
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  test("strips push credentials and secret keys for non-mutating configurations (mutating: false)", () => {
+    const env = {
+      SSH_AUTH_SOCK: "/tmp/test.sock",
+      SSH_AGENT_PID: "12345",
+      GITHUB_TOKEN: "ghp_secret_token",
+      GH_TOKEN: "ghp_other_token",
+      ANTHROPIC_API_KEY: "sk-ant-secret",
+      CLAUDECODE: "1",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CUSTOM_INSPECT_VAR: "allowed",
+    };
+    const childEnv = safeChildEnvironment(env, { mutating: false });
+
+    expect(childEnv.CUSTOM_INSPECT_VAR).toBe("allowed");
+    expect(childEnv.SSH_AUTH_SOCK).toBeUndefined();
+    expect(childEnv.SSH_AGENT_PID).toBeUndefined();
+    expect(childEnv.GITHUB_TOKEN).toBeUndefined();
+    expect(childEnv.GH_TOKEN).toBeUndefined();
+    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(childEnv.CLAUDECODE).toBeUndefined();
+    expect(childEnv.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+  });
+
+  test("preserves push credentials while stripping secret keys for mutating configurations (mutating: true)", () => {
+    const env = {
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      SSH_AGENT_PID: "54321",
+      GITHUB_TOKEN: "ghp_mutating_token",
+      GH_TOKEN: "ghp_gh_token",
+      ANTHROPIC_API_KEY: "sk-ant-secret",
+      CLAUDECODE: "1",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CUSTOM_MUTATING_VAR: "allowed",
+    };
+    const childEnv = safeChildEnvironment(env, { mutating: true });
+
+    expect(childEnv.CUSTOM_MUTATING_VAR).toBe("allowed");
+    expect(childEnv.SSH_AUTH_SOCK).toBe("/tmp/agent.sock");
+    expect(childEnv.SSH_AGENT_PID).toBe("54321");
+    expect(childEnv.GITHUB_TOKEN).toBe("ghp_mutating_token");
+    expect(childEnv.GH_TOKEN).toBe("ghp_gh_token");
+    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(childEnv.CLAUDECODE).toBeUndefined();
+    expect(childEnv.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+  });
+
+  test("inherits push credentials from process.env when mutating: true", () => {
+    process.env.SSH_AUTH_SOCK = "/tmp/inherited.sock";
+    process.env.GITHUB_TOKEN = "ghp_inherited_token";
+
+    const mutatingEnv = safeChildEnvironment({}, { mutating: true });
+    expect(mutatingEnv.SSH_AUTH_SOCK).toBe("/tmp/inherited.sock");
+    expect(mutatingEnv.GITHUB_TOKEN).toBe("ghp_inherited_token");
+
+    const readOnlyEnv = safeChildEnvironment({}, { mutating: false });
+    expect(readOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
+    expect(readOnlyEnv.GITHUB_TOKEN).toBeUndefined();
   });
 });
 
@@ -693,7 +763,7 @@ if (behavior === "emit_denial_then_recovery") {
     expect(outcome.policyDenials).toEqual([{ tool: "Bash", rule: "Claude requested permissions to use Bash, but you haven't granted it yet." }]);
   });
 
-  test("mutating dispatch execution passes --dangerously-skip-permissions and omits settings policy (WM-137)", async () => {
+  test("mutating dispatch execution passes --dangerously-skip-permissions and preserves push credentials (WM-137, WM-128)", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
     const mutatingDef = {
@@ -710,6 +780,8 @@ if (behavior === "emit_denial_then_recovery") {
       timeoutMs: 5000,
       env: {
         PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        SSH_AUTH_SOCK: "/tmp/dispatch-ssh.sock",
+        GITHUB_TOKEN: "ghp_dispatch_secret",
         ANTHROPIC_API_KEY: "sk-must-be-stripped",
         FACTORY_TEST_BEHAVIOR: "normal",
         FACTORY_TEST_RECORD_FILE: recordFile,
@@ -720,11 +792,13 @@ if (behavior === "emit_denial_then_recovery") {
     const record = JSON.parse(readFileSync(recordFile, "utf8"));
     expect(record.argv).toContain("--dangerously-skip-permissions");
     expect(record.argv).not.toContain("--settings");
+    expect(record.env.SSH_AUTH_SOCK).toBe("/tmp/dispatch-ssh.sock");
+    expect(record.env.GITHUB_TOKEN).toBe("ghp_dispatch_secret");
     expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(existsSync(path.join(workspaceDir, ".claude-policy.json"))).toBe(false);
   });
 
-  test("read-only dispatch execution enforces settings policy and omits --dangerously-skip-permissions (WM-137)", async () => {
+  test("read-only dispatch execution enforces settings policy and strips push credentials (WM-137, WM-128)", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
     const readOnlyDef = {
@@ -741,6 +815,8 @@ if (behavior === "emit_denial_then_recovery") {
       timeoutMs: 5000,
       env: {
         PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        SSH_AUTH_SOCK: "/tmp/read-only-ssh.sock",
+        GITHUB_TOKEN: "ghp_read_only_secret",
         ANTHROPIC_API_KEY: "sk-must-be-stripped",
         FACTORY_TEST_BEHAVIOR: "normal",
         FACTORY_TEST_RECORD_FILE: recordFile,
@@ -751,6 +827,8 @@ if (behavior === "emit_denial_then_recovery") {
     const record = JSON.parse(readFileSync(recordFile, "utf8"));
     expect(record.argv).not.toContain("--dangerously-skip-permissions");
     expect(record.argv).toContain("--settings");
+    expect(record.env.SSH_AUTH_SOCK).toBeUndefined();
+    expect(record.env.GITHUB_TOKEN).toBeUndefined();
     expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(existsSync(path.join(workspaceDir, ".claude-policy.json"))).toBe(true);
   });

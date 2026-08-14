@@ -82,14 +82,57 @@ export function buildClaudeSettings({ spec, def, workspaceDir }) {
   };
 }
 
-/** Keep untrusted model subprocesses from inheriting the worker's authority. */
-export function safeChildEnvironment(env = {}) {
-  const inherited = ["HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"];
-  const childEnv = Object.fromEntries(inherited.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]));
+export const BASE_INHERITED_ENV = [
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "TERM",
+  "TMPDIR",
+  "USER",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+];
+
+export const PUSH_CREDENTIAL_ENV = [
+  "SSH_AUTH_SOCK",
+  "SSH_AGENT_PID",
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+];
+
+/**
+ * Keep untrusted model subprocesses from inheriting the worker's authority (WM-128).
+ * Mutating runs (`mutating !== false` when def/options provide mutating: true)
+ * preserve push credentials (SSH_AUTH_SOCK, SSH_AGENT_PID, GITHUB_TOKEN, GH_TOKEN)
+ * so tickets can push git branches to remote origin. Non-mutating runs
+ * (`mutating: false` or default) have push credentials and secret keys stripped.
+ */
+export function safeChildEnvironment(env = {}, defOrOpts = {}) {
+  const isMutating = typeof defOrOpts === "boolean"
+    ? defOrOpts
+    : defOrOpts?.mutating === true || (defOrOpts?.mutating !== false && defOrOpts?.mutating !== undefined);
+
+  const inherited = isMutating
+    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
+    : BASE_INHERITED_ENV;
+
+  const childEnv = Object.fromEntries(
+    inherited.flatMap((key) => (process.env[key] === undefined ? [] : [[key, process.env[key]]]))
+  );
   Object.assign(childEnv, env);
   delete childEnv.ANTHROPIC_API_KEY;
   delete childEnv.CLAUDECODE;
   delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+
+  if (!isMutating) {
+    for (const key of PUSH_CREDENTIAL_ENV) {
+      delete childEnv[key];
+    }
+  }
   return childEnv;
 }
 
@@ -245,7 +288,7 @@ export async function execute({
   signal,
 }) {
   const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
-  const childEnv = safeChildEnvironment(env);
+  const childEnv = safeChildEnvironment(env, def);
 
   const mcpConfig = path.join(FACTORY_ROOT, "config", "mcp", "claude.json");
   const settings = buildClaudeSettings({ spec, def, workspaceDir });

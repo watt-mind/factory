@@ -168,7 +168,7 @@ const ACTIVE_EXECUTIONS = new Map();
  * { fenced: true } when a newer attempt owns the run at publish time.
  */
 export async function executeClaimed(db, registry, adapters, claim, {
-  workspacesRoot, artifactStore = artifactsRoot(), now = () => Date.now(), policyVersion = "unknown", adapterOverride,
+  workspacesRoot, artifactStore = artifactsRoot(), now = () => Date.now(), policyVersion = "unknown", adapterOverride, env = {},
 } = {}) {
   const { runId, attempt, fencingToken, spec } = claim;
   const owner = db
@@ -328,7 +328,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
     let outcome;
     try {
       outcome = await adapter.execute({
-        spec, def, workspaceDir, timeoutMs: spec.timeoutSeconds * 1000, env: {}, onTrace,
+        spec, def, workspaceDir, timeoutMs: spec.timeoutSeconds * 1000, env, onTrace,
         abortSignal: abortController.signal, signal: abortController.signal,
       });
     } finally {
