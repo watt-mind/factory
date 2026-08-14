@@ -146,21 +146,30 @@ test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
   const ticket1 = `CONCA-${base}`;
   const ticket2 = `CONCB-${base + 1}`;
 
-  try {
-    const [p1, p2] = await Promise.all([
-      Bun.spawn(["bash", UP, ticket1, "--checkout-only"], {
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-      }).exited,
-      Bun.spawn(["bash", UP, ticket2, "--checkout-only"], {
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-      }).exited,
+  // Keep each child's stderr: a losing `git worktree add` reports the reason
+  // (lock contention, etc.) only there, and a bare exit-1 in the CI log is
+  // undiagnosable (WM-113).
+  const runUp = async (ticket) => {
+    const proc = Bun.spawn(["bash", UP, ticket, "--checkout-only"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    const [stderr, status] = await Promise.all([
+      new Response(proc.stderr).text(),
+      proc.exited,
     ]);
-    expect(p1).toBe(0);
-    expect(p2).toBe(0);
+    return { ticket, status, stderr };
+  };
+
+  try {
+    const [r1, r2] = await Promise.all([runUp(ticket1), runUp(ticket2)]);
+    for (const r of [r1, r2]) {
+      if (r.status !== 0) {
+        console.error(`worktree-up ${r.ticket} exited ${r.status}; stderr:\n${r.stderr}`);
+      }
+      expect(r.status).toBe(0);
+    }
     expect(existsSync(path.join(tempWtRoot, ticket1))).toBe(true);
     expect(existsSync(path.join(tempWtRoot, ticket2))).toBe(true);
 

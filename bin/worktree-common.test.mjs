@@ -5,12 +5,53 @@ import { expect, test } from "bun:test";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
 
+// Private port band for this test run (WM-113). Fixed in-band ports (7752,
+// 7772, …) collide with real runtimes, leftover servers, and concurrent CI
+// jobs — EADDRINUSE before the assertion even runs. Instead, probe random
+// even bases in the ephemeral-ish 20000–60000 range until every offset the
+// fixtures bind is free, and pass the band to the scripts via
+// FACTORY_PORT_BASE / FACTORY_PORT_SPAN. No absolute ports below.
+const PORT_SPAN = 200;
+const FIXTURE_OFFSETS = [352, 360, 362, 364, 366, 372, 374, 396];
+
+function offsetsBindable(base) {
+  for (const off of FIXTURE_OFFSETS) {
+    try {
+      const l = Bun.listen({
+        hostname: "127.0.0.1",
+        port: base + off,
+        socket: { data() {} },
+      });
+      l.stop(true);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pickPortBase() {
+  for (let i = 0; i < 50; i++) {
+    // Even base in 20000–59998 so every slot in the band stays even.
+    const candidate = 20000 + 2 * Math.floor(Math.random() * 20000);
+    if (offsetsBindable(candidate)) return candidate;
+  }
+  throw new Error("could not find a free port band for worktree-common tests");
+}
+
+const PORT_BASE = pickPortBase();
+const P = (offset) => PORT_BASE + offset;
+const BAND_ENV = {
+  FACTORY_PORT_BASE: String(PORT_BASE),
+  FACTORY_PORT_SPAN: String(PORT_SPAN),
+};
+
 function sh(body, extraEnv = {}) {
   const result = Bun.spawnSync({
     cmd: ["bash", "-c", `source "${COMMON}"\n${body}`],
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...extraEnv },
+    env: { ...process.env, ...BAND_ENV, ...extraEnv },
   });
   return {
     status: result.exitCode,
@@ -23,7 +64,7 @@ async function shAsync(body, extraEnv = {}) {
   const proc = Bun.spawn(["bash", "-c", `source "${COMMON}"\n${body}`], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...extraEnv },
+    env: { ...process.env, ...BAND_ENV, ...extraEnv },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -40,8 +81,12 @@ test("ticket_api_port hashes the full id so N and N+200 do not share a slot", ()
   expect(a.status).toBe(0);
   expect(b.status).toBe(0);
   expect(a.stdout).not.toBe(b.stdout);
-  expect(Number(a.stdout) % 2).toBe(0);
-  expect(Number(b.stdout) % 2).toBe(0);
+  for (const port of [Number(a.stdout), Number(b.stdout)]) {
+    expect(port % 2).toBe(0);
+    // Preferred-slot math must follow the overridden base, not the default.
+    expect(port).toBeGreaterThanOrEqual(PORT_BASE);
+    expect(port).toBeLessThan(PORT_BASE + 2 * PORT_SPAN);
+  }
 });
 
 test("ticket_api_port treats OPS-123 and OPS-123-scratch as different tickets", () => {
@@ -55,9 +100,9 @@ test("ticket_api_port treats OPS-123 and OPS-123-scratch as different tickets", 
 test("write_ports / read_ports round-trip", () => {
   const wt = mkdtempSync(path.join(tmpdir(), "ops-460-ports-"));
   try {
-    const written = sh(`write_ports "${wt}" 7752 7753\nread_ports "${wt}"`);
+    const written = sh(`write_ports "${wt}" ${P(352)} ${P(353)}\nread_ports "${wt}"`);
     expect(written.status).toBe(0);
-    expect(written.stdout.trim()).toBe("7752 7753");
+    expect(written.stdout.trim()).toBe(`${P(352)} ${P(353)}`);
   } finally {
     rmSync(wt, { recursive: true, force: true });
   }
@@ -65,7 +110,7 @@ test("write_ports / read_ports round-trip", () => {
 
 test("assert_event_home dies when /health belongs to another checkout", () => {
   const json = JSON.stringify({ env: { home: "/other/.factory/event-runtime" } });
-  const r = sh(`assert_event_home '${json}' '/this/.factory/event-runtime' 7752`);
+  const r = sh(`assert_event_home '${json}' '/this/.factory/event-runtime' ${P(352)}`);
   expect(r.status).not.toBe(0);
   expect(r.stderr).toContain("refusing to seed");
   expect(r.stderr).toContain("/other/.factory/event-runtime");
@@ -74,16 +119,16 @@ test("assert_event_home dies when /health belongs to another checkout", () => {
 test("assert_event_home accepts a matching env.home", () => {
   const home = "/this/.factory/event-runtime";
   const json = JSON.stringify({ env: { home } });
-  const r = sh(`assert_event_home '${json}' '${home}' 7752`);
+  const r = sh(`assert_event_home '${json}' '${home}' ${P(352)}`);
   expect(r.status).toBe(0);
 });
 
 test("assert_event_adapter requires fake unless --live", () => {
   const fake = JSON.stringify({ env: { adapter: "fake" } });
   const live = JSON.stringify({ env: {} });
-  expect(sh(`assert_event_adapter '${fake}' 0 7752`).status).toBe(0);
-  expect(sh(`assert_event_adapter '${live}' 1 7752`).status).toBe(0);
-  const mismatch = sh(`assert_event_adapter '${fake}' 1 7752`);
+  expect(sh(`assert_event_adapter '${fake}' 0 ${P(352)}`).status).toBe(0);
+  expect(sh(`assert_event_adapter '${live}' 1 ${P(352)}`).status).toBe(0);
+  const mismatch = sh(`assert_event_adapter '${fake}' 1 ${P(352)}`);
   expect(mismatch.status).not.toBe(0);
   expect(mismatch.stderr).toContain("--live");
 });
@@ -95,15 +140,15 @@ test("adapter_banner reports the /health adapter, not the local flag", () => {
 });
 
 test("allocate_api_port returns the preferred slot when nothing answers /health", () => {
-  const r = sh('allocate_api_port 7752 /tmp/expected-home');
+  const r = sh(`allocate_api_port ${P(352)} /tmp/expected-home`);
   expect(r.status).toBe(0);
-  expect(r.stdout).toBe("7752");
+  expect(r.stdout).toBe(String(P(352)));
 });
 
 test("allocate_api_port skips port occupied by another runtime", async () => {
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: 7760,
+    port: P(360),
     fetch(req) {
       if (new URL(req.url).pathname === "/health") {
         return new Response(JSON.stringify({ ok: true, env: { home: "/other/worktree/.factory/event-runtime" } }), {
@@ -114,9 +159,9 @@ test("allocate_api_port skips port occupied by another runtime", async () => {
     },
   });
   try {
-    const r = await shAsync('allocate_api_port 7760 /this/worktree/.factory/event-runtime');
+    const r = await shAsync(`allocate_api_port ${P(360)} /this/worktree/.factory/event-runtime`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("7762");
+    expect(r.stdout.trim()).toBe(String(P(362)));
   } finally {
     server.stop(true);
   }
@@ -125,24 +170,25 @@ test("allocate_api_port skips port occupied by another runtime", async () => {
 test("allocate_api_port skips port squatted by an alien process that does not answer /health", async () => {
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: 7764,
+    port: P(364),
     fetch() {
       return new Response("I am an alien process", { status: 500 });
     },
   });
   try {
-    const r = await shAsync('allocate_api_port 7764 /this/worktree/.factory/event-runtime');
+    const r = await shAsync(`allocate_api_port ${P(364)} /this/worktree/.factory/event-runtime`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("7766");
+    expect(r.stdout.trim()).toBe(String(P(366)));
   } finally {
     server.stop(true);
   }
 });
 
 test("allocate_api_port skips port held by raw TCP listener", async () => {
+  const heldPort = P(372);
   const listener = Bun.listen({
     hostname: "127.0.0.1",
-    port: 7772,
+    port: heldPort,
     socket: {
       data() {},
       open() {},
@@ -150,9 +196,11 @@ test("allocate_api_port skips port held by raw TCP listener", async () => {
     },
   });
   try {
-    const r = await shAsync('allocate_api_port 7772 /this/worktree/.factory/event-runtime');
+    const r = await shAsync(`allocate_api_port ${heldPort} /this/worktree/.factory/event-runtime`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("7774");
+    // The skip property: allocation succeeds and lands off the held slot.
+    expect(r.stdout.trim()).not.toBe(String(heldPort));
+    expect(r.stdout.trim()).toBe(String(P(374)));
   } finally {
     listener.stop(true);
   }
@@ -162,7 +210,7 @@ test("allocate_api_port reuses port when /health reports matching expected home"
   const home = "/this/worktree/.factory/event-runtime";
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: 7774,
+    port: P(374),
     fetch(req) {
       if (new URL(req.url).pathname === "/health") {
         return new Response(JSON.stringify({ ok: true, env: { home } }), {
@@ -173,19 +221,19 @@ test("allocate_api_port reuses port when /health reports matching expected home"
     },
   });
   try {
-    const r = await shAsync(`allocate_api_port 7774 '${home}'`);
+    const r = await shAsync(`allocate_api_port ${P(374)} '${home}'`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe("7774");
+    expect(r.stdout.trim()).toBe(String(P(374)));
   } finally {
     server.stop(true);
   }
 });
 
 test("port_listening detects active and closed ports", async () => {
-  expect(sh('port_listening 7796').status).not.toBe(0);
+  expect(sh(`port_listening ${P(396)}`).status).not.toBe(0);
   const listener = Bun.listen({
     hostname: "127.0.0.1",
-    port: 7796,
+    port: P(396),
     socket: {
       data() {},
       open() {},
@@ -193,11 +241,11 @@ test("port_listening detects active and closed ports", async () => {
     },
   });
   try {
-    expect(sh('port_listening 7796').status).toBe(0);
+    expect(sh(`port_listening ${P(396)}`).status).toBe(0);
   } finally {
     listener.stop(true);
   }
-  expect(sh('port_listening 7796').status).not.toBe(0);
+  expect(sh(`port_listening ${P(396)}`).status).not.toBe(0);
 });
 
 test("ticket_number extracts numeric ID from valid ticket strings", () => {

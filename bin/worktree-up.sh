@@ -59,6 +59,34 @@ done
 
 REPO="$(repo_root)"
 
+# `git worktree add` from concurrent bring-ups contends on git's internal
+# locks and the loser exits 1 with the reason only on stderr (WM-113).
+# Capture stderr so the die names the actual failure, and retry briefly when
+# it looks like lock contention; any other error dies immediately. Branch
+# existence is re-checked per attempt: a lock-interrupted `-b` add can leave
+# the branch created, and a blind `-b` retry would then die on "already
+# exists" instead of finishing the checkout.
+worktree_add() { # <worktree> <branch> <base-ref>
+  local wt="$1" branch="$2" base="$3"
+  local attempt=1 max_attempts=3 err=""
+  local delays=(0.5 1)
+  while :; do
+    if git -C "$REPO" show-ref --verify --quiet "refs/heads/$branch"; then
+      err=$(git -C "$REPO" worktree add --quiet "$wt" "$branch" 2>&1 >/dev/null) && return 0
+    else
+      err=$(git -C "$REPO" worktree add --quiet "$wt" -b "$branch" "$base" 2>&1 >/dev/null) && return 0
+    fi
+    if [[ $attempt -lt $max_attempts ]] \
+      && grep -qiE '\.lock|could not lock|unable to create|another git process' <<<"$err"; then
+      warn "git worktree add hit lock contention (attempt $attempt/$max_attempts) — retrying"
+      sleep "${delays[$((attempt - 1))]}"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    die "git worktree add failed: $err"
+  done
+}
+
 if [[ "$HERE" -eq 1 ]]; then
   [[ -z "$TICKET" ]] || die "--here takes no ticket — it provisions the current checkout"
   WT="$REPO"
@@ -76,11 +104,7 @@ else
     [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "fetching origin/$BASE_BRANCH"
     git -C "$REPO" fetch origin "$BASE_BRANCH" --quiet || die "could not fetch origin/$BASE_BRANCH"
     [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "creating worktree $WT on $BRANCH"
-    if git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH"; then
-      git -C "$REPO" worktree add --quiet "$WT" "$BRANCH" >/dev/null 2>&1 || die "git worktree add failed (git worktree list)"
-    else
-      git -C "$REPO" worktree add --quiet "$WT" -b "$BRANCH" "origin/$BASE_BRANCH" >/dev/null 2>&1 || die "git worktree add failed"
-    fi
+    worktree_add "$WT" "$BRANCH" "origin/$BASE_BRANCH"
   fi
 fi
 

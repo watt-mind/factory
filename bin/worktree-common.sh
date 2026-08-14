@@ -17,8 +17,11 @@ BASE_BRANCH="${FACTORY_BASE_BRANCH:-develop}"
 #                     ticket string (OPS-123 ≠ OPS-123-scratch, OPS-201 ≠
 #                     OPS-401), persisted in .factory/run/ports. Occupied
 #                     slots walk forward. web = API + 1.
-PORT_BASE=7400
-PORT_SPAN=200
+# The band is env-overridable (WM-113) so tests can run in a private range
+# instead of colliding with real runtimes or concurrent CI jobs; defaults
+# are unchanged for real use.
+PORT_BASE="${FACTORY_PORT_BASE:-7400}"
+PORT_SPAN="${FACTORY_PORT_SPAN:-200}"
 HERE_API_PORT=7391
 HERE_WEB_PORT=7392
 
@@ -28,6 +31,9 @@ die() {
 }
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
+
+[[ "$PORT_BASE" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_BASE must be numeric (got '$PORT_BASE')"
+[[ "$PORT_SPAN" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_SPAN must be numeric (got '$PORT_SPAN')"
 
 repo_root() { git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel; }
 
