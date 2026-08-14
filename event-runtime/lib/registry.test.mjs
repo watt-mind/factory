@@ -42,6 +42,23 @@ describe("registry", () => {
     expect(() => loadRegistry({ root })).toThrow(/mutating/);
   });
 
+  test("schedule payload must be a plain object without reserved tick fields (WM-72)", () => {
+    const root = tempRegistry();
+    const withPayload = (payload) =>
+      writeFileSync(
+        path.join(root, "schedules.json"),
+        JSON.stringify({
+          "reconcile-x": { every: "10m", eventType: "factory.reconcile.requested", payload, enabled: false },
+        }),
+      );
+    withPayload(["bj29"]);
+    expect(() => loadRegistry({ root })).toThrow(/plain object/);
+    withPayload({ slot: "2026-01-01T00:00:00.000Z" });
+    expect(() => loadRegistry({ root })).toThrow(/reserved tick field/);
+    withPayload({ repo: "bj29" });
+    expect(() => loadRegistry({ root })).not.toThrow();
+  });
+
   test("event type mapped to an unregistered agent fails closed", () => {
     const root = tempRegistry();
     writeFileSync(

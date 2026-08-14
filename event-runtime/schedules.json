@@ -6,5 +6,41 @@
     "singleton": true,
     "approval": "watched",
     "enabled": false
+  },
+  "reconcile-bj29": {
+    "every": "10m",
+    "eventType": "factory.reconcile.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "label-guard-bj29": {
+    "every": "5m",
+    "eventType": "factory.label-guard.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "warm-bj29": {
+    "every": "2h",
+    "eventType": "factory.warm.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "unblock-digest-bj29": {
+    "every": "1d",
+    "eventType": "factory.unblock-digest.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
   }
 }

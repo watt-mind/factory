@@ -1,0 +1,37 @@
+{
+  "id": "reconcile",
+  "version": 1,
+  "prompt": "agents/reconcile.md",
+  "input_schema": "schemas/repo-loop.input.json",
+  "output_schema": "schemas/command-result.output.json",
+  "output_contract": "factory.command-result/v1",
+  "command": [
+    "bun",
+    "{factoryRoot}/orchestrator/reconcile.mjs",
+    "--repo",
+    "{repo}",
+    "--apply"
+  ],
+  "captureStdout": "reconcile.log",
+  "captureKind": "log",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 300,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/reconcile.md": "sha256:f2c7e089132677a70e82346b1e51ad68739746da36abef29e2a17a9f172dfb4a",
+    "schemas/repo-loop.input.json": "sha256:8a67a773285d276f50f8b595d43d980f5ce286b74d2b4ad5852f07ee42e517a9",
+    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+  }
+}

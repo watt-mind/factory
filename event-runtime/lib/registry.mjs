@@ -158,6 +158,19 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
       if (approval === "auto" && !schedule.enabled) {
         throw new RegistryError(`schedules.json: ${loop} declares approval "auto" but is not enabled — decide one`);
       }
+      // A static payload rides along on every tick (repo-scoped loops need
+      // {repo}). Tick fields always win the merge, so a payload claiming
+      // loop/slot identity is a config error, not a spoofing vector.
+      if (schedule.payload !== undefined) {
+        if (typeof schedule.payload !== "object" || schedule.payload === null || Array.isArray(schedule.payload)) {
+          throw new RegistryError(`schedules.json: ${loop} payload must be a plain object`);
+        }
+        for (const reserved of ["loop", "slot", "cadenceSeconds", "skippedSlots"]) {
+          if (reserved in schedule.payload) {
+            throw new RegistryError(`schedules.json: ${loop} payload must not set reserved tick field "${reserved}"`);
+          }
+        }
+      }
     }
   }
 

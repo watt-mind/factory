@@ -1,0 +1,37 @@
+{
+  "id": "warm",
+  "version": 1,
+  "prompt": "agents/warm.md",
+  "input_schema": "schemas/repo-loop.input.json",
+  "output_schema": "schemas/command-result.output.json",
+  "output_contract": "factory.command-result/v1",
+  "command": [
+    "bun",
+    "{factoryRoot}/orchestrator/warm.mjs",
+    "--repo",
+    "{repo}",
+    "--apply"
+  ],
+  "captureStdout": "warm.log",
+  "captureKind": "log",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "repo:read"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 1800,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/warm.md": "sha256:3c873b0f2ed6cc1c98200773218f3ffb83379c138107597f2ec088e45dbe3238",
+    "schemas/repo-loop.input.json": "sha256:8a67a773285d276f50f8b595d43d980f5ce286b74d2b4ad5852f07ee42e517a9",
+    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+  }
+}

@@ -131,7 +131,10 @@ export function emitDueTicks(db, registry, { now = Date.now() } = {}) {
             causationId: null,
             // skippedSlots travels on the tick that did fire: the audit trail
             // says "this run stands for 5 slots nobody was awake for".
-            payload: { loop, slot, cadenceSeconds, skippedSlots: skipped },
+            // A schedule's static payload (e.g. {repo}) rides along under the
+            // tick fields, which always win — a schedule must not be able to
+            // forge which slot it claims to be.
+            payload: { ...(schedule.payload ?? {}), loop, slot, cadenceSeconds, skippedSlots: skipped },
           },
           { now },
         );

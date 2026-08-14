@@ -180,6 +180,23 @@ describe("emitDueTicks (§3)", () => {
     expect(envelope.source).toBe("schedule");
   });
 
+  test("a static payload rides on the tick and the planner proposes the routed run (WM-72)", () => {
+    const d = db();
+    const registry = withLoop({ eventType: "factory.reconcile.requested", payload: { repo: "bj29" } });
+    emitDueTicks(d, registry, { now: at("2026-08-13T21:00:00Z") });
+
+    const row = d.query(`SELECT envelope_json FROM events ORDER BY event_id DESC LIMIT 1`).get();
+    const envelope = JSON.parse(row.envelope_json);
+    expect(envelope.type).toBe("factory.reconcile.requested");
+    // Tick identity fields always win the merge over the static payload.
+    expect(envelope.payload).toMatchObject({ repo: "bj29", loop: "reaper", slot: "2026-08-13T21:00:00.000Z" });
+
+    planAdmittedEvents(d, registry, { policyVersion: PV });
+    const proposal = openProposals(d, {}).find((p) => p.spec?.agent === "reconcile@1");
+    expect(proposal).toBeTruthy();
+    expect(proposal.status).toBe("open");
+  });
+
   test("a disabled loop never fires", () => {
     const d = db();
     expect(emitDueTicks(d, withLoop({ enabled: false }), { now: Date.now() }).emitted).toEqual([]);

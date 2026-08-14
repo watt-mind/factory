@@ -1,0 +1,37 @@
+{
+  "id": "label-guard",
+  "version": 1,
+  "prompt": "agents/label-guard.md",
+  "input_schema": "schemas/repo-loop.input.json",
+  "output_schema": "schemas/command-result.output.json",
+  "output_contract": "factory.command-result/v1",
+  "command": [
+    "bun",
+    "{factoryRoot}/orchestrator/label-guard.mjs",
+    "--repo",
+    "{repo}",
+    "--apply"
+  ],
+  "captureStdout": "label-guard.log",
+  "captureKind": "log",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 300,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/label-guard.md": "sha256:c830c11cc98ada2c13a412985e91e6c7befbffa7400bcac084c8b13d1c5fb0ed",
+    "schemas/repo-loop.input.json": "sha256:8a67a773285d276f50f8b595d43d980f5ce286b74d2b4ad5852f07ee42e517a9",
+    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+  }
+}

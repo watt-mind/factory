@@ -97,6 +97,38 @@
     ],
     "proposalTtlSeconds": 1800
   },
+  "factory.reconcile.requested": {
+    "agent": "reconcile@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "factory.label-guard.requested": {
+    "agent": "label-guard@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "factory.warm.requested": {
+    "agent": "warm@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "factory.unblock-digest.requested": {
+    "agent": "unblock-digest@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
   "clock.tick.reaper": {
     "agent": "reaper@1",
     "adapter": "command",

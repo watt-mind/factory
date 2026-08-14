@@ -1,0 +1,17 @@
+{
+  "title": "repo-scoped loop input — a manual request, or a clock tick whose schedule carries a static {repo} payload",
+  "type": "object",
+  "required": ["repo"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repository identifier configured in config/repos.yaml"
+    },
+    "loop": { "type": "string", "minLength": 1 },
+    "slot": { "type": "string", "minLength": 1 },
+    "cadenceSeconds": { "type": "integer", "minimum": 1 },
+    "skippedSlots": { "type": "integer", "minimum": 0 }
+  }
+}
