@@ -313,6 +313,13 @@ export interface StoppedSchedule {
   error: string | null;
 }
 
+/** A scheduled loop that has open proposals piling up beyond threshold (WM-124). */
+export interface ProposalPilingUp {
+  loop: string;
+  count: number;
+  threshold: number;
+}
+
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
@@ -333,6 +340,7 @@ export interface StatusView {
     /** Queued runs with no live worker to claim them. */
     noWorkers: boolean;
     ambiguousOpenProposals: { runId: string; count: number }[];
+    proposalsPilingUp?: ProposalPilingUp[];
   };
 }
 

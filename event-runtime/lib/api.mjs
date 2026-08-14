@@ -25,7 +25,7 @@ import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
 import { storeStats } from "./artifacts.mjs";
-import { parseCadence, scheduleView } from "./schedules.mjs";
+import { parseCadence, proposalsPilingUp, scheduleView } from "./schedules.mjs";
 import { listWorkers, stalledWorkers } from "./workers.mjs";
 
 /**
@@ -130,7 +130,7 @@ function runCounts(db) {
 }
 
 /** §13 status + doctor view: aggregates plus anomalies, all read-only SQL. */
-function statusView(db, registry, nowMs, { secret, policyVersion, env, getStoreStats } = {}) {
+function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats } = {}) {
   const open = openProposals(db, { now: nowMs });
   const expiredOpen = open.filter((p) => p.expired);
   const staleLeases = db
@@ -159,6 +159,9 @@ function statusView(db, registry, nowMs, { secret, policyVersion, env, getStoreS
   const configAnomalies = [];
   if (!secret) {
     configAnomalies.push("FACTORY_EVENT_SECRET is unset (webhook intake disabled)");
+  }
+  if (!githubSecret) {
+    configAnomalies.push("FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)");
   }
   if (policyVersion === "unknown") {
     configAnomalies.push("policyVersion is unknown");
@@ -198,6 +201,7 @@ function statusView(db, registry, nowMs, { secret, policyVersion, env, getStoreS
       // Two or more open proposals on one run: cancel fail-closes and leaves
       // them open (OPS-245). Unreachable on the TTL replan path.
       ambiguousOpenProposals: ambiguousOpenProposalRuns(db),
+      proposalsPilingUp: proposalsPilingUp(db, registry),
     },
   };
 }
@@ -547,6 +551,7 @@ export function createApi({
           policyVersion,
           env,
           webhookSecret: secret ? "set" : "absent",
+          githubWebhookSecret: githubSecret ? "set" : "absent",
         });
       }
 
@@ -616,7 +621,7 @@ export function createApi({
       if (route === "GET /status") {
         return send(res, 200, {
           env,
-          ...statusView(db, registry, nowMs, { secret, policyVersion, env, getStoreStats }),
+          ...statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats }),
         });
       }
 

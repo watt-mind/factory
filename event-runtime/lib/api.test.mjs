@@ -16,6 +16,7 @@ import { registerWorker, heartbeat, deregisterWorker } from "./workers.mjs";
 
 const registry = loadRegistry();
 const SECRET = "test-secret";
+const GH_SECRET = "test-github-secret";
 const PV = "git:test-pv";
 
 let n = 0;
@@ -48,12 +49,12 @@ function sign(rawBody, timestamp, secret = SECRET) {
   return `sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`;
 }
 
-async function makeServer({ secret = SECRET, ...opts } = {}) {
+async function makeServer({ secret = SECRET, githubSecret = GH_SECRET, ...opts } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-api-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const onEvents = [];
   const server = startApi({
-    db, registry, secret, policyVersion: PV, port: 0,
+    db, registry, secret, githubSecret, policyVersion: PV, port: 0,
     onEvent: (kind) => onEvents.push(kind),
     ...opts,
   });
@@ -95,6 +96,8 @@ describe("webhook intake (§14)", () => {
     expect(body.ok).toBe(true);
     expect(body.policyVersion).toBe(PV);
     expect(typeof body.env.name).toBe("string"); // environment identity, always present
+    expect(body.webhookSecret).toBe("set");
+    expect(body.githubWebhookSecret).toBe("set");
   });
 
   test("unknown route → 404 with an error body", async () => {
@@ -1174,52 +1177,93 @@ describe("serve PID lock (OPS-458)", () => {
   });
 });
 
-describe("missing FACTORY_EVENT_SECRET visibility and port validation (OPS-457)", () => {
-  test("GET /health reports webhookSecret set vs absent", async () => {
-    const sWithSecret = await makeServer({ secret: "test-secret" });
+describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibility (OPS-457, WM-124)", () => {
+  test("GET /health reports webhookSecret and githubWebhookSecret set vs absent", async () => {
+    const sWithSecret = await makeServer({ secret: "test-secret", githubSecret: "test-gh-secret" });
     try {
       const res = await fetch(sWithSecret.url("/health"));
       const body = await res.json();
       expect(body.webhookSecret).toBe("set");
+      expect(body.githubWebhookSecret).toBe("set");
     } finally {
       sWithSecret.close();
     }
 
-    const sNoSecret = await makeServer({ secret: null });
+    const sNoSecret = await makeServer({ secret: null, githubSecret: null });
     try {
       const res = await fetch(sNoSecret.url("/health"));
       const body = await res.json();
       expect(body.webhookSecret).toBe("absent");
+      expect(body.githubWebhookSecret).toBe("absent");
     } finally {
       sNoSecret.close();
     }
   });
 
-  test("GET /status includes configuration anomaly when secret is absent or policyVersion is unknown", async () => {
-    const sNoSecret = await makeServer({ secret: null, policyVersion: "git:abc1234" });
+  test("GET /status includes configuration anomaly when secret or githubSecret is absent or policyVersion is unknown", async () => {
+    const sNoSecret = await makeServer({ secret: null, githubSecret: "test-gh-secret", policyVersion: "git:abc1234" });
     try {
       const status = await sNoSecret.client.status();
       expect(status.anomalies.configuration).toContain("FACTORY_EVENT_SECRET is unset (webhook intake disabled)");
+      expect(status.anomalies.configuration).not.toContain("FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)");
       expect(status.anomalies.configuration).not.toContain("policyVersion is unknown");
     } finally {
       sNoSecret.close();
     }
 
-    const sUnknownPv = await makeServer({ secret: "test-secret", policyVersion: "unknown" });
+    const sNoGhSecret = await makeServer({ secret: "test-secret", githubSecret: null, policyVersion: "git:abc1234" });
+    try {
+      const status = await sNoGhSecret.client.status();
+      expect(status.anomalies.configuration).toContain("FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)");
+      expect(status.anomalies.configuration).not.toContain("FACTORY_EVENT_SECRET is unset (webhook intake disabled)");
+      expect(status.anomalies.configuration).not.toContain("policyVersion is unknown");
+    } finally {
+      sNoGhSecret.close();
+    }
+
+    const sUnknownPv = await makeServer({ secret: "test-secret", githubSecret: "test-gh-secret", policyVersion: "unknown" });
     try {
       const status = await sUnknownPv.client.status();
       expect(status.anomalies.configuration).toContain("policyVersion is unknown");
       expect(status.anomalies.configuration).not.toContain("FACTORY_EVENT_SECRET is unset (webhook intake disabled)");
+      expect(status.anomalies.configuration).not.toContain("FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)");
     } finally {
       sUnknownPv.close();
     }
 
-    const sClean = await makeServer({ secret: "test-secret", policyVersion: "git:abc1234" });
+    const sClean = await makeServer({ secret: "test-secret", githubSecret: "test-gh-secret", policyVersion: "git:abc1234" });
     try {
       const status = await sClean.client.status();
       expect(status.anomalies.configuration).toEqual([]);
     } finally {
       sClean.close();
+    }
+  });
+
+  test("GET /status reports proposalsPilingUp anomaly when open proposals exceed threshold (WM-124)", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-piling-test-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+    const at = new Date().toISOString();
+
+    for (let i = 1; i <= 4; i++) {
+      db.query(
+        `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at, status, envelope_json, payload_hash, admitted_at)
+         VALUES ('schedule', ?, 'factory.reconcile.requested', 'reconcile-bj29', ?, ?, 'admitted', ?, 'sha256:h', ?)`,
+      ).run(`clock:reconcile-bj29:${i}`, at, at, JSON.stringify({ payload: { loop: "reconcile-bj29" } }), at);
+      db.query(
+        `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+         VALUES (?, 'schedule', ?, 'run', 'open', ?, 1800)`,
+      ).run(`prop-piling-${i}`, `clock:reconcile-bj29:${i}`, at);
+    }
+
+    const s = await makeServer({ db, secret: "test-secret", githubSecret: "test-gh-secret" });
+    try {
+      const status = await s.client.status();
+      expect(status.anomalies.proposalsPilingUp).toEqual([
+        { loop: "reconcile-bj29", count: 4, threshold: 3 },
+      ]);
+    } finally {
+      s.close();
     }
   });
 
@@ -1540,6 +1584,18 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
        VALUES ("test", "evt-dead-1", "test.type", "test", "dead_lettered", "dummy-hash", ?, ?, "corr-1", 3, "failed to plan", ?, "{}")`
     ).run(atIso, atIso, atIso);
 
+    // Proposals piling up for a scheduled loop
+    for (let i = 1; i <= 4; i++) {
+      db.query(
+        `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, admitted_at, envelope_json)
+         VALUES ("schedule", ?, "clock.tick.reaper", "reaper", "admitted", "dummy-hash", ?, ?, ?, ?)`,
+      ).run(`clock:reaper:${i}`, atIso, atIso, atIso, JSON.stringify({ payload: { loop: "reaper" } }));
+      db.query(
+        `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+         VALUES (?, "schedule", ?, "run", "open", ?, 1800)`,
+      ).run(`prop-piling-reaper-${i}`, `clock:reaper:${i}`, atIso);
+    }
+
     const s = await makeServer({
       db,
       secret: "sec",
@@ -1608,6 +1664,22 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       for (const ss of status.anomalies.stoppedSchedules) {
         expect(Object.keys(ss).sort()).toEqual(expectedStoppedSchedKeys);
       }
+
+      // proposalsPilingUp matches ProposalPilingUp
+      const pilingBlock = extractInterfaceBlock(typesSrc, "ProposalPilingUp");
+      const expectedPilingKeys = extractDirectProperties(pilingBlock).sort();
+      expect(status.anomalies.proposalsPilingUp.length).toBe(1);
+      for (const p of status.anomalies.proposalsPilingUp) {
+        expect(Object.keys(p).sort()).toEqual(expectedPilingKeys);
+        expect(typeof p.loop).toBe("string");
+        expect(typeof p.count).toBe("number");
+        expect(typeof p.threshold).toBe("number");
+      }
+      expect(status.anomalies.proposalsPilingUp[0]).toEqual({
+        loop: "reaper",
+        count: 4,
+        threshold: 3,
+      });
 
       // Remaining anomaly primitives
       expect(Array.isArray(status.anomalies.configuration)).toBe(true);

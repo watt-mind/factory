@@ -125,6 +125,36 @@ describe("translateGitHubEvent (WM-112)", () => {
     }
   });
 
+  test("draft PR opened or synchronized is ignored as draft_pr; ready_for_review continues (WM-124)", () => {
+    expect(
+      translate("pull_request", prPayload({ action: "opened", pull_request: { base: { ref: "develop" }, draft: true } })),
+    ).toEqual({
+      ok: false,
+      ignored: true,
+      reason: "draft_pr",
+    });
+    expect(
+      translate("pull_request", prPayload({ action: "synchronize", pull_request: { base: { ref: "develop" }, draft: true } })),
+    ).toEqual({
+      ok: false,
+      ignored: true,
+      reason: "draft_pr",
+    });
+    const ready = translate(
+      "pull_request",
+      prPayload({ action: "ready_for_review", pull_request: { base: { ref: "develop" }, draft: false } }),
+    );
+    expect(ready.ok).toBe(true);
+    expect(ready.envelope.type).toBe("factory.merge.requested");
+
+    const readyEvenIfDraftTrue = translate(
+      "pull_request",
+      prPayload({ action: "ready_for_review", pull_request: { base: { ref: "develop" }, draft: true } }),
+    );
+    expect(readyEvenIfDraftTrue.ok).toBe(true);
+    expect(readyEvenIfDraftTrue.envelope.type).toBe("factory.merge.requested");
+  });
+
   test("a PR not targeting the configured base branch is ignored", () => {
     const payload = prPayload({ pull_request: { number: 7, base: { ref: "feature/x" } } });
     expect(translate("pull_request", payload)).toEqual({ ok: false, ignored: true, reason: "not_base_branch" });
@@ -272,6 +302,13 @@ describe("POST /github route (WM-112)", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ admitted: false, ignored: true, reason: "unhandled_event" });
     expect(s.db.query(`SELECT COUNT(*) AS n FROM events WHERE event_id = 'd-ping'`).get().n).toBe(0);
+  });
+
+  test("a draft PR is 2xx-ignored with reason draft_pr; nothing is admitted (WM-124)", async () => {
+    const res = await deliver(prPayload({ pull_request: { draft: true } }), { deliveryId: "d-draft" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ admitted: false, ignored: true, reason: "draft_pr" });
+    expect(s.db.query(`SELECT COUNT(*) AS n FROM events WHERE event_id = 'd-draft'`).get().n).toBe(0);
   });
 
   test("a report_only repo's PR is 2xx-ignored — merge.requested never admitted", async () => {

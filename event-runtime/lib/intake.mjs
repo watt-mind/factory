@@ -152,6 +152,9 @@ export function translateGitHubEvent({ event, deliveryId, payload, repos, now = 
     if (!PR_ACTIONS.includes(payload.action)) return { ok: false, ignored: true, reason: "unhandled_action" };
     const pr = payload.pull_request;
     if (!pr || typeof pr !== "object") return { ok: false, ignored: false, reason: "malformed_payload" };
+    if (payload.action !== "ready_for_review" && pr.draft === true) {
+      return { ok: false, ignored: true, reason: "draft_pr" };
+    }
     const repo = repoForSlug(repos, payload.repository?.full_name);
     if (!repo) return { ok: false, ignored: true, reason: "unconfigured_repo" };
     if (pr.base?.ref !== repo.base) return { ok: false, ignored: true, reason: "not_base_branch" };
