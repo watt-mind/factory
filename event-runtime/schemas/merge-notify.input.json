@@ -1,0 +1,18 @@
+{
+  "title": "merge-notify input — the merge-scan escalation to push to the operator",
+  "type": "object",
+  "required": ["repo", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short repo name as configured in config/repos.yaml — names the queue the human needs to look at"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-line scan summary naming the escalated PR(s) and why, pushed verbatim to the operator"
+    }
+  }
+}

@@ -48,6 +48,26 @@
       }
     }
   },
+  "merge-scan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "MERGE": {
+        "eventType": "factory.merge-apply.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "plan": "$.artifact.plan"
+        }
+      },
+      "ESCALATE": {
+        "eventType": "factory.merge-escalate.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "summary": "$.artifact.summary"
+        }
+      }
+    }
+  },
   "ci-log-capture@1": {
     "recommendationField": "exitCode",
     "edges": {
