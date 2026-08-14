@@ -20,7 +20,6 @@ import { ToastContainer, copyLink, copyText } from "./components/ui";
 import { Agents } from "./views/Agents";
 import { Events } from "./views/Events";
 import { Overview } from "./views/Overview";
-import { Proposals } from "./views/Proposals";
 import { RunFull } from "./views/RunFull";
 import { Runs } from "./views/Runs";
 import { Workers } from "./views/Workers";
@@ -36,6 +35,7 @@ type NavBadge = {
 const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph })));
 const Projects = lazy(() => import("./views/Projects").then((m) => ({ default: m.Projects })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
+const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default: m.Proposals })));
 
 export function App() {
   const [route, navigateRaw] = useHashRoute();
@@ -498,18 +498,20 @@ export function App() {
         )}
         <div className="min-h-0 flex-1">
           {view === "proposals" ? (
-            <Proposals
-              connected={connected}
-              context={context}
-              onRunQueued={jumpToRun}
-              focusProposalId={focusProposalId}
-              onSelectProposal={(id) => navigate(hashPath("proposals", id))}
-              focusExpired={focusExpired}
-              onFocusExpiredConsumed={() => setFocusExpired(false)}
-              onJumpAgent={jumpToAgent}
-              onJumpEvent={jumpToEvent}
-              rejumpEpoch={rejumpEpoch}
-            />
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading proposals…</div>}>
+              <Proposals
+                connected={connected}
+                context={context}
+                onRunQueued={jumpToRun}
+                focusProposalId={focusProposalId}
+                onSelectProposal={(id) => navigate(hashPath("proposals", id))}
+                focusExpired={focusExpired}
+                onFocusExpiredConsumed={() => setFocusExpired(false)}
+                onJumpAgent={jumpToAgent}
+                onJumpEvent={jumpToEvent}
+                rejumpEpoch={rejumpEpoch}
+              />
+            </Suspense>
           ) : view === "run" && fullRunId ? (
             <RunFull
               runId={fullRunId}
