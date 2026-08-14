@@ -83,3 +83,14 @@ test("factory ps executes orchestrator/ps.mjs via CLI", () => {
   expect(Array.isArray(data.controlPlane)).toBe(true);
 });
 
+test("factory workers executes orchestrator/workers.mjs via CLI", () => {
+  const result = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "workers", "--help"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("factory workers");
+});
+
+

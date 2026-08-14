@@ -1,0 +1,20 @@
+# Remote worker nodes configuration (OPS-445)
+# Defines remote nodes available for distributed worker offloading via SSH.
+
+nodes:
+  mac-mini:
+    host: "mac-mini.local"
+    user: "hdkiller"
+    port: 22
+    factory_root: "~/Develop/factory"
+    branch: "develop"
+    env:
+      FACTORY_EVENT_PORT: 7381
+    labels:
+      node: "mac-mini"
+      arch: "arm64"
+      can: "infra-exec"
+    adapters:
+      - "claude"
+      - "actions"
+      - "command"
