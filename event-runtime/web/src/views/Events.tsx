@@ -19,7 +19,7 @@ import { ScopeCaption } from "../components/ContextTabs";
 import type { AdmittedEvent, EventFocus } from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
-import { EVENT_FACETS, matchesFilterQuery, parseFilterQuery } from "../filterQuery";
+import { EVENT_FACETS, matchesFilterQuery, parseFilterQuery, removeFilterToken, type FilterToken } from "../filterQuery";
 import { decideRevealFilters, formatRevealNotification } from "../reveal";
 import {
   Ago,
@@ -43,6 +43,51 @@ import {
   copyText,
   copyLink,
 } from "../components/ui";
+
+function toggleFacetInQuery(filter: string, key: "type" | "source", value: string): string {
+  const parsed = parseFilterQuery(filter, EVENT_FACETS);
+  const existingTokens = parsed.tokens.filter(
+    (t): t is Extract<FilterToken, { kind: "field" }> =>
+      t.kind === "field" && t.key === key,
+  );
+  const isAlreadyActive = existingTokens.some(
+    (t) => t.value.toLowerCase() === value.toLowerCase(),
+  );
+
+  if (isAlreadyActive) {
+    let next = filter;
+    const matching = existingTokens
+      .filter((t) => t.value.toLowerCase() === value.toLowerCase())
+      .sort((a, b) => b.start - a.start);
+    for (const t of matching) {
+      next = removeFilterToken(next, t);
+    }
+    return next;
+  }
+
+  let next = filter;
+  const toRemove = [...existingTokens].sort((a, b) => b.start - a.start);
+  for (const t of toRemove) {
+    next = removeFilterToken(next, t);
+  }
+  const addition = `${key}:${value}`;
+  return next ? `${next} ${addition}`.replace(/\s+/g, " ").trim() : addition;
+}
+
+function setFacetInQuery(filter: string, key: "type" | "source", value: string): string {
+  const parsed = parseFilterQuery(filter, EVENT_FACETS);
+  const existingTokens = parsed.tokens.filter(
+    (t): t is Extract<FilterToken, { kind: "field" }> =>
+      t.kind === "field" && t.key === key,
+  );
+  let next = filter;
+  const toRemove = [...existingTokens].sort((a, b) => b.start - a.start);
+  for (const t of toRemove) {
+    next = removeFilterToken(next, t);
+  }
+  const addition = `${key}:${value}`;
+  return next ? `${next} ${addition}`.replace(/\s+/g, " ").trim() : addition;
+}
 
 const STATUS_TABS = ["all", "admitted", "planned", "noop", "human_needed", "dead_lettered"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
@@ -139,9 +184,7 @@ export function Events({
   const queryClient = useQueryClient();
   const pollRequeue = useRequeuePoll(onJumpProposal);
   const [tab, setTab] = useState<StatusTab>(isStatusTab(focusEvent?.status) ? focusEvent.status : "all");
-  const [filter, setFilter] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string | null>(focusEvent?.type ?? null);
-  const [sourceFilter, setSourceFilter] = useState<string | null>(null);
+  const [filter, setFilter] = useState(focusEvent?.type ? `type:${focusEvent.type}` : "");
   const [confirmReplay, setConfirmReplay] = useState(false);
 
   const fetchAll = context.kind === "repo";
@@ -158,18 +201,56 @@ export function Events({
     return rows.filter((e) => keyOf(e) === focusKey || matchesRepo(e.repos, context));
   }, [rows, context, focusEvent?.source, focusEvent?.eventId]);
 
-  const types = useMemo(() => [...new Set(scoped.map((e) => e.type))].sort(), [scoped]);
-  const sources = useMemo(() => [...new Set(scoped.map((e) => e.source))].sort(), [scoped]);
+  const tabScoped = useMemo(() => {
+    if (fetchAll && tab !== "all") {
+      return scoped.filter((e) => e.status === tab);
+    }
+    return scoped;
+  }, [scoped, fetchAll, tab]);
+
+  const types = useMemo(() => [...new Set(tabScoped.map((e) => e.type))].sort(), [tabScoped]);
+  const sources = useMemo(() => [...new Set(tabScoped.map((e) => e.source))].sort(), [tabScoped]);
+
+  const typeCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const e of tabScoped) {
+      counts[e.type] = (counts[e.type] ?? 0) + 1;
+    }
+    return counts;
+  }, [tabScoped]);
+
+  const sourceCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const e of tabScoped) {
+      counts[e.source] = (counts[e.source] ?? 0) + 1;
+    }
+    return counts;
+  }, [tabScoped]);
 
   const parsed = useMemo(() => parseFilterQuery(filter, EVENT_FACETS), [filter]);
+
+  const activeTypes = useMemo(() => {
+    return new Set(
+      parsed.tokens
+        .filter((t): t is Extract<FilterToken, { kind: "field" }> => t.kind === "field" && t.key === "type")
+        .map((t) => t.value.toLowerCase()),
+    );
+  }, [parsed.tokens]);
+
+  const activeSources = useMemo(() => {
+    return new Set(
+      parsed.tokens
+        .filter((t): t is Extract<FilterToken, { kind: "field" }> => t.kind === "field" && t.key === "source")
+        .map((t) => t.value.toLowerCase()),
+    );
+  }, [parsed.tokens]);
+
   const visible = useMemo(() => {
     return scoped.filter((e) => {
       if (fetchAll && tab !== "all" && e.status !== tab) return false;
-      if (typeFilter && e.type !== typeFilter) return false;
-      if (sourceFilter && e.source !== sourceFilter) return false;
       return matchesFilterQuery(e, parsed, EVENT_FACETS, undefined);
     });
-  }, [scoped, parsed, typeFilter, sourceFilter, fetchAll, tab]);
+  }, [scoped, parsed, fetchAll, tab]);
 
   // Display options (OPS-493): partition into sections, order inside them,
   // and feed keyboard navigation only the rows of open sections. Under a
@@ -219,7 +300,9 @@ export function Events({
   useEffect(() => {
     if (!focusEvent) return;
     if (isStatusTab(focusEvent.status) && tab !== focusEvent.status) setTab(focusEvent.status);
-    if (focusEvent.type) setTypeFilter(focusEvent.type);
+    if (focusEvent.type) {
+      setFilter((cur) => setFacetInQuery(cur, "type", focusEvent.type!));
+    }
     if (focusEvent.status || focusEvent.type) onFocusConsumed();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusEvent?.status, focusEvent?.type]);
@@ -232,7 +315,7 @@ export function Events({
   // before the tab effect below has made the row renderable.
   const pendingReveal = useRef<{
     key: string;
-    snapshot: { filter: string; typeFilter: string | null; sourceFilter: string | null };
+    snapshot: { filter: string };
   } | null>(null);
   const lastKey = useRef<string | null>(null);
   const lastRejump = useRef<number | undefined>(rejumpEpoch);
@@ -246,7 +329,7 @@ export function Events({
     if (selectedKey && (isNewKey || isRejump)) {
       pendingReveal.current = {
         key: selectedKey,
-        snapshot: { filter, typeFilter, sourceFilter },
+        snapshot: { filter },
       };
     }
     const latch = pendingReveal.current;
@@ -256,18 +339,14 @@ export function Events({
     if (fetchAll && tab !== "all" && row.status !== tab) return; // waiting on the tab switch
     pendingReveal.current = null; // decided once
     const isVisible = visible.some((e) => keyOf(e) === latch.key);
-    const currentFilters = { filter, typeFilter, sourceFilter };
+    const currentFilters = { filter };
     const emptyFilters = {
       filter: "",
-      typeFilter: focusEvent?.type ?? null,
-      sourceFilter: null,
     };
     const decision = decideRevealFilters(latch.snapshot, currentFilters, emptyFilters, isVisible);
     if (decision.cleared) {
-      if (decision.clearedFields.includes("filter")) setFilter(decision.next.filter);
-      if (decision.clearedFields.includes("sourceFilter")) setSourceFilter(decision.next.sourceFilter);
-      if (decision.clearedFields.includes("typeFilter")) {
-        setTypeFilter(decision.next.typeFilter);
+      if (decision.clearedFields.includes("filter")) {
+        setFilter(decision.next.filter);
         if (!focusEvent?.type) onSelectType(null);
       }
     }
@@ -293,8 +372,6 @@ export function Events({
     fetchAll,
     tab,
     filter,
-    sourceFilter,
-    typeFilter,
     onSelectType,
   ]);
 
@@ -366,10 +443,8 @@ export function Events({
     },
     onClose: () => {
       if (sel) onSelectEvent(null);
-      else if (filter || typeFilter || sourceFilter) {
+      else if (filter) {
         setFilter("");
-        setTypeFilter(null);
-        setSourceFilter(null);
         onSelectType(null);
       } else if (selectedKey) {
         onSelectEvent(null);
@@ -456,43 +531,63 @@ export function Events({
             token chips below the box are full-width, so a facet chip beside it
             would jump a line the moment a token appeared. */}
         {(types.length > 1 || sources.length > 1) && (
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          {types.length > 1 &&
-            types.map((t) => (
-              <button
-                key={t}
-                type="button"
-                aria-pressed={typeFilter === t}
-                onClick={() => {
-                  const next = typeFilter === t ? null : t;
-                  setTypeFilter(next);
-                  onSelectType(next);
-                }}
-                className={`rounded-md px-2 py-0.5 text-[11px] ${
-                  typeFilter === t
-                    ? "bg-(--surface-3) text-(--text)"
-                    : "text-(--text-faint) hover:bg-(--surface-1)"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          {sources.length > 1 &&
-            sources.map((s) => (
-              <button
-                key={s}
-                type="button"
-                aria-pressed={sourceFilter === s}
-                onClick={() => setSourceFilter((cur) => (cur === s ? null : s))}
-                className={`rounded-md px-2 py-0.5 font-mono text-[11px] ${
-                  sourceFilter === s
-                    ? "bg-(--surface-3) text-(--text)"
-                    : "text-(--text-faint) hover:bg-(--surface-1)"
-                }`}
-              >
-                {s}
-              </button>
-            ))}
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+          {types.length > 1 && (
+            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event types">
+              <span className="text-[11px] font-semibold text-(--text-dim)">Type:</span>
+              {types.map((t) => {
+                const isPressed = activeTypes.has(t.toLowerCase());
+                const count = typeCounts[t] ?? 0;
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    aria-pressed={isPressed}
+                    onClick={() => {
+                      const next = isPressed ? null : t;
+                      setFilter((cur) => toggleFacetInQuery(cur, "type", t));
+                      onSelectType(next);
+                    }}
+                    className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+                      isPressed
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                    }`}
+                  >
+                    <span>{t}</span>
+                    <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {sources.length > 1 && (
+            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event sources">
+              <span className="text-[11px] font-semibold text-(--text-dim)">Source:</span>
+              {sources.map((s) => {
+                const isPressed = activeSources.has(s.toLowerCase());
+                const count = sourceCounts[s] ?? 0;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    aria-pressed={isPressed}
+                    onClick={() => {
+                      setFilter((cur) => toggleFacetInQuery(cur, "source", s));
+                    }}
+                    className={`rounded-md px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                      isPressed
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                    }`}
+                  >
+                    <span>{s}</span>
+                    <span className="ml-1.5 font-sans tabular-nums text-(--text-faint)">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
         )}
 
