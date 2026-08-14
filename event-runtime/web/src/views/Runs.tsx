@@ -1,9 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, artifactUrl } from "../api";
 import { hashPath } from "../hash";
 import { dur } from "../heartbeat";
-import { useListKeys, useNow, useTabKeys } from "../hooks";
+import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import {
+  buildSections,
+  cycleColumnSort,
+  flattenSections,
+  grouped,
+  toggleCollapsed,
+  visibleColumns,
+  type DisplayConfig,
+} from "../displayOptions";
+import { DisplayOptions } from "../components/DisplayOptions";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
 import { readPinnedRuns, savePinnedRuns } from "../components/ContextTabs";
@@ -28,6 +38,9 @@ import {
   notify,
   Section,
   StateBadge,
+  STATE_HUES,
+  GroupHeaderRow,
+  Th,
   VerbError,
   copyText,
   copyLink,
@@ -46,6 +59,44 @@ export const isCancellable = (state: RunState) => !TERMINAL.includes(state) && s
  */
 const IN_FLIGHT: RunState[] = ["LEASED", "RUNNING"];
 
+/**
+ * Grouping/ordering/columns (OPS-493). One config for every status tab: the
+ * tabs only filter rows, the column set never changes with them.
+ */
+const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
+  view: "runs",
+  groups: [
+    {
+      key: "state",
+      label: "State",
+      get: (r) => r.state,
+      order: [
+        "PROPOSED", "APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING",
+        "COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED",
+      ],
+      hue: STATE_HUES,
+    },
+    { key: "agent", label: "Agent", get: (r) => r.agent },
+    { key: "adapter", label: "Adapter", get: (r) => r.adapter },
+  ],
+  subGroups: ["agent", "adapter", "state"],
+  sorts: [
+    { key: "created", label: "Created", get: (r) => r.created_at, defaultDir: "desc", column: "created" },
+    { key: "updated", label: "Updated", get: (r) => r.updated_at, defaultDir: "desc", column: "updated" },
+    { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
+    { key: "attempts", label: "Attempts", get: (r) => r.attempts, defaultDir: "desc", column: "attempts" },
+  ],
+  columns: [
+    { key: "run", label: "Run", always: true },
+    { key: "state", label: "State" },
+    { key: "agent", label: "Agent" },
+    { key: "adapter", label: "Adapter" },
+    { key: "attempts", label: "Attempts" },
+    { key: "reason", label: "Reason" },
+    { key: "origin", label: "Origin" },
+    { key: "updated", label: "Updated" },
+  ],
+};
 
 /** `off`: no deadline running yet. `spent`: the deadline passed; the runtime has not caught up. */
 type Clock = { kind: "off" } | { kind: "live"; leftMs: number } | { kind: "spent" };
@@ -327,8 +378,24 @@ export function Runs({
     [byTab, parsed, staleRuns],
   );
 
+  // Display options (OPS-493): partition into sections, order inside them,
+  // and feed keyboard navigation only the rows of open sections.
+  const [display, setDisplay] = useDisplayOptions(RUNS_DISPLAY);
+  const sections = useMemo(
+    () => buildSections(visible, RUNS_DISPLAY, display),
+    [visible, display],
+  );
+  const flat = useMemo(
+    () => flattenSections(sections, display.collapsed),
+    [sections, display.collapsed],
+  );
+  const cols = visibleColumns(RUNS_DISPLAY, display);
+  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
+
   const selectedId = focusRunId;
-  const selectedIndex = useMemo(() => visible.findIndex((r) => r.runId === selectedId), [visible, selectedId]);
+  // Keyboard index walks the open sections; the detail pane keys off the row
+  // itself so collapsing the group under a selection never closes the pane.
+  const selectedIndex = useMemo(() => flat.findIndex((r) => r.runId === selectedId), [flat, selectedId]);
 
   // Deep link / jump: switch to ALL if the run isn't on this tab. Hash stays put.
   // Reveal (clear filter) once per focus id, after the run is on the tab so a
@@ -415,7 +482,10 @@ export function Runs({
     setTab((t) => (t === "LEASED" || t === "RUNNING" || t === "ALL" ? t : "ALL"));
   }, [context.kind]);
 
-  const sel = selectedIndex >= 0 ? visible[selectedIndex] : null;
+  const sel = useMemo(
+    () => (selectedId ? (visible.find((r) => r.runId === selectedId) ?? null) : null),
+    [visible, selectedId],
+  );
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -462,9 +532,9 @@ export function Runs({
   useTabKeys(STATE_TABS, tab, selectTab);
 
   useListKeys({
-    count: visible.length,
+    count: flat.length,
     selected: selectedIndex,
-    onSelect: (i) => onSelectRun(visible[i]?.runId ?? null),
+    onSelect: (i) => onSelectRun(flat[i]?.runId ?? null),
     // §5 "Enter/o — open detail": selection already opens the panel, so the
     // open verb graduates to the full-page run view (`g o` is safe — list
     // verbs stand down while the chord prefix is armed, hooks.ts).
@@ -571,6 +641,9 @@ export function Runs({
               );
             })}
           </div>
+          <span className="ml-auto">
+            <DisplayOptions config={RUNS_DISPLAY} state={display} onChange={setDisplay} />
+          </span>
           <FilterInput
             value={filter}
             onChange={setFilter}
@@ -586,58 +659,112 @@ export function Runs({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              {["Run", "State", "Agent", "Adapter", "Attempts", "Reason", "Origin", "Updated"].map((h) => (
-                <th key={h} className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">
-                  {h}
-                </th>
-              ))}
+              {cols.map((c) => {
+                const sort = RUNS_DISPLAY.sorts.find((s) => s.column === c.key);
+                return (
+                  <Th
+                    key={c.key}
+                    label={c.label}
+                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
+                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(RUNS_DISPLAY, s, c.key)) : undefined}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {visible.map((r, i) => (
-              <tr
-                key={r.runId}
-                onClick={() => onSelectRun(r.runId)}
-                aria-selected={i === selectedIndex}
-                className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${i === selectedIndex ? "row-selected" : ""}`}
-              >
-                <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5">{r.runId}</td>
-                <td className="border-b border-(--border) px-3 py-1.5">
-                  <StateBadge state={r.state} />
-                  {IN_FLIGHT.includes(r.state) && <RowDeadlines r={r} now={now} />}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
-                  <JumpLink
-                    onClick={() => onJumpAgent(r.agent)}
-                    title={`Open ${r.agent} in Agents`}
-                  >
-                    {r.agent}
-                  </JumpLink>
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">{r.adapter}</td>
-                <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
-                  {r.attempts}/{r.maxAttempts}
-                </td>
-                <td className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                  {r.reasonCode ?? "-"}
-                </td>
-                <td className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                  {r.eventId && r.eventSource ? (
-                    <JumpLink onClick={() => onJumpEvent(r.eventSource!, r.eventId!)} title="Open origin event">
-                      {r.eventId}
-                    </JumpLink>
-                  ) : (
-                    (r.eventId ?? "-")
+            {(() => {
+              const renderRow = (r: RunListItem) => (
+                <tr
+                  key={r.runId}
+                  onClick={() => onSelectRun(r.runId)}
+                  aria-selected={r.runId === selectedId}
+                  className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
+                >
+                  <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5">{r.runId}</td>
+                  {show.has("state") && (
+                    <td className="border-b border-(--border) px-3 py-1.5">
+                      <StateBadge state={r.state} />
+                      {IN_FLIGHT.includes(r.state) && <RowDeadlines r={r} now={now} />}
+                    </td>
                   )}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                  <Ago iso={r.updated_at} now={now} />
-                </td>
-              </tr>
-            ))}
+                  {show.has("agent") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                      <JumpLink
+                        onClick={() => onJumpAgent(r.agent)}
+                        title={`Open ${r.agent} in Agents`}
+                      >
+                        {r.agent}
+                      </JumpLink>
+                    </td>
+                  )}
+                  {show.has("adapter") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">{r.adapter}</td>
+                  )}
+                  {show.has("attempts") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      {r.attempts}/{r.maxAttempts}
+                    </td>
+                  )}
+                  {show.has("reason") && (
+                    <td className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      {r.reasonCode ?? "-"}
+                    </td>
+                  )}
+                  {show.has("origin") && (
+                    <td className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      {r.eventId && r.eventSource ? (
+                        <JumpLink onClick={() => onJumpEvent(r.eventSource!, r.eventId!)} title="Open origin event">
+                          {r.eventId}
+                        </JumpLink>
+                      ) : (
+                        (r.eventId ?? "-")
+                      )}
+                    </td>
+                  )}
+                  {show.has("updated") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <Ago iso={r.updated_at} now={now} />
+                    </td>
+                  )}
+                </tr>
+              );
+              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
+              return sections.map((s) => {
+                const closed = display.collapsed.includes(s.key);
+                return (
+                  <Fragment key={s.key}>
+                    <GroupHeaderRow
+                      colSpan={cols.length}
+                      section={s}
+                      collapsed={closed}
+                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    />
+                    {!closed &&
+                      (s.subsections
+                        ? s.subsections.map((child) => {
+                            const childClosed = display.collapsed.includes(child.key);
+                            return (
+                              <Fragment key={child.key}>
+                                <GroupHeaderRow
+                                  colSpan={cols.length}
+                                  section={child}
+                                  collapsed={childClosed}
+                                  onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
+                                  sub
+                                />
+                                {!childClosed && child.rows.map(renderRow)}
+                              </Fragment>
+                            );
+                          })
+                        : s.rows.map(renderRow))}
+                  </Fragment>
+                );
+              });
+            })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={8}
+                colSpan={cols.length}
                 query={list}
                 filtered={scoped.length > 0}
                 noun="runs"

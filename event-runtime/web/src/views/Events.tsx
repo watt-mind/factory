@@ -1,8 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
-import { useListKeys, useNow, useTabKeys } from "../hooks";
+import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import {
+  buildSections,
+  cycleColumnSort,
+  flattenSections,
+  grouped,
+  toggleCollapsed,
+  visibleColumns,
+  type DisplayConfig,
+} from "../displayOptions";
+import { DisplayOptions } from "../components/DisplayOptions";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
 import type { AdmittedEvent, EventFocus } from "../types";
@@ -24,8 +34,10 @@ import {
   KV,
   ListEmpty,
   notify,
+  GroupHeaderRow,
   Section,
   StateBadge,
+  Th,
   VerbError,
   copyText,
   copyLink,
@@ -54,6 +66,42 @@ function isStatusTab(value: string | undefined): value is StatusTab {
 
 const rowWash = (s: string) =>
   s === "dead_lettered" ? "row-wash-err" : s === "human_needed" ? "row-wash-warn" : "";
+
+/**
+ * Grouping/ordering/columns (OPS-493) — one config across every status tab:
+ * the tabs filter the same table, they never change its columns. Occurred and
+ * Received have no column of their own (the table shows Admitted), so those
+ * sorts live in the Display popover only; Type is the click-to-sort header.
+ */
+const EVENTS_DISPLAY: DisplayConfig<AdmittedEvent> = {
+  view: "events",
+  groups: [
+    {
+      key: "status",
+      label: "Status",
+      get: (e) => e.status,
+      order: ["admitted", "planned", "noop", "human_needed", "dead_lettered"],
+      hue: EVENT_STATUS_HUES,
+    },
+    { key: "source", label: "Source", get: (e) => e.source },
+    { key: "type", label: "Type", get: (e) => e.type },
+  ],
+  subGroups: ["type", "source", "status"],
+  sorts: [
+    { key: "occurred", label: "Occurred", get: (e) => e.occurredAt, defaultDir: "desc" },
+    { key: "received", label: "Received", get: (e) => e.receivedAt, defaultDir: "desc" },
+    { key: "type", label: "Type", get: (e) => e.type, column: "type" },
+    { key: "admitted", label: "Admitted", get: (e) => e.admittedAt, defaultDir: "desc", column: "admitted" },
+  ],
+  columns: [
+    { key: "event", label: "Event", always: true },
+    { key: "source", label: "Source" },
+    { key: "type", label: "Type" },
+    { key: "subject", label: "Subject" },
+    { key: "status", label: "Status" },
+    { key: "admitted", label: "Admitted" },
+  ],
+};
 
 /**
  * Events (webui doc §10.1) — the event inbox. Every admitted envelope with
@@ -129,13 +177,32 @@ export function Events({
     });
   }, [scoped, parsed, typeFilter, sourceFilter, fetchAll, tab]);
 
+  // Display options (OPS-493): partition into sections, order inside them,
+  // and feed keyboard navigation only the rows of open sections.
+  const [display, setDisplay] = useDisplayOptions(EVENTS_DISPLAY);
+  const sections = useMemo(
+    () => buildSections(visible, EVENTS_DISPLAY, display),
+    [visible, display],
+  );
+  const flat = useMemo(
+    () => flattenSections(sections, display.collapsed),
+    [sections, display.collapsed],
+  );
+  const cols = visibleColumns(EVENTS_DISPLAY, display);
+  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
+
   const selectedKey =
     focusEvent?.source && focusEvent?.eventId ? `${focusEvent.source}:${focusEvent.eventId}` : null;
+  // Keyboard index walks the open sections; the detail pane keys off the row
+  // itself so collapsing the group under a selection never closes the pane.
   const selectedIndex = useMemo(
-    () => visible.findIndex((e) => keyOf(e) === selectedKey),
+    () => flat.findIndex((e) => keyOf(e) === selectedKey),
+    [flat, selectedKey],
+  );
+  const sel = useMemo(
+    () => (selectedKey ? (visible.find((e) => keyOf(e) === selectedKey) ?? null) : null),
     [visible, selectedKey],
   );
-  const sel = selectedIndex >= 0 ? visible[selectedIndex] : null;
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -302,10 +369,10 @@ export function Events({
   useTabKeys(STATUS_TABS, tab, selectTab);
 
   useListKeys({
-    count: visible.length,
+    count: flat.length,
     selected: selectedIndex,
     onSelect: (i) => {
-      const e = visible[i];
+      const e = flat[i];
       onSelectEvent(e ? e.source : null, e?.eventId);
     },
     onClose: () => {
@@ -434,6 +501,12 @@ export function Events({
         )}
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="ml-auto">
+            <DisplayOptions config={EVENTS_DISPLAY} state={display} onChange={setDisplay} />
+          </span>
+          {/* Last in the row: the token chips are a full-width item, so anything
+              after the filter box would be pushed onto a third line the moment
+              a chip appeared. */}
           <FilterInput
             value={filter}
             onChange={setFilter}
@@ -449,61 +522,113 @@ export function Events({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              {["Event", "Source", "Type", "Subject", "Status", "Admitted"].map((h) => (
-                <th key={h} className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">
-                  {h}
-                </th>
-              ))}
+              {cols.map((c) => {
+                const sort = EVENTS_DISPLAY.sorts.find((s) => s.column === c.key);
+                return (
+                  <Th
+                    key={c.key}
+                    label={c.label}
+                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
+                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(EVENTS_DISPLAY, s, c.key)) : undefined}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {visible.map((e, i) => {
-              const proposalReason = (e as any).proposalReason ?? (e as any).proposal_reason ?? null;
-              return (
-              <tr
-                key={keyOf(e)}
-                onClick={() => onSelectEvent(e.source, e.eventId)}
-                aria-selected={i === selectedIndex}
-                className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${i === selectedIndex ? "row-selected" : ""}`}
-              >
-                <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5">{e.eventId}</td>
-                <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                  {e.source}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{e.type}</td>
-                <td className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                  {e.subject ?? "-"}
-                </td>
-                <td className="max-w-56 border-b border-(--border) px-3 py-1.5">
-                  <div>
-                    <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
-                    {e.planFailures > 0 && (
-                      <span className="ml-2 whitespace-nowrap text-[11px]" style={{ color: "var(--hue-err)" }}>
-                        {e.planFailures} plan failure{e.planFailures === 1 ? "" : "s"}
-                      </span>
+            {(() => {
+              const renderRow = (e: AdmittedEvent) => {
+                const proposalReason = (e as any).proposalReason ?? (e as any).proposal_reason ?? null;
+                const isSelected = keyOf(e) === selectedKey;
+                return (
+                  <tr
+                    key={keyOf(e)}
+                    onClick={() => onSelectEvent(e.source, e.eventId)}
+                    aria-selected={isSelected}
+                    className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${isSelected ? "row-selected" : ""}`}
+                  >
+                    <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5">{e.eventId}</td>
+                    {show.has("source") && (
+                      <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                        {e.source}
+                      </td>
                     )}
-                  </div>
-                  {/* Why the event is parked, on the row: `.mono` carries its own
-                      11.5px, so no size utility (it is unlayered and would win).
-                      The detail pane keeps the untruncated error. */}
-                  {e.lastPlanError ? (
-                    <div className="mono mt-0.5 truncate text-(--text-dim)" title={e.lastPlanError}>
-                      {e.lastPlanError}
-                    </div>
-                  ) : proposalReason ? (
-                    <div className="mono mt-0.5 truncate text-(--text-dim)" title={proposalReason}>
-                      {proposalReason}
-                    </div>
-                  ) : null}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                  <Ago iso={e.admittedAt} now={now} />
-                </td>
-              </tr>
-            );})}
+                    {show.has("type") && (
+                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{e.type}</td>
+                    )}
+                    {show.has("subject") && (
+                      <td className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                        {e.subject ?? "-"}
+                      </td>
+                    )}
+                    {show.has("status") && (
+                      <td className="max-w-56 border-b border-(--border) px-3 py-1.5">
+                        <div>
+                          <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
+                          {e.planFailures > 0 && (
+                            <span className="ml-2 whitespace-nowrap text-[11px]" style={{ color: "var(--hue-err)" }}>
+                              {e.planFailures} plan failure{e.planFailures === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </div>
+                        {/* Why the event is parked, on the row: `.mono` carries its own
+                            11.5px, so no size utility (it is unlayered and would win).
+                            The detail pane keeps the untruncated error. */}
+                        {e.lastPlanError ? (
+                          <div className="mono mt-0.5 truncate text-(--text-dim)" title={e.lastPlanError}>
+                            {e.lastPlanError}
+                          </div>
+                        ) : proposalReason ? (
+                          <div className="mono mt-0.5 truncate text-(--text-dim)" title={proposalReason}>
+                            {proposalReason}
+                          </div>
+                        ) : null}
+                      </td>
+                    )}
+                    {show.has("admitted") && (
+                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                        <Ago iso={e.admittedAt} now={now} />
+                      </td>
+                    )}
+                  </tr>
+                );
+              };
+              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
+              return sections.map((s) => {
+                const closed = display.collapsed.includes(s.key);
+                return (
+                  <Fragment key={s.key}>
+                    <GroupHeaderRow
+                      colSpan={cols.length}
+                      section={s}
+                      collapsed={closed}
+                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    />
+                    {!closed &&
+                      (s.subsections
+                        ? s.subsections.map((child) => {
+                            const childClosed = display.collapsed.includes(child.key);
+                            return (
+                              <Fragment key={child.key}>
+                                <GroupHeaderRow
+                                  colSpan={cols.length}
+                                  section={child}
+                                  collapsed={childClosed}
+                                  onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
+                                  sub
+                                />
+                                {!childClosed && child.rows.map(renderRow)}
+                              </Fragment>
+                            );
+                          })
+                        : s.rows.map(renderRow))}
+                  </Fragment>
+                );
+              });
+            })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={6}
+                colSpan={cols.length}
                 query={list}
                 filtered={scoped.length > 0}
                 noun="events"
