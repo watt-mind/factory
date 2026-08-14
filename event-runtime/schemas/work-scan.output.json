@@ -1,0 +1,71 @@
+{
+  "title": "factory.work-plan/v1 output artifact — ordered dispatchable-ticket plan with one chained dispatch target (WM-110)",
+  "type": "object",
+  "required": ["recommendation", "repo", "ticket", "plan", "deferred", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "recommendation": {
+      "enum": ["DISPATCH", "NOOP"],
+      "description": "DISPATCH when at least one Todo + ai:agent-ready + unassigned ticket fits the per-repo in-flight cap with Owned Paths disjoint from all in-flight work; NOOP otherwise, with a typed noopReason"
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Echo of the short repo name from the input"
+    },
+    "ticket": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Z]+-[0-9]+$",
+      "description": "The plan's first ticket — the single target the chain edge feeds into factory.dispatch.requested (chain.mjs emits exactly one chain event per run); must equal plan[0].ticket, null on NOOP"
+    },
+    "plan": {
+      "type": "array",
+      "description": "Queue-ordered (priority asc, then createdAt asc) tickets that are dispatchable right now: Todo + ai:agent-ready + unassigned, within the per-repo in-flight cap, Owned Paths mutually disjoint and disjoint from every in-flight ticket's paths. Item order is dispatch order; only the first item chains this run",
+      "items": {
+        "type": "object",
+        "required": ["ticket", "ownedPaths", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]+$",
+            "description": "Linear issue identifier, dispatchable at scan time (assignee field checked, not just labels)"
+          },
+          "ownedPaths": {
+            "type": "array",
+            "minItems": 1,
+            "description": "The ticket's Owned Paths globs as parsed at scan time — the disjointness evidence this plan rests on; a ticket with no parseable section owns everything ([\"**\"]) and can only ever be planned alone",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "description": "One Owned Paths glob, verified against the pinned tree at ./repo"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One line of why this ticket made the plan at this position (priority, age, path disjointness)"
+          }
+        }
+      }
+    },
+    "deferred": {
+      "type": "array",
+      "description": "Tickets after the first plan item: selected but NOT chained this run — chain.mjs emits one chain event per run, so only plan[0] becomes a factory.dispatch.requested; rolling dispatch re-fires the scan after each completion and re-plans these against a fresh world",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z]+-[0-9]+$",
+        "description": "Linear issue identifier of a planned-but-deferred ticket (echo of a plan[1..] item's ticket)"
+      }
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One line an operator can act on"
+    },
+    "noopReason": {
+      "enum": ["queue_empty", "cap_full", "all_overlapping"],
+      "description": "Typed reason accompanying a NOOP — no Todo + ai:agent-ready + unassigned tickets exist, the per-repo in-flight cap is already full, or every dispatchable ticket's Owned Paths collide with in-flight work or with each other"
+    }
+  }
+}

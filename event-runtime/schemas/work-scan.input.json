@@ -1,0 +1,51 @@
+{
+  "title": "work-scan input — one repo queue to scan; repoPin is resolved by the planner (WM-110)",
+  "type": "object",
+  "required": [
+    "repo"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short repo name as configured in config/repos.yaml — not the GitHub owner/name slug"
+    },
+    "ref": {
+      "type": "string",
+      "description": "Optional git ref to scan instead of the repo's configured base branch"
+    },
+    "repoPin": {
+      "type": "object",
+      "required": [
+        "repo",
+        "sha"
+      ],
+      "additionalProperties": false,
+      "description": "Filled by the planner (pinRepo) at plan time — not operator-supplied",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Echo of the pinned short repo name"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Ref the pin was resolved from, when one was requested"
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Commit SHA the scan runs against"
+        },
+        "github": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "GitHub owner/name slug of the repo, or null when it has no GitHub remote"
+        }
+      }
+    }
+  }
+}

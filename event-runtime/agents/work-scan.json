@@ -1,0 +1,30 @@
+{
+  "id": "work-scan",
+  "version": 1,
+  "prompt": "agents/work-scan.md",
+  "input_schema": "schemas/work-scan.input.json",
+  "output_schema": "schemas/work-scan.output.json",
+  "output_contract": "factory.work-plan/v1",
+  "workspace": {
+    "type": "repository",
+    "checkoutDir": "repo",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:read",
+      "repo:read"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 900,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/work-scan.md": "sha256:fc801eff175731093b473930fc6c24a4c7914ec7514a6d047e67780486022659",
+    "schemas/work-scan.input.json": "sha256:9932614918892f8ad90e0ef2e89145ef41a2bad79050a3dc6298ac88aff30e4c",
+    "schemas/work-scan.output.json": "sha256:fc3d7d8de8ca4c892f6be6effe6e3f89edd8ea68e6a0cbc0b5d17d469d4cb188"
+  }
+}
