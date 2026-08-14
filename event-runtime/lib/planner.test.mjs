@@ -292,6 +292,104 @@ describe("planEvent worktree gate (WM-108)", () => {
   });
 });
 
+describe("planEvent repo scoping (WM-64)", () => {
+  // A synthetic agent per test keeps the check independent of any one real
+  // definition (same approach as the worktree gate tests above).
+  function scopedRegistry({ repos, workspace = { type: "ephemeral" } } = {}) {
+    const synthetic = { ...registry, agents: new Map(registry.agents), eventTypes: { ...registry.eventTypes } };
+    synthetic.eventTypes["test.scoped.requested"] = {
+      agent: "test-scoped@1",
+      adapter: "claude",
+      idempotencyScope: ["inputHash"],
+    };
+    synthetic.agents.set("test-scoped@1", {
+      id: "test-scoped",
+      version: 1,
+      ref: "test-scoped@1",
+      output_contract: "factory.test/v1",
+      workspace,
+      capabilities: { services: [] },
+      limits: { timeout_seconds: 60, attempts: 1 },
+      ...(repos ? { repos } : {}),
+      inputSchema: {
+        type: "object",
+        required: ["repo", "ticket"],
+        properties: { repo: { type: "string" }, ticket: { type: "string" } },
+      },
+    });
+    return synthetic;
+  }
+
+  const scopedEnvelope = (payload) => ({
+    type: "test.scoped.requested",
+    eventId: `scoped-${JSON.stringify(payload)}`,
+    correlationId: null,
+    payload,
+  });
+
+  test("payload.repo inside the declared set plans a run, and the spec carries the scope", () => {
+    const synthetic = scopedRegistry({ repos: ["bj29", "cw-app"] });
+    const db = openDb(":memory:");
+    const ref = admit(db, scopedEnvelope({ repo: "bj29", ticket: "WM-1" }));
+    const outcome = planEvent(db, synthetic, ref, { now: NOW, policyVersion: "git:test" });
+    expect(outcome.decision).toBe("run");
+    // The proposal the operator approves names the scope (WM-64).
+    expect(JSON.parse(outcome.proposal.spec_json).repos).toEqual(["bj29", "cw-app"]);
+  });
+
+  test("payload.repo outside the declared set parks human_needed with the named reason, no run", () => {
+    const synthetic = scopedRegistry({ repos: ["bj29", "cw-app"] });
+    const db = openDb(":memory:");
+    const ref = admit(db, scopedEnvelope({ repo: "coach-wattz", ticket: "WM-1" }));
+    const outcome = planEvent(db, synthetic, ref, { now: NOW, policyVersion: "git:test" });
+    expect(outcome.decision).toBe("human_needed");
+    expect(outcome.reason).toBe("repo_not_allowed: test-scoped@1 may not run over coach-wattz (allowed: bj29, cw-app)");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    const event = db.query(`SELECT status FROM events WHERE event_id = ?`).get(ref.eventId);
+    expect(event.status).toBe("human_needed");
+  });
+
+  test("a definition without repos is unrestricted — behaves exactly as today (regression)", () => {
+    const synthetic = scopedRegistry();
+    const db = openDb(":memory:");
+    const ref = admit(db, scopedEnvelope({ repo: "anything-at-all", ticket: "WM-1" }));
+    const outcome = planEvent(db, synthetic, ref, { now: NOW, policyVersion: "git:test" });
+    expect(outcome.decision).toBe("run");
+    expect(JSON.parse(outcome.proposal.spec_json).repos).toBeUndefined();
+  });
+
+  test("scope refusal precedes the repo pin: repository workspace parks repo_not_allowed, never touches the mirror", () => {
+    // No FACTORY_REPOS_ROOT setup at all — if the planner reached pinRepo it
+    // would fail as repo_pin_failed; the scope check must win first, so no
+    // mirror fetch happens for a refused run.
+    const synthetic = scopedRegistry({ repos: ["bj29"], workspace: { type: "repository" } });
+    const db = openDb(":memory:");
+    const ref = admit(db, scopedEnvelope({ repo: "coach-wattz", ticket: "WM-1" }));
+    const outcome = planEvent(db, synthetic, ref, { now: NOW, policyVersion: "git:test" });
+    expect(outcome.decision).toBe("human_needed");
+    expect(outcome.reason).toMatch(/^repo_not_allowed: /);
+    const stored = db.query(`SELECT envelope_json FROM events WHERE event_id = ?`).get(ref.eventId);
+    expect(JSON.parse(stored.envelope_json).payload.repoPin).toBeUndefined();
+  });
+
+  test("scope refusal precedes the worktree dispatch gate: no Linear or lease reads for an out-of-scope repo", () => {
+    const synthetic = scopedRegistry({ repos: ["bj29"], workspace: { type: "worktree" } });
+    const db = openDb(":memory:");
+    const ref = admit(db, scopedEnvelope({ repo: "coach-wattz", ticket: "WM-1" }));
+    const dispatch = {
+      fetchTicket: () => {
+        throw new Error("gate consulted Linear for an out-of-scope repo");
+      },
+      fetchInFlight: () => {
+        throw new Error("gate consulted Linear for an out-of-scope repo");
+      },
+    };
+    const outcome = planEvent(db, synthetic, ref, { now: NOW, policyVersion: "git:test", dispatch });
+    expect(outcome.decision).toBe("human_needed");
+    expect(outcome.reason).toMatch(/^repo_not_allowed: /);
+  });
+});
+
 describe("buildRunSpec", () => {
   test("is pure and honors adapterOverride", () => {
     const mapping = registry.eventTypes["factory.status-report.requested"];

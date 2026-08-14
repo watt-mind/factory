@@ -51,6 +51,19 @@ export function idempotencyKeyFor(mapping, def, envelope, inputHash) {
 }
 
 /**
+ * Per-agent repo scoping (WM-64), the repo analogue of the actions adapter's
+ * host allowlist: a definition that declares `repos` may only run over those
+ * repos. Applies to any input carrying a `repo` field, whatever the workspace
+ * or adapter. Returns the typed refusal reason, or null when in scope (no
+ * `repos` declared, or no `repo` in the payload, or a member of the set).
+ */
+export function repoNotAllowed(def, payload) {
+  if (!Array.isArray(def.repos) || typeof payload?.repo !== "string") return null;
+  if (def.repos.includes(payload.repo)) return null;
+  return `repo_not_allowed: ${def.ref} may not run over ${payload.repo} (allowed: ${def.repos.join(", ")})`;
+}
+
+/**
  * Pure assembly of the §5.2 RunSpec from a registered mapping. No I/O, no
  * clock reads beyond the injected `now` — same inputs, same spec, always.
  */
@@ -84,6 +97,9 @@ export function buildRunSpec(registry, envelope, mapping, { runId, policyVersion
     policyVersion,
     outputContract: def.output_contract,
     capabilities: def.capabilities.services,
+    // Declared repo scope (WM-64) rides in the spec so the proposal the
+    // operator approves names it, same as capabilities.
+    ...(def.repos ? { repos: def.repos } : {}),
     timeoutSeconds: def.limits.timeout_seconds,
     maxAttempts: def.limits.attempts,
     idempotencyKey,
@@ -273,10 +289,14 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
       const preEnvelope = JSON.parse(row.envelope_json);
       const preMapping = getEventType(registry, preEnvelope.type);
       const preDef = preMapping && preMapping.observe !== true ? registry.agents.get(preMapping.agent) : null;
+      // An event already outside the definition's repo scope (WM-64) skips
+      // the gate's Linear/lease reads entirely — the transaction below parks
+      // it repo_not_allowed before anything else happens.
       if (
         preDef?.workspace?.type === "worktree" &&
         typeof preEnvelope.payload?.repo === "string" &&
-        typeof preEnvelope.payload?.ticket === "string"
+        typeof preEnvelope.payload?.ticket === "string" &&
+        !repoNotAllowed(preDef, preEnvelope.payload)
       ) {
         worktreeRefusal = worktreeDispatchGate(preEnvelope.payload, dispatch);
       }
@@ -307,6 +327,13 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     }
 
     const def = getAgent(registry, mapping.agent);
+
+    // Per-agent repo scoping (WM-64): checked before anything else the plan
+    // would do for the run — no repo pin, no mirror fetch, no worktree
+    // materialization for a repo the definition may never touch. Same idea as
+    // the actions adapter's host allowlist, enforced at plan time.
+    const scopeRefusal = repoNotAllowed(def, envelope.payload);
+    if (scopeRefusal) return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
 
     // §5 singleton: a scheduled loop whose previous run is still in flight
     // plans a typed NOOP, never a second queued run. A reaper that takes 70

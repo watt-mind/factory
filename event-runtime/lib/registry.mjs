@@ -60,6 +60,22 @@ function loadAgentDef(root, file) {
       );
     }
   }
+  // Per-agent repo scoping (WM-64), the repo analogue of the actions adapter's
+  // host allowlist: an optional closed set of repos the definition may run
+  // over. Only the shape is checked here — membership against config/repos.yaml
+  // is deliberately NOT validated at load, because repos.yaml is external
+  // config that may legitimately change; the planner's plan-time check is the
+  // authority. Absent field = unrestricted. An empty array is refused as a
+  // half-finished edit: write the set or delete the field.
+  if (def.repos !== undefined) {
+    const wellFormed =
+      Array.isArray(def.repos) && def.repos.length > 0 && def.repos.every((r) => typeof r === "string" && r.trim() !== "");
+    if (!wellFormed) {
+      throw new RegistryError(
+        `${file}: "repos" must be a non-empty array of non-empty repo names (WM-64) — omit the field for an unrestricted agent`,
+      );
+    }
+  }
   const pins = def.pins ?? {};
   for (const field of PINNED_FIELDS) {
     const rel = def[field];

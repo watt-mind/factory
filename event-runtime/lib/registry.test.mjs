@@ -74,6 +74,28 @@ describe("registry", () => {
     expect(() => loadRegistry({ root })).not.toThrow();
   });
 
+  test("repos scope: malformed values fail closed at load, well-formed ones load (WM-64)", () => {
+    const root = tempRegistry();
+    const defFile = path.join(root, "agents", "factory-status-report.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    const withRepos = (repos) => writeFileSync(defFile, JSON.stringify({ ...def, repos }));
+
+    withRepos("bj29"); // not an array
+    expect(() => loadRegistry({ root })).toThrow(/"repos"/);
+    withRepos([]); // half-finished edit, not a deny-all
+    expect(() => loadRegistry({ root })).toThrow(/"repos"/);
+    withRepos(["bj29", ""]); // empty string member
+    expect(() => loadRegistry({ root })).toThrow(/"repos"/);
+    withRepos(["bj29", 7]); // non-string member
+    expect(() => loadRegistry({ root })).toThrow(/"repos"/);
+
+    // Well-formed loads, and membership is deliberately NOT checked against
+    // config/repos.yaml here — the planner owns that at plan time.
+    withRepos(["bj29", "not-in-repos-yaml"]);
+    const registry = loadRegistry({ root });
+    expect(getAgent(registry, "factory-status-report@1").repos).toEqual(["bj29", "not-in-repos-yaml"]);
+  });
+
   test("event type mapped to an unregistered agent fails closed", () => {
     const root = tempRegistry();
     writeFileSync(

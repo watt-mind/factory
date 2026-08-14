@@ -358,6 +358,22 @@ mutating: false
 A definition is admitted only when its adapter can prove the required
 capabilities. Adapter support is a contract, not a hopeful command-line flag.
 
+**Per-agent repo scoping (`repos`, WM-64).** A definition may declare an
+optional top-level `"repos": ["bj29", "cw-app"]` — a closed set of repos the
+agent may run over, the repo analogue of the actions adapter's per-definition
+host allowlist. Absent field = unrestricted (backward compatible). The
+registry validates only the field's shape at load (non-empty array of
+non-empty strings; an empty array is refused as a half-finished edit);
+membership against `config/repos.yaml` is deliberately not checked at load,
+because repos.yaml is external config that may legitimately change — the
+planner's plan-time check is the authority. The planner refuses any event
+whose `payload.repo` falls outside the declared set, whatever the workspace or
+adapter: the event parks `human_needed` with reason
+`repo_not_allowed: <agent> may not run over <repo> (allowed: …)`, before any
+repo pin, mirror fetch, or worktree materialization happens. The declared
+scope rides in the RunSpec (so the proposal an operator approves names it) and
+is readable in `GET /registry`.
+
 **Adapters are a registry, not a flag.** `"adapter": "claude"` in the run spec
 names an entry in a small adapter registry, one per harness the runtime has
 actually tested. The emit pipeline targets several harnesses (Claude Code,
@@ -752,7 +768,20 @@ a minimal runtime environment instead of copying the worker environment. That
 does not yet turn declarations such as `linear:read` into network authority:
 those still answer *what was authorized*, not *what was possible*. The
 declaration is validated at admission, recorded immutably in the `RunSpec`, and
-auditable after the fact. The remaining enforcement path, in order:
+auditable after the fact.
+
+Two per-definition allowlists ARE enforced by construction today, in contrast
+to the audited-not-enforced service capabilities: the actions adapter's **host
+allowlist** (`def.hosts` — an action naming a host outside the set fails the
+attempt before anything executes) and the planner's **repo scoping**
+(`def.repos`, WM-64 — an event naming a repo outside the set parks
+`human_needed` at plan time, before any repo pin or mirror fetch, so a
+`repository`/`worktree` workspace for an out-of-scope repo is never even
+materialized). Both are closed sets in the registered definition, checked in
+deterministic code on the refusal path, not policies a model is asked to
+respect.
+
+The remaining enforcement path, in order:
 
 1. **A worker-local egress proxy** that permits only declared services — for
    `linear:read`, a GraphQL proxy that forwards queries and rejects mutations.

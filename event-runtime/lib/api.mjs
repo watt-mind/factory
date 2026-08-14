@@ -342,6 +342,9 @@ function agentsView(registry) {
       command: def.command ?? null,
       actionRegistry: def.actionRegistry ?? null,
       hosts: def.hosts ? Object.keys(def.hosts) : null,
+      // Per-agent repo scope (WM-64), the repo analogue of hosts. Null means
+      // unrestricted.
+      repos: def.repos ?? null,
       eventTypes: Object.entries(registry.eventTypes)
         .filter(([, mapping]) => mapping.agent === def.ref)
         .map(([type, mapping]) => ({
