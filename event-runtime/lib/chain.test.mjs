@@ -64,6 +64,31 @@ describe("buildChainInput", () => {
     ).toEqual({ repo: "wm/x", v: "FLAKE", deep: 1, lit: "x" });
   });
 
+  test("resolves $.item.* and $.item in multi-emit item context (WM-119)", () => {
+    const itemContext = {
+      ...context,
+      item: { ticket: "WM-119", count: 42, meta: { tag: "alpha" } },
+    };
+    expect(
+      buildChainInput(
+        {
+          repo: "$.input.repo",
+          ticket: "$.item.ticket",
+          tag: "$.item.meta.tag",
+          fullItem: "$.item",
+          literal: "fixed",
+        },
+        itemContext,
+      ),
+    ).toEqual({
+      repo: "wm/x",
+      ticket: "WM-119",
+      tag: "alpha",
+      fullItem: { ticket: "WM-119", count: 42, meta: { tag: "alpha" } },
+      literal: "fixed",
+    });
+  });
+
   test("missing path fails loudly", () => {
     expect(() => buildChainInput({ nope: "$.artifact.absent" }, context)).toThrow("resolves to nothing");
   });
@@ -189,3 +214,146 @@ describe("registry gates (OPS-223)", () => {
     expect(() => loadRegistry({ root })).toThrow("only $.input.*, $.artifact.* and $.artifactHash.*");
   });
 });
+
+describe("multi-emit chain resolution (WM-119)", () => {
+  function seedCompletedRun(db, { runId, agent, input, artifact, eventId = `evt-${runId}`, correlationId = `corr-${runId}` }) {
+    const now = new Date().toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at, correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('operator', ?, 'test.event', 'test', ?, ?, ?, NULL, ?, 'hash', 'admitted', ?)`,
+    ).run(eventId, now, now, correlationId, JSON.stringify({ payload: input }), now);
+
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, run_id, decision, spec_json, status, created_at, ttl_seconds)
+       VALUES (?, 'operator', ?, ?, 'run', ?, 'approved', ?, 1800)`,
+    ).run(`prop-${runId}`, eventId, runId, JSON.stringify({ agent, input }), now);
+
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(runId, `idem-${runId}`, JSON.stringify({ agent, input }), now, now);
+
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'art-hash', '{}', '{}', ?)`,
+    ).run(runId, JSON.stringify({ artifact }), now);
+  }
+
+  test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-multi-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+
+    seedCompletedRun(db, {
+      runId: "run-fanout-1",
+      agent: "work-scan@1",
+      input: { repo: "wm/multi" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/multi",
+        plan: [
+          { ticket: "WM-101", ownedPaths: ["a/**"], reason: "p1" },
+          { ticket: "WM-102", ownedPaths: ["b/**"], reason: "p2" },
+          { ticket: "WM-103", ownedPaths: ["c/**"], reason: "p3" },
+        ],
+      },
+      correlationId: "scan-corr-1",
+    });
+
+    const outcome = resolveChains(db, registry);
+    expect(outcome).toEqual({ emitted: 3, skipped: 0, errors: [] });
+
+    for (const ticket of ["WM-101", "WM-102", "WM-103"]) {
+      const event = db.query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`).get(`chain-run-fanout-1-${ticket}`);
+      expect(event).toBeTruthy();
+      expect(event.type).toBe("factory.dispatch.requested");
+      expect(event.correlation_id).toBe("scan-corr-1");
+      expect(event.causation_id).toBe("run-fanout-1");
+      const envelope = JSON.parse(event.envelope_json);
+      expect(envelope.payload).toEqual({ repo: "wm/multi", ticket });
+    }
+
+    // Idempotent: re-resolving chains emits 0
+    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 0, errors: [] });
+  });
+
+  test("empty plan skips cleanly without error", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-empty-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+
+    seedCompletedRun(db, {
+      runId: "run-empty-1",
+      agent: "work-scan@1",
+      input: { repo: "wm/empty" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/empty",
+        plan: [],
+      },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+  });
+
+  test("custom eventId templating and perItem mapping overlays", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-tmpl-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+
+    const customRegistry = {
+      ...registry,
+      edges: {
+        "work-scan@1": {
+          recommendationField: "recommendation",
+          edges: {
+            DISPATCH: {
+              eventType: "factory.dispatch.requested",
+              itemsField: "plan",
+              itemKey: "ticket",
+              eventId: "chain-${runId}-${item.ticket}",
+              input: { repo: "$.artifact.repo" },
+              perItem: { ticket: "$.item.ticket" },
+            },
+          },
+        },
+      },
+    };
+
+    seedCompletedRun(db, {
+      runId: "run-tmpl-1",
+      agent: "work-scan@1",
+      input: { repo: "wm/tmpl" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/tmpl",
+        plan: [{ ticket: "WM-201" }],
+      },
+    });
+
+    const outcome = resolveChains(db, customRegistry);
+    expect(outcome).toEqual({ emitted: 1, skipped: 0, errors: [] });
+    const event = db.query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`).get("chain-run-tmpl-1-WM-201");
+    expect(event).toBeTruthy();
+    expect(JSON.parse(event.envelope_json).payload).toEqual({ repo: "wm/tmpl", ticket: "WM-201" });
+  });
+
+  test("missing itemKey records error cleanly", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-err-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+
+    seedCompletedRun(db, {
+      runId: "run-err-1",
+      agent: "work-scan@1",
+      input: { repo: "wm/err" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/err",
+        plan: [{ missingTicket: "bad" }],
+      },
+    });
+
+    const outcome = resolveChains(db, registry);
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.errors).toHaveLength(1);
+    expect(outcome.errors[0]).toContain('missing key "ticket"');
+  });
+});
+

@@ -61,16 +61,19 @@ function chainCandidates(db, edges) {
          AND json_extract(r.spec_json, '$.agent') IN (${placeholders})
          AND NOT EXISTS (
            SELECT 1 FROM events ce
-           WHERE ce.source = '${CHAIN_SOURCE}' AND ce.event_id = 'chain-' || r.run_id
+           WHERE ce.source = '${CHAIN_SOURCE}'
+             AND (ce.causation_id = r.run_id OR ce.event_id = 'chain-' || r.run_id OR ce.event_id LIKE 'chain-' || r.run_id || '-%')
          )`,
     )
     .all(...agents);
 }
 
 /**
- * One deterministic pass: emit the chain event for every eligible completed
- * run. Idempotent — the derived eventId dedups at intake, and candidates
- * with an existing chain event are excluded up front.
+ * One deterministic pass: emit chain events for eligible completed runs.
+ * Supports single-emit (eventId chain-<runId>) and multi-emit fan-out edges
+ * (eventId chain-<runId>-<itemKey>) (OPS-223, WM-119). Idempotent — the derived
+ * eventId dedups at intake, and candidates with existing chain events are
+ * excluded up front.
  *
  * @returns {{ emitted: number, skipped: number, errors: string[] }}
  */
@@ -100,25 +103,104 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
           artifactHash[entry.kind] = entry.sha256;
         }
       }
-      const envelope = {
-        schemaVersion: "factory.event/v1",
-        eventId: `chain-${row.run_id}`,
-        type: edge.eventType,
-        source: CHAIN_SOURCE,
-        subject: spec.agent,
-        occurredAt: new Date(now).toISOString(),
-        correlationId: row.correlation_id ?? row.origin_event_id,
-        causationId: row.run_id,
-        payload: buildChainInput(edge.input, {
-          input: spec.input,
-          artifact: result.artifact ?? {},
-          artifactHash,
-        }),
-      };
-      const admitted = admitEvent(db, registry, envelope, { now });
-      if (admitted.admitted) outcome.emitted += 1;
-      else if (admitted.duplicate) outcome.skipped += 1;
-      else outcome.errors.push(`chain-${row.run_id}: ${admitted.errors.join("; ")}`);
+
+      const itemsField = edge.itemsField ?? rule.itemsField;
+      const itemKey = edge.itemKey ?? rule.itemKey;
+
+      if (itemsField !== undefined) {
+        // Multi-emit / fan-out edge (WM-119)
+        let items;
+        if (typeof itemsField === "string" && itemsField.startsWith("$.")) {
+          items = resolvePath(itemsField, {
+            input: spec.input,
+            artifact: result.artifact ?? {},
+            artifactHash,
+          });
+        } else {
+          items = result.artifact?.[itemsField] ?? spec.input?.[itemsField];
+        }
+
+        if (!Array.isArray(items) || items.length === 0) {
+          outcome.skipped += 1;
+          continue;
+        }
+
+        for (const item of items) {
+          let itemKeyVal;
+          if (typeof item === "object" && item !== null) {
+            itemKeyVal = itemKey ? item[itemKey] : undefined;
+          } else if (typeof item === "string" || typeof item === "number") {
+            itemKeyVal = String(item);
+          }
+          if (itemKeyVal === undefined || itemKeyVal === null || String(itemKeyVal).trim() === "") {
+            throw new Error(`multi-emit chain item missing key "${itemKey}"`);
+          }
+
+          const itemContext = {
+            input: spec.input,
+            artifact: result.artifact ?? {},
+            artifactHash,
+            item,
+          };
+          const itemPayload = buildChainInput(edge.input ?? {}, itemContext);
+          if (itemKey && itemPayload[itemKey] === undefined) {
+            itemPayload[itemKey] = itemKeyVal;
+          }
+          if (edge.perItem) {
+            const perItemInput = buildChainInput(edge.perItem, itemContext);
+            Object.assign(itemPayload, perItemInput);
+          }
+
+          let eventId;
+          if (typeof edge.eventId === "string") {
+            eventId = edge.eventId.replace(/\$\{([^}]+)\}/g, (_, expr) => {
+              if (expr === "runId") return row.run_id;
+              if (expr.startsWith("item.")) return item?.[expr.slice(5)] ?? "";
+              return String(resolvePath(`$.${expr}`, itemContext) ?? "");
+            });
+          } else {
+            eventId = `chain-${row.run_id}-${itemKeyVal}`;
+          }
+
+          const envelope = {
+            schemaVersion: "factory.event/v1",
+            eventId,
+            type: edge.eventType,
+            source: CHAIN_SOURCE,
+            subject: spec.agent,
+            occurredAt: new Date(now).toISOString(),
+            correlationId: row.correlation_id ?? row.origin_event_id,
+            causationId: row.run_id,
+            payload: itemPayload,
+          };
+          const admitted = admitEvent(db, registry, envelope, { now });
+          if (admitted.admitted) outcome.emitted += 1;
+          else if (admitted.duplicate) outcome.skipped += 1;
+          else outcome.errors.push(`${eventId}: ${admitted.errors.join("; ")}`);
+        }
+      } else {
+        // Single-emit edge (OPS-223)
+        const eventId = `chain-${row.run_id}`;
+        const envelope = {
+          schemaVersion: "factory.event/v1",
+          eventId,
+          type: edge.eventType,
+          source: CHAIN_SOURCE,
+          subject: spec.agent,
+          occurredAt: new Date(now).toISOString(),
+          correlationId: row.correlation_id ?? row.origin_event_id,
+          causationId: row.run_id,
+          payload: buildChainInput(edge.input, {
+            input: spec.input,
+            artifact: result.artifact ?? {},
+            artifactHash,
+          }),
+        };
+        const admitted = admitEvent(db, registry, envelope, { now });
+        if (admitted.admitted) outcome.emitted += 1;
+        else if (admitted.duplicate) outcome.skipped += 1;
+        else outcome.errors.push(`${eventId}: ${admitted.errors.join("; ")}`);
+      }
     } catch (err) {
       outcome.errors.push(`chain-${row.run_id}: ${err.message}`);
     }

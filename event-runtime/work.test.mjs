@@ -148,13 +148,13 @@ const workFake = {
  * matrix — not re-proven here.
  */
 const openWorld = {
-  fetchTicket: () => ({
-    identifier: FIRST,
+  fetchTicket: (ticketId) => ({
+    identifier: ticketId ?? FIRST,
     title: "a fully specified ticket",
     state: { name: "Todo" },
     assignee: null,
     labels: { nodes: [{ name: "ai:agent-ready" }] },
-    description: "## Owned Paths\n- src/feature-a/**\n",
+    description: ticketId === SECOND ? "## Owned Paths\n- src/feature-b/**\n" : "## Owned Paths\n- src/feature-a/**\n",
   }),
   fetchInFlight: () => [],
   countLeases: () => 0,
@@ -218,24 +218,25 @@ describe("work-scan registration (WM-110)", () => {
     expect(schema.properties.noopReason.enum).toEqual(["queue_empty", "cap_full", "all_overlapping"]);
   });
 
-  test("the DISPATCH edge is single-emit by construction: one {repo, ticket} into factory.dispatch.requested", () => {
-    // chain.mjs derives eventId chain-<runId> — one chain event per run, ever
-    // — so the edge carries exactly the artifact's single dispatch target and
-    // the rest of the plan stays in `deferred`.
+  test("the DISPATCH edge is multi-emit: fans out plan items into factory.dispatch.requested (WM-119)", () => {
+    // chain.mjs derives eventId chain-<runId>-<ticket> — multi-emit fan-out
+    // edge feeds every planned ticket into factory.dispatch.requested.
     expect(registry.edges["work-scan@1"]).toEqual({
       recommendationField: "recommendation",
       edges: {
         DISPATCH: {
           eventType: "factory.dispatch.requested",
-          input: { repo: "$.artifact.repo", ticket: "$.artifact.ticket" },
+          itemsField: "plan",
+          itemKey: "ticket",
+          input: { repo: "$.artifact.repo" },
         },
       },
     });
   });
 });
 
-describe("work chain: scan → chained dispatch proposal (WM-110)", () => {
-  test("a DISPATCH plan chains its first ticket into a watched, re-gated dispatch proposal", async () => {
+describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () => {
+  test("a DISPATCH plan fans out N tickets into separate watched, re-gated dispatch proposals (WM-119)", async () => {
     const { db, planAll, approveNext } = harness();
     admitEvent(db, registry, workEnvelope("wm29", "work-1"));
 
@@ -246,29 +247,40 @@ describe("work chain: scan → chained dispatch proposal (WM-110)", () => {
     expect(scan.proposal.spec.input.repoPin).toMatchObject({ repo: "wm29", ref: "develop" });
     expect(scan.proposal.spec.input.repoPin.sha).toMatch(/^[0-9a-f]{40}$/);
 
-    // The single-emit shape: only plan[0] chains; the rest is recorded, typed.
+    // Multi-emit fan-out: every item in plan becomes an admitted internal event.
     const result = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(scan.runId).result_json);
-    expect(result.artifact.ticket).toBe(FIRST);
-    expect(result.artifact.deferred).toEqual([SECOND]);
+    expect(result.artifact.plan).toHaveLength(2);
 
-    expect(resolveChains(db, registry)).toEqual({ emitted: 1, skipped: 0, errors: [] });
-    const chainEvent = db
+    expect(resolveChains(db, registry)).toEqual({ emitted: 2, skipped: 0, errors: [] });
+    const chainEvent1 = db
       .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
-      .get(`chain-${scan.runId}`);
-    expect(chainEvent.type).toBe("factory.dispatch.requested");
-    expect(chainEvent.correlation_id).toBe("work-1"); // inherited from the scan's event
-    expect(chainEvent.causation_id).toBe(scan.runId);
+      .get(`chain-${scan.runId}-${FIRST}`);
+    expect(chainEvent1.type).toBe("factory.dispatch.requested");
+    expect(chainEvent1.correlation_id).toBe("work-1"); // inherited from the scan's event
+    expect(chainEvent1.causation_id).toBe(scan.runId);
+    expect(JSON.parse(chainEvent1.envelope_json).payload).toEqual({ repo: "wm29", ticket: FIRST });
 
-    // The chained event is planned through WM-108's gate (injected world) and
-    // lands as its own watched proposal with exactly the dispatch input shape.
+    const chainEvent2 = db
+      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
+      .get(`chain-${scan.runId}-${SECOND}`);
+    expect(chainEvent2.type).toBe("factory.dispatch.requested");
+    expect(chainEvent2.correlation_id).toBe("work-1");
+    expect(chainEvent2.causation_id).toBe(scan.runId);
+    expect(JSON.parse(chainEvent2.envelope_json).payload).toEqual({ repo: "wm29", ticket: SECOND });
+
+    // Both chained events are planned through WM-108's gate (injected world) and
+    // land as watched proposals with their respective dispatch input shape.
     planAll();
-    const dispatch = openProposals(db, {}).find((p) => p.spec?.agent === "dispatch@1");
-    expect(dispatch).toBeTruthy();
-    expect(dispatch.status).toBe("open"); // watched: nothing mutates without approval
-    expect(dispatch.spec.input).toEqual({ repo: "wm29", ticket: FIRST });
-    expect(dispatch.spec.workspace.type).toBe("worktree");
+    const dispatches = openProposals(db, {}).filter((p) => p.spec?.agent === "dispatch@1");
+    expect(dispatches).toHaveLength(2);
+    for (const dispatch of dispatches) {
+      expect(dispatch.status).toBe("open"); // watched: nothing mutates without approval
+      expect(dispatch.spec.workspace.type).toBe("worktree");
+      expect(dispatch.spec.input.repo).toBe("wm29");
+    }
+    expect(dispatches.map((p) => p.spec.input.ticket).sort()).toEqual([FIRST, SECOND].sort());
 
-    // One chain event per run, ever: re-resolving emits nothing new.
+    // One chain pass per run: re-resolving emits nothing new.
     expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 0, errors: [] });
   });
 
