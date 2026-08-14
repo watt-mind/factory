@@ -14,9 +14,10 @@ nothing to decide. `./input.json` names one repo:
 There is no source checkout: you read branches and CI through `gh`, never a
 local tree. Resolve the repo's GitHub `owner/name` slug, its `base` branch,
 its `deploy_branch`, and its optional `deployment` block (`url`, `branch`,
-`revision_field`) from `$FACTORY_ROOT/config/repos.yaml`. Write
-`./result.json`. Work only inside this directory. You are read-only: you
-never open PRs, merge, push, comment, or notify.
+`revision_field`, `smoke_deadline_seconds`) or top-level `smoke_deadline_seconds`
+from `$FACTORY_ROOT/config/repos.yaml`. Write `./result.json`. Work only
+inside this directory. You are read-only: you never open PRs, merge, push,
+comment, or notify.
 
 ## Method
 
@@ -31,9 +32,10 @@ never open PRs, merge, push, comment, or notify.
    if either branch moved after this scan.
 3. **Ahead?** `gh api repos/<owner/name>/compare/<deploy_branch>...<base>`.
    `ahead_by` of 0 means there is nothing to ship: typed NOOP `not_ahead`.
-   (A `diverged` status means someone committed to the deploy branch
-   directly — say so in the summary; the comparison still ships base's
-   commits, and the human sees the divergence before approving.)
+   Branch divergence (`status === "diverged"` or `behind_by > 0`) means
+   someone committed to the deploy branch directly — this produces
+   recommendation `NOOP` with `noopReason: "diverged"` and an empty `plan`.
+   (Say so in the summary; never attempt to ship over diverged history.)
 4. **Base CI green — real checks on the head commit.**
    `gh api repos/<owner/name>/commits/<headSha>/check-runs`. Zero check runs
    is NOT green — that is typed NOOP `no_checks`, never a pass. Any latest
@@ -57,9 +59,11 @@ never open PRs, merge, push, comment, or notify.
    the integration links every shipped ticket. Never `Fixes <ID>` — these
    tickets are already Done; a release PR references, it doesn't close.
    Include `smoke_check` only when the repo has a `deployment` block with a
-   `url`; its `smokeBranch` is `deployment.branch` (default `deploy_branch`)
-   and `revisionField` is `deployment.revision_field` (default `""`). Never
-   invent an action id.
+   `url`; its `smokeBranch` is `deployment.branch` (default `deploy_branch`),
+   `revisionField` is `deployment.revision_field` (default `""`), and
+   `smokeDeadlineSeconds` is `smoke_deadline_seconds` or
+   `deployment.smoke_deadline_seconds` (default 600). Never invent an action
+   id.
 
 ## Output
 
@@ -82,7 +86,7 @@ never open PRs, merge, push, comment, or notify.
     "plan": [
       { "action": "open_rc_pr", "title": "release: develop → master (2026-08-14)", "body": "..." },
       { "action": "merge_rc_pr" },
-      { "action": "smoke_check", "url": "https://bj29-dev.projects.watt-mind.com", "smokeBranch": "develop", "revisionField": "" }
+      { "action": "smoke_check", "url": "https://bj29.projects.watt-mind.com", "smokeBranch": "master", "revisionField": "", "smokeDeadlineSeconds": 600 }
     ],
     "summary": "one line the human reads before taking the deploy decision"
   },
@@ -92,7 +96,7 @@ never open PRs, merge, push, comment, or notify.
 
 `recommendation` is `SHIP` only when the base is ahead, its head commit's
 checks exist and are all green, and the plan is complete; otherwise `NOOP`
-with empty `plan` and a typed `noopReason` (`not_ahead`, `ci_red`,
+with empty `plan` and a typed `noopReason` (`not_ahead`, `diverged`, `ci_red`,
 `ci_pending`, `no_checks`, `no_deploy_config`). A NOOP is a good outcome,
 not a failure. If `gh` is unreachable or the repo is not in
 `config/repos.yaml`, refuse:

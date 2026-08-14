@@ -59,8 +59,15 @@ describe("ship-scan registration (WM-111)", () => {
     expect(props.recommendation.enum).toEqual(["SHIP", "NOOP"]);
     // The plan is the closed ship set, nothing else nameable.
     expect(props.plan.items.properties.action.enum).toEqual(["open_rc_pr", "merge_rc_pr", "smoke_check"]);
-    // NOOP is typed: not ahead, CI red/pending, no real checks, or no deploy config.
-    expect(props.noopReason.enum).toEqual(["not_ahead", "ci_red", "ci_pending", "no_checks", "no_deploy_config"]);
+    // NOOP is typed: not ahead, diverged, CI red/pending, no real checks, or no deploy config.
+    expect(props.noopReason.enum).toEqual([
+      "not_ahead",
+      "diverged",
+      "ci_red",
+      "ci_pending",
+      "no_checks",
+      "no_deploy_config",
+    ]);
   });
 });
 
@@ -160,8 +167,8 @@ describe("ship-apply is closed by construction (WM-111)", () => {
     expect(def.actionRegistry.merge_rc_pr.argv.slice(-5)).toEqual([
       "{github}", "{deployBranch}", "{deployHeadSha}", "{base}", "{headSha}",
     ]);
-    expect(def.actionRegistry.smoke_check.argv.slice(-6)).toEqual([
-      "{github}", "{smokeBranch}", "{url}", "{factoryRoot}", "{repo}", "{revisionField}",
+    expect(def.actionRegistry.smoke_check.argv.slice(-7)).toEqual([
+      "{github}", "{smokeBranch}", "{url}", "{factoryRoot}", "{repo}", "{revisionField}", "{smokeDeadlineSeconds}",
     ]);
     // A release PR merges with a merge commit — never squash, never
     // --delete-branch (its head is the integration branch): factory-ship §4.
@@ -269,7 +276,13 @@ describe("ship-apply is closed by construction (WM-111)", () => {
   test("smoke_check goes green when the endpoint serves the deployed branch's tip (factory-status form)", async () => {
     await withSmokeServer({ revision: BASE_SHA }, async (port) => {
       const { outcome, workspaceDir } = await runApply([
-        { action: "smoke_check", url: `http://127.0.0.1:${port}`, smokeBranch: "develop", revisionField: "" },
+        {
+          action: "smoke_check",
+          url: `http://127.0.0.1:${port}`,
+          smokeBranch: "develop",
+          revisionField: "",
+          smokeDeadlineSeconds: 600,
+        },
       ]);
       expect(outcome).toEqual({ exitCode: 0, timedOut: false });
       const result = JSON.parse(readFileSync(path.join(workspaceDir, "result.json"), "utf8"));
@@ -280,13 +293,36 @@ describe("ship-apply is closed by construction (WM-111)", () => {
   test("smoke red pushes SMOKE RED and fails the attempt — never an auto-revert", async () => {
     await withSmokeServer({ revision: "0123456789abcdef" }, async (port) => {
       const { outcome, workspaceDir, log } = await runApply([
-        { action: "smoke_check", url: `http://127.0.0.1:${port}`, smokeBranch: "develop", revisionField: "" },
+        {
+          action: "smoke_check",
+          url: `http://127.0.0.1:${port}`,
+          smokeBranch: "develop",
+          revisionField: "",
+          smokeDeadlineSeconds: 600,
+        },
       ]);
       expect(outcome.exitCode).toBe(1);
       expect(readFileSync(log, "utf8")).toContain("factory notify SMOKE RED bj29:");
       expect(readFileSync(path.join(workspaceDir, ".actions.log"), "utf8")).toContain("smoke red");
       // Never auto-revert: the only mutation a red smoke performs is the push.
       expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(1);
+    });
+  }, 20_000);
+
+  test("smoke_check accepts custom smokeDeadlineSeconds parameter and passes it into action", async () => {
+    await withSmokeServer({ revision: BASE_SHA }, async (port) => {
+      const { outcome, workspaceDir } = await runApply([
+        {
+          action: "smoke_check",
+          url: `http://127.0.0.1:${port}`,
+          smokeBranch: "develop",
+          revisionField: "",
+          smokeDeadlineSeconds: 120,
+        },
+      ]);
+      expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+      const result = JSON.parse(readFileSync(path.join(workspaceDir, "result.json"), "utf8"));
+      expect(result.artifact).toEqual({ repo: "bj29", applied: [{ issueId: "smoke_check", action: "smoke_check" }] });
     });
   }, 20_000);
 
@@ -418,6 +454,9 @@ function shipScanArtifact(repo) {
   if (repo === "clean") {
     return { ...base, recommendation: "NOOP", summary: "fake: nothing to ship", noopReason: "not_ahead" };
   }
+  if (repo === "diverged") {
+    return { ...base, recommendation: "NOOP", summary: "fake: branch diverged", noopReason: "diverged" };
+  }
   return {
     ...base,
     recommendation: "SHIP",
@@ -429,7 +468,13 @@ function shipScanArtifact(repo) {
     plan: [
       { action: "open_rc_pr", title: "release: develop → master (2026-08-14)", body: "- feat(app): fake thing\nCLNT-901" },
       { action: "merge_rc_pr" },
-      { action: "smoke_check", url: `https://${repo}.projects.watt-mind.com`, smokeBranch: "develop", revisionField: "" },
+      {
+        action: "smoke_check",
+        url: `https://${repo}.projects.watt-mind.com`,
+        smokeBranch: "master",
+        revisionField: "",
+        smokeDeadlineSeconds: 600,
+      },
     ],
     summary: `fake release candidate for ${repo}: 1 commit, CI green`,
   };
@@ -524,7 +569,13 @@ describe("ship chain: scan → human-approved apply (WM-111)", () => {
       plan: [
         { action: "open_rc_pr", title: "release: develop → master (2026-08-14)", body: "- feat(app): fake thing\nCLNT-901" },
         { action: "merge_rc_pr" },
-        { action: "smoke_check", url: "https://bj29.projects.watt-mind.com", smokeBranch: "develop", revisionField: "" },
+        {
+          action: "smoke_check",
+          url: "https://bj29.projects.watt-mind.com",
+          smokeBranch: "master",
+          revisionField: "",
+          smokeDeadlineSeconds: 600,
+        },
       ],
     });
 
@@ -553,6 +604,21 @@ describe("ship chain: scan → human-approved apply (WM-111)", () => {
     expect(scan.summary.terminalState).toBe("COMPLETED");
     const result = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(scan.runId).result_json);
     expect(result.artifact.noopReason).toBe("not_ahead");
+
+    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(openProposals(db, {}).find((p) => p.spec?.agent === "ship-apply@1")).toBeUndefined();
+  });
+
+  test("a diverged branch produces a NOOP with noopReason diverged and empty plan", async () => {
+    const { db, approveNext } = harness();
+    admitEvent(db, registry, shipEnvelope("diverged", "ship-diverged"));
+    const scan = await approveNext("ship-scan@1");
+    expect(scan.summary.terminalState).toBe("COMPLETED");
+    const result = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(scan.runId).result_json);
+    expect(result.artifact.recommendation).toBe("NOOP");
+    expect(result.artifact.noopReason).toBe("diverged");
+    expect(result.artifact.plan).toEqual([]);
 
     expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
     planAdmittedEvents(db, registry, { policyVersion: PV });

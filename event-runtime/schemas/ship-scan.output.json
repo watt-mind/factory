@@ -99,6 +99,11 @@
             "type": "string",
             "pattern": "^[A-Za-z_]*$",
             "description": "smoke_check only: configured deployment.revision_field, or empty to use the default revision field candidates"
+          },
+          "smokeDeadlineSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "smoke_check only: deadline in seconds to wait for deployment endpoint to serve live tip (defaults to 600)"
           }
         }
       }
@@ -109,8 +114,8 @@
       "description": "One line the human reads before taking the deploy decision"
     },
     "noopReason": {
-      "enum": ["not_ahead", "ci_red", "ci_pending", "no_checks", "no_deploy_config"],
-      "description": "Typed reason accompanying a NOOP — nothing to ship, base CI red, base CI still running, no real checks on the head commit (no checks is not green), or the repo has no deploy branch distinct from base"
+      "enum": ["not_ahead", "diverged", "ci_red", "ci_pending", "no_checks", "no_deploy_config"],
+      "description": "Typed reason accompanying a NOOP — nothing to ship, branch divergence (behind_by > 0 or status diverged), base CI red, base CI still running, no real checks on the head commit (no checks is not green), or the repo has no deploy branch distinct from base"
     }
   }
 }

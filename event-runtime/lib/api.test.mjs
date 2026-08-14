@@ -738,6 +738,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         deployBranch: "master",
         reportOnly: false,
         maxInFlight: 20,
+        smokeDeadlineSeconds: null,
         worktreeRoot: path.join(process.env.HOME ?? "", "Develop/.worktrees/dispatchable"),
         hasWorktreeUp: false,
         hasWorktreeDown: true,

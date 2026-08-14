@@ -38,7 +38,8 @@ conflicts and wrecks `git log deploy..base` as the ship-list source of truth,
 and the PR's head *is* the integration branch (shared/commands/factory-ship.md
 §4). `smoke_check` reuses `lib/repo-status.mjs` — the exact metadata-URL and
 revision-field logic `factory status` uses for deployment freshness — via a
-fixed `bun -e` one-liner inside the constant script. A red smoke **never
+fixed `bun -e` one-liner inside the constant script, polling up to the
+configured `smokeDeadlineSeconds` (defaulting to 600s). A red smoke **never
 auto-reverts**: the action notifies and fails the attempt; what happens next
 is the human's call.
 
