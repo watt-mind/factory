@@ -13,10 +13,17 @@ import { api } from "../api";
 import { keyGuard } from "../hooks";
 import { buildCapabilityGraph, type GraphNode } from "../graph/model";
 import { nodeTypes } from "../graph/nodes";
+import { largestComponentIds, matchNodes } from "../graph/search";
+import { EDGE_STYLES, legendEntries } from "../graph/style";
 import type { EventFocus } from "../types";
 import type { OperatorContext } from "../context";
 import { Button, DetailPane, JsonBlock, JumpLink, KV, Section, copyText, copyLink } from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
+
+// Fit-all on a large graph lands at ~0.1–0.3 zoom where labels are unreadable
+// (WM-99). The initial fit centers on the largest component and never goes
+// below this floor — the minimap covers "where is everything else".
+const INITIAL_FIT_MIN_ZOOM = 0.65;
 
 /**
  * Graph (webui roadmap / OPS-224 phase 1, chrome OPS-230): the capability map
@@ -93,9 +100,9 @@ export function Graph({
                     label: edge.label,
                     animated: false,
                     style: {
-                      stroke: edge.kind === "recommends" ? "var(--accent)" : "var(--border-strong)",
+                      stroke: EDGE_STYLES[edge.kind].stroke,
                       strokeWidth: 1.5,
-                      strokeDasharray: edge.kind === "recommends" ? "4 3" : undefined,
+                      strokeDasharray: EDGE_STYLES[edge.kind].strokeDasharray,
                     },
                     labelStyle: { fill: "var(--text-faint)", fontSize: 10 },
                     labelBgStyle: { fill: "var(--surface-0)" },
@@ -123,9 +130,26 @@ export function Graph({
     };
   }, [graph]);
 
+  // Node search (WM-99): case-insensitive substring on label/id, matches
+  // highlighted on canvas, Enter cycles through them.
+  const [query, setQuery] = useState("");
+  const [matchIdx, setMatchIdx] = useState(0);
+  const matches = useMemo(() => (graph ? matchNodes(graph.nodes, query) : []), [graph, query]);
+  const matchSet = useMemo(() => new Set(matches), [matches]);
+  const safeMatchIdx = matches.length ? matchIdx % matches.length : 0;
+  const currentMatch = matches[safeMatchIdx] ?? null;
+  const legend = useMemo(() => (graph ? legendEntries(graph) : null), [graph]);
+
   const nodes = useMemo(
-    () => (positioned ? positioned.nodes.map((n) => ({ ...n, selected: n.id === focusNodeId })) : []),
-    [positioned, focusNodeId],
+    () =>
+      positioned
+        ? positioned.nodes.map((n) => ({
+            ...n,
+            selected: n.id === focusNodeId,
+            data: { ...n.data, searchHit: matchSet.has(n.id) },
+          }))
+        : [],
+    [positioned, focusNodeId, matchSet],
   );
 
   const selected: GraphNode | undefined = graph?.nodes.find((n) => n.id === focusNodeId);
@@ -179,10 +203,44 @@ export function Graph({
     });
   };
 
+  // Initial view (WM-99): fit the largest connected component with a zoom
+  // floor instead of squeezing every island on screen at label-illegible zoom.
+  // Runs once per mount; refetches must not yank the viewport afterwards.
+  const didInitialFit = useRef(false);
+  useEffect(() => {
+    if (didInitialFit.current || !flowRef.current || !positioned || !graph || graph.nodes.length === 0)
+      return;
+    didInitialFit.current = true;
+    flowRef.current.fitView({
+      nodes: largestComponentIds(graph).map((id) => ({ id })),
+      padding: 0.25,
+      minZoom: INITIAL_FIT_MIN_ZOOM,
+      maxZoom: 1,
+    });
+  }, [graph, positioned, flowReady]);
+
   useEffect(() => {
     revealSelected();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusNodeId, flowReady, positioned]);
+
+  // Center the current search match at the operator's zoom; `currentMatch` is
+  // a stable string, so background refetches do not re-center the viewport.
+  useEffect(() => {
+    setMatchIdx(0);
+  }, [query]);
+  useEffect(() => {
+    if (!currentMatch || !flowRef.current) return;
+    const zoom = Math.max(flowRef.current.getZoom(), INITIAL_FIT_MIN_ZOOM);
+    flowRef.current.fitView({
+      nodes: [{ id: currentMatch }],
+      padding: 0.45,
+      duration: 180,
+      minZoom: zoom,
+      maxZoom: zoom,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentMatch, flowReady]);
 
   const emptyCopy = registry.isPending
     ? "Loading the capability map…"
@@ -208,6 +266,73 @@ export function Graph({
           </div>
           <ScopeCaption context={context} surface="graph" />
         </div>
+        {positioned && graph && graph.nodes.length > 0 && (
+          <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              {query.trim() && (
+                <span className="text-[11px] text-(--text-faint)">
+                  {matches.length ? `${safeMatchIdx + 1} / ${matches.length}` : "no matches"}
+                </span>
+              )}
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && matches.length) {
+                    e.preventDefault();
+                    setMatchIdx((i) => (i + 1) % matches.length);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    if (query) setQuery("");
+                    else e.currentTarget.blur();
+                  }
+                }}
+                placeholder="Search nodes…"
+                aria-label="Search graph nodes"
+                spellCheck={false}
+                className="w-52 rounded-md border border-(--border) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
+              />
+            </div>
+            {legend && (legend.nodes.length > 0 || legend.edges.length > 0) && (
+              <div
+                className="flex flex-col gap-1 rounded-md border border-(--border) bg-(--surface-1) px-2.5 py-2"
+                role="img"
+                aria-label="Graph legend"
+              >
+                {legend.nodes.map((entry) => (
+                  <div key={entry.key} className="flex items-center gap-2 text-[11px] text-(--text-dim)">
+                    <span
+                      aria-hidden
+                      className="inline-block shrink-0 rounded-xs"
+                      style={{
+                        width: 14,
+                        height: 11,
+                        background: "var(--surface-0)",
+                        border: `1px ${entry.dashed ? "dashed" : "solid"} var(--border)`,
+                        borderLeft: `3px solid ${entry.accent}`,
+                      }}
+                    />
+                    {entry.label}
+                  </div>
+                ))}
+                {legend.edges.map((entry) => (
+                  <div key={entry.kind} className="flex items-center gap-2 text-[11px] text-(--text-dim)">
+                    <span
+                      aria-hidden
+                      className="inline-block shrink-0"
+                      style={{
+                        width: 14,
+                        borderTop: `2px ${entry.strokeDasharray ? "dashed" : "solid"} ${entry.stroke}`,
+                      }}
+                    />
+                    {entry.label}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {positioned && graph && graph.nodes.length > 0 ? (
           <ReactFlow
             nodes={nodes}
@@ -220,8 +345,6 @@ export function Graph({
               setFlowReady((n) => n + 1);
             }}
             nodesFocusable
-            fitView
-            fitViewOptions={{ padding: 0.25 }}
             proOptions={{ hideAttribution: true }}
             minZoom={0.2}
           >

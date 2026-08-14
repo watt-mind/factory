@@ -1,21 +1,27 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { GraphNode } from "./model";
+import { NODE_STYLES } from "./style";
 
 // Custom nodes: plain components on the app's OKLCH tokens, so the canvas
-// reads as part of the tool rather than an embedded diagram widget.
+// reads as part of the tool rather than an embedded diagram widget. Accents
+// and dash styles come from ./style so the legend stays truthful (WM-99).
 
 const handleStyle = { background: "var(--border-strong)", width: 6, height: 6, border: "none" };
+
+const searchHitOf = (data: NodeProps["data"]) => Boolean((data as { searchHit?: boolean }).searchHit);
 
 function Shell({
   children,
   accent,
   selected,
   dashed,
+  searchHit,
 }: {
   children: React.ReactNode;
   accent: string;
   selected?: boolean;
   dashed?: boolean;
+  searchHit?: boolean;
 }) {
   return (
     <div
@@ -28,6 +34,8 @@ function Shell({
         border: `1px ${dashed ? "dashed" : "solid"} ${selected ? accent : "var(--border)"}`,
         boxShadow: selected ? `0 0 0 1px ${accent}` : "none",
         borderLeft: `3px solid ${accent}`,
+        outline: searchHit ? "2px solid var(--accent)" : undefined,
+        outlineOffset: searchHit ? 2 : undefined,
       }}
     >
       {children}
@@ -49,9 +57,9 @@ function Line({ children, dim }: { children: React.ReactNode; dim?: boolean }) {
 export function EventTypeNode({ data, selected }: NodeProps) {
   const node = data.node as Extract<GraphNode, { kind: "eventType" }>;
   return (
-    <Shell accent="var(--hue-info)" selected={selected}>
+    <Shell accent={NODE_STYLES.eventType.accent} selected={selected} searchHit={searchHitOf(data)}>
       <Handle type="target" position={Position.Left} style={handleStyle} />
-      <div className="text-[10px] tracking-wide uppercase" style={{ color: "var(--hue-info)" }}>
+      <div className="text-[10px] tracking-wide uppercase" style={{ color: NODE_STYLES.eventType.accent }}>
         event type
       </div>
       <div className="mono truncate text-[12px]" title={node.label}>
@@ -66,9 +74,9 @@ export function EventTypeNode({ data, selected }: NodeProps) {
 
 export function AgentNode({ data, selected }: NodeProps) {
   const node = data.node as Extract<GraphNode, { kind: "agent" }>;
-  const accent = node.mutating ? "var(--hue-warn)" : "var(--hue-ok)";
+  const accent = node.mutating ? NODE_STYLES.agentMutating.accent : NODE_STYLES.agentReadOnly.accent;
   return (
-    <Shell accent={accent} selected={selected}>
+    <Shell accent={accent} selected={selected} searchHit={searchHitOf(data)}>
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-2">
         <span className="text-[10px] tracking-wide uppercase" style={{ color: accent }}>
@@ -77,7 +85,10 @@ export function AgentNode({ data, selected }: NodeProps) {
         {node.mutating && (
           <span
             className="rounded px-1 text-[9.5px] font-semibold tracking-wide uppercase"
-            style={{ color: "var(--hue-warn)", background: "color-mix(in oklch, var(--hue-warn) 15%, transparent)" }}
+            style={{
+              color: NODE_STYLES.agentMutating.accent,
+              background: `color-mix(in oklch, ${NODE_STYLES.agentMutating.accent} 15%, transparent)`,
+            }}
           >
             mutating
           </span>
@@ -100,7 +111,12 @@ export function AgentNode({ data, selected }: NodeProps) {
 export function TerminalNode({ data, selected }: NodeProps) {
   const node = data.node as Extract<GraphNode, { kind: "terminal" }>;
   return (
-    <Shell accent="var(--hue-idle)" selected={selected} dashed>
+    <Shell
+      accent={NODE_STYLES.terminal.accent}
+      selected={selected}
+      dashed={NODE_STYLES.terminal.dashed}
+      searchHit={searchHitOf(data)}
+    >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="text-[10px] tracking-wide uppercase" style={{ color: "var(--text-faint)" }}>
         terminal
