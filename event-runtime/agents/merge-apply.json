@@ -1,0 +1,67 @@
+{
+  "id": "merge-apply",
+  "version": 1,
+  "prompt": "agents/merge-apply.md",
+  "input_schema": "schemas/merge-apply.input.json",
+  "output_schema": "schemas/merge-applied.output.json",
+  "output_contract": "factory.merge-applied/v1",
+  "itemsField": "plan",
+  "itemKey": "ticket",
+  "actionRegistry": {
+    "merge_pr": {
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu\nactual=\"$(gh pr view \"$1\" --repo \"$2\" --json headRefOid -q .headRefOid)\"\nif [ \"$actual\" != \"$3\" ]; then\n  echo \"refusing PR #$1: head $actual is not the reviewed $3 — a moved head needs a fresh scan, not a merge\" >&2\n  exit 1\nfi\nexec gh pr merge \"$1\" --repo \"$2\" --squash --delete-branch",
+        "merge_pr",
+        "{pr}",
+        "{github}",
+        "{headSha}"
+      ]
+    },
+    "ticket_done": {
+      "argv": [
+        "bun",
+        "{factoryRoot}/tools/linear.mjs",
+        "state",
+        "{ticket}",
+        "Done",
+        "--remove",
+        "ai:needs-review",
+        "--remove",
+        "ai:escalated",
+        "--remove",
+        "ai:blocked"
+      ]
+    },
+    "notify_escalate": {
+      "argv": [
+        "factory",
+        "notify",
+        "ESCALATED PR#{pr} ({ticket}): {reason}"
+      ]
+    }
+  },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "gh:write",
+      "linear:write",
+      "notify:telegram"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600,
+    "attempts": 1
+  },
+  "mutating": true,
+  "pins": {
+    "agents/merge-apply.md": "sha256:3f4a7b02c8cf0d492536b2c21cfbda136aa3d8fcd773ee835158b6f7569eb116",
+    "schemas/merge-apply.input.json": "sha256:299af3cd5b0c171805345ddf81a2663a28c33a1a402b09082a7b78fb443913cc",
+    "schemas/merge-applied.output.json": "sha256:799c2d6cbd896720bcb78c3987e7499761ec4368016fa2841f631448d038a066"
+  }
+}
