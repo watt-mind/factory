@@ -46,6 +46,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
 export function parseArgs(argv) {
   const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
@@ -333,6 +334,14 @@ async function main() {
     // `--gate` is a probe: it must never tear down, even if `--apply` is also set.
     const result = await survey(repo, { apply: APPLY && !GATE });
     surveys.push(result);
+    // Lifecycle observation (WM-75): fire-and-forget, day-scoped id so a
+    // re-run reports the same removal once but a later worktree for the same
+    // ticket is a new event.
+    for (const t of result.removed) {
+      await emitFactoryEvent("factory.worktree.reclaimed",
+        { repo: repo.name, ticket: t },
+        { eventId: `janitor:${repo.name}:${t}:${new Date().toISOString().slice(0, 10)}`, subject: t });
+    }
     if (GATE) continue;
     if (!quiet) printHuman(repo, result);
   }

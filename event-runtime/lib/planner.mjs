@@ -137,6 +137,18 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     if (!mapping) return humanNeeded(db, event, "unregistered_event_type", at, DEFAULT_PROPOSAL_TTL_SECONDS);
     const ttlSeconds = mapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS;
 
+    // Observe-only types (WM-75): the orchestrator reporting its own
+    // lifecycle. The event is the deliverable — admitted, journaled,
+    // queryable — and the plan is a typed NOOP, never an inbox ask.
+    if (mapping.observe === true) {
+      const proposal = insertProposal(db, {
+        id: newProposalId(), event, decision: "noop", status: "resolved",
+        reason: "observed", at, ttlSeconds,
+      });
+      setEventStatus(db, event, "noop");
+      return { decision: "noop", proposal, reason: "observed" };
+    }
+
     const def = getAgent(registry, mapping.agent);
 
     // §5 singleton: a scheduled loop whose previous run is still in flight

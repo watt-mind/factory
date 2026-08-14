@@ -31,6 +31,7 @@ import { openBlockers, BLOCKING_RELATIONS_GQL } from "./blockers.mjs";
 import { budgetExhausted } from "../lib/spend.mjs";
 import { agentLabel } from "../tools/linear.mjs";
 import { LEASE_HEARTBEAT_MS, releaseWorkerLease, renewWorkerLease, writeWorkerLease, liveWorkerLeases } from "../lib/worker-leases.mjs";
+import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
 const argv = process.argv.slice(2);
 const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
@@ -374,6 +375,11 @@ async function runTicket(t) {
     // as soon as it exists. The lease is independent of transcript activity:
     // a long test or API call can be silent without looking dead.
     writeWorkerLease({ repo: repo.name, ticket: t.identifier, owner: leaseOwner, pid: child.pid });
+    // Lifecycle observation (WM-75): fire-and-forget — the runtime being down
+    // must never affect dispatch. eventId is stable within this tick run.
+    void emitFactoryEvent("factory.ticket.dispatched",
+      { repo: repo.name, ticket: t.identifier, harness: HARNESS, worktree: wt },
+      { eventId: `dispatch:${t.identifier}:${stamp}`, subject: t.identifier });
     child.on("close", () => children.delete(child));
 
     let buf = "";

@@ -195,6 +195,21 @@ describe("planEvent", () => {
     expect(event.status).toBe("human_needed");
   });
 
+  test("observe-only event type → typed NOOP 'observed', never an inbox ask (WM-75)", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, {
+      type: "factory.ticket.dispatched",
+      payload: { repo: "bj29", ticket: "CLNT-1", harness: "claude" },
+    });
+    const outcome = planEvent(db, registry, ref, { now: NOW });
+    expect(outcome.decision).toBe("noop");
+    expect(outcome.reason).toBe("observed");
+    expect(outcome.proposal.status).toBe("resolved");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    const event = db.query(`SELECT status FROM events WHERE event_id = ?`).get(ref.eventId);
+    expect(event.status).toBe("noop");
+  });
+
   test("payload failing the agent input schema → human_needed with the first error", () => {
     const db = openDb(":memory:");
     const ref = admit(db, { payload: { repos: [] } });

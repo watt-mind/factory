@@ -161,6 +161,18 @@
     ],
     "proposalTtlSeconds": 1800
   },
+  "factory.ticket.dispatched": {
+    "observe": true
+  },
+  "factory.ticket.reaped": {
+    "observe": true
+  },
+  "factory.ticket.reconciled": {
+    "observe": true
+  },
+  "factory.worktree.reclaimed": {
+    "observe": true
+  },
   "clock.tick.reaper": {
     "agent": "reaper@1",
     "adapter": "command",

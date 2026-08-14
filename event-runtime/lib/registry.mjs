@@ -90,6 +90,15 @@ export function loadRegistry({ root = RUNTIME_ROOT } = {}) {
 
   const eventTypes = JSON.parse(readFileSync(path.join(root, "event-types.json"), "utf8"));
   for (const [type, mapping] of Object.entries(eventTypes)) {
+    // Observe-only types (WM-75): admitted and recorded, resolved by the
+    // planner as a typed NOOP — never a run, never a human_needed ask. They
+    // name no agent, and naming one anyway is a config error, not a hint.
+    if (mapping.observe === true) {
+      if (mapping.agent) {
+        throw new RegistryError(`event type ${type} is observe-only but names agent ${mapping.agent} — pick one`);
+      }
+      continue;
+    }
     if (!mapping.agent || !agents.has(mapping.agent)) {
       throw new RegistryError(`event type ${type} maps to unregistered agent ${mapping.agent}`);
     }

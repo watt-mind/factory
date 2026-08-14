@@ -28,6 +28,7 @@
 import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -486,6 +487,12 @@ Options:
 
     if (args.apply) {
       console.log(`        -> unassigned, returned to Todo`);
+      // Lifecycle observation (WM-75): fire-and-forget; the last-activity
+      // timestamp keys the id, so retrying the same stale claim re-admits
+      // nothing while the next genuine reap is a new event.
+      await emitFactoryEvent("factory.ticket.reaped",
+        { ticket: issue.identifier, reason: todoId ? "returned_to_todo" : "marker_cleared" },
+        { eventId: `reap:${issue.identifier}:${seen?.getTime() ?? "unknown"}`, subject: issue.identifier });
     }
   }
 

@@ -33,6 +33,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { gql, lastActivity } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
 export function parseArgs(argv) {
   const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
@@ -273,8 +274,18 @@ async function main() {
 
   let totalDrift = 0;
   for (const repo of repos) {
-    const { drift } = await reconcileRepo(repo, { apply: APPLY, gate: GATE, quietMin: QUIET_MIN });
+    const { drift, actions } = await reconcileRepo(repo, { apply: APPLY, gate: GATE, quietMin: QUIET_MIN });
     totalDrift += drift;
+    // Lifecycle observation (WM-75): fire-and-forget, one event per applied
+    // move; the PR numbers make the id stable across re-runs of the same drift.
+    if (APPLY && !GATE) {
+      for (const a of actions) {
+        const prs = (a.open ?? a.merged ?? []).join(",");
+        await emitFactoryEvent("factory.ticket.reconciled",
+          { repo: repo.name, ticket: a.issue.identifier, kind: a.type, targetState: a.targetState, prs: a.open ?? a.merged ?? [] },
+          { eventId: `reconcile:${a.issue.identifier}:${a.type}:${prs}`, subject: a.issue.identifier });
+      }
+    }
   }
 
   if (GATE) process.exit(totalDrift ? 0 : 1);
