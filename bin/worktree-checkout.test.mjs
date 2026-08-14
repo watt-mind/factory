@@ -28,9 +28,19 @@ function createTempProject() {
   return dir;
 }
 
+function makeTestTicket(prefix = "TEST") {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${prefix}-${Date.now()}-${process.pid}-${rand}`;
+}
+
+function makeTestLockDir(prefix = "test-lock") {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return path.join(tmpdir(), `${prefix}-${Date.now()}-${process.pid}-${rand}.lock`);
+}
+
 test("locked_bun_install executes real bun install under lock and releases lock", () => {
   const testDir = createTempProject();
-  const lockDir = path.join(tmpdir(), `test-lock-${Date.now()}-${Math.random()}.lock`);
+  const lockDir = makeTestLockDir("test-lock");
   try {
     const r = sh(`locked_bun_install "${testDir}"`, { FACTORY_LOCK_DIR: lockDir });
     expect(r.status).toBe(0);
@@ -43,7 +53,7 @@ test("locked_bun_install executes real bun install under lock and releases lock"
 
 test("locked_bun_install reclaims stale lock with dead PID and succeeds", () => {
   const testDir = createTempProject();
-  const lockDir = path.join(tmpdir(), `test-stale-lock-${Date.now()}-${Math.random()}.lock`);
+  const lockDir = makeTestLockDir("test-stale-lock");
   mkdirSync(lockDir, { recursive: true });
   writeFileSync(path.join(lockDir, "pid"), "999999");
 
@@ -59,7 +69,7 @@ test("locked_bun_install reclaims stale lock with dead PID and succeeds", () => 
 
 test("locked_bun_install preserves live locks and times out when lock held", () => {
   const testDir = createTempProject();
-  const lockDir = path.join(tmpdir(), `test-live-lock-${Date.now()}-${Math.random()}.lock`);
+  const lockDir = makeTestLockDir("test-live-lock");
   mkdirSync(lockDir, { recursive: true });
   writeFileSync(path.join(lockDir, "pid"), String(process.pid));
 
@@ -81,7 +91,7 @@ test("locked_bun_install preserves live locks and times out when lock held", () 
 test("concurrent locked_bun_install invocations serialize without colliding", async () => {
   const testDir1 = createTempProject();
   const testDir2 = createTempProject();
-  const lockDir = path.join(tmpdir(), `test-conc-lock-${Date.now()}-${Math.random()}.lock`);
+  const lockDir = makeTestLockDir("test-conc-lock");
 
   try {
     const [p1, p2] = await Promise.all([
@@ -108,14 +118,14 @@ test("concurrent locked_bun_install invocations serialize without colliding", as
 
 test("worktree-up --checkout-only creates checkout without daemons and worktree-down removes it", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-root-"));
-  const ticketId = `TEST-${Date.now() % 100000}`;
+  const ticketId = makeTestTicket("TEST");
 
   try {
     const upRes = Bun.spawnSync({
       cmd: ["bash", UP, ticketId, "--checkout-only"],
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, FACTORY_SKIP_FETCH: "1" },
     });
     expect(upRes.exitCode).toBe(0);
     const expectedPath = path.join(tempWtRoot, ticketId);
@@ -142,9 +152,8 @@ test("worktree-up --checkout-only creates checkout without daemons and worktree-
 
 test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-conc-"));
-  const base = Date.now() % 100000;
-  const ticket1 = `CONCA-${base}`;
-  const ticket2 = `CONCB-${base + 1}`;
+  const ticket1 = makeTestTicket("CONCA");
+  const ticket2 = makeTestTicket("CONCB");
 
   // Keep each child's stderr: a losing `git worktree add` reports the reason
   // (lock contention, etc.) only there, and a bare exit-1 in the CI log is
@@ -153,7 +162,7 @@ test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
     const proc = Bun.spawn(["bash", UP, ticket, "--checkout-only"], {
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, FACTORY_SKIP_FETCH: "1" },
     });
     const [stderr, status] = await Promise.all([
       new Response(proc.stderr).text(),
@@ -186,6 +195,68 @@ test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
     rmSync(tempWtRoot, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticket1}`, `feat/${ticket2}`] });
   }
+});
+
+test("high concurrency worktree-up --checkout-only with 4 parallel bring-ups succeeds", async () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-4conc-"));
+  const tickets = [
+    makeTestTicket("PARA"),
+    makeTestTicket("PARB"),
+    makeTestTicket("PARC"),
+    makeTestTicket("PARD"),
+  ];
+
+  const runUp = async (ticket) => {
+    const proc = Bun.spawn(["bash", UP, ticket, "--checkout-only", "--no-fetch"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    const [stderr, status] = await Promise.all([
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { ticket, status, stderr };
+  };
+
+  try {
+    const results = await Promise.all(tickets.map(runUp));
+    for (const r of results) {
+      if (r.status !== 0) {
+        console.error(`worktree-up ${r.ticket} exited ${r.status}; stderr:\n${r.stderr}`);
+      }
+      expect(r.status).toBe(0);
+      expect(existsSync(path.join(tempWtRoot, r.ticket))).toBe(true);
+    }
+
+    await Promise.all(
+      tickets.map((t) =>
+        Bun.spawn(["bash", DOWN, t], {
+          env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+        }).exited
+      )
+    );
+  } finally {
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    Bun.spawnSync({
+      cmd: ["git", "branch", "-D", ...tickets.map((t) => `feat/${t}`)],
+    });
+  }
+});
+
+test("git_fetch skips when FACTORY_SKIP_FETCH is set and base ref exists", () => {
+  const repo = path.resolve(import.meta.dir, "..");
+  const r = sh(`git_fetch "${repo}" origin develop`, { FACTORY_SKIP_FETCH: "1" });
+  expect(r.status).toBe(0);
+});
+
+test("git_fetch falls back to existing ref on remote failure", () => {
+  const repo = path.resolve(import.meta.dir, "..");
+  // Non-existent remote should fail network fetch but fall back if ref exists
+  const r = sh(`git_fetch "${repo}" non_existent_remote develop`, { FACTORY_SKIP_FETCH: "0" });
+  // Since non_existent_remote doesn't have develop in refs/remotes/non_existent_remote, it should die
+  expect(r.status).not.toBe(0);
+  expect(r.stderr).toContain("could not fetch");
 });
 
 test("worktree-up CLI argument parsing error paths", () => {
@@ -320,7 +391,7 @@ test("worktree-down CLI argument parsing error paths", () => {
 
 test("worktree-down refuses dirty worktree without --force and cleans up with --force", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-down-dirty-"));
-  const ticketId = `DIRTY-${Date.now() % 100000}`;
+  const ticketId = makeTestTicket("DIRTY");
   const expectedPath = path.join(tempWtRoot, ticketId);
 
   try {
@@ -329,7 +400,7 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
       cmd: ["bash", UP, ticketId, "--checkout-only"],
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, FACTORY_SKIP_FETCH: "1" },
     });
     expect(upRes.exitCode).toBe(0);
     expect(existsSync(expectedPath)).toBe(true);
