@@ -281,6 +281,34 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace
     });
     return { exitCode: 0, timedOut: false };
   }
+  if (spec.outputContract === "factory.dispatch-result/v1") {
+    const repo = spec.input?.repo ?? "factory";
+    const ticket = spec.input?.ticket ?? "WM-100";
+    const prUrl = `https://github.com/watt-mind/${repo}/pull/42`;
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        outcome: "PR_OPEN",
+        repo,
+        ticket,
+        prUrl,
+        verification: {
+          command: "bun test",
+          passed: true,
+          output: "3 pass\n0 fail\nRan 3 tests across 1 file.",
+        },
+        summary: `fake dispatch completed with PR open for ${ticket}`,
+      },
+      evidence: {
+        commands: ["bun test", "gh pr create"],
+        prUrl,
+        ticket,
+      },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
 
   const mode = spec.input?.repos?.[0];
 
