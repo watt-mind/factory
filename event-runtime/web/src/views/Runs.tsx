@@ -746,9 +746,9 @@ export function Runs({
                 Copy CLI
               </Button>
               <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectRun(null)}>Close</Button>
             </>
           }
+          close={<Button onClick={() => onSelectRun(null)}>Close</Button>}
         >
 
           {!d && (

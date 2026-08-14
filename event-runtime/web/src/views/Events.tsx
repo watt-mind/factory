@@ -533,9 +533,9 @@ export function Events({
             <>
               <Button onClick={() => copyText(sel.eventId, "event id")}>Copy id</Button>
               <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectEvent(null)}>Close</Button>
             </>
           }
+          close={<Button onClick={() => onSelectEvent(null)}>Close</Button>}
         >
 
           <Section title="Event">

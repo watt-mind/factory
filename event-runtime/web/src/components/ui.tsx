@@ -235,18 +235,29 @@ export function DetailPane({
   widthClass,
   title,
   actions,
+  close,
   children,
 }: {
   widthClass: string;
   title: ReactNode;
   actions: ReactNode;
+  /** Escape hatch pinned at the top-right, outside the wrapping action row,
+   *  so it stays visible and clickable no matter how many actions the view
+   *  stacks up or how narrow the panel gets (WM-97). */
+  close?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <aside className={`${widthClass} flex min-h-0 shrink-0 flex-col border-l border-(--border) bg-(--surface-1)`}>
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-(--border) px-4 py-3">
-        <div className="display min-w-0 truncate text-[14px] font-semibold">{title}</div>
-        <div className="flex shrink-0 flex-wrap justify-end gap-1.5">{actions}</div>
+      <div className="shrink-0 border-b border-(--border) px-4 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">{title}</div>
+          {close != null && <div className="shrink-0">{close}</div>}
+        </div>
+        {/* Own row under the title, and no shrink-0: the actions must be free
+            to wrap when the panel is narrower than the button row, instead of
+            crushing the title or clipping past the panel edge (WM-97). */}
+        <div className="mt-2 flex flex-wrap justify-end gap-1.5">{actions}</div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">{children}</div>
     </aside>

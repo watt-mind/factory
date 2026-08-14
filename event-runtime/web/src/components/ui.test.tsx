@@ -1,7 +1,7 @@
 import "../test-dom";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
-import { act, cleanup, render } from "@testing-library/react";
-import { Countdown, notify, ToastContainer } from "./ui";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { Button, Countdown, DetailPane, notify, ToastContainer } from "./ui";
 
 function stackOf(r: ReturnType<typeof render>): HTMLElement {
   const parent = r.getByRole("status").parentElement;
@@ -121,5 +121,68 @@ describe("Countdown", () => {
     if (!el) throw new Error("Countdown span is missing");
     expect(el.textContent).toBe("expired 2h ago");
     expect(el.getAttribute("title")).toBe(new Date(new Date(createdAt).getTime() + ttlSeconds * 1000).toISOString());
+  });
+});
+
+describe("DetailPane", () => {
+  // WM-97: with six actions in the Runs toolbar the old single-row header
+  // grew past the panel edge and clipped Close off entirely. Close now rides
+  // a dedicated non-wrapping slot next to the title; the other actions live
+  // in a row that is allowed to wrap. jsdom does no layout, so these assert
+  // the structure that produces that behavior, plus that Close stays wired.
+
+  function renderPane(onClose: () => void) {
+    return render(
+      <DetailPane
+        widthClass="w-[460px]"
+        title={<span>run_0000</span>}
+        actions={
+          <>
+            <Button onClick={() => {}}>Open in tab</Button>
+            <Button onClick={() => {}}>Expand</Button>
+            <Button onClick={() => {}}>Copy id</Button>
+            <Button onClick={() => {}}>Copy CLI</Button>
+            <Button onClick={() => {}}>Copy link</Button>
+          </>
+        }
+        close={<Button onClick={onClose}>Close</Button>}
+      >
+        <div>body</div>
+      </DetailPane>,
+    );
+  }
+
+  test("renders Close and fires its handler even with many actions present", () => {
+    const onClose = jest.fn();
+    const r = renderPane(onClose);
+    const close = r.getByText("Close");
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test("pins Close outside the wrapping action row, in a non-shrinking slot", () => {
+    const r = renderPane(() => {});
+    const close = r.getByText("Close");
+    const actionRow = r.getByText("Copy link").parentElement;
+    if (!actionRow) throw new Error("action row is missing");
+    // Close must not be a sibling inside the wrapping row, or wrapping order
+    // could push it below the fold with everything else.
+    expect(actionRow.contains(close)).toBe(false);
+    expect(classes(actionRow)).toContain("flex-wrap");
+    // shrink-0 on the row is what defeated flex-wrap originally: the row then
+    // keeps its max-content width and overflows instead of wrapping.
+    expect(classes(actionRow)).not.toContain("shrink-0");
+    const closeSlot = close.parentElement;
+    if (!closeSlot) throw new Error("close slot is missing");
+    expect(classes(closeSlot)).toContain("shrink-0");
+  });
+
+  test("omits the close slot when no close action is given", () => {
+    const r = render(
+      <DetailPane widthClass="w-[440px]" title="t" actions={<Button onClick={() => {}}>Copy id</Button>}>
+        <div>body</div>
+      </DetailPane>,
+    );
+    expect(r.queryByText("Close")).toBeNull();
   });
 });
