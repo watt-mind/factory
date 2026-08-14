@@ -20,6 +20,7 @@ import { admitEvent } from "./lib/intake.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { approveProposal, openProposals } from "./lib/proposals.mjs";
 import { loadRegistry } from "./lib/registry.mjs";
+import { emitDueTicks } from "./lib/schedules.mjs";
 import { runOnce } from "./lib/worker.mjs";
 
 const registry = loadRegistry();
@@ -213,5 +214,86 @@ describe("dispatch-completion edge: a finished dispatch re-fires the work-scan (
       expect(db.query(`SELECT COUNT(*) AS n FROM events WHERE type = 'factory.work.requested'`).get().n).toBe(0);
       expect(openProposals(db, {}).find((p) => p.spec?.agent === "work-scan@1")).toBeUndefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The heartbeat half (WM-112): work/merge/ship loop schedules per dispatchable
+// repo, every one shipped disabled — switching a loop on stays a deliberate
+// operator act, and `approval: auto` appears nowhere (WM-107 §7).
+// ---------------------------------------------------------------------------
+
+/** The repos in config/repos.yaml that are NOT report_only, enumerated by hand
+ *  from the actual file — dispatch doc §5: report_only repos are never loop
+ *  targets. Everything else there (coach-wattz, watts-mobile, proxies,
+ *  hdkiller, eslint-config, factory) is report_only. */
+const DISPATCHABLE = ["bj29", "wm-home", "legalease", "cashsaas"];
+
+const loopEntry = (eventType, repo, every) => ({
+  every,
+  eventType,
+  payload: { repo },
+  catchUp: "none",
+  singleton: true,
+  approval: "watched",
+  enabled: false,
+});
+
+describe("loop schedules ship disabled (WM-112)", () => {
+  test("every dispatchable repo gets work/merge every 30m and ship weekly — all off, all watched, all singleton", () => {
+    for (const repo of DISPATCHABLE) {
+      expect(registry.schedules[`work-${repo}`]).toEqual(loopEntry("factory.work.requested", repo, "30m"));
+      expect(registry.schedules[`merge-${repo}`]).toEqual(loopEntry("factory.merge.requested", repo, "30m"));
+      expect(registry.schedules[`ship-${repo}`]).toEqual(loopEntry("factory.ship.requested", repo, "7d"));
+    }
+  });
+
+  test("no loop targets a report_only repo, and no loop anywhere declares approval auto", () => {
+    for (const repo of ["coach-wattz", "watts-mobile", "proxies", "hdkiller", "eslint-config", "factory"]) {
+      expect(registry.schedules[`work-${repo}`]).toBeUndefined();
+      expect(registry.schedules[`merge-${repo}`]).toBeUndefined();
+      expect(registry.schedules[`ship-${repo}`]).toBeUndefined();
+    }
+    for (const [loop, schedule] of Object.entries(registry.schedules)) {
+      expect({ loop, approval: schedule.approval }).toEqual({ loop, approval: "watched" });
+      expect({ loop, enabled: schedule.enabled }).toEqual({ loop, enabled: false });
+    }
+  });
+
+  test("enabling a loop in a fixture registry fires exactly its event type with its repo payload", () => {
+    const cases = [
+      ["work-bj29", "factory.work.requested", "bj29"],
+      ["merge-wm-home", "factory.merge.requested", "wm-home"],
+      ["ship-legalease", "factory.ship.requested", "legalease"],
+    ];
+    for (const [loop, eventType, repo] of cases) {
+      const db = openDb(":memory:");
+      const fixture = { ...registry, schedules: { [loop]: { ...registry.schedules[loop], enabled: true } } };
+      const outcome = emitDueTicks(db, fixture, { now: Date.parse("2026-08-14T10:05:00Z") });
+      expect(outcome.errors).toEqual([]);
+      expect(outcome.emitted).toHaveLength(1);
+      expect(outcome.emitted[0].loop).toBe(loop);
+
+      const row = db.query(`SELECT envelope_json FROM events`).get();
+      const envelope = JSON.parse(row.envelope_json);
+      expect(envelope.type).toBe(eventType);
+      expect(envelope.source).toBe("schedule");
+      expect(envelope.payload).toMatchObject({ repo, loop });
+      db.close();
+    }
+    // Known first-enable precondition, recorded rather than silently shipped:
+    // the tick payload carries {loop, slot, cadenceSeconds, skippedSlots}
+    // alongside the static {repo}, and the three scan input schemas do not yet
+    // whitelist those fields the way repo-loop.input.json does — so a planned
+    // tick lands as a typed human_needed(invalid_input), never a run. Fixing
+    // it means re-pinning agents' definitions, out of this ticket's scope; see
+    // docs/event-runtime-schedules.md §"Repo loops" and the WM-112 report.
+  });
+
+  test("a disabled loop never fires — the shipped default is silence", () => {
+    const db = openDb(":memory:");
+    expect(emitDueTicks(db, registry, { now: Date.now() }).emitted).toEqual([]);
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+    db.close();
   });
 });

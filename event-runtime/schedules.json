@@ -42,5 +42,113 @@
     "singleton": true,
     "approval": "watched",
     "enabled": false
+  },
+  "work-bj29": {
+    "every": "30m",
+    "eventType": "factory.work.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "merge-bj29": {
+    "every": "30m",
+    "eventType": "factory.merge.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "ship-bj29": {
+    "every": "7d",
+    "eventType": "factory.ship.requested",
+    "payload": { "repo": "bj29" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "work-wm-home": {
+    "every": "30m",
+    "eventType": "factory.work.requested",
+    "payload": { "repo": "wm-home" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "merge-wm-home": {
+    "every": "30m",
+    "eventType": "factory.merge.requested",
+    "payload": { "repo": "wm-home" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "ship-wm-home": {
+    "every": "7d",
+    "eventType": "factory.ship.requested",
+    "payload": { "repo": "wm-home" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "work-legalease": {
+    "every": "30m",
+    "eventType": "factory.work.requested",
+    "payload": { "repo": "legalease" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "merge-legalease": {
+    "every": "30m",
+    "eventType": "factory.merge.requested",
+    "payload": { "repo": "legalease" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "ship-legalease": {
+    "every": "7d",
+    "eventType": "factory.ship.requested",
+    "payload": { "repo": "legalease" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "work-cashsaas": {
+    "every": "30m",
+    "eventType": "factory.work.requested",
+    "payload": { "repo": "cashsaas" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "merge-cashsaas": {
+    "every": "30m",
+    "eventType": "factory.merge.requested",
+    "payload": { "repo": "cashsaas" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "ship-cashsaas": {
+    "every": "7d",
+    "eventType": "factory.ship.requested",
+    "payload": { "repo": "cashsaas" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
   }
 }

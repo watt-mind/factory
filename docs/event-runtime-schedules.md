@@ -1,6 +1,7 @@
 # Event runtime: scheduled clock events
 
-Status: **implemented** (OPS-381). Tracking: OPS-380 (this spec), OPS-381 (implementation).
+Status: **implemented** (OPS-381). Tracking: OPS-380 (this spec), OPS-381
+(implementation), WM-112 (repo loops §12, GitHub webhook intake §13).
 Parent: [event-runtime.md](event-runtime.md) §2 (`clock.tick.<loop>`), §3
 (isolation and capacity), §5.4 (idempotency), §12 (approval).
 
@@ -226,3 +227,143 @@ error, not a surprise at 03:00.
 
 1–3 are the substance; 4 is the one that changes what the runtime is allowed
 to do unattended and deserves its own review.
+
+## 12. Repo loops: work, merge, ship (WM-112)
+
+The chains only make a **loop** once events arrive without a human injecting
+them. The heartbeat half is schedules: for every repo in `config/repos.yaml`
+that is **not** `report_only` (today: `bj29`, `wm-home`, `legalease`,
+`cashsaas` — the dispatch doc's §5 rule keeps report-only repos out), three
+per-repo entries in `schedules.json`:
+
+| Loop | Cadence | Fires | Chain it heads |
+| :--- | :--- | :--- | :--- |
+| `work-<repo>` | `30m` | `factory.work.requested {repo}` | work-scan → dispatch (WM-110/108) |
+| `merge-<repo>` | `30m` | `factory.merge.requested {repo}` | merge-scan → merge-apply / escalate (WM-109) |
+| `ship-<repo>` | `7d` | `factory.ship.requested {repo}` | ship-scan → human-only ship-apply (WM-111) |
+
+Every entry ships `enabled: false`, `approval: "watched"`, `singleton: true`,
+`catchUp: "none"`. Switching a loop on is a deliberate, per-loop operator act
+in a reviewable commit — the §6 earning path applies unchanged, and
+`approval: auto` appears nowhere (the ship chain's apply step could never
+earn it anyway: the registry fails closed on `auto` against a
+`humanApprovalOnly` type, WM-111).
+
+Notes, stated rather than absorbed:
+
+- **There are no offsets.** §8 is intervals only; a slot is the epoch floor,
+  so `work-<repo>` and `merge-<repo>` at `30m` tick on the same boundary.
+  That is safe by construction — each loop is a singleton, each tick is a
+  watched proposal, and merges serialize downstream — so staggering is a
+  cosmetic nicety this mechanism deliberately does not have.
+- **The latency half is the dispatch-completion edge**, not a faster clock:
+  `dispatch@1` outcomes `PR_OPEN` and `NOT_CLAIMED` chain straight back into
+  `factory.work.requested {repo}` (edges.json, WM-112), so a freed slot is
+  re-scanned immediately and the 30-minute tick only catches what no
+  completion re-fired. `FAILED` and `BLOCKED` terminate — a run that needs a
+  human must not spin the scanner.
+- **First-enable precondition (known gap, WM-112).** A tick's payload carries
+  `{loop, slot, cadenceSeconds, skippedSlots}` alongside the static
+  `{repo}`. The loop-native agents accept those fields
+  (`schemas/repo-loop.input.json`); the three scan input schemas
+  (`work-scan`, `merge-scan`, `ship-scan`) do not yet, so an enabled loop's
+  tick currently plans to a typed `human_needed (invalid_input)` instead of a
+  proposal. Extending those schemas means re-pinning the agents' definitions
+  — out of WM-112's scope, filed as follow-up. Until it lands, the loops are
+  registered, visible, and inert even if enabled; webhook and injected
+  events (whose payloads are exactly `{repo}`) are unaffected.
+- **Doctor coverage is automatic.** The §9 silent-loop anomaly
+  (`stoppedSchedules` in `GET /status`) iterates `schedules.json` via
+  `scheduleView`, so the twelve new loops are covered without any change to
+  the doctor.
+
+## 13. GitHub webhook intake (WM-112)
+
+The other half of closing the loop: GitHub deliveries, translated at the
+intake boundary into ordinary `factory.event/v1` envelopes. The design
+decision, made against the code: intake's structure allowed a clean seam
+(option *a* of WM-112), so verification and translation live in
+`lib/intake.mjs` (`verifyGitHubWebhook`, `translateGitHubEvent`) and only the
+route — `POST /github` — sits in `lib/api.mjs`, because intake has no HTTP
+layer. The factory-envelope path on `POST /events` is byte-for-byte
+unchanged.
+
+**The contract:**
+
+- **Path**: `POST /github` (GitHub webhook "Content type:
+  application/json").
+- **Headers**: `X-GitHub-Event` (kind), `X-GitHub-Delivery` (GUID →
+  `eventId`, so at-least-once delivery dedupes on the ordinary
+  `(source="github", eventId)` key), `X-Hub-Signature-256` (GitHub's
+  `sha256=<hex>` HMAC over the raw body).
+- **Secret**: `FACTORY_GITHUB_WEBHOOK_SECRET`, dedicated on purpose — GitHub
+  signs raw-body-only with no timestamp, and one secret across two signature
+  schemes would let a capture from the weaker scheme replay against the
+  stronger. Absent secret disables the route, like the factory path.
+- **No signed timestamp** exists in GitHub's scheme, so there is no staleness
+  window; replay of a captured delivery is bounded by delivery-ID dedup
+  instead (a replay answers `duplicate: true` and admits nothing).
+
+**Translations** — minimal and typed; anything else refuses:
+
+| Delivery | Condition | Envelope |
+| :--- | :--- | :--- |
+| `pull_request` | action `opened`/`synchronize`/`ready_for_review`, base ref = the configured repo's `base`, repo not `report_only` | `factory.merge.requested`, subject + payload `{repo}` (short name) |
+| `workflow_run` | action `completed`, conclusion `failure`, repo configured (`report_only` included) | `github.workflow-run.failed`, subject `ci`, payload `{repo: owner/name slug, runId}` — the existing shape ci-log-capture consumes |
+
+**Refusal cases**, following intake's typed-refusal conventions:
+
+- `401 {error}` — missing/bad signature, missing secret. Nothing parsed,
+  nothing written.
+- `200 {admitted: false, ignored: true, reason}` — benign non-events, so
+  GitHub never marks the hook failing: `unhandled_event` (ping and every
+  other kind), `unhandled_action` (closed PRs, green runs),
+  `unconfigured_repo` (no `github:` match in repos.yaml),
+  `not_base_branch`, `repo_report_only` (CI failures still flow for
+  report-only repos; merge requests never do).
+- `422 {errors}` — malformed deliveries that deserve a failure:
+  `missing_delivery_id`, `malformed_payload`, invalid JSON.
+
+**Replay-CLI parity.** Every webhook kind has an injected equivalent through
+`cli.mjs inject` (same intake, no signature, loopback only) — which is also
+the offline test rig:
+
+```jsonc
+// pull_request → merge chain          // workflow_run failure → CI chain
+{                                      {
+  "schemaVersion": "factory.event/v1",   "schemaVersion": "factory.event/v1",
+  "eventId": "gh-replay-1",              "eventId": "gh-replay-2",
+  "type": "factory.merge.requested",     "type": "github.workflow-run.failed",
+  "source": "github",                    "source": "github",
+  "subject": "bj29",                     "subject": "ci",
+  "occurredAt": "<now>",                 "occurredAt": "<now>",
+  "correlationId": "gh-replay-1",        "correlationId": "gh-replay-2",
+  "payload": { "repo": "bj29" }          "payload": { "repo": "watt-mind/bakonszegi-coaching", "runId": 12345 }
+}                                      }
+```
+
+## 14. The loop, end to end (demo walkthrough)
+
+The whole circuit, on the local fake-adapter runtime (`event-runtime/demo/`,
+port 7522 — a demo, never a test dependency), or any watched environment:
+
+1. **Ticket becomes ready** → inject `factory.work.requested {repo}` (or let
+   an enabled `work-<repo>` slot fire it; a finished dispatch re-fires it by
+   itself via the completion edge).
+2. **work-scan proposal** appears in the inbox — the typed DISPATCH plan with
+   its Owned Paths evidence. **Approve.**
+3. **(fake) dispatch** runs: claim → worktree by delegation → PR → the
+   `factory.dispatch-result/v1` artifact. Its `PR_OPEN` outcome chains
+   `factory.work.requested` again — the queue is re-scanned without anyone
+   asking.
+4. **PR webhook arrives** — GitHub's `pull_request` delivery on the repo's
+   base branch through `POST /github` (or its injected equivalent above) —
+   and admits `factory.merge.requested {repo}`, deduped on the delivery ID.
+5. **merge proposal**: merge-scan reviews the open PRs cold and its MERGE
+   verdict chains a head-SHA-pinned `merge-apply` plan into a watched
+   proposal. Approving *that* is the merge.
+
+Ship is the same shape on a weekly clock, with one permanent difference: the
+`ship-apply` approval is structurally human-only (WM-111) — that watched
+approval *is* the master-merge decision, and no schedule, chain, or earned
+policy can ever make it `auto`.
