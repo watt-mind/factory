@@ -10,6 +10,7 @@
  * partial acceptances. These checks verify form, not truth (§9): semantic
  * evidence checking is slice 2.
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
@@ -126,6 +127,15 @@ const SEMANTIC_CHECKS = {
     }
     return violations;
   },
+  "factory.dispatch-result/v1": (candidate) => {
+    const violations = [];
+    const { artifact } = candidate;
+    if (artifact.outcome === "PR_OPEN") {
+      if (!artifact.prUrl) violations.push("pr_url_required_for_pr_open");
+      if (artifact.verification?.passed !== true) violations.push("verification_must_pass_for_pr_open");
+    }
+    return violations;
+  },
 };
 
 function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts = [] }) {
@@ -138,6 +148,28 @@ function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalH
   if (semantic) {
     const semanticViolations = semantic(candidate);
     if (semanticViolations.length > 0) throw new ContractViolation(semanticViolations);
+  }
+
+  // Execute repo's declared verify command for tier-2 mutating runs (docs/event-runtime-dispatch.md §5, §9, WM-115)
+  const markerPath = path.join(workspaceDir, ".worktree.json");
+  let worktreeRecord = null;
+  if (existsSync(markerPath)) {
+    try {
+      worktreeRecord = JSON.parse(readFileSync(markerPath, "utf8"));
+    } catch {}
+  }
+
+  let repoVerifyPassed = false;
+  if (worktreeRecord?.verify && candidate.artifact?.outcome === "PR_OPEN") {
+    const worktreePath = worktreeRecord.path && existsSync(worktreeRecord.path)
+      ? worktreeRecord.path
+      : path.join(workspaceDir, "repo");
+    const vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], { cwd: worktreePath, encoding: "utf8" });
+    if (vres.status !== 0) {
+      const why = (vres.stderr || vres.stdout || "").trim().split("\n").pop() || `exit ${vres.status}`;
+      throw new ContractViolation([`repo_verify_failed: ${why}`]);
+    }
+    repoVerifyPassed = true;
   }
 
   // Runtime-injected artifacts (e.g. the adapter's transcript): best-effort —
@@ -199,6 +231,7 @@ function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalH
         "schema_valid", "hash_recomputed", "paths_confined", "artifacts_exist",
         ...(evidence !== undefined ? ["evidence_retained"] : []),
         ...(SEMANTIC_CHECKS[spec.outputContract] ? ["evidence_recomputed"] : []),
+        ...(repoVerifyPassed ? ["repo_verify_passed"] : []),
       ],
     },
     artifacts: collected,

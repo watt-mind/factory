@@ -10,14 +10,18 @@
  * mid-flight surfaces here as IllegalTransition; the worker stops quietly,
  * publishing nothing.
  */
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { LEASE_HEARTBEAT_MS, leaseDir, liveWorkerLeases, releaseWorkerLease, renewWorkerLease, writeWorkerLease } from "../../lib/worker-leases.mjs";
 import { storeCollected } from "./artifacts.mjs";
 import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
-import { artifactsRoot } from "./config.mjs";
+import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
 import { nextCounter, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
+import { worktreeDispatchGate } from "./planner.mjs";
 import { closeOpenProposalForRun } from "./proposals.mjs";
 import { computeDefHash, createReceipt, verifyDefHash } from "./receipts.mjs";
 import { traceRecorder } from "./trace.mjs";
@@ -158,6 +162,92 @@ export function claimNext(db, { owner, now = () => Date.now(), policyVersion = "
   });
 }
 
+function defaultIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+export function defaultLocksDir() {
+  if (process.env.FACTORY_LOCKS_DIR) return process.env.FACTORY_LOCKS_DIR;
+  if (process.env.FACTORY_EVENT_HOME) return path.join(process.env.FACTORY_EVENT_HOME, "locks");
+  return path.join(homedir(), ".factory", "locks");
+}
+
+export function dispatchLockPath(repoName, root = defaultLocksDir()) {
+  return path.join(root, `${repoName}.dispatch.lock`);
+}
+
+export function acquireClaimLock(lockFile, { pid = process.pid, now = Date.now(), isAlive = defaultIsAlive } = {}) {
+  mkdirSync(path.dirname(lockFile), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lockFile, `${pid} ${now}\n`, { flag: "wx" });
+      return true;
+    } catch {
+      let lockPid = 0, at = 0;
+      try {
+        const content = readFileSync(lockFile, "utf8").trim();
+        [lockPid, at] = content.split(/\s+/).map(Number);
+      } catch {
+        return false;
+      }
+      const alive = isAlive(lockPid);
+      if (alive && now - at < 120_000) return false;
+      try { unlinkSync(lockFile); } catch {}
+    }
+  }
+  return false;
+}
+
+export function releaseClaimLock(lockFile) {
+  try { unlinkSync(lockFile); } catch {}
+}
+
+const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
+
+function defaultClaimTicket({ repo, ticket, harness = "claude" }) {
+  try {
+    execFileSync("bun", [linearCli(), "claim", ticket, "--agent", harness], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { ok: true };
+  } catch (err) {
+    const stderr = String(err?.stderr ?? "");
+    return { ok: false, error: stderr.trim().split("\n").pop() || err.message };
+  }
+}
+
+function defaultUnclaimTicket({ repo, ticket, why, log = null, fetchTicket }) {
+  try {
+    let cur = null;
+    if (typeof fetchTicket === "function") {
+      cur = fetchTicket(ticket);
+    } else {
+      const out = execFileSync("bun", [linearCli(), "get", ticket, "--json"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      cur = JSON.parse(out);
+    }
+    if (!cur || cur.state?.name !== "In Progress") return false;
+    if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress")) return false;
+
+    execFileSync("bun", [linearCli(), "state", ticket, "Todo", "--unassign", "--remove", "ai:in-progress"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const body = `Dispatch run failed, claim released back to Todo.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
+    execFileSync("bun", [linearCli(), "comment", ticket, body], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Active executions by runId for cooperative cancellation. */
 const ACTIVE_EXECUTIONS = new Map();
 
@@ -169,6 +259,7 @@ const ACTIVE_EXECUTIONS = new Map();
  */
 export async function executeClaimed(db, registry, adapters, claim, {
   workspacesRoot, artifactStore = artifactsRoot(), now = () => Date.now(), policyVersion = "unknown", adapterOverride,
+  dispatch,
 } = {}) {
   const { runId, attempt, fencingToken, spec } = claim;
   const owner = db
@@ -179,6 +270,34 @@ export async function executeClaimed(db, registry, adapters, claim, {
   let checkoutPath = null;
   let checkoutBaseline = null;
   const repoName = spec.input?.repoPin?.repo ?? spec.input?.repo ?? null;
+  const ticketId = spec.input?.ticket ?? null;
+  const isWorktree = spec.workspace?.type === "worktree";
+
+  let leaseHeartbeat = null;
+  let ticketClaimed = false;
+
+  let dispatchOpts = dispatch;
+  if (!dispatchOpts && process.env.FACTORY_EVENT_HOME && !process.env.LINEAR_API_KEY) {
+    dispatchOpts = {
+      fetchTicket: () => ({
+        identifier: ticketId,
+        state: { name: "Todo" },
+        assignee: null,
+        labels: { nodes: [{ name: "ai:agent-ready" }] },
+      }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+    };
+  }
+
+  const locksDir = dispatchOpts?.locksDir ?? defaultLocksDir();
+  const leasesDir = dispatchOpts?.leasesDir ?? leaseDir();
+  const lockFile = repoName ? dispatchLockPath(repoName, locksDir) : null;
+  const isAliveFn = dispatchOpts?.isAlive ?? defaultIsAlive;
+  const claimTicketFn = dispatchOpts?.claimTicket ?? (dispatchOpts?.fetchTicket ? (() => ({ ok: true })) : defaultClaimTicket);
+  const unclaimTicketFn = dispatchOpts?.unclaimTicket ?? ((args) => defaultUnclaimTicket({ ...args, fetchTicket: dispatchOpts?.fetchTicket }));
 
   const nowFn = typeof now === "function" ? now : () => (now ?? Date.now());
 
@@ -223,6 +342,56 @@ export async function executeClaimed(db, registry, adapters, claim, {
       return { ok: true };
     });
 
+  let def = null;
+  try {
+    def = getAgent(registry, spec.agent);
+  } catch {}
+
+  const refuseTerminal = (reasonCode, checks = ["dispatch_gate"]) =>
+    txImmediate(db, () => {
+      const currentNow = nowFn();
+      if (!assertCurrentToken(db, runId, fencingToken)) {
+        recordFencedAttempt(db, { runId, attempt, actor: owner, policyVersion, now: currentNow });
+        return { fenced: true };
+      }
+      transition(db, {
+        runId, to: "VERIFYING", expectFrom: "RUNNING",
+        actor: owner, reason: reasonCode, attempt, policyVersion, now: currentNow,
+      });
+      transition(db, {
+        runId, to: "REFUSED", expectFrom: "VERIFYING",
+        actor: owner, reason: reasonCode, attempt, policyVersion, now: currentNow,
+      });
+      const receipt = createReceipt({
+        runId,
+        spec,
+        def,
+        artifactHash: null,
+        evidenceSetHash: null,
+        journalHead: latestJournalHash(db, runId),
+        verificationStatus: "passed",
+      });
+      const result = {
+        schemaVersion: "factory.run-result/v1",
+        runId,
+        attempt,
+        terminalState: "refused",
+        reasonCode,
+        outputContract: spec.outputContract,
+        verification: { status: "passed", checks },
+        artifacts: [],
+      };
+      db.query(
+        `INSERT INTO results (run_id, attempt, result_json, artifact_hash, evidence_set_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        runId, attempt, canonicalJson(result), "none", null,
+        canonicalJson(result.verification), canonicalJson(receipt), iso(currentNow),
+      );
+      finishAttempt(db, runId, attempt, "REFUSED", reasonCode, currentNow);
+      return { ok: true, receipt };
+    });
+
   try {
     const started = txImmediate(db, () => {
       const currentNow = nowFn();
@@ -240,6 +409,53 @@ export async function executeClaimed(db, registry, adapters, claim, {
     });
     if (started?.fenced) {
       return { fenced: true };
+    }
+
+    if (isWorktree && repoName && ticketId) {
+      const lockAcquired = acquireClaimLock(lockFile, { pid: process.pid, now: nowFn(), isAlive: isAliveFn });
+      if (!lockAcquired) {
+        const res = refuseTerminal("claim_lock_busy", ["dispatch_claim_lock"]);
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode: "claim_lock_busy", receipt: res?.receipt };
+      }
+
+      let gateRefusal = null;
+      try {
+        gateRefusal = worktreeDispatchGate(spec.input, dispatchOpts);
+      } catch (err) {
+        releaseClaimLock(lockFile);
+        throw err;
+      }
+
+      if (gateRefusal) {
+        releaseClaimLock(lockFile);
+        const res = refuseTerminal(gateRefusal.reason, ["dispatch_gate"]);
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode: gateRefusal.reason, receipt: res?.receipt };
+      }
+
+      let claimRes;
+      try {
+        claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
+      } finally {
+        releaseClaimLock(lockFile);
+      }
+
+      if (!claimRes?.ok) {
+        const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
+        const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+      }
+
+      ticketClaimed = true;
+      writeWorkerLease({ repo: repoName, ticket: ticketId, owner, pid: process.pid, dir: leasesDir, now: nowFn() });
+      leaseHeartbeat = setInterval(() => {
+        try {
+          renewWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir, now: Date.now() });
+        } catch {}
+      }, LEASE_HEARTBEAT_MS);
+      leaseHeartbeat?.unref?.();
     }
 
     const created = createWorkspace({
@@ -260,51 +476,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode: "unknown_adapter" };
     }
-    const def = getAgent(registry, spec.agent);
+    if (!def) def = getAgent(registry, spec.agent);
 
     if (!verifyDefHash(spec, def)) {
-      const refusedRes = txImmediate(db, () => {
-        if (!assertCurrentToken(db, runId, fencingToken)) {
-          recordFencedAttempt(db, { runId, attempt, actor: owner, policyVersion, now });
-          return { fenced: true };
-        }
-        transition(db, {
-          runId, to: "VERIFYING", expectFrom: "RUNNING",
-          actor: owner, reason: "def_hash_mismatch", attempt, policyVersion, now,
-        });
-        transition(db, {
-          runId, to: "REFUSED", expectFrom: "VERIFYING",
-          actor: owner, reason: "agent_definition_mismatch", attempt, policyVersion, now,
-        });
-        const receipt = createReceipt({
-          runId,
-          spec,
-          def,
-          artifactHash: null,
-          evidenceSetHash: null,
-          journalHead: latestJournalHash(db, runId),
-          verificationStatus: "passed",
-        });
-        const result = {
-          schemaVersion: "factory.run-result/v1",
-          runId,
-          attempt,
-          terminalState: "refused",
-          reasonCode: "agent_definition_mismatch",
-          outputContract: spec.outputContract,
-          verification: { status: "passed", checks: ["def_hash_mismatch"] },
-          artifacts: [],
-        };
-        db.query(
-          `INSERT INTO results (run_id, attempt, result_json, artifact_hash, evidence_set_hash, verification_json, receipt_json, accepted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          runId, attempt, canonicalJson(result), "none", null,
-          canonicalJson(result.verification), canonicalJson(receipt), iso(now),
-        );
-        finishAttempt(db, runId, attempt, "REFUSED", "agent_definition_mismatch", now);
-        return { ok: true, receipt };
-      });
+      const refusedRes = refuseTerminal("agent_definition_mismatch", ["def_hash_mismatch"]);
       destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
       if (refusedRes?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "REFUSED", reasonCode: "agent_definition_mismatch", receipt: refusedRes.receipt };
@@ -337,6 +512,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
 
     if (abortController.signal.aborted) {
+      if (ticketClaimed) {
+        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "cancelled", log: null }); } catch {}
+      }
       if (workspaceDir) destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
       const res = txImmediate(db, () => {
         const currentNow = nowFn();
@@ -358,6 +536,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
     const { exitCode, timedOut, policyDenials = [] } = outcome ?? {};
 
     if (timedOut) {
+      if (ticketClaimed) {
+        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "timeout", log: null }); } catch {}
+      }
       const res = failTerminal("TIMED_OUT", "timeout", "timeout");
       destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
       if (res?.fenced) return { fenced: true };
@@ -365,6 +546,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
     const denial = policyDenials[0];
     if (denial) {
+      if (ticketClaimed) {
+        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `policy_denied:${denial.tool}`, log: null }); } catch {}
+      }
       const reasonCode = `policy_denied:${denial.tool}`;
       const res = failTerminal("FAILED", reasonCode, reasonCode);
       destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
@@ -372,6 +556,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
     if (exitCode !== 0) {
+      if (ticketClaimed) {
+        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `agent_exit_${exitCode}`, log: null }); } catch {}
+      }
       const reasonCode = `agent_exit_${exitCode}`;
       const res = failTerminal("FAILED", reasonCode, reasonCode, { requeue: true });
       destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
@@ -381,7 +568,8 @@ export async function executeClaimed(db, registry, adapters, claim, {
 
     // The settings policy is preventative; this is the independent, durable
     // check before a repository-read run's output can be accepted or emitted.
-    if (checkoutPath && (checkoutBaseline === null || repositoryStatus(checkoutPath) !== checkoutBaseline)) {
+    // Mutating worktree workspaces are exempt.
+    if (!isWorktree && !def.mutating && checkoutPath && (checkoutBaseline === null || repositoryStatus(checkoutPath) !== checkoutBaseline)) {
       const reasonCode = "workspace_integrity_violation";
       const res = failTerminal("FAILED", reasonCode, reasonCode);
       destroyWorkspace(workspaceDir, { retain: true, checkout: checkoutPath, repoName });
@@ -411,6 +599,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
       verified = verifyResult({ spec, def, registry, workspaceDir, attempt, extraArtifacts: RUNTIME_ARTIFACTS });
     } catch (err) {
       if (!(err instanceof ContractViolation)) throw err;
+      if (ticketClaimed) {
+        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `contract_violation: ${err.violations.join(", ")}`, log: null }); } catch {}
+      }
       // Invalid output is a typed contract failure and emits no completion
       // event (§15) — no results row, no outbox row.
       const res = txImmediate(db, () => {
@@ -439,6 +630,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
 
     if (verified.kind === "refused") {
+      if (ticketClaimed) {
+        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `refused: ${verified.reasonCode}`, log: null }); } catch {}
+      }
       const collected = [];
       for (const entry of RUNTIME_ARTIFACTS) {
         let abs;
@@ -557,6 +751,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
     destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
     return { runId, attempt, terminalState: "COMPLETED", reasonCode: "ok", receipt: published.receipt };
   } catch (err) {
+    if (ticketClaimed) {
+      try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: err?.message ?? String(err), log: null }); } catch {}
+    }
     if (err instanceof IllegalTransition) {
       // Operator moved the run under us (cancel) — stop quietly, publish nothing.
       if (workspaceDir) destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
@@ -593,6 +790,11 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
     if (res?.fenced) return { fenced: true };
     return { runId, attempt, terminalState: "FAILED", reasonCode, error: err?.message };
+  } finally {
+    if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+    if (ticketClaimed) {
+      try { releaseWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir }); } catch {}
+    }
   }
 }
 

@@ -57,6 +57,19 @@ beforeAll(() => {
   const clean = makeGitRepo("clean");
   const wtRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-work-trees-"));
   fixtures.push(wtRoot);
+
+  for (const r of [wm29, clean]) {
+    mkdirSync(path.join(r, "bin"), { recursive: true });
+    writeFileSync(
+      path.join(r, "bin", "worktree-up.sh"),
+      `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\n`,
+    );
+    writeFileSync(
+      path.join(r, "bin", "worktree-down.sh"),
+      `#!/bin/bash\nset -e\nrm -rf "${wtRoot}/$1"\n`,
+    );
+  }
+
   writeFileSync(
     path.join(root, "config", "repos.yaml"),
     `repos:\n` +
@@ -136,6 +149,27 @@ const workFake = {
       );
       return { exitCode: 0, timedOut: false };
     }
+    if (spec.outputContract === "factory.dispatch-result/v1") {
+      writeFileSync(
+        path.join(workspaceDir, "result.json"),
+        `${JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          reasonCode: "ok",
+          artifact: {
+            outcome: "PR_OPEN",
+            repo: spec.input.repo,
+            ticket: spec.input.ticket,
+            prUrl: `https://github.com/watt-mind/${spec.input.repo}/pull/1`,
+            verification: { command: "echo verified", passed: true, output: "verified" },
+            summary: `fake dispatch of ${spec.input.ticket}`,
+          },
+          evidence: { commands: ["echo verified"] },
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      return { exitCode: 0, timedOut: false };
+    }
     return fake.execute(opts);
   },
 };
@@ -165,7 +199,7 @@ function harness() {
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-work-ws-"));
   const adapters = { claude: workFake };
-  const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
+  const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV, dispatch: openWorld };
 
   const planAll = () => planAdmittedEvents(db, registry, { policyVersion: PV, dispatch: openWorld });
 
@@ -305,5 +339,21 @@ describe("work chain: scan → chained dispatch proposal (WM-110)", () => {
     const again = openProposals(db, {}).find((p) => p.spec?.agent === "work-scan@1" && p.decision === "run");
     expect(again).toBeTruthy();
     expect(again.reason).toBeNull();
+  });
+
+  test("the chained dispatch proposal can be approved and executed through worktree delegation and repo verification (WM-115)", async () => {
+    const { db, planAll, approveNext } = harness();
+    admitEvent(db, registry, workEnvelope("wm29", "work-exec-1"));
+    await approveNext("work-scan@1");
+    resolveChains(db, registry);
+    planAll();
+
+    const dispatch = await approveNext("dispatch@1");
+    expect(dispatch.summary.terminalState).toBe("COMPLETED");
+    expect(dispatch.summary.reasonCode).toBe("ok");
+    const resultRow = db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(dispatch.runId);
+    const result = JSON.parse(resultRow.result_json);
+    expect(result.artifact.outcome).toBe("PR_OPEN");
+    expect(result.verification.checks).toContain("repo_verify_passed");
   });
 });

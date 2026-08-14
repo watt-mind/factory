@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -14,8 +14,10 @@ import { createRun, lifecycleOf, runState, transition, IllegalTransition } from 
 import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import {
-  cancelRun, claimNext, executeClaimed, reapExpiredLeases, repositoryIsClean, repositoryStatus, retryRun, runOnce,
+  acquireClaimLock, cancelRun, claimNext, defaultLocksDir, dispatchLockPath, executeClaimed, reapExpiredLeases,
+  releaseClaimLock, repositoryIsClean, repositoryStatus, retryRun, runOnce,
 } from "./worker.mjs";
+import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
 
 const registry = loadRegistry();
 const adapters = { fake };
@@ -804,5 +806,346 @@ describe("worker", () => {
     // Stale attempt with higher token existing
     const w1Result = await executeClaimed(db, registry, adapters, claim1, { ...o1, now: afterExpiry });
     expect(w1Result.fenced).toBe(true);
+  });
+});
+
+describe("execute-side dispatch hardening (WM-115)", () => {
+  let factoryRoot;
+  let repoDir;
+  let wtRoot;
+  let callsLog;
+  let previousReposRoot;
+
+  beforeAll(() => {
+    factoryRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-worker-hard-factory-"));
+    repoDir = mkdtempSync(path.join(os.tmpdir(), "evrt-worker-hard-repo-"));
+    wtRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-worker-hard-trees-"));
+    callsLog = path.join(repoDir, "calls.log");
+
+    mkdirSync(path.join(repoDir, "bin"), { recursive: true });
+    writeFileSync(
+      path.join(repoDir, "bin", "worktree-up.sh"),
+      `#!/bin/bash\nset -e\necho "up $1" >> "${callsLog}"\nmkdir -p "${wtRoot}/$1"\n`,
+    );
+    writeFileSync(
+      path.join(repoDir, "bin", "worktree-down.sh"),
+      `#!/bin/bash\nset -e\necho "down $1" >> "${callsLog}"\nrm -rf "${wtRoot}/$1"\n`,
+    );
+
+    mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(factoryRoot, "config", "repos.yaml"),
+      `repos:\n` +
+        `  - name: wt-worker\n    path: ${repoDir}\n    github: watt-mind/wt-worker\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
+        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n    verify: echo repo_verified\n` +
+        `  - name: wt-failing-verify\n    path: ${repoDir}\n    github: watt-mind/wt-failing-verify\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
+        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n    verify: exit 42\n`,
+    );
+    previousReposRoot = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = factoryRoot;
+  });
+
+  afterAll(() => {
+    if (previousReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
+  });
+
+  function makeDispatchSpec(overrides = {}) {
+    const runId = overrides.runId ?? `run_dispatch_${++seq}_${Math.random().toString(36).slice(2)}`;
+    const input = overrides.input ?? { repo: "wt-worker", ticket: "WM-701" };
+    return {
+      schemaVersion: "factory.run-spec/v1",
+      runId,
+      agent: "dispatch@1",
+      input,
+      inputHash: hashJson(input),
+      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      adapter: "fake",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.dispatch-result/v1",
+      capabilities: ["linear:write", "repo:write", "github:write"],
+      timeoutSeconds: 5,
+      maxAttempts: 1,
+      idempotencyKey: `idem-${runId}`,
+      ...overrides,
+    };
+  }
+
+  const dispatchFakeAdapter = {
+    async execute({ spec, workspaceDir }) {
+      writeFileSync(path.join(workspaceDir, ".transcript.json"), `{"fake":"dispatch transcript"}\n`, "utf8");
+      const repoPath = path.join(workspaceDir, "repo");
+      if (existsSync(repoPath)) {
+        writeFileSync(path.join(repoPath, "mutated.txt"), "some dirty edit\n", "utf8");
+      }
+      writeFileSync(
+        path.join(workspaceDir, "result.json"),
+        `${JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          reasonCode: "ok",
+          artifact: {
+            outcome: "PR_OPEN",
+            repo: spec.input.repo,
+            ticket: spec.input.ticket,
+            prUrl: `https://github.com/watt-mind/${spec.input.repo}/pull/10`,
+            verification: { command: "echo repo_verified", passed: true, output: "repo_verified" },
+            summary: `implemented ${spec.input.ticket}`,
+          },
+          evidence: { commands: ["echo repo_verified"] },
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      return { exitCode: 0, timedOut: false };
+    },
+  };
+
+  test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
+    const lockFile = dispatchLockPath("wt-worker", lockDir);
+    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 1000 })).toBe(true);
+    // Second acquire by live PID fails
+    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 2000 })).toBe(false);
+    releaseClaimLock(lockFile);
+    expect(existsSync(lockFile)).toBe(false);
+    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 3000 })).toBe(true);
+    releaseClaimLock(lockFile);
+  });
+
+  test("acquireClaimLock steals stale lock older than 120s or from dead PID", () => {
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-stale-"));
+    const lockFile = dispatchLockPath("wt-worker", lockDir);
+    // Write stale lock from 200s ago
+    writeFileSync(lockFile, `${process.pid} 1000\n`, "utf8");
+    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 201_000, isAlive: () => true })).toBe(true);
+    releaseClaimLock(lockFile);
+
+    // Write lock from dead PID
+    writeFileSync(lockFile, `999999 1000\n`, "utf8");
+    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 2000, isAlive: () => false })).toBe(true);
+    releaseClaimLock(lockFile);
+  });
+
+  test("contended claim lock at execute time causes typed refusal claim_lock_busy", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-busy-"));
+    const lockFile = dispatchLockPath("wt-worker", lockDir);
+    // Hold the lock
+    acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
+
+    const spec = queueRun(db, makeDispatchSpec());
+    const o = opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    });
+
+    const summary = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(summary.terminalState).toBe("REFUSED");
+    expect(summary.reasonCode).toBe("claim_lock_busy");
+    releaseClaimLock(lockFile);
+  });
+
+  test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-rechecks-"));
+
+    // 1. ticket_not_todo
+    const spec1 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-702" } }));
+    const sum1 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-702", state: { name: "In Review" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+      },
+    }));
+    expect(sum1.terminalState).toBe("REFUSED");
+    expect(sum1.reasonCode).toBe("ticket_not_todo");
+
+    // 2. ticket_assigned
+    const spec2 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-703" } }));
+    const sum2 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-703", state: { name: "Todo" }, assignee: { id: "other" }, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+      },
+    }));
+    expect(sum2.terminalState).toBe("REFUSED");
+    expect(sum2.reasonCode).toBe("ticket_assigned");
+
+    // 3. capacity_full
+    const spec3 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-704" } }));
+    const sum3 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-704", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 2, // cap is 2
+      },
+    }));
+    expect(sum3.terminalState).toBe("REFUSED");
+    expect(sum3.reasonCode).toBe("capacity_full");
+
+    // 4. owned_paths_overlap
+    const spec4 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-705" } }));
+    const sum4 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-705", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] }, description: "## Owned Paths\n- src/api/**\n" }),
+        fetchInFlight: () => [{ identifier: "WM-800", description: "## Owned Paths\n- src/api/routes.ts\n" }],
+        countLeases: () => 0,
+      },
+    }));
+    expect(sum4.terminalState).toBe("REFUSED");
+    expect(sum4.reasonCode).toBe("owned_paths_overlap");
+
+    // 5. ticket_claim_lost
+    const spec5 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-706" } }));
+    const sum5 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-706", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: false, reasonCode: "ticket_claim_lost" }),
+      },
+    }));
+    expect(sum5.terminalState).toBe("REFUSED");
+    expect(sum5.reasonCode).toBe("ticket_claim_lost");
+  });
+
+  test("worker lease is acquired during execution and released on completion", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lease-locks-"));
+    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lease-dir-"));
+
+    let sawActiveLease = false;
+    const leaseCheckAdapter = {
+      async execute({ spec, workspaceDir }) {
+        const active = liveWorkerLeases("wt-worker", { dir: leaseDir, now: T0 });
+        sawActiveLease = active.some((l) => l.ticket === spec.input.ticket);
+        return dispatchFakeAdapter.execute({ spec, workspaceDir });
+      },
+    };
+
+    const spec = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-710" } }));
+    const summary = await runOnce(db, registry, { fake: leaseCheckAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => ({ identifier: "WM-710", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    }));
+
+    expect(sawActiveLease).toBe(true);
+    expect(summary.terminalState).toBe("COMPLETED");
+    // After execution, the lease must be released
+    expect(liveWorkerLeases("wt-worker", { dir: leaseDir, now: T0 })).toHaveLength(0);
+  });
+
+  test("mutating worktree is exempt from read-only clean check and runs repo verify command", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-verify-locks-"));
+    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-verify-leases-"));
+
+    const spec = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-720" } }));
+    const summary = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => ({ identifier: "WM-720", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    }));
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(summary.reasonCode).toBe("ok");
+    const resRow = db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(spec.runId);
+    const result = JSON.parse(resRow.result_json);
+    expect(result.verification.checks).toContain("repo_verify_passed");
+  });
+
+  test("failing repo verify command triggers contract_violation failure", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-fverify-locks-"));
+    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-fverify-leases-"));
+
+    const spec = queueRun(db, makeDispatchSpec({ input: { repo: "wt-failing-verify", ticket: "WM-730" } }));
+    const summary = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => ({ identifier: "WM-730", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    }));
+
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("contract_violation");
+  });
+
+  test("rollback Linear ticket state to Todo on crash, timeout, and contract violation", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-rollback-locks-"));
+    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-rollback-leases-"));
+
+    const rollbacks = [];
+    const mockUnclaim = ({ repo, ticket, why }) => {
+      rollbacks.push({ repo, ticket, why });
+      return true;
+    };
+
+    // 1. Crash (exit code 1)
+    const crashingAdapter = { async execute() { return { exitCode: 1, timedOut: false }; } };
+    const spec1 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-740" } }));
+    const sum1 = await runOnce(db, registry, { fake: crashingAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => ({ identifier: "WM-740", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+        unclaimTicket: mockUnclaim,
+      },
+    }));
+    expect(sum1.terminalState).toBe("FAILED");
+    expect(rollbacks).toContainEqual(expect.objectContaining({ ticket: "WM-740", why: "agent_exit_1" }));
+
+    // 2. Timeout
+    const timingOutAdapter = { async execute() { return { exitCode: 0, timedOut: true }; } };
+    const spec2 = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-741" } }));
+    const sum2 = await runOnce(db, registry, { fake: timingOutAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => ({ identifier: "WM-741", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+        unclaimTicket: mockUnclaim,
+      },
+    }));
+    expect(sum2.terminalState).toBe("TIMED_OUT");
+    expect(rollbacks).toContainEqual(expect.objectContaining({ ticket: "WM-741", why: "timeout" }));
   });
 });
