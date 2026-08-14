@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys, useNow } from "../hooks";
+import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
 import {
   buildSections,
   cycleColumnSort,
@@ -56,6 +56,32 @@ const WORKER_HUES: Record<string, string> = {
  * these four are disjoint.
  */
 const health = (w: Worker) => (w.stale ? "stale" : w.state);
+
+export const WORKER_TABS = ["ALL", "LIVE", "STOPPED"] as const;
+export type WorkerTab = (typeof WORKER_TABS)[number];
+
+/**
+ * Live = anything that could still be holding or claiming work: idle, busy, or
+ * stale. Stale belongs here, not with stopped — a stale worker is a problem to
+ * look at, while a cleanly stopped one is history.
+ */
+export const isLive = (w: Worker) => health(w) !== "stopped";
+
+/** Split the registry into live and stopped, preserving order within each group. */
+export function partitionWorkers(rows: Worker[]): { live: Worker[]; stopped: Worker[] } {
+  const live: Worker[] = [];
+  const stopped: Worker[] = [];
+  for (const w of rows) (isLive(w) ? live : stopped).push(w);
+  return { live, stopped };
+}
+
+/**
+ * The list opens on the workers that matter: live ones when any exist. A fleet
+ * that is all history (or empty) opens on All, so the page never looks blank
+ * while stopped workers hide behind a tab.
+ */
+export const defaultWorkerTab = (rows: Worker[]): WorkerTab =>
+  rows.some(isLive) ? "LIVE" : "ALL";
 
 /** Grouping/ordering/columns for the fleet table (OPS-493). */
 const WORKERS_DISPLAY: DisplayConfig<Worker> = {
@@ -201,16 +227,33 @@ export function Workers({
     [rows],
   );
 
+  const parts = useMemo(() => partitionWorkers(rows), [rows]);
+
+  // `null` = no explicit choice yet: follow the data (live when any worker is
+  // live). The first click pins the tab and the default stops moving under it.
+  const [tabChoice, setTabChoice] = useState<WorkerTab | null>(null);
+  const tab = tabChoice ?? defaultWorkerTab(rows);
+  useTabKeys(WORKER_TABS, tab, setTabChoice);
+
+  // Live before stopped regardless of recency; within a group the registry's
+  // own order stands. Display Options grouping/sorting (OPS-493) applies on
+  // top of whatever the active tab lets through.
+  const byTab = useMemo(
+    () =>
+      tab === "ALL" ? [...parts.live, ...parts.stopped] : tab === "LIVE" ? parts.live : parts.stopped,
+    [tab, parts],
+  );
+
   const [filter, setFilter] = useState("");
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((w) =>
+    if (!q) return byTab;
+    return byTab.filter((w) =>
       [w.workerId, w.host, String(w.pid), health(w), labelText(w.labels), w.adapters.join(","), w.currentRun].some(
         (v) => (v ?? "").toLowerCase().includes(q),
       ),
     );
-  }, [rows, filter]);
+  }, [byTab, filter]);
 
   // Display options (OPS-493): partition into sections, order inside them,
   // and feed keyboard navigation only the rows of open sections.
@@ -246,6 +289,17 @@ export function Workers({
   useEffect(() => {
     if (focusWorkerId) setFilter("");
   }, [focusWorkerId]);
+
+  // Deep link / jump: reveal a focused worker the active tab hides, once per
+  // focus id, so the jump lands without overriding a tab the operator picks later.
+  const jumpedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusWorkerId || jumpedFor.current === focusWorkerId) return;
+    const w = rows.find((r) => r.workerId === focusWorkerId);
+    if (!w) return;
+    jumpedFor.current = focusWorkerId;
+    if (tab !== "ALL" && (tab === "LIVE") !== isLive(w)) setTabChoice("ALL");
+  }, [focusWorkerId, rows, tab]);
 
   useListKeys({
     count: flat.length,
@@ -285,6 +339,28 @@ export function Workers({
             <h1 className="display mb-4 text-lg font-semibold">Workers</h1>
             <ScopeCaption context={context} surface="fleet" />
             <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto" role="tablist" aria-label="Worker state">
+                {WORKER_TABS.map((t) => {
+                  const count =
+                    t === "ALL" ? rows.length : t === "LIVE" ? parts.live.length : parts.stopped.length;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      role="tab"
+                      aria-selected={tab === t}
+                      onClick={() => setTabChoice(t)}
+                      title={t === "LIVE" ? "idle, busy, or stale" : t === "STOPPED" ? "cleanly stopped — history" : undefined}
+                      className={`shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                        tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
+                      }`}
+                    >
+                      {t === "ALL" ? "All" : t === "LIVE" ? "Live" : "Stopped"}
+                      {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                    </button>
+                  );
+                })}
+              </div>
               <span className="ml-auto">
                 <DisplayOptions config={WORKERS_DISPLAY} state={display} onChange={setDisplay} />
               </span>
@@ -344,8 +420,8 @@ export function Workers({
                   onClick={() => onSelectWorker(w.workerId)}
                   aria-selected={w.workerId === selectedId}
                   className={`cursor-pointer hover:bg-(--surface-1) ${w.stale ? "row-wash-err" : ""} ${
-                    w.workerId === selectedId ? "row-selected" : ""
-                  }`}
+                    !isLive(w) ? "opacity-55" : ""
+                  } ${w.workerId === selectedId ? "row-selected" : ""}`}
                 >
                   <td
                     className={`mono max-w-52 truncate border-b border-(--border) px-3 py-1.5 ${
