@@ -329,6 +329,7 @@ export function Workers({
                     key={c.key}
                     label={c.label}
                     dir={sort && display.sortBy === sort.key ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir}
                     onSort={sort ? () => setDisplay((s) => cycleColumnSort(WORKERS_DISPLAY, s, c.key)) : undefined}
                   />
                 );

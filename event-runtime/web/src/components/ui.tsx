@@ -303,11 +303,14 @@ export function Th({
   label,
   align,
   dir,
+  naturalDir,
   onSort,
 }: {
   label: string;
   align?: "right";
   dir?: SortDir | null;
+  /** What the first click will do — the hover hint must not promise "↑" on a newest-first column. */
+  naturalDir?: SortDir;
   onSort?: () => void;
 }) {
   const alignCls = align === "right" ? "text-right" : "text-left";
@@ -327,7 +330,7 @@ export function Th({
           aria-hidden
           className={`text-[9px] transition-opacity ${dir ? "opacity-100" : "opacity-0 group-hover/th:opacity-50"}`}
         >
-          {dir === "desc" ? "↓" : "↑"}
+          {(dir ?? naturalDir ?? "asc") === "desc" ? "↓" : "↑"}
         </span>
       </button>
     </th>

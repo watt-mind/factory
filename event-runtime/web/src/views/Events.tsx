@@ -178,17 +178,29 @@ export function Events({
   }, [scoped, parsed, typeFilter, sourceFilter, fetchAll, tab]);
 
   // Display options (OPS-493): partition into sections, order inside them,
-  // and feed keyboard navigation only the rows of open sections.
-  const [display, setDisplay] = useDisplayOptions(EVENTS_DISPLAY);
+  // and feed keyboard navigation only the rows of open sections. Under a
+  // single-status tab the empty-group universe narrows to that status, so
+  // "show empty groups" never renders bands the tab already filtered out.
+  const displayConfig = useMemo(
+    () =>
+      tab === "all"
+        ? EVENTS_DISPLAY
+        : {
+            ...EVENTS_DISPLAY,
+            groups: EVENTS_DISPLAY.groups.map((g) => (g.key === "status" ? { ...g, order: [tab] } : g)),
+          },
+    [tab],
+  );
+  const [display, setDisplay] = useDisplayOptions(displayConfig);
   const sections = useMemo(
-    () => buildSections(visible, EVENTS_DISPLAY, display),
-    [visible, display],
+    () => buildSections(visible, displayConfig, display),
+    [visible, displayConfig, display],
   );
   const flat = useMemo(
     () => flattenSections(sections, display.collapsed),
     [sections, display.collapsed],
   );
-  const cols = visibleColumns(EVENTS_DISPLAY, display);
+  const cols = visibleColumns(displayConfig, display);
   const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
 
   const selectedKey =
@@ -502,7 +514,7 @@ export function Events({
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="ml-auto">
-            <DisplayOptions config={EVENTS_DISPLAY} state={display} onChange={setDisplay} />
+            <DisplayOptions config={displayConfig} state={display} onChange={setDisplay} />
           </span>
           {/* Last in the row: the token chips are a full-width item, so anything
               after the filter box would be pushed onto a third line the moment
@@ -523,13 +535,14 @@ export function Events({
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
-                const sort = EVENTS_DISPLAY.sorts.find((s) => s.column === c.key);
+                const sort = displayConfig.sorts.find((s) => s.column === c.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
                     dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(EVENTS_DISPLAY, s, c.key)) : undefined}
+                    naturalDir={sort?.defaultDir}
+                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
                   />
                 );
               })}

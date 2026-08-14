@@ -379,17 +379,30 @@ export function Runs({
   );
 
   // Display options (OPS-493): partition into sections, order inside them,
-  // and feed keyboard navigation only the rows of open sections.
-  const [display, setDisplay] = useDisplayOptions(RUNS_DISPLAY);
+  // and feed keyboard navigation only the rows of open sections. Under a
+  // single-state tab the empty-group universe narrows to that state — "show
+  // empty groups" on the COMPLETED tab must not render ten 0-count bands the
+  // tab itself already filtered out.
+  const displayConfig = useMemo(
+    () =>
+      tab === "ALL"
+        ? RUNS_DISPLAY
+        : {
+            ...RUNS_DISPLAY,
+            groups: RUNS_DISPLAY.groups.map((g) => (g.key === "state" ? { ...g, order: [tab] } : g)),
+          },
+    [tab],
+  );
+  const [display, setDisplay] = useDisplayOptions(displayConfig);
   const sections = useMemo(
-    () => buildSections(visible, RUNS_DISPLAY, display),
-    [visible, display],
+    () => buildSections(visible, displayConfig, display),
+    [visible, displayConfig, display],
   );
   const flat = useMemo(
     () => flattenSections(sections, display.collapsed),
     [sections, display.collapsed],
   );
-  const cols = visibleColumns(RUNS_DISPLAY, display);
+  const cols = visibleColumns(displayConfig, display);
   const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
 
   const selectedId = focusRunId;
@@ -642,7 +655,7 @@ export function Runs({
             })}
           </div>
           <span className="ml-auto">
-            <DisplayOptions config={RUNS_DISPLAY} state={display} onChange={setDisplay} />
+            <DisplayOptions config={displayConfig} state={display} onChange={setDisplay} />
           </span>
           <FilterInput
             value={filter}
@@ -660,13 +673,14 @@ export function Runs({
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
-                const sort = RUNS_DISPLAY.sorts.find((s) => s.column === c.key);
+                const sort = displayConfig.sorts.find((s) => s.column === c.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
                     dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(RUNS_DISPLAY, s, c.key)) : undefined}
+                    naturalDir={sort?.defaultDir}
+                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
                   />
                 );
               })}
