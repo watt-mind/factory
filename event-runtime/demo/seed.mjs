@@ -381,8 +381,21 @@ try {
     deadEnvelope.occurredAt, nowStr, deadEnvelope.correlationId, null,
     JSON.stringify(deadEnvelope), "none", nowStr,
   );
-  db.close();
   log(`${deadEventId} inserted as dead_lettered (dead-letter anomaly)`);
+
+  // WM-132: Update failed-contract run spec to have maxAttempts = 2 so plain Retry is exercisable (attempts < maxAttempts)
+  const contractRow = db
+    .query("SELECT p.run_id, r.spec_json FROM proposals p JOIN runs r ON r.run_id = p.run_id WHERE p.idempotency_key LIKE ?")
+    .get(`%${prefix}-failed-contract%`);
+  if (contractRow) {
+    const spec = JSON.parse(contractRow.spec_json);
+    spec.maxAttempts = 2;
+    const updatedSpecJson = JSON.stringify(spec);
+    db.query("UPDATE runs SET spec_json = ? WHERE run_id = ?").run(updatedSpecJson, contractRow.run_id);
+    db.query("UPDATE proposals SET spec_json = ? WHERE run_id = ?").run(updatedSpecJson, contractRow.run_id);
+    log(`${contractRow.run_id} spec updated to maxAttempts=2 (attempts: 1/2, plain retry exercisable)`);
+  }
+  db.close();
 } catch (err) {
   log(`warning: could not write direct db anomalies (${err.message})`);
 }

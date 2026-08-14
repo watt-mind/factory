@@ -77,6 +77,14 @@ if (crashFailed) {
   check("multi-attempt attempt records recorded", (crashView?.attempts?.length ?? 0) >= 2);
 }
 
+// Plain retryable run (failed run with attempts < maxAttempts, WM-132)
+const retryableFailed = failedRuns.find((r) => (r.attempts ?? 0) < (r.maxAttempts ?? 1));
+check(
+  "≥1 FAILED run with attempts remaining (attempts < maxAttempts)",
+  Boolean(retryableFailed),
+  retryableFailed ? `${retryableFailed.runId} (${retryableFailed.attempts}/${retryableFailed.maxAttempts})` : "",
+);
+
 // CANCELLED runs
 const cancelledRuns = byState("CANCELLED");
 check("≥2 runs CANCELLED (rejected proposal + operator cancelled)", cancelledRuns.length >= 2, `found ${cancelledRuns.length}`);
