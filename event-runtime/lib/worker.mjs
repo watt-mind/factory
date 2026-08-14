@@ -572,11 +572,19 @@ export async function executeClaimed(db, registry, adapters, claim, {
       }
       return { cancelled: false, error: err.message };
     }
-    const reasonCode = "adapter_error";
-    const journalReason = `adapter_error: ${err?.message ?? String(err)}`;
+    // A missing CLI (OPS-296: `pi`/`npx` absent from PATH) is a typed,
+    // recognizable adapter precondition, not an opaque crash — an adapter
+    // signals it by throwing an error with `code: "cli_not_found"` (see
+    // lib/adapters/pi.mjs's CliNotFoundError) before ever spawning a child.
+    // No `requeue`: retrying on the same worker just fails the same way.
+    const isCliNotFound = err?.code === "cli_not_found";
+    const reasonCode = isCliNotFound ? "cli_not_found" : "adapter_error";
+    const journalReason = isCliNotFound
+      ? `cli_not_found: ${err.message}`
+      : `adapter_error: ${err?.message ?? String(err)}`;
     let res;
     try {
-      res = failTerminal("FAILED", journalReason, reasonCode, { requeue: true });
+      res = failTerminal("FAILED", journalReason, reasonCode, { requeue: !isCliNotFound });
     } catch {
       // if failTerminal could not transition, continue
     }

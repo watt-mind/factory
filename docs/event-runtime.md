@@ -402,11 +402,42 @@ names an entry in a small adapter registry, one per harness the runtime has
 actually tested. The emit pipeline targets several harnesses (Claude Code,
 Codex, Gemini, Cursor, Pi); the event runtime admits only adapters with a
 passing conformance test covering structured output, timeout and shutdown
-behavior, and workspace confinement. The registry has four entries: `claude`
-(the LLM harness), `command` (a closed argv template), `actions` (an approved
-action list resolved against a closed registry, remote-SSH or local-argv), and
-`fake` (tests and demo environments). It does not inherit the current runner's
-entire adapter surface.
+behavior, and workspace confinement. The registry has entries for `claude`
+(the primary LLM harness), `pi` (OPS-296, a second LLM harness on the Codex
+subscription window), `command` (a closed argv template), `actions` (an
+approved action list resolved against a closed registry, remote-SSH or
+local-argv), and `fake` (tests and demo environments). It does not inherit the
+current runner's entire adapter surface.
+
+**The `pi` adapter (`lib/adapters/pi.mjs`, OPS-296) mirrors `claude.mjs`,
+adapted to a different CLI shape.** `pi -p --mode json` (prompt piped to
+stdin, matching `runners/run-agent.sh`'s existing invocation) rather than
+`claude -p <prompt>`; `--model` takes the tier-resolved `provider/id` value
+directly (`openai-codex/gpt-5.6-terra`), no separate `--provider` flag. There
+is no `--max-budget-usd` equivalent and no per-tool settings/sandbox policy —
+those, and native capability enforcement derived from `spec.capabilities`, are
+deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls`:
+pi's own documented read-only pattern is omitting bash/edit/write from the
+tool allowlist entirely, never exposing them to the model, rather than
+intercepting a call to them at runtime the way claude's settings/sandbox
+policy does — see §14. (An earlier draft of this design read `-r` as pi's
+read-only flag; the installed CLI's own `--help` says otherwise — `-r` is
+`--resume`, a session selector, unrelated to tool access. Verify adapter flags
+against the actual CLI before relying on ticket text.) `mutating: true` pi
+agents are admissible under the same registry rule as any other LLM adapter
+(`docs/event-runtime-dispatch.md` §6, WM-108): only over a tier-2 `worktree`
+workspace — the registry's admission check at load time is adapter-agnostic
+already, so no adapter-specific carve-out was needed. A missing `pi` CLI (and
+no `npx` fallback) on PATH is a preflight refusal, not a spawn crash: the
+adapter throws before spawning anything, and the worker recognizes it as the
+typed `cli_not_found` reason code rather than the generic `adapter_error`.
+Trace mapping targets pi's real `--mode json` shape — `message_end` (role
+`assistant`) content blocks for `assistant_text`/`tool_use`,
+`tool_execution_end` for `tool_result`. pi has no single terminal summary
+message the way claude's `type: "result"` is one, so `usage` is accumulated
+across every assistant turn's own reported tokens/cost and emitted once at
+process close; fields pi never reported land as explicit `null`/`{}`, never a
+guessed value.
 
 **Live trace is an optional adapter capability (`factory.trace/v1`).** An
 adapter may stream what the agent is doing mid-run — via the `onTrace`
@@ -805,6 +836,19 @@ does not yet turn declarations such as `linear:read` into network authority:
 those still answer *what was authorized*, not *what was possible*. The
 declaration is validated at admission, recorded immutably in the `RunSpec`, and
 auditable after the fact.
+
+**pi (OPS-296) enforces `mutating: false` more coarsely than claude, and says
+so rather than implying a parity it doesn't have.** claude intercepts a denied
+tool call at runtime and reports a recognizable refusal message (WM-127); pi's
+`--tools read,grep,find,ls` never offers bash/edit/write to the model as
+callable functions in the first place, so there is no equivalent runtime
+denial to observe or classify — `lib/adapters/pi.mjs`'s
+`HARNESS_DENIAL_PATTERNS` is deliberately empty until a real refusal shape is
+confirmed from the CLI, same discipline as claude's list. This is the same
+audited-not-enforced framing as the service-capability declarations above:
+what's authorized is recorded and reviewable; what's actually possible for the
+model to attempt (a `bash` invocation of `pi` itself if the workspace's own
+`PATH` were compromised, say) is a stage-2 concern, same as claude's.
 
 Two per-definition allowlists ARE enforced by construction today, in contrast
 to the audited-not-enforced service capabilities: the actions adapter's **host

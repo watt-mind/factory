@@ -62,6 +62,13 @@ models:
     strong: default        # CLI default — preserves today's dispatch behavior
     standard: sonnet
     light: haiku
+  # pi (OPS-296), Codex subscription window: sol/terra/luna are the
+  # provider's own strong/standard/light tier names, passed verbatim as
+  # `--model` (provider/id form; no separate --provider flag needed).
+  pi:
+    strong: openai-codex/gpt-5.6-sol
+    standard: openai-codex/gpt-5.6-terra
+    light: openai-codex/gpt-5.6-luna
 
 limits:
   # Hard wall-clock cap the FACTORY enforces, independent of whatever the
