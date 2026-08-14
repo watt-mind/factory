@@ -144,10 +144,6 @@ repos:
       - nginx.conf
       - .github/workflows/**
 
-    # Marketing site: no payments, no accounts, no schema. Nothing to match
-    # mechanically until someone reads it for one (WM-47).
-    escalate_paths: []
-
   - name: coach-wattz
     path: ~/Develop/coach-wattz
     github: watt-mind/coach
@@ -172,11 +168,6 @@ repos:
       - Dockerfile
       - .github/workflows/**
 
-    # Explicit opt-out, not a considered list (WM-47). This repo does hold auth
-    # and payment surfaces; the list belongs in its own ticket, written from the
-    # tree rather than guessed at here.
-    escalate_paths: []
-
   - name: watts-mobile
     path: ~/Develop/watts-mobile
     github: watt-mind/watts-mobile
@@ -193,10 +184,6 @@ repos:
       - eas.json
       - .env.example
       - .github/workflows/**
-
-    # Explicit opt-out (WM-47) — same reasoning as coach-wattz: a real list for
-    # the mobile client's auth and purchase flows is its own ticket.
-    escalate_paths: []
 
   - name: legalease
     path: ~/Develop/legalease
