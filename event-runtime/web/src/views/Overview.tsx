@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { hashPath } from "../hash";
 import { useNow } from "../hooks";
-import type { JournalEntry, EventFocus, RunState } from "../types";
+import type { JournalEntry, EventFocus, Proposal, RunState } from "../types";
 import type { OperatorContext } from "../context";
 import { ScopeCaption } from "../components/ContextTabs";
 import {
@@ -99,6 +99,14 @@ export function Overview({
     queryFn: () => api.outbox(15),
     refetchInterval: 2000,
   });
+  // Client-side join for the anomaly deck (WM-95): the doctor only reports
+  // expired proposal ids, so pull the same proposals list the Proposals view
+  // uses to enrich each id with agent/decision/reason/origin/age.
+  const proposalsForDeck = useQuery({
+    queryKey: ["proposals"],
+    queryFn: api.proposals,
+    refetchInterval: 2000,
+  });
   const feed = useJournalFeed();
 
   const requeue = useMutation({
@@ -137,16 +145,23 @@ export function Overview({
 
   const s = status.data;
   const anomalies = s?.anomalies;
+  const proposalsById = new Map<string, Proposal>(
+    (proposalsForDeck.data?.proposals ?? []).map((p) => [p.id, p]),
+  );
   const anomalyRows: {
     text: string;
     links: { label: string; go: () => void }[];
     requeue?: { source: string; eventId: string };
     dismissProposalId?: string;
+    proposalId?: string;
+    proposal?: Proposal;
   }[] = [];
   if (anomalies) {
     for (const id of anomalies.expiredOpenProposals) {
       anomalyRows.push({
         text: `expired open proposal ${id}`,
+        proposalId: id,
+        proposal: proposalsById.get(id),
         links: [{ label: "View proposal", go: () => onJumpProposal(id) }],
         dismissProposalId: id,
       });
@@ -245,13 +260,45 @@ export function Overview({
                 key={i}
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0"
               >
-                <span
-                  className="min-w-0 break-words sm:truncate text-[12px]"
-                  title={a.text}
-                  style={{ color: "var(--hue-warn)" }}
-                >
-                  {a.text}
-                </span>
+                {a.proposalId ? (
+                  <span className="min-w-0 flex flex-col gap-0.5 text-[12px]" style={{ color: "var(--hue-warn)" }}>
+                    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words">
+                      <span>expired open proposal</span>
+                      <span className="text-(--text-faint)">·</span>
+                      <span>agent: {a.proposal?.agent ?? "—"}</span>
+                      <span className="text-(--text-faint)">·</span>
+                      <span>
+                        {a.proposal?.decision ?? "—"}
+                        {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
+                      </span>
+                      <span className="text-(--text-faint)">·</span>
+                      <span className="text-(--text-faint)">
+                        origin {a.proposal?.eventSource ?? "—"}/{a.proposal?.eventId ?? "—"}
+                      </span>
+                      <span className="text-(--text-faint)">·</span>
+                      {a.proposal?.created_at ? (
+                        <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
+                      ) : (
+                        <span className="text-(--text-faint)">age —</span>
+                      )}
+                    </span>
+                    <span
+                      className="mono truncate text-[11px] text-(--text-faint) cursor-pointer"
+                      title={`${a.proposalId} — click to copy`}
+                      onClick={() => copyText(a.proposalId!, "proposal id")}
+                    >
+                      {a.proposalId}
+                    </span>
+                  </span>
+                ) : (
+                  <span
+                    className="min-w-0 break-words sm:truncate text-[12px]"
+                    title={a.text}
+                    style={{ color: "var(--hue-warn)" }}
+                  >
+                    {a.text}
+                  </span>
+                )}
                 <span className="flex flex-wrap items-center gap-1.5 sm:gap-2 sm:shrink-0">
                   <Button onClick={() => copyText(a.text, "anomaly")}>Copy</Button>
                   {a.requeue && (
