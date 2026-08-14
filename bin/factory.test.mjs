@@ -69,3 +69,17 @@ test("factory notify preserves stdin mode and the notifier exit code", () => {
     result.cleanup();
   }
 });
+
+test("factory ps executes orchestrator/ps.mjs via CLI", () => {
+  const result = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "ps", "--json"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  const data = JSON.parse(result.stdout.toString());
+  expect(data.timestamp).toBeDefined();
+  expect(data.summary).toBeDefined();
+  expect(Array.isArray(data.controlPlane)).toBe(true);
+});
+
