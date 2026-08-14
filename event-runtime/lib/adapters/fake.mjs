@@ -51,6 +51,53 @@ function ciDoctorArtifact(input) {
   };
 }
 
+export const FAKE_PLAN_SHA = "c".repeat(40);
+
+export function mergeScanArtifact(repo) {
+  const base = { repo, github: `watt-mind/${repo}`, plan: [], fix: [], escalate: [] };
+  if (repo === "clean") {
+    return { ...base, recommendation: "NOOP", summary: "fake: no open PRs", noopReason: "no_open_prs" };
+  }
+  if (repo.endsWith("-merge-esc") || repo.endsWith("-both")) {
+    return {
+      ...base,
+      recommendation: "MERGE",
+      plan: [
+        { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
+        { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
+        { pr: 44, headSha: FAKE_PLAN_SHA, ticket: "CLNT-778", action: "notify_escalate", reason: "fake: touches auth" },
+      ],
+      escalate: [{ pr: 44, ticket: "CLNT-778", reason: "fake: touches auth" }],
+      summary: `fake merge plan with escalation for ${repo}`,
+    };
+  }
+  if (repo.endsWith("-esc")) {
+    return {
+      ...base,
+      recommendation: "ESCALATE",
+      escalate: [{ pr: 44, ticket: "CLNT-778", reason: "fake: touches auth" }],
+      summary: `fake: PR #44 on ${repo} changes auth behavior`,
+    };
+  }
+  if (repo.endsWith("-fix")) {
+    return {
+      ...base,
+      recommendation: "FIX",
+      fix: [{ pr: 43, ticket: "CLNT-779", finding: "fake: Verify job red" }],
+      summary: `fake: PR #43 on ${repo} needs a fix`,
+    };
+  }
+  return {
+    ...base,
+    recommendation: "MERGE",
+    plan: [
+      { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
+      { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
+    ],
+    summary: `fake merge plan for ${repo}`,
+  };
+}
+
 export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace, abortSignal, signal }) {
   // Every real adapter captures the agent's output as a runtime artifact
   // (worker.mjs RUNTIME_ARTIFACTS). The fake must too, or it models a world
@@ -227,6 +274,29 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace
       artifact: {
         repo: spec.input.repo,
         applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.issueId, action: i.action })),
+      },
+      evidence: { commands: ["fake"] },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.merge-plan/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: mergeScanArtifact(spec.input?.repo ?? "unknown"),
+      evidence: { commands: ["fake"], prsSeen: 1 },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
+  if (spec.outputContract === "factory.merge-applied/v1") {
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repo: spec.input.repo,
+        applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.ticket ?? i.issueId, action: i.action })),
       },
       evidence: { commands: ["fake"] },
     });

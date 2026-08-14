@@ -57,6 +57,12 @@ Each qualifying PR contributes exactly two plan items, in order:
 | :--- | :--- |
 | `merge_pr` | squash-merge the PR — refused by merge-apply if the head SHA moved since this scan |
 | `ticket_done` | move the PR's Linear ticket to `Done` |
+| `notify_escalate` | push notification for an escalated PR when `recommendation` is `MERGE` alongside qualifying PRs |
+
+When `recommendation` is `MERGE` and `escalate` is non-empty, include
+`notify_escalate` items in `plan` (`{ pr, headSha, ticket, action: "notify_escalate", reason }`)
+alongside `merge_pr` and `ticket_done` items so escalations are never
+silenced when other PRs merge.
 
 Pin `headSha` at exactly the commit you reviewed. A head that moves between
 scan and apply is a refusal at apply time, never a re-review. Never invent

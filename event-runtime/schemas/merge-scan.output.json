@@ -20,7 +20,7 @@
     },
     "plan": {
       "type": "array",
-      "description": "Merge actions for qualifying PRs only — two items per PR (merge_pr, then ticket_done), each pinned to the reviewed head SHA. Never a deploy-branch-targeting PR: those are the ship chain's (WM-111), refused at scan time",
+      "description": "Merge actions for qualifying PRs (merge_pr, then ticket_done) and notify_escalate items when recommendation is MERGE alongside escalations, each pinned to the reviewed head SHA. Never a deploy-branch-targeting PR: those are the ship chain's (WM-111), refused at scan time",
       "items": {
         "type": "object",
         "required": ["pr", "headSha", "ticket", "action", "reason"],
@@ -42,7 +42,7 @@
             "description": "Linear ticket the PR fixes, from its Fixes line"
           },
           "action": {
-            "enum": ["merge_pr", "ticket_done"],
+            "enum": ["merge_pr", "ticket_done", "notify_escalate"],
             "description": "Closed merge-apply action id this item resolves to"
           },
           "reason": {
