@@ -9,7 +9,7 @@ import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { artifactsRoot } from "./config.mjs";
-import { openDb } from "./db.mjs";
+import { openDb, runUsage } from "./db.mjs";
 import { createRun, lifecycleOf, runState, transition, IllegalTransition } from "./lifecycle.mjs";
 import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
@@ -188,12 +188,82 @@ describe("worker", () => {
       runId: spec.runId, attempt: 1,
       artifactHash: result.artifact_hash, outputContract: spec.outputContract,
     });
+    expect(runUsage(db, spec.runId).attempts).toEqual([expect.objectContaining({
+      attempt: 1,
+      adapter: "fake",
+      model: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    })]);
 
     const attempt = db.query(`SELECT * FROM attempts WHERE run_id = ?`).get(spec.runId);
     expect(attempt.terminal_state).toBe("COMPLETED");
     expect(attempt.started_at).toBeTruthy();
     expect(attempt.finished_at).toBeTruthy();
     expect(existsSync(path.join(o.workspacesRoot, `${spec.runId}-a1`))).toBe(false);
+  });
+
+  test("persists usage returned by an adapter, including model and cache tokens", async () => {
+    const db = openDb(":memory:");
+    const usageAdapter = {
+      async execute(args) {
+        const outcome = await fake.execute(args);
+        args.onUsage?.({
+          model: "claude-sonnet-4-6",
+          inputTokens: 101,
+          outputTokens: 29,
+          cacheCreationInputTokens: 300,
+          cacheReadInputTokens: 700,
+          costUSD: 0.123,
+        });
+        return outcome;
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "usage-stub" }));
+
+    const summary = await runOnce(db, registry, { "usage-stub": usageAdapter }, opts());
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(runUsage(db, spec.runId)).toEqual({
+      totals: {
+        attempts: 1,
+        inputTokens: 101,
+        outputTokens: 29,
+        cacheCreationInputTokens: 300,
+        cacheReadInputTokens: 700,
+        totalTokens: 1130,
+        costUSD: 0.123,
+      },
+      attempts: [expect.objectContaining({
+        attempt: 1,
+        adapter: "usage-stub",
+        model: "claude-sonnet-4-6",
+        totalTokens: 1130,
+      })],
+    });
+  });
+
+  test("failed adapter outcomes retain tokens consumed before failure", async () => {
+    const db = openDb(":memory:");
+    const consumedThenFailed = {
+      async execute() {
+        return {
+          exitCode: 1,
+          timedOut: false,
+          usage: { model: "claude-sonnet-4-6", inputTokens: 11, outputTokens: 4 },
+        };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "consumed-failure", maxAttempts: 1 }));
+
+    const summary = await runOnce(db, registry, { "consumed-failure": consumedThenFailed }, opts());
+    expect(summary.terminalState).toBe("FAILED");
+    expect(runUsage(db, spec.runId).attempts[0]).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-6",
+      inputTokens: 11,
+      outputTokens: 4,
+      totalTokens: 15,
+    }));
   });
 
   test("policy denial is terminal and is never retried as an opaque agent exit", async () => {
@@ -535,7 +605,11 @@ describe("worker", () => {
           abortSignal?.addEventListener("abort", () => {
             clearTimeout(timer);
             aborted = true;
-            resolve({ exitCode: null, timedOut: false });
+            resolve({
+              exitCode: null,
+              timedOut: false,
+              usage: { model: "claude-sonnet-4-6", inputTokens: 9, outputTokens: 2 },
+            });
           });
         });
       },
@@ -561,6 +635,12 @@ describe("worker", () => {
     expect(attempt.reason_code).toBe("cancelled");
     expect(attempt.finished_at).toBeTruthy();
     expect(existsSync(path.join(o.workspacesRoot, `${spec.runId}-a1`))).toBe(false);
+    expect(runUsage(db, spec.runId).attempts[0]).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-6",
+      inputTokens: 9,
+      outputTokens: 2,
+      totalTokens: 11,
+    }));
   });
 
   test("runOnce returns null when nothing is QUEUED", async () => {

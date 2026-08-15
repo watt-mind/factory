@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { findArtifact } from "./artifacts.mjs";
 import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, webhookSecret } from "./config.mjs";
+import { runUsage, usageSpend } from "./db.mjs";
 import { admitEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
@@ -260,7 +261,7 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
     ? getStoreStats(nowMs)
     : storeStats(db, artifactsRoot(env?.home), { now: nowMs });
   const stalled = stalledWorkers(db, { now: nowMs });
-  const runs = runCounts(db);
+  const runs = { ...runCounts(db), spend: usageSpend(db, { now: nowMs }) };
 
   const configAnomalies = [];
   if (!secret) {
@@ -614,6 +615,7 @@ function runView(db, runId, { artifactsDir } = {}) {
       artifactsDir && transcript?.sha256
         ? observedModelFromTranscript(artifactHead(artifactsDir, transcript.sha256))
         : null,
+    usage: runUsage(db, runId),
   };
 }
 

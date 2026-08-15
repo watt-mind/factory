@@ -284,6 +284,7 @@ export async function execute({
   killGraceMs = KILL_GRACE_MS,
   env = {},
   onTrace,
+  onUsage,
   abortSignal,
   signal,
 }) {
@@ -319,11 +320,26 @@ export async function execute({
     const policyDenials = [];
     let lastTool = null;
     const toolNames = new Map();
+    const tokenKeys = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+    const assistantUsage = Object.fromEntries(tokenKeys.map((key) => [key, 0]));
+    let finalUsage = null;
+    let observedModel = null;
     if (child.stdout) {
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         try {
           const parsed = JSON.parse(line);
+          if (parsed?.type === "system" && parsed?.subtype === "init" && typeof parsed.model === "string") {
+            observedModel = parsed.model;
+          } else if (parsed?.type === "assistant") {
+            if (!observedModel && typeof parsed.message?.model === "string") observedModel = parsed.message.model;
+            for (const key of tokenKeys) {
+              const value = parsed.message?.usage?.[key];
+              if (typeof value === "number" && Number.isFinite(value) && value >= 0) assistantUsage[key] += value;
+            }
+          } else if (parsed?.type === "result") {
+            finalUsage = parsed;
+          }
           for (const event of mapStreamEvent(parsed)) {
             if (event.kind === "tool_use") {
               lastTool = event.payload?.name ?? null;
@@ -386,6 +402,25 @@ export async function execute({
       // PR, and exited clean). A clean exit outranks the observation — report
       // denials to the worker only when the run also failed; the lifecycle
       // trace events above keep the evidence visible either way.
+      const finalTokens = finalUsage?.usage ?? {};
+      const tokenValue = (key) => {
+        const value = finalTokens[key];
+        return typeof value === "number" && Number.isFinite(value) && value >= 0
+          ? value
+          : assistantUsage[key];
+      };
+      try {
+        onUsage?.({
+          model: observedModel,
+          inputTokens: tokenValue("input_tokens"),
+          outputTokens: tokenValue("output_tokens"),
+          cacheCreationInputTokens: tokenValue("cache_creation_input_tokens"),
+          cacheReadInputTokens: tokenValue("cache_read_input_tokens"),
+          costUSD: typeof finalUsage?.total_cost_usd === "number" ? finalUsage.total_cost_usd : 0,
+        });
+      } catch {
+        // Usage is observability: a consumer failure must not change execution.
+      }
       resolve({ exitCode, timedOut, policyDenials: exitCode === 0 ? [] : policyDenials });
     });
   });

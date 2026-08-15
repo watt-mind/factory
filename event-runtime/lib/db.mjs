@@ -156,6 +156,28 @@ export const MIGRATIONS = [
       db.exec(SCHEMA_V1);
     },
   },
+  {
+    version: 2,
+    name: "run_usage",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS run_usage (
+          run_id                     TEXT NOT NULL,
+          attempt                    INTEGER NOT NULL,
+          adapter                    TEXT NOT NULL,
+          model                      TEXT,
+          input_tokens               INTEGER NOT NULL DEFAULT 0,
+          output_tokens              INTEGER NOT NULL DEFAULT 0,
+          cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_input_tokens    INTEGER NOT NULL DEFAULT 0,
+          cost_usd                   REAL NOT NULL DEFAULT 0,
+          recorded_at                TEXT NOT NULL,
+          PRIMARY KEY (run_id, attempt)
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_usage_recorded_at ON run_usage (recorded_at);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1].version : 1;
@@ -171,6 +193,7 @@ export const CORE_TABLES = [
   "workers",
   "counters",
   "attempt_trace",
+  "run_usage",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */
@@ -311,6 +334,152 @@ export function isBusyError(err) {
   return /database is locked|database table is locked|resource temporarily unavailable|\bSQLITE_BUSY\b|\bSQLITE_LOCKED\b/i.test(msg);
 }
 
+
+/** Normalize adapter-supplied usage into durable, non-negative values. */
+function normalizedUsage(usage = {}) {
+  const tokens = (value) => Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+  const money = (value) => Number.isFinite(value) && value >= 0 ? value : 0;
+  return {
+    model: typeof usage.model === "string" && usage.model !== "" ? usage.model : null,
+    inputTokens: tokens(usage.inputTokens ?? usage.input_tokens),
+    outputTokens: tokens(usage.outputTokens ?? usage.output_tokens),
+    cacheCreationInputTokens: tokens(usage.cacheCreationInputTokens ?? usage.cache_creation_input_tokens),
+    cacheReadInputTokens: tokens(usage.cacheReadInputTokens ?? usage.cache_read_input_tokens),
+    costUSD: money(usage.costUSD ?? usage.cost_usd),
+  };
+}
+
+function usageTimestamp(value) {
+  if (typeof value === "string") return new Date(value).toISOString();
+  return new Date(value ?? Date.now()).toISOString();
+}
+
+/**
+ * Persist one attempt's final usage. Re-writing the same attempt is intentional:
+ * cancellation can first record zero, then the aborting adapter can report the
+ * tokens it consumed before stopping.
+ */
+export function recordRunUsage(db, {
+  runId, attempt, adapter, recordedAt = Date.now(), ...rawUsage
+}) {
+  const usage = normalizedUsage(rawUsage.usage ?? rawUsage);
+  const actualAdapter = adapter ?? db
+    .query(`SELECT json_extract(spec_json, '$.adapter') AS adapter FROM runs WHERE run_id = ?`)
+    .get(runId)?.adapter ?? "unknown";
+  db.query(
+    `INSERT INTO run_usage
+       (run_id, attempt, adapter, model, input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens, cost_usd, recorded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, attempt) DO UPDATE SET
+       adapter = excluded.adapter,
+       model = excluded.model,
+       input_tokens = excluded.input_tokens,
+       output_tokens = excluded.output_tokens,
+       cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+       cache_read_input_tokens = excluded.cache_read_input_tokens,
+       cost_usd = excluded.cost_usd,
+       recorded_at = excluded.recorded_at`,
+  ).run(
+    runId, attempt, actualAdapter, usage.model, usage.inputTokens, usage.outputTokens,
+    usage.cacheCreationInputTokens, usage.cacheReadInputTokens, usage.costUSD,
+    usageTimestamp(recordedAt),
+  );
+}
+
+function usageRow(row) {
+  const inputTokens = Number(row.input_tokens ?? 0);
+  const outputTokens = Number(row.output_tokens ?? 0);
+  const cacheCreationInputTokens = Number(row.cache_creation_input_tokens ?? 0);
+  const cacheReadInputTokens = Number(row.cache_read_input_tokens ?? 0);
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+    totalTokens: inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens,
+    costUSD: Number(row.cost_usd ?? 0),
+  };
+}
+
+/** Persisted attempt usage plus a per-run total for inspect. */
+export function runUsage(db, runId) {
+  const rows = db.query(
+    `SELECT attempt, adapter, model, input_tokens, output_tokens,
+            cache_creation_input_tokens, cache_read_input_tokens, cost_usd, recorded_at
+     FROM run_usage WHERE run_id = ? ORDER BY attempt`,
+  ).all(runId);
+  const attempts = rows.map((row) => ({
+    attempt: row.attempt,
+    adapter: row.adapter,
+    model: row.model ?? null,
+    ...usageRow(row),
+    recordedAt: row.recorded_at,
+  }));
+  return {
+    totals: attempts.reduce((totals, row) => ({
+      attempts: totals.attempts + 1,
+      inputTokens: totals.inputTokens + row.inputTokens,
+      outputTokens: totals.outputTokens + row.outputTokens,
+      cacheCreationInputTokens: totals.cacheCreationInputTokens + row.cacheCreationInputTokens,
+      cacheReadInputTokens: totals.cacheReadInputTokens + row.cacheReadInputTokens,
+      totalTokens: totals.totalTokens + row.totalTokens,
+      costUSD: totals.costUSD + row.costUSD,
+    }), {
+      attempts: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+      totalTokens: 0,
+      costUSD: 0,
+    }),
+    attempts,
+  };
+}
+
+const USAGE_TOTALS_SQL = `
+  COUNT(DISTINCT run_id) AS runs,
+  COUNT(*) AS attempts,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+  COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+  COALESCE(SUM(cost_usd), 0) AS cost_usd`;
+
+function spendRow(row) {
+  return {
+    runs: Number(row.runs ?? 0),
+    attempts: Number(row.attempts ?? 0),
+    ...usageRow(row),
+  };
+}
+
+/** Rolling usage windows for GET /status and the status CLI. */
+export function usageSpend(db, { now = Date.now() } = {}) {
+  const nowMs = typeof now === "function" ? now() : now;
+  const nowIso = new Date(nowMs).toISOString();
+  const since = (milliseconds) => new Date(nowMs - milliseconds).toISOString();
+  const totalSince = (cutoff) => spendRow(db.query(
+    `SELECT ${USAGE_TOTALS_SQL} FROM run_usage WHERE recorded_at >= ? AND recorded_at <= ?`,
+  ).get(cutoff, nowIso));
+  const cutoff24h = since(24 * 60 * 60 * 1000);
+  const byAgent24h = db.query(
+    `SELECT COALESCE(json_extract(r.spec_json, '$.agent'), 'unknown') AS agent,
+            ${USAGE_TOTALS_SQL.replaceAll("run_id", "u.run_id")}
+     FROM run_usage u JOIN runs r ON r.run_id = u.run_id
+     WHERE u.recorded_at >= ? AND u.recorded_at <= ?
+     GROUP BY agent
+     ORDER BY (SUM(u.input_tokens) + SUM(u.output_tokens) +
+               SUM(u.cache_creation_input_tokens) + SUM(u.cache_read_input_tokens)) DESC,
+              agent`,
+  ).all(cutoff24h, nowIso).map((row) => ({ agent: row.agent, ...spendRow(row) }));
+  return {
+    rolling1h: totalSince(since(60 * 60 * 1000)),
+    rolling24h: totalSince(cutoff24h),
+    byAgent24h,
+  };
+}
 
 /** Monotonic named counter — fencing tokens come from here (§8). */
 export function nextCounter(db, name) {

@@ -10,8 +10,11 @@ import {
   getSchemaVersion,
   migrateDb,
   openDb,
+  recordRunUsage,
+  runUsage,
   setSchemaVersion,
   txImmediate,
+  usageSpend,
 } from "./db.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
 
@@ -139,7 +142,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
 
     expect(() => openDb(file)).toThrow(
-      "Database schema version (999) is newer than code version (1). Please upgrade the runtime.",
+      `Database schema version (999) is newer than code version (${CURRENT_SCHEMA_VERSION}). Please upgrade the runtime.`,
     );
   });
 
@@ -153,13 +156,14 @@ describe("schema migration runner and assertions (OPS-415)", () => {
        VALUES ('github', 'evt-415', 'issue.opened', '2026-08-14T00:00:00Z', '2026-08-14T00:00:01Z', '{}', 'hash1', '2026-08-14T00:00:01Z')`,
     ).run();
 
-    expect(getSchemaVersion(db)).toBe(1);
+    expect(getSchemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
 
-    // Apply a custom migration v2 that adds a column
-    const migrationsV2 = [
-      MIGRATIONS[0],
+    // Apply one custom migration after the real migration chain.
+    const customVersion = CURRENT_SCHEMA_VERSION + 1;
+    const migrationsWithCustom = [
+      ...MIGRATIONS,
       {
-        version: 2,
+        version: customVersion,
         name: "add_priority_to_events",
         up(targetDb) {
           targetDb.exec("ALTER TABLE events ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';");
@@ -167,8 +171,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       },
     ];
 
-    migrateDb(db, { migrations: migrationsV2, targetVersion: 2 });
-    expect(getSchemaVersion(db)).toBe(2);
+    migrateDb(db, { migrations: migrationsWithCustom, targetVersion: customVersion });
+    expect(getSchemaVersion(db)).toBe(customVersion);
 
     // Verify existing row is preserved and has default value
     const row = db.query("SELECT event_id, priority FROM events WHERE event_id = 'evt-415'").get();
@@ -199,7 +203,102 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     const file = freshFile();
     const db = openDb(file);
     setSchemaVersion(db, 0);
-    expect(() => assertSchema(db)).toThrow("Database schema assertion failed: user_version is 0, expected 1");
+    expect(() => assertSchema(db)).toThrow(
+      `Database schema assertion failed: user_version is 0, expected ${CURRENT_SCHEMA_VERSION}`,
+    );
+    db.close();
+  });
+});
+
+describe("run usage persistence and aggregation (WM-66)", () => {
+  function insertRun(db, runId, agent, at) {
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(runId, `idem-${runId}`, JSON.stringify({ agent, adapter: "fake" }), at, at);
+  }
+
+  test("persists per-attempt usage across reopen and returns explicit totals", () => {
+    const file = freshFile();
+    const at = "2026-08-15T10:00:00.000Z";
+    let db = openDb(file);
+    insertRun(db, "run-usage-1", "agent-a@1", at);
+    recordRunUsage(db, {
+      runId: "run-usage-1",
+      attempt: 1,
+      adapter: "claude",
+      model: "claude-sonnet-4-6",
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheCreationInputTokens: 30,
+      cacheReadInputTokens: 40,
+      costUSD: 0.5,
+      recordedAt: at,
+    });
+    db.close();
+
+    db = openDb(file);
+    expect(runUsage(db, "run-usage-1")).toEqual({
+      totals: {
+        attempts: 1,
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheCreationInputTokens: 30,
+        cacheReadInputTokens: 40,
+        totalTokens: 100,
+        costUSD: 0.5,
+      },
+      attempts: [{
+        attempt: 1,
+        adapter: "claude",
+        model: "claude-sonnet-4-6",
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheCreationInputTokens: 30,
+        cacheReadInputTokens: 40,
+        totalTokens: 100,
+        costUSD: 0.5,
+        recordedAt: at,
+      }],
+    });
+    db.close();
+  });
+
+  test("rolling windows and per-definition 24h totals exclude older usage", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-15T12:00:00.000Z");
+    const rows = [
+      ["run-recent-a", "agent-a@1", now - 30 * 60_000, 10, 5],
+      ["run-day-a", "agent-a@1", now - 2 * 60 * 60_000, 20, 10],
+      ["run-day-b", "agent-b@2", now - 23 * 60 * 60_000, 7, 3],
+      ["run-old", "agent-b@2", now - 25 * 60 * 60_000, 1000, 1000],
+    ];
+    for (const [runId, agent, atMs, inputTokens, outputTokens] of rows) {
+      const at = new Date(atMs).toISOString();
+      insertRun(db, runId, agent, at);
+      recordRunUsage(db, { runId, attempt: 1, adapter: "fake", inputTokens, outputTokens, recordedAt: at });
+    }
+
+    expect(usageSpend(db, { now })).toEqual({
+      rolling1h: {
+        runs: 1, attempts: 1, inputTokens: 10, outputTokens: 5,
+        cacheCreationInputTokens: 0, cacheReadInputTokens: 0, totalTokens: 15, costUSD: 0,
+      },
+      rolling24h: {
+        runs: 3, attempts: 3, inputTokens: 37, outputTokens: 18,
+        cacheCreationInputTokens: 0, cacheReadInputTokens: 0, totalTokens: 55, costUSD: 0,
+      },
+      byAgent24h: [
+        {
+          agent: "agent-a@1", runs: 2, attempts: 2, inputTokens: 30, outputTokens: 15,
+          cacheCreationInputTokens: 0, cacheReadInputTokens: 0, totalTokens: 45, costUSD: 0,
+        },
+        {
+          agent: "agent-b@2", runs: 1, attempts: 1, inputTokens: 7, outputTokens: 3,
+          cacheCreationInputTokens: 0, cacheReadInputTokens: 0, totalTokens: 10, costUSD: 0,
+        },
+      ],
+    });
     db.close();
   });
 });
