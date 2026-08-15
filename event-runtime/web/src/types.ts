@@ -220,6 +220,14 @@ export interface AgentEventRoute {
   adapter: string;
   idempotencyScope: string;
   proposalTtlSeconds: number | null;
+  /**
+   * What the planner would pin for this route (WM-135). Resolution is per
+   * adapter, which is why it rides the route and not the definition: the same
+   * `model_tier: strong` is `default` on claude and a codex id on pi. Null
+   * both when the adapter takes no model and when the definition declares
+   * none — `routeModel` in views/Agents.tsx tells those two apart.
+   */
+  resolvedModel: string | null;
 }
 
 /** One registered agent, fully readable: definition, prompt, schemas, pins. */
@@ -243,6 +251,10 @@ export interface AgentDef {
   command: string[] | null;
   actionRegistry: Record<string, { remote: string }> | null;
   hosts: string[] | null;
+  /** Declared intent (WM-135): strong | standard | light, or null for none. */
+  modelTier: string | null;
+  /** Exact model id, when a definition overrides its tier outright. */
+  model: string | null;
   eventTypes: AgentEventRoute[];
 }
 

@@ -1,16 +1,126 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { useListKeys } from "../hooks";
-import type { AgentDef } from "../types";
+import { useDisplayOptions, useListKeys } from "../hooks";
+import {
+  buildSections,
+  cycleColumnSort,
+  flattenSections,
+  grouped,
+  toggleCollapsed,
+  visibleColumns,
+  type DisplayConfig,
+} from "../displayOptions";
+import { DisplayOptions } from "../components/DisplayOptions";
+import type { AgentDef, AgentEventRoute } from "../types";
 import type { OperatorContext } from "../context";
-import { Button, DetailPane, Disclosure, FilterInput, JsonBlock, KV, ListEmpty, ListPane, Section, copyText, copyLink } from "../components/ui";
+import {
+  Button,
+  DetailPane,
+  Disclosure,
+  FilterInput,
+  GroupHeaderRow,
+  JsonBlock,
+  KV,
+  ListEmpty,
+  ListPane,
+  Section,
+  Th,
+  copyText,
+  copyLink,
+} from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
 import { eventsHash } from "../hash";
 import { setContextActions } from "../palette";
 
 const caps = (a: AgentDef) =>
   [a.capabilities.filesystem, ...(a.capabilities.services ?? [])].filter(Boolean).join(", ") || "none";
+
+/**
+ * The adapters that take a model at all — the web-side mirror of
+ * `MODEL_ADAPTERS` in `event-runtime/lib/registry.mjs` (WM-135). `GET /agents`
+ * reports `resolvedModel: null` for two different situations, and an operator
+ * reads them differently: a command/actions agent has no model *by
+ * construction*, while an LLM agent that declares no tier simply pins nothing
+ * and rides the CLI's own default. Collapsing both to a blank cell is exactly
+ * the ambiguity this view exists to remove.
+ */
+const MODEL_ADAPTERS = new Set(["claude", "pi"]);
+
+/**
+ * Tier buckets, strongest first — the group order and the sort order at once,
+ * so "sort by tier" and "group by tier" cannot disagree. `override` is not a
+ * tier but reads as one here: it is what a definition says instead of a tier.
+ */
+const TIER_ORDER = ["strong", "standard", "light", "override", "-"] as const;
+
+/** No tier, no override, nothing to say — one dash, used everywhere. */
+const DASH = "-";
+
+const uniq = (values: string[]) => [...new Set(values)];
+
+/**
+ * What this route actually runs on. `resolvedModel` is the planner's answer and
+ * wins whenever it exists; null falls back to the adapter's nature rather than
+ * to an empty cell.
+ */
+export const routeModel = (r: AgentEventRoute): string =>
+  r.resolvedModel ?? (MODEL_ADAPTERS.has(r.adapter) ? "default" : "n/a");
+
+/**
+ * Row-level roll-ups. An agent is one row but can be routed by several event
+ * types, each with its own adapter — so the cell is the distinct set in route
+ * order, not the first value. A mixed agent reading `claude, command` is the
+ * truth; picking one adapter to show would be a lie the table cannot flag.
+ */
+export const adapterText = (a: AgentDef): string =>
+  uniq(a.eventTypes.map((r) => r.adapter)).join(", ") || DASH;
+
+/** Declared intent. An exact-id override answers for a definition that names no tier. */
+export const tierText = (a: AgentDef): string => a.modelTier ?? (a.model ? "override" : DASH);
+
+/** Sort key for the Tier column: TIER_ORDER's position, unknowns last. */
+const tierRank = (a: AgentDef): number => {
+  const i = (TIER_ORDER as readonly string[]).indexOf(tierText(a));
+  return i === -1 ? TIER_ORDER.length : i;
+};
+
+/**
+ * Resolved model per row. Nothing routes to this agent → nothing resolves,
+ * whatever it declares; the Tier column and the detail pane still carry the
+ * declaration, so the fact is not lost.
+ */
+export const modelText = (a: AgentDef): string =>
+  uniq(a.eventTypes.map(routeModel)).join(", ") || DASH;
+
+/** Grouping/ordering/columns for the registry table (OPS-493/OPS-492). */
+const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
+  view: "agents",
+  groups: [
+    { key: "adapter", label: "Adapter", get: adapterText },
+    { key: "tier", label: "Tier", get: tierText, order: TIER_ORDER },
+    { key: "contract", label: "Contract", get: (a) => a.outputContract },
+  ],
+  subGroups: ["adapter", "tier", "contract"],
+  sorts: [
+    { key: "ref", label: "Ref", get: (a) => a.ref, column: "ref" },
+    { key: "adapter", label: "Adapter", get: adapterText, column: "adapter" },
+    { key: "tier", label: "Tier", get: tierRank, column: "tier" },
+    { key: "model", label: "Model", get: modelText, column: "model" },
+    { key: "contract", label: "Contract", get: (a) => a.outputContract, column: "contract" },
+  ],
+  columns: [
+    { key: "ref", label: "Ref", always: true },
+    { key: "contract", label: "Contract" },
+    { key: "adapter", label: "Adapter" },
+    { key: "tier", label: "Tier" },
+    { key: "model", label: "Model" },
+    { key: "mutating", label: "Mutating" },
+    { key: "capabilities", label: "Capabilities" },
+    { key: "timeout", label: "Timeout" },
+    { key: "attempts", label: "Attempts" },
+  ],
+};
 
 /**
  * Events already owns `#/events?type=` (the same target Graph jumps to). A real
@@ -22,8 +132,9 @@ const eventsTypeHref = (type: string) => `#/${eventsHash(null, null, type)}`;
 /**
  * Agents (webui doc §10.6) — the registry, fully readable. An operator
  * approving "factory-status-report@1" can read exactly what that ref means —
- * prompt, schemas, pins, routing — without opening the repo. Read-only:
- * the registry has no mutation surface, by design.
+ * prompt, schemas, pins, routing, and (WM-211) which adapter runs it on which
+ * model — without opening the repo. Read-only: the registry has no mutation
+ * surface, by design.
  */
 export function Agents({
   context,
@@ -43,14 +154,40 @@ export function Agents({
     const q = filter.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((a) =>
-      [a.ref, a.id, a.outputContract, caps(a), ...a.eventTypes.map((t) => t.type)].some((v) =>
-        v.toLowerCase().includes(q),
-      ),
+      [
+        a.ref,
+        a.id,
+        a.outputContract,
+        caps(a),
+        // Adapter/tier/model are filterable for the same reason they are
+        // columns: "which agents run on pi" is one of the questions.
+        adapterText(a),
+        tierText(a),
+        modelText(a),
+        ...a.eventTypes.map((t) => t.type),
+      ].some((v) => v.toLowerCase().includes(q)),
     );
   }, [rows, filter]);
+
+  // Display options (OPS-493): partition into sections, order inside them, and
+  // feed keyboard navigation only the rows of open sections.
+  const [display, setDisplay] = useDisplayOptions(AGENTS_DISPLAY);
+  const sections = useMemo(() => buildSections(visible, AGENTS_DISPLAY, display), [visible, display]);
+  const flat = useMemo(
+    () => flattenSections(sections, display.collapsed),
+    [sections, display.collapsed],
+  );
+  const cols = visibleColumns(AGENTS_DISPLAY, display);
+  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
+
   const selectedRef = focusAgentRef;
-  const selectedIndex = useMemo(() => visible.findIndex((a) => a.ref === selectedRef), [visible, selectedRef]);
-  const sel = selectedIndex >= 0 ? visible[selectedIndex] : null;
+  // Keyboard index walks the open sections; the detail pane keys off the row
+  // itself so collapsing the group under a selection never closes the pane.
+  const selectedIndex = useMemo(() => flat.findIndex((a) => a.ref === selectedRef), [flat, selectedRef]);
+  const sel = useMemo(
+    () => (selectedRef ? (visible.find((a) => a.ref === selectedRef) ?? null) : null),
+    [visible, selectedRef],
+  );
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -61,9 +198,9 @@ export function Agents({
   }, [focusAgentRef]);
 
   useListKeys({
-    count: visible.length,
+    count: flat.length,
     selected: selectedIndex,
-    onSelect: (i) => onSelectAgent(visible[i]?.ref ?? null),
+    onSelect: (i) => onSelectAgent(flat[i]?.ref ?? null),
     onClose: () => {
       if (selectedRef) onSelectAgent(null);
       else if (filter) setFilter("");
@@ -92,11 +229,14 @@ export function Agents({
           <>
         <h1 className="display mb-4 text-lg font-semibold">Agents</h1>
         <ScopeCaption context={context} surface="registry" />
-        <div className="mb-3">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="ml-auto">
+            <DisplayOptions config={AGENTS_DISPLAY} state={display} onChange={setDisplay} />
+          </span>
           <FilterInput
             value={filter}
             onChange={setFilter}
-            placeholder="Filter ref, contract, event type…"
+            placeholder="Filter ref, contract, adapter, model, event type…"
             label="Filter agents"
           />
         </div>
@@ -107,43 +247,119 @@ export function Agents({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Ref</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Contract</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Mutating</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Capabilities</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Timeout</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Attempts</th>
+              {cols.map((c) => {
+                const sort = AGENTS_DISPLAY.sorts.find((s) => s.column === c.key);
+                return (
+                  <Th
+                    key={c.key}
+                    label={c.label}
+                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir}
+                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(AGENTS_DISPLAY, s, c.key)) : undefined}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {visible.map((a, i) => (
-              <tr
-                key={a.ref}
-                onClick={() => onSelectAgent(a.ref)}
-                aria-selected={i === selectedIndex}
-                className={`cursor-pointer hover:bg-(--surface-1) ${i === selectedIndex ? "row-selected" : ""}`}
-              >
-                <td className="mono border-b border-(--border) px-3 py-1.5">{a.ref}</td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{a.outputContract}</td>
-                <td className="border-b border-(--border) px-3 py-1.5">
-                  <span style={{ color: a.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
-                    {a.mutating ? "mutating" : "read-only"}
-                  </span>
-                </td>
-                <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
-                  {caps(a)}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
-                  {a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : "-"}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
-                  {a.limits.attempts ?? "-"}
-                </td>
-              </tr>
-            ))}
+            {(() => {
+              const renderRow = (a: AgentDef) => (
+                <tr
+                  key={a.ref}
+                  onClick={() => onSelectAgent(a.ref)}
+                  aria-selected={a.ref === selectedRef}
+                  className={`cursor-pointer hover:bg-(--surface-1) ${a.ref === selectedRef ? "row-selected" : ""}`}
+                >
+                  <td className="mono border-b border-(--border) px-3 py-1.5">{a.ref}</td>
+                  {show.has("contract") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{a.outputContract}</td>
+                  )}
+                  {show.has("adapter") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      {adapterText(a)}
+                    </td>
+                  )}
+                  {show.has("tier") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      {tierText(a)}
+                      {a.model && a.modelTier && (
+                        <span
+                          className="ml-1.5 text-[11px] text-(--text-faint)"
+                          title={`Overridden outright by model ${a.model} — the tier is declared but never resolved.`}
+                        >
+                          overridden
+                        </span>
+                      )}
+                    </td>
+                  )}
+                  {show.has("model") && (
+                    <td
+                      className="mono max-w-56 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)"
+                      title={modelText(a)}
+                    >
+                      {modelText(a)}
+                    </td>
+                  )}
+                  {show.has("mutating") && (
+                    <td className="border-b border-(--border) px-3 py-1.5">
+                      <span style={{ color: a.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
+                        {a.mutating ? "mutating" : "read-only"}
+                      </span>
+                    </td>
+                  )}
+                  {show.has("capabilities") && (
+                    <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                      {caps(a)}
+                    </td>
+                  )}
+                  {show.has("timeout") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      {a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : "-"}
+                    </td>
+                  )}
+                  {show.has("attempts") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      {a.limits.attempts ?? "-"}
+                    </td>
+                  )}
+                </tr>
+              );
+              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
+              return sections.map((s) => {
+                const closed = display.collapsed.includes(s.key);
+                return (
+                  <Fragment key={s.key}>
+                    <GroupHeaderRow
+                      colSpan={cols.length}
+                      section={s}
+                      collapsed={closed}
+                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    />
+                    {!closed &&
+                      (s.subsections
+                        ? s.subsections.map((child) => {
+                            const childClosed = display.collapsed.includes(child.key);
+                            return (
+                              <Fragment key={child.key}>
+                                <GroupHeaderRow
+                                  colSpan={cols.length}
+                                  section={child}
+                                  collapsed={childClosed}
+                                  onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
+                                  sub
+                                />
+                                {!childClosed && child.rows.map(renderRow)}
+                              </Fragment>
+                            );
+                          })
+                        : s.rows.map(renderRow))}
+                  </Fragment>
+                );
+              });
+            })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={6}
+                colSpan={cols.length}
                 query={query}
                 filtered={rows.length > 0}
                 noun="agents"
@@ -202,6 +418,21 @@ export function Agents({
               v={`${sel.workspace.type}${sel.workspace.retainOnFailure ? " · retain on failure" : ""}`}
             />
             <KV k="capabilities" v={caps(sel)} />
+            <KV k="adapter" v={adapterText(sel)} />
+            {/* Declared intent and the exact-id escape hatch (WM-135). What each
+                route actually resolves to is per adapter, and lives on the
+                Event routing lines below — the same split `cli.mjs agents` prints. */}
+            <KV k="modelTier" v={sel.modelTier ?? "-"} />
+            <KV
+              k="model override"
+              v={
+                sel.model ? (
+                  <span title="Exact model id — resolved verbatim, whatever the tier says.">{sel.model}</span>
+                ) : (
+                  "-"
+                )
+              }
+            />
             <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : "-"} />
             <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : "-"} />
             <KV
@@ -277,7 +508,20 @@ export function Agents({
                   >
                     <div className="mono text-(--accent) group-hover:underline">{r.type}</div>
                     <div className="text-[11px] text-(--text-faint)">
-                      adapter {r.adapter} · idempotency {r.idempotencyScope}
+                      adapter {r.adapter} · model{" "}
+                      <span
+                        className="mono"
+                        title={
+                          r.resolvedModel != null
+                            ? "What the planner pins into the RunSpec for this route."
+                            : MODEL_ADAPTERS.has(r.adapter)
+                              ? "This definition pins nothing, so dispatch rides the CLI's own default."
+                              : `The ${r.adapter} adapter runs a fixed argv, not a model.`
+                        }
+                      >
+                        {routeModel(r)}
+                      </span>{" "}
+                      · idempotency {r.idempotencyScope}
                       {r.proposalTtlSeconds != null ? ` · proposal TTL ${r.proposalTtlSeconds}s` : ""}
                     </div>
                   </a>
