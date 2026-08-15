@@ -308,6 +308,8 @@ const stubAgent = (ref: string): AgentsView["agents"][number] =>
     command: null,
     actionRegistry: null,
     hosts: null,
+    modelTier: null,
+    model: null,
     eventTypes: [],
   }) as AgentsView["agents"][number];
 
