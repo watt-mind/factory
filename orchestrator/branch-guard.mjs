@@ -35,11 +35,16 @@ export function protectedBranchesFor(repo) {
   return Array.from(list);
 }
 
+/** Normalize branch refs for protected-branch comparisons. */
+function normalizeBranchName(branch) {
+  return String(branch).toLowerCase().replace(/^(?:refs\/heads\/|origin\/|heads\/)/, "");
+}
+
 /** Check if a branch name matches any protected branch for this repo. */
 export function isProtectedBranch(branch, repo) {
   if (!branch) return false;
-  const protectedList = protectedBranchesFor(repo);
-  return protectedList.includes(branch);
+  const candidate = normalizeBranchName(branch);
+  return protectedBranchesFor(repo).some((protectedBranch) => normalizeBranchName(protectedBranch) === candidate);
 }
 
 /**
