@@ -3,7 +3,7 @@ import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { GO_CHORD_MS, goPrefix, goSequence } from "../goSequence";
-import { keyGuard, modal } from "../hooks";
+import { keyGuard, modal, registerFocusReturnScope } from "../hooks";
 import { useContextActions } from "../palette";
 import { health } from "../workerHealth";
 
@@ -109,11 +109,15 @@ export function CommandPalette({
     };
     window.addEventListener("keydown", onKey);
     const root = panelRef.current;
+    const unregisterFocusReturn = root
+      ? registerFocusReturnScope(root, previousFocusRef.current)
+      : () => {};
     const input = root?.querySelector<HTMLElement>("input");
     (input ?? root)?.focus();
     return () => {
       modal.depth -= 1;
       window.removeEventListener("keydown", onKey);
+      unregisterFocusReturn();
       const active = document.activeElement;
       const claimed =
         active instanceof HTMLElement && active !== document.body && active.isConnected;

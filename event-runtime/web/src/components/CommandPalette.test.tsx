@@ -2,8 +2,10 @@ import "../test-dom";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState } from "react";
 import { modal } from "../hooks";
 import { CommandPalette, type PaletteAction } from "./CommandPalette";
+import { Dialog } from "./ui";
 
 const ACTIONS: PaletteAction[] = [
   { label: "Overview", hint: "g g", group: "Go", run: () => {} },
@@ -40,6 +42,38 @@ function renderPalette(actions: PaletteAction[] = ACTIONS) {
         onJumpWorker={NOOP}
       />
     </QueryClientProvider>,
+  );
+}
+
+function PaletteDialogHost() {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [client] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: { queries: { retry: false, refetchInterval: false } },
+      }),
+  );
+  return (
+    <QueryClientProvider client={client}>
+      <button type="button" data-testid="dialog-opener">
+        nav
+      </button>
+      <CommandPalette
+        actions={[{ label: "Keyboard shortcuts", run: () => setDialogOpen(true) }]}
+        onJumpRun={NOOP}
+        onJumpProposal={NOOP}
+        onJumpEvent={NOOP}
+        onJumpAgent={NOOP}
+        onJumpWorker={NOOP}
+      />
+      {dialogOpen ? (
+        <Dialog title="Keyboard shortcuts" onClose={() => setDialogOpen(false)}>
+          <button type="button" autoFocus>
+            Done
+          </button>
+        </Dialog>
+      ) : null}
+    </QueryClientProvider>
   );
 }
 
@@ -168,6 +202,22 @@ describe("CommandPalette", () => {
     fireEvent.click(r.getByText("Focus filter"));
     expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
     expect(document.activeElement).toBe(r.getByTestId("view-filter"));
+  });
+
+  test("a dialog opened by a palette action returns focus to the palette opener", () => {
+    const r = render(<PaletteDialogHost />);
+    const opener = r.getByTestId("dialog-opener");
+    opener.focus();
+    chordK();
+    expect(document.activeElement).toBe(r.getByPlaceholderText("Type a command…"));
+
+    fireEvent.click(r.getByText("Keyboard shortcuts"));
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+    expect(r.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(r.queryByRole("dialog", { name: "Keyboard shortcuts" }) == null).toBe(true);
+    expect(document.activeElement).toBe(opener);
   });
 
   test("search input uses an accent focus border and no outline", () => {
