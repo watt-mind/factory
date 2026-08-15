@@ -407,20 +407,26 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
        VALUES (?, ?, ?, ?, 'run', ?, 1800)`,
     ).run("prop_extra_ambiguous", prop.eventSource, prop.eventId, prop.runId, at);
 
-    expect(await s.client.cancel(prop.runId, "never mind")).toEqual({
-      cancelled: true,
-      ambiguousOpenProposals: [{ runId: prop.runId, count: 2 }],
-    });
-    expect((await s.client.run(prop.runId)).run.state).toBe("CANCELLED");
+    try {
+      expect(await s.client.cancel(prop.runId, "never mind")).toEqual({
+        cancelled: true,
+        ambiguousOpenProposals: [{ runId: prop.runId, count: 2 }],
+      });
+      expect((await s.client.run(prop.runId)).run.state).toBe("CANCELLED");
 
-    const open = await s.client.proposals();
-    expect(open.proposals.map((p) => p.id)).toContain(prop.id);
-    expect(open.proposals.map((p) => p.id)).toContain("prop_extra_ambiguous");
+      const open = await s.client.proposals();
+      expect(open.proposals.map((p) => p.id)).toContain(prop.id);
+      expect(open.proposals.map((p) => p.id)).toContain("prop_extra_ambiguous");
 
-    const status = await s.client.status();
-    expect(status.anomalies.ambiguousOpenProposals).toEqual([
-      { runId: prop.runId, count: 2 },
-    ]);
+      const status = await s.client.status();
+      expect(status.anomalies.ambiguousOpenProposals).toEqual([
+        { runId: prop.runId, count: 2 },
+      ]);
+    } finally {
+      s.db
+        .query(`DELETE FROM proposals WHERE id IN (?, ?)`)
+        .run(prop.id, "prop_extra_ambiguous");
+    }
   });
 
   test("retry: 404 on unknown run, 409 when attempts are exhausted, queued with force", async () => {
