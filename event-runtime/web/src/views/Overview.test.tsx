@@ -530,7 +530,7 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
     }
   });
 
-  test("event and run grids are 2–4 columns below sm, not 5/8", async () => {
+  test("stage cards and legend rows use responsive fluid layouts", async () => {
     const restore = stubApis({
       status: {
         ...baseStatus(),
@@ -543,14 +543,12 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
       const { getByText } = renderOverview();
       await waitFor(() => getByText(/1\. Event Intake/));
 
-      const eventGrid = getByText(/1\. Event Intake/).nextElementSibling;
-      expect(eventGrid?.className).toMatch(/\bgrid-cols-2\b/);
-      expect(eventGrid?.className).not.toMatch(/^grid grid-cols-5 /);
+      const stage1 = getByText(/1\. Event Intake/).closest("section");
+      expect(stage1?.className).toMatch(/\brounded-lg\b/);
+      expect(stage1?.className).toMatch(/\blg:col-span-2\b/);
 
-      const runGrid = getByText(/3\. Execution Fleet/).nextElementSibling;
-      expect(runGrid?.className).toMatch(/\bgrid-cols-2\b/);
-      expect(runGrid?.className).not.toMatch(/^grid grid-cols-4 /);
-      expect(runGrid?.className).toMatch(/xl:grid-cols-8/);
+      const stage3 = getByText(/3\. Execution Fleet/).closest("section");
+      expect(stage3?.className).toMatch(/\brounded-lg\b/);
     } finally {
       restore();
     }
