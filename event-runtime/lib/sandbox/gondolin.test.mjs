@@ -90,16 +90,34 @@ describe("NDJSON protocol", () => {
 });
 
 describe("runInSandbox refusals", () => {
+  // FACTORY_SANDBOX_NODE points at a path that cannot exist, so preflight
+  // fails on any machine, with or without QEMU installed.
+  const unavailableHost = { FACTORY_SANDBOX_NODE: "/nonexistent/node", PATH: "" };
+
   test("an unavailable host refuses with a typed error before spawning anything", async () => {
-    // FACTORY_SANDBOX_NODE points at a path that cannot exist, so preflight
-    // fails on this machine whether or not QEMU is installed.
     await expect(
       runInSandbox({
         policy: { provider: "gondolin" },
         command: ["/bin/true"],
         timeoutMs: 1000,
-        hostEnv: { FACTORY_SANDBOX_NODE: "/nonexistent/node", PATH: "" },
+        hostEnv: unavailableHost,
       }),
     ).rejects.toThrow(SandboxUnavailableError);
+  });
+
+  test("an invalid policy is reported as invalid even on a host that could not run it anyway", async () => {
+    // Regression: policy validation used to run after preflight, so a typo'd
+    // provider surfaced as "qemu is not on PATH" on any machine without a
+    // hypervisor — a diagnostic that sends the reader after the wrong bug.
+    // This passed locally (QEMU present) and failed in CI (QEMU absent), which
+    // is exactly the asymmetry this test exists to prevent.
+    await expect(
+      runInSandbox({
+        policy: { provider: "firecracker" },
+        command: ["/bin/true"],
+        timeoutMs: 1000,
+        hostEnv: unavailableHost,
+      }),
+    ).rejects.toThrow(/unknown sandbox provider/);
   });
 });

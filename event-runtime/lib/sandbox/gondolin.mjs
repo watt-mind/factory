@@ -184,8 +184,13 @@ export async function runInSandbox({
   abortSignal,
   signal,
 }) {
-  const report = assertAvailable({ env: hostEnv });
+  // Order matters, and CI proved it: policy validation is host-independent,
+  // so it goes first. A definition with a typo'd provider is wrong on every
+  // machine, and reporting "qemu is not on PATH" for it sends the reader
+  // hunting a hypervisor problem that does not exist. Host capability is
+  // checked second, and secret resolution (which reads this host's env) last.
   const policy = normalizePolicy(rawPolicy, { workspaceDir });
+  const report = assertAvailable({ env: hostEnv });
   const secrets = resolveSecretValues(policy, hostEnv);
 
   const guestCwd = workspaceDir ? policy.workspaceMount : undefined;
