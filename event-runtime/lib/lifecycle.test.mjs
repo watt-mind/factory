@@ -72,26 +72,46 @@ describe("lifecycle", () => {
     expect(runState(db, runId)).toBe("QUEUED");
   });
 
-  test("resolveIdempotency: duplicate delivery matches existing run, distinct correlation returns null (OPS-419)", () => {
+  test("resolveIdempotency coalesces an active repeat trigger, then releases it after terminal completion", () => {
     const db = openDb(":memory:");
     createRun(db, {
-      runId: "run_remed_1",
-      idempotencyKey: "remed-key-1",
+      runId: "run_chain_1",
+      idempotencyKey: "chain-key-1",
       spec: {},
       specJson: "{}",
       specHash: "sha256:0",
       actor: "planner",
-      correlationId: "alert-001",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_1",
       policyVersion: "test",
     });
 
-    // Same key and matching correlationId -> resolves to existing run
-    const dup = resolveIdempotency(db, { idempotencyKey: "remed-key-1", correlationId: "alert-001" });
-    expect(dup?.run_id).toBe("run_remed_1");
+    // Same lineage and input, but a distinct chain causation: while the first
+    // run is active the repeat trigger coalesces into it.
+    const active = resolveIdempotency(db, {
+      idempotencyKey: "chain-key-1",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_2",
+    });
+    expect(active?.run_id).toBe("run_chain_1");
 
-    // Same key but distinct correlationId (repeat remediation) -> null (not falsely suppressed)
-    const distinct = resolveIdempotency(db, { idempotencyKey: "remed-key-1", correlationId: "alert-002" });
-    expect(distinct).toBeNull();
+    transition(db, { runId: "run_chain_1", to: "CANCELLED", actor: "test" });
+
+    // Once terminal, that distinct trigger is eligible to create a new run.
+    const afterTerminal = resolveIdempotency(db, {
+      idempotencyKey: "chain-key-1",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_2",
+    });
+    expect(afterTerminal).toBeNull();
+
+    // Redelivery of the original trigger still resolves to its terminal run.
+    const duplicate = resolveIdempotency(db, {
+      idempotencyKey: "chain-key-1",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_1",
+    });
+    expect(duplicate?.run_id).toBe("run_chain_1");
   });
 
   test("lifecycle timestamps are monotonic and distinct across states when clock advances", () => {
