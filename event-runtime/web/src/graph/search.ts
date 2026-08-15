@@ -17,6 +17,38 @@ export function matchNodes(nodes: GraphNode[], query: string): string[] {
 }
 
 /**
+ * Enter on a non-empty query selects the current match (match 1 of N first).
+ * A second Enter while that match is already selected advances to the next.
+ */
+export function searchEnter(
+  matches: string[],
+  matchIdx: number,
+  selectedId: string | null,
+): { selectId: string; nextIdx: number } | null {
+  if (matches.length === 0) return null;
+  const idx = ((matchIdx % matches.length) + matches.length) % matches.length;
+  const current = matches[idx]!;
+  if (selectedId === current && matches.length > 1) {
+    const nextIdx = (idx + 1) % matches.length;
+    return { selectId: matches[nextIdx]!, nextIdx };
+  }
+  return { selectId: current, nextIdx: idx };
+}
+
+/**
+ * Stale `#/graph/:nodeId`: the hash names a node that is not in the loaded
+ * graph. While loading, this is false so the banner does not flash.
+ */
+export function missingFocusNode(
+  nodes: Array<{ id: string }> | null | undefined,
+  focusNodeId: string | null,
+  loaded: boolean,
+): boolean {
+  if (!loaded || !focusNodeId || !nodes) return false;
+  return !nodes.some((n) => n.id === focusNodeId);
+}
+
+/**
  * Node ids of the largest connected component (undirected), edges winning
  * ties — the initial view centers here instead of fitting every stray island
  * on screen at once.

@@ -10,6 +10,34 @@ import { DECISION_HUES, STATE_HUES, StateBadge } from "../components/ui";
 const handleStyle = { background: "var(--border-strong)", width: 6, height: 6, border: "none" };
 
 const searchHitOf = (data: NodeProps["data"]) => Boolean((data as { searchHit?: boolean }).searchHit);
+const searchCurrentOf = (data: NodeProps["data"]) =>
+  Boolean((data as { searchCurrent?: boolean }).searchCurrent);
+
+function materialState(node: GraphNode): string {
+  switch (node.kind) {
+    case "eventType": {
+      const admitted = node.admittedCount ?? 0;
+      const planned = node.plannedCount ?? 0;
+      if (admitted > 0 || planned > 0) return `${admitted} admitted, ${planned} planned`;
+      return "idle";
+    }
+    case "agent": {
+      const runs = node.activeRuns ?? [];
+      if (runs.length === 0) return "idle";
+      return runs.map(({ state, count }) => (count > 1 ? `${state} ${count}` : state)).join(", ");
+    }
+    case "proposal":
+      return node.proposal.expired ? `${node.decision}, expired` : node.decision;
+    case "terminal":
+      return node.reason;
+  }
+}
+
+/** Accessible name: kind + label + material state (counts, run badges, decision). */
+export function nodeAccessibleName(node: GraphNode): string {
+  const kind = node.kind === "eventType" ? "event type" : node.kind;
+  return `${kind} ${node.label}, ${materialState(node)}`;
+}
 
 function Shell({
   children,
@@ -17,17 +45,27 @@ function Shell({
   selected,
   dashed,
   searchHit,
+  searchCurrent,
+  accessibleName,
 }: {
   children: React.ReactNode;
   accent: string;
   selected?: boolean;
   dashed?: boolean;
   searchHit?: boolean;
+  searchCurrent?: boolean;
+  accessibleName: string;
 }) {
   return (
     <div
       className="rounded-md px-3 py-2 text-left"
       tabIndex={0}
+      role="button"
+      aria-label={accessibleName}
+      aria-selected={selected ? true : false}
+      aria-pressed={selected ? true : false}
+      data-search-hit={searchHit || searchCurrent ? "true" : undefined}
+      data-search-current={searchCurrent ? "true" : undefined}
       style={{
         width: 236,
         height: 92,
@@ -35,8 +73,10 @@ function Shell({
         border: `1px ${dashed ? "dashed" : "solid"} ${selected ? accent : "var(--border)"}`,
         boxShadow: selected ? `0 0 0 1px ${accent}` : "none",
         borderLeft: `3px solid ${accent}`,
-        outline: searchHit ? "2px solid var(--accent)" : undefined,
-        outlineOffset: searchHit ? 2 : undefined,
+        outlineWidth: searchHit || searchCurrent ? "2px" : undefined,
+        outlineStyle: searchCurrent ? "solid" : searchHit ? "dashed" : undefined,
+        outlineColor: searchHit || searchCurrent ? "var(--accent)" : undefined,
+        outlineOffset: searchHit || searchCurrent ? 2 : undefined,
       }}
     >
       {children}
@@ -62,7 +102,13 @@ export function EventTypeNode({ data, selected }: NodeProps) {
   const hasCounts = admitted > 0 || planned > 0;
 
   return (
-    <Shell accent={NODE_STYLES.eventType.accent} selected={selected} searchHit={searchHitOf(data)}>
+    <Shell
+      accent={NODE_STYLES.eventType.accent}
+      selected={selected}
+      searchHit={searchHitOf(data)}
+      searchCurrent={searchCurrentOf(data)}
+      accessibleName={nodeAccessibleName(node)}
+    >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-1">
         <span className="text-[10px] tracking-wide uppercase" style={{ color: NODE_STYLES.eventType.accent }}>
@@ -115,7 +161,13 @@ export function AgentNode({ data, selected }: NodeProps) {
   const activeRuns = node.activeRuns ?? [];
 
   return (
-    <Shell accent={accent} selected={selected} searchHit={searchHitOf(data)}>
+    <Shell
+      accent={accent}
+      selected={selected}
+      searchHit={searchHitOf(data)}
+      searchCurrent={searchCurrentOf(data)}
+      accessibleName={nodeAccessibleName(node)}
+    >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-2">
         <span className="text-[10px] tracking-wide uppercase" style={{ color: accent }}>
@@ -172,6 +224,8 @@ export function TerminalNode({ data, selected }: NodeProps) {
       selected={selected}
       dashed={NODE_STYLES.terminal.dashed}
       searchHit={searchHitOf(data)}
+      searchCurrent={searchCurrentOf(data)}
+      accessibleName={nodeAccessibleName(node)}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="text-[10px] tracking-wide uppercase" style={{ color: "var(--text-faint)" }}>
@@ -193,6 +247,8 @@ export function ProposalNode({ data, selected }: NodeProps) {
       selected={selected}
       dashed={NODE_STYLES.proposal.dashed}
       searchHit={searchHitOf(data)}
+      searchCurrent={searchCurrentOf(data)}
+      accessibleName={nodeAccessibleName(node)}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-1">
