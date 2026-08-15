@@ -257,8 +257,7 @@ describe("ContextTabs", () => {
     expect(window.location.hash).toBe("#/runs/run_abc");
   });
 
-  test("closed repo picker ignores ArrowDown and Enter (does not open a repo)", () => {
-    const opened: string[] = [];
+  test("native keyboard activation on the repo picker trigger opens the listbox", () => {
     const r = render(
       <ContextTabs
         repos={[repo("factory"), repo("client")]}
@@ -266,17 +265,44 @@ describe("ContextTabs", () => {
         openRepos={["factory"]}
         active={{ kind: "all" }}
         onSelect={() => {}}
-        onOpen={(name) => opened.push(name)}
+        onOpen={() => {}}
         onClose={() => {}}
       />,
     );
 
     const plus = r.getByRole("button", { name: "Open a repo tab" });
     plus.focus();
-    fireEvent.keyDown(plus, { key: "ArrowDown" });
-    fireEvent.keyDown(plus, { key: "Enter" });
-    expect(opened).toEqual([]);
-    expect(r.queryByRole("listbox")).toBeNull();
+    // Browsers synthesize a detail=0 click when Enter activates a native button.
+    // happy-dom does not synthesize that click from keyDown, so dispatch it directly.
+    fireEvent.click(plus, { detail: 0 });
+
+    expect(plus.getAttribute("aria-expanded")).toBe("true");
+    expect(r.getByRole("listbox", { name: "Factory repos" })).toBeDefined();
+  });
+
+  test("ArrowDown on the closed repo picker opens and focuses the listbox", () => {
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory"), repo("client")]}
+        reposError={false}
+        openRepos={["factory"]}
+        active={{ kind: "all" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    const plus = r.getByRole("button", { name: "Open a repo tab" });
+    plus.focus();
+    const arrowDown = createEvent.keyDown(plus, { key: "ArrowDown" });
+    act(() => {
+      fireEvent(plus, arrowDown);
+    });
+
+    const listbox = r.getByRole("listbox", { name: "Factory repos" });
+    expect(arrowDown.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(listbox);
   });
 
   test("empty picker copy does not use registry or fleet jargon", () => {

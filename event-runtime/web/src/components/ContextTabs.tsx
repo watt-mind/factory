@@ -262,6 +262,12 @@ export function ContextTabs({
     closePicker(true);
   };
 
+  const handlePickerTriggerKeyDown = (e: React.KeyboardEvent) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.key !== "ArrowDown") return;
+    e.preventDefault();
+    setPicker(true);
+  };
+
   const handlePickerKeyDown = (e: React.KeyboardEvent) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "Tab") {
@@ -454,6 +460,7 @@ export function ContextTabs({
           title="Open a repo"
           className="rounded-md px-2 py-1 text-[14px] text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
           onClick={() => setPicker((open) => !open)}
+          onKeyDown={handlePickerTriggerKeyDown}
         >
           +
         </button>
