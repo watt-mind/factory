@@ -1093,7 +1093,15 @@ export function Proposals({
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && reason.trim()) reject.mutate({ id: sel.id, why: reason.trim() });
+                    if (
+                      (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) &&
+                      reason.trim() &&
+                      !reject.isPending &&
+                      connected
+                    ) {
+                      e.preventDefault();
+                      reject.mutate({ id: sel.id, why: reason.trim() });
+                    }
                     if (e.key === "Escape") setRejecting(false);
                   }}
                   placeholder="Reason (required — rejections are audit records)"
@@ -1101,7 +1109,7 @@ export function Proposals({
                 />
                 <Button
                   variant="danger"
-                  disabled={!reason.trim() || reject.isPending}
+                  disabled={!reason.trim() || reject.isPending || !connected}
                   onClick={() => reject.mutate({ id: sel.id, why: reason.trim() })}
                 >
                   Confirm
@@ -1267,7 +1275,12 @@ export function Proposals({
             value={bulkReason}
             onChange={(e) => setBulkReason(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && bulkReason.trim() && !bulkRejecting) {
+              if (
+                (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) &&
+                bulkReason.trim() &&
+                !bulkRejecting &&
+                connected
+              ) {
                 e.preventDefault();
                 handleBulkReject();
               }

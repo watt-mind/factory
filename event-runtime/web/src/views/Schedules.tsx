@@ -392,7 +392,7 @@ export function Schedules({
               disabled={connected === false}
               onClick={() => setConfirmLoop(sel)}
             >
-              Run now…
+              Run now… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">r</span>
             </Button>
           }
           utility={
