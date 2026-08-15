@@ -95,6 +95,65 @@ function renderRuns(props: Partial<Parameters<typeof Runs>[0]> = {}) {
   );
 }
 
+describe("Runs sortable columns (OPS-492)", () => {
+  test("every data header cycles ascending, descending, and default order with accessible state", async () => {
+    const onSelectRun = mock(() => {});
+    const later = stubListItem("run_zulu", "RUNNING", {
+      agent: "z-agent",
+      adapter: "pi",
+      attempts: 2,
+      reasonCode: "z-reason",
+      eventId: "event_zulu",
+      eventSource: "github",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    });
+    const earlier = stubListItem("run_alpha", "FAILED", {
+      agent: "a-agent",
+      adapter: "claude",
+      attempts: 1,
+      reasonCode: "a-reason",
+      eventId: "event_alpha",
+      eventSource: "linear",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [later, earlier] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ onSelectRun });
+        await waitFor(() => r.getByRole("columnheader", { name: /Run/ }));
+
+        for (const label of ["Run", "State", "Agent", "Adapter", "Model", "Attempts", "Reason", "Origin", "Updated"]) {
+          const header = r.getByRole("columnheader", { name: new RegExp(label) });
+          expect(header.getAttribute("aria-sort")).toBe("none");
+          expect(header.querySelector("button")).toBeTruthy();
+        }
+
+        const runHeader = r.getByRole("columnheader", { name: /Run/ });
+        fireEvent.click(r.getByRole("button", { name: /Run/ }));
+        expect(runHeader.getAttribute("aria-sort")).toBe("ascending");
+        expect(Array.from(r.container.querySelectorAll("tbody tr td:first-child")).map((cell) => cell.textContent)).toEqual([
+          "run_alpha",
+          "run_zulu",
+        ]);
+
+        act(() => {
+          document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+        });
+        expect(onSelectRun).toHaveBeenLastCalledWith("run_alpha");
+
+        fireEvent.click(r.getByRole("button", { name: /Run/ }));
+        expect(runHeader.getAttribute("aria-sort")).toBe("descending");
+        fireEvent.click(r.getByRole("button", { name: /Run/ }));
+        expect(runHeader.getAttribute("aria-sort")).toBe("none");
+      },
+    );
+  });
+});
+
 describe("Runs table short run ids (WM-96)", () => {
   test("run id cell displays the short form and carries the full id as title", async () => {
     const runId = "run_ec9c87f9-4c1d-4f4a-9d7e-2c2f3a1b0c9d";

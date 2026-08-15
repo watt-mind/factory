@@ -142,10 +142,14 @@ const EVENTS_DISPLAY: DisplayConfig<AdmittedEvent> = {
   ],
   subGroups: ["type", "source", "status"],
   sorts: [
+    { key: "event", label: "Event", get: (e) => e.eventId, column: "event" },
+    { key: "source", label: "Source", get: (e) => e.source, column: "source" },
+    { key: "type", label: "Type", get: (e) => e.type, column: "type" },
+    { key: "subject", label: "Subject", get: (e) => e.subject ?? "", column: "subject" },
+    { key: "status", label: "Status", get: (e) => e.status, column: "status" },
+    { key: "admitted", label: "Admitted", get: (e) => e.admittedAt, defaultDir: "desc", column: "admitted" },
     { key: "occurred", label: "Occurred", get: (e) => e.occurredAt, defaultDir: "desc" },
     { key: "received", label: "Received", get: (e) => e.receivedAt, defaultDir: "desc" },
-    { key: "type", label: "Type", get: (e) => e.type, column: "type" },
-    { key: "admitted", label: "Admitted", get: (e) => e.admittedAt, defaultDir: "desc", column: "admitted" },
   ],
   columns: [
     { key: "event", label: "Event", always: true },

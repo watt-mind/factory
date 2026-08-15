@@ -2,6 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ScheduleItem, type TriggerOutcome } from "../api";
 import { useListKeys, useNow } from "../hooks";
+import {
+  cycleColumnSort,
+  defaultDisplayState,
+  sortRows,
+  type DisplayConfig,
+} from "../displayOptions";
 import { setContextActions } from "../palette";
 import type { AdmittedEvent, AgentDef } from "../types";
 import type { OperatorContext } from "../context";
@@ -19,6 +25,7 @@ import {
   ListEmpty,
   ListPane,
   Section,
+  Th,
   VerbError,
   copyLink,
   copyText,
@@ -43,6 +50,50 @@ export function scheduleFilterTokens(s: ScheduleItem): string[] {
     s.error ? "error" : !s.enabled ? "not scheduled" : s.stopped ? "stopped" : "running",
   ];
 }
+
+const scheduleState = (schedule: ScheduleItem): string =>
+  schedule.error ? "error" : !schedule.enabled ? "not scheduled" : schedule.stopped ? "stopped" : "running";
+
+const SCHEDULES_SORT: DisplayConfig<ScheduleItem> = {
+  view: "schedules-table-sort",
+  groups: [],
+  sorts: [
+    { key: "loop", label: "Loop", get: (schedule) => schedule.loop, column: "loop" },
+    {
+      key: "cadence",
+      label: "Cadence",
+      get: (schedule) => schedule.cadenceSeconds ?? Number.POSITIVE_INFINITY,
+      column: "cadence",
+    },
+    { key: "enabled", label: "Enabled", get: (schedule) => Number(schedule.enabled), column: "enabled" },
+    { key: "approval", label: "Approval", get: (schedule) => schedule.approval, column: "approval" },
+    { key: "catchUp", label: "Catch-up", get: (schedule) => schedule.catchUp, column: "catchUp" },
+    {
+      key: "lastFire",
+      label: "Last fire",
+      get: (schedule) => schedule.lastSlot ?? "",
+      defaultDir: "desc",
+      column: "lastFire",
+    },
+    {
+      key: "nextDue",
+      label: "Next due",
+      get: (schedule) => schedule.nextDue ?? "",
+      column: "nextDue",
+    },
+    { key: "state", label: "State", get: scheduleState, column: "state" },
+  ],
+  columns: [
+    { key: "loop", label: "Loop" },
+    { key: "cadence", label: "Cadence" },
+    { key: "enabled", label: "Enabled" },
+    { key: "approval", label: "Approval" },
+    { key: "catchUp", label: "Catch-up" },
+    { key: "lastFire", label: "Last fire" },
+    { key: "nextDue", label: "Next due" },
+    { key: "state", label: "State" },
+  ],
+};
 
 /**
  * Schedules view (OPS-400, OPS-401) — surfaces recurring loops, last fire,
@@ -94,13 +145,15 @@ export function Schedules({
   const allEvents = eventsQ.data?.events ?? [];
 
   const [filter, setFilter] = useState("");
-  const visible = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((s) =>
       scheduleFilterTokens(s).some((v) => (v ?? "").toLowerCase().includes(q)),
     );
   }, [rows, filter]);
+  const [sort, setSort] = useState(() => defaultDisplayState(SCHEDULES_SORT));
+  const visible = useMemo(() => sortRows(filtered, SCHEDULES_SORT, sort), [filtered, sort]);
 
   const selectedLoop = focusScheduleLoop;
   const selectedIndex = useMemo(
@@ -216,25 +269,26 @@ export function Schedules({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Loop</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Cadence</th>
-              <th
-                className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium"
-                title="Config flag from event-runtime/schedules.json — edit that file (or use the CLI) to enable/disable; there is no toggle in this UI"
-              >
-                Enabled
-              </th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Approval</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Catch-up</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Last fire</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Next due</th>
-              <th
-                className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium"
-                title="Runtime health of the scheduler loop: running, stopped (no ticks), not scheduled (disabled), or error"
-              >
-                State
-              </th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 text-right font-medium">Action</th>
+              {SCHEDULES_SORT.columns.map((column) => {
+                const field = SCHEDULES_SORT.sorts.find((candidate) => candidate.column === column.key)!;
+                const title =
+                  column.key === "enabled"
+                    ? "Config flag from event-runtime/schedules.json — edit that file (or use the CLI) to enable/disable; there is no toggle in this UI"
+                    : column.key === "state"
+                      ? "Runtime health of the scheduler loop: running, stopped (no ticks), not scheduled (disabled), or error"
+                      : undefined;
+                return (
+                  <Th
+                    key={column.key}
+                    label={column.label}
+                    title={title}
+                    dir={sort.sortBy === field.key ? sort.sortDir : null}
+                    naturalDir={field.defaultDir ?? "asc"}
+                    onSort={() => setSort((state) => cycleColumnSort(SCHEDULES_SORT, state, column.key))}
+                  />
+                );
+              })}
+              <Th label="Action" align="right" />
             </tr>
           </thead>
           <tbody>

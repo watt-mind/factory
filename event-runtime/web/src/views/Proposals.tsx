@@ -74,9 +74,17 @@ const OPEN_DISPLAY: DisplayConfig<Proposal> = {
   ],
   subGroups: ["agent", "decision"],
   sorts: [
-    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
-    { key: "ttl", label: "Time left", get: ttlExpiry, column: "ttl" },
     { key: "agent", label: "Agent", get: (p) => p.agent ?? "", column: "agent" },
+    { key: "decision", label: "Decision", get: (p) => p.decision, column: "decision" },
+    { key: "ttl", label: "Time left", get: ttlExpiry, column: "ttl" },
+    {
+      key: "origin",
+      label: "Origin",
+      get: (p) => `${p.eventSource ?? ""}:${p.eventId ?? ""}`,
+      column: "origin",
+    },
+    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
+    { key: "reason", label: "Reason", get: (p) => p.reason ?? "", column: "reason" },
   ],
   columns: [
     { key: "agent", label: "Agent", always: true },
@@ -102,9 +110,17 @@ const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
   ],
   subGroups: ["agent", "status"],
   sorts: [
-    { key: "decided", label: "Decided", get: (p) => p.decided_at ?? "", defaultDir: "desc", column: "decided" },
-    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
     { key: "agent", label: "Agent", get: (p) => p.agent ?? "", column: "agent" },
+    { key: "status", label: "Status", get: (p) => p.status, column: "status" },
+    { key: "decided", label: "Decided", get: (p) => p.decided_at ?? "", defaultDir: "desc", column: "decided" },
+    {
+      key: "origin",
+      label: "Origin",
+      get: (p) => `${p.eventSource ?? ""}:${p.eventId ?? ""}`,
+      column: "origin",
+    },
+    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
+    { key: "reason", label: "Reason", get: (p) => p.reason ?? "", column: "reason" },
   ],
   columns: [
     { key: "agent", label: "Agent", always: true },

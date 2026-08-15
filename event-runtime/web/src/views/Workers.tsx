@@ -150,9 +150,15 @@ const WORKERS_DISPLAY: DisplayConfig<Worker> = {
   ],
   subGroups: ["host", "state"],
   sorts: [
-    { key: "lastSeen", label: "Last seen", get: (w) => w.lastSeen ?? "", defaultDir: "desc", column: "heartbeat" },
+    { key: "worker", label: "Worker", get: (w) => w.workerId, column: "worker" },
     { key: "host", label: "Host", get: (w) => w.host, column: "host" },
-    { key: "started", label: "Started", get: (w) => w.startedAt ?? "", defaultDir: "desc" },
+    { key: "pid", label: "PID", get: (w) => w.pid, column: "pid" },
+    { key: "state", label: "State", get: workerDisplayState, column: "state" },
+    { key: "labels", label: "Labels", get: (w) => labelText(w.labels), column: "labels" },
+    { key: "adapters", label: "Adapters", get: (w) => w.adapters.join(", "), column: "adapters" },
+    { key: "run", label: "Current run", get: (w) => w.currentRun ?? "", column: "run" },
+    { key: "started", label: "Started", get: (w) => w.startedAt ?? "", defaultDir: "desc", column: "uptime" },
+    { key: "lastSeen", label: "Last seen", get: (w) => w.lastSeen ?? "", defaultDir: "desc", column: "heartbeat" },
   ],
   columns: [
     { key: "worker", label: "Worker", always: true },

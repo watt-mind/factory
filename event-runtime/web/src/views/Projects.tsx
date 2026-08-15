@@ -4,9 +4,15 @@ import { api, ApiError } from "../api";
 import { contextFromProject, type OperatorContext } from "../context";
 import { hashProject } from "../hash";
 import { keyGuard, useListKeys, useTabKeys } from "../hooks";
+import {
+  cycleColumnSort,
+  defaultDisplayState,
+  sortRows,
+  type DisplayConfig,
+} from "../displayOptions";
 import { goPrefixActive } from "../goSequence";
 import { setContextActions } from "../palette";
-import type { JanitorResult } from "../types";
+import type { JanitorResult, RepoItem } from "../types";
 import { ScopeCaption } from "../components/ContextTabs";
 
 const PROJECT_MODES = ["ALL", "DISPATCHABLE", "REPORT_ONLY"] as const;
@@ -24,11 +30,44 @@ import {
   ListEmpty,
   ListPane,
   Section,
+  Th,
   VerbError,
   copyLink,
   copyText,
   notify,
 } from "../components/ui";
+
+const projectTarget = (repo: RepoItem) => repo.project || repo.github || repo.path;
+const worktreeScripts = (repo: RepoItem) =>
+  [repo.hasWorktreeUp && "up", repo.hasWorktreeDown && "down", repo.hasWorktreeWarm && "warm"]
+    .filter(Boolean)
+    .join(" · ") || "—";
+
+const PROJECTS_SORT: DisplayConfig<RepoItem> = {
+  view: "projects-table-sort",
+  groups: [],
+  sorts: [
+    { key: "name", label: "Name", get: (repo) => repo.name, column: "name" },
+    { key: "team", label: "Team", get: (repo) => repo.team ?? "", column: "team" },
+    { key: "target", label: "Project / GitHub", get: projectTarget, column: "target" },
+    { key: "mode", label: "Mode", get: (repo) => Number(repo.reportOnly), column: "mode" },
+    {
+      key: "base",
+      label: "Base",
+      get: (repo) => `${repo.base}:${repo.deployBranch ?? ""}`,
+      column: "base",
+    },
+    { key: "scripts", label: "Worktree Scripts", get: worktreeScripts, column: "scripts" },
+  ],
+  columns: [
+    { key: "name", label: "Name" },
+    { key: "team", label: "Team" },
+    { key: "target", label: "Project / GitHub" },
+    { key: "mode", label: "Mode" },
+    { key: "base", label: "Base" },
+    { key: "scripts", label: "Worktree Scripts" },
+  ],
+};
 
 /** Live operator context from the hash — same source App uses. Read on every render: context-tab switches replaceState and do not fire hashchange. Do not read sessionStorage: stale `active` must not caption All. */
 function operatorContext(): OperatorContext {
@@ -92,7 +131,7 @@ export function Projects({
 
   const repos = query.data?.repos ?? [];
 
-  const visible = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     return repos.filter((r) => {
       if (filterMode === "DISPATCHABLE" && r.reportOnly) return false;
@@ -106,6 +145,8 @@ export function Projects({
       );
     });
   }, [repos, filter, filterMode]);
+  const [sort, setSort] = useState(() => defaultDisplayState(PROJECTS_SORT));
+  const visible = useMemo(() => sortRows(filtered, PROJECTS_SORT, sort), [filtered, sort]);
 
   const selectedName = focusRepoName;
   const selectedIndex = useMemo(() => visible.findIndex((r) => r.name === selectedName), [visible, selectedName]);
@@ -319,12 +360,17 @@ export function Projects({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Name</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Team</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Project / GitHub</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Mode</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Base</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Worktree Scripts</th>
+              {PROJECTS_SORT.columns.map((column) => {
+                const field = PROJECTS_SORT.sorts.find((candidate) => candidate.column === column.key)!;
+                return (
+                  <Th
+                    key={column.key}
+                    label={column.label}
+                    dir={sort.sortBy === field.key ? sort.sortDir : null}
+                    onSort={() => setSort((state) => cycleColumnSort(PROJECTS_SORT, state, column.key))}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
@@ -347,7 +393,7 @@ export function Projects({
                     )}
                   </td>
                   <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
-                    {r.project || r.github || r.path}
+                    {projectTarget(r)}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5">
                     <span
@@ -372,13 +418,7 @@ export function Projects({
                     {r.deployBranch ? ` → ${r.deployBranch}` : ""}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-faint)">
-                    {[
-                      r.hasWorktreeUp && "up",
-                      r.hasWorktreeDown && "down",
-                      r.hasWorktreeWarm && "warm",
-                    ]
-                      .filter(Boolean)
-                      .join(" · ") || "—"}
+                    {worktreeScripts(r)}
                   </td>
                 </tr>
               );

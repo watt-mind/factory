@@ -106,10 +106,24 @@ const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
   subGroups: ["adapter", "tier", "contract"],
   sorts: [
     { key: "ref", label: "Ref", get: (a) => a.ref, column: "ref" },
+    { key: "contract", label: "Contract", get: (a) => a.outputContract, column: "contract" },
     { key: "adapter", label: "Adapter", get: adapterText, column: "adapter" },
     { key: "tier", label: "Tier", get: tierRank, column: "tier" },
     { key: "model", label: "Model", get: modelText, column: "model" },
-    { key: "contract", label: "Contract", get: (a) => a.outputContract, column: "contract" },
+    { key: "mutating", label: "Mutating", get: (a) => Number(a.mutating), column: "mutating" },
+    { key: "capabilities", label: "Capabilities", get: caps, column: "capabilities" },
+    {
+      key: "timeout",
+      label: "Timeout",
+      get: (a) => a.limits.timeout_seconds ?? Number.POSITIVE_INFINITY,
+      column: "timeout",
+    },
+    {
+      key: "attempts",
+      label: "Attempts",
+      get: (a) => a.limits.attempts ?? Number.POSITIVE_INFINITY,
+      column: "attempts",
+    },
   ],
   columns: [
     { key: "ref", label: "Ref", always: true },

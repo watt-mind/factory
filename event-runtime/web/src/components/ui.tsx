@@ -511,6 +511,7 @@ export function ListEmpty({
 export function Th({
   label,
   align,
+  title,
   dir,
   naturalDir,
   onSort,
@@ -518,6 +519,7 @@ export function Th({
 }: {
   label: string;
   align?: "right";
+  title?: string;
   dir?: SortDir | null;
   /** What the first click will do — the hover hint must not promise "↑" on a newest-first column. */
   naturalDir?: SortDir;
@@ -526,16 +528,16 @@ export function Th({
 }) {
   const alignCls = align === "right" ? "text-right" : "text-left";
   const base = `sticky top-0 z-10 h-7 bg-(--surface-0) px-3 font-medium whitespace-nowrap shadow-[inset_0_-1px_0_var(--border)] ${alignCls}`;
-  if (!onSort && !onRemove) return <th className={base}>{label}</th>;
+  if (!onSort && !onRemove) return <th className={base} title={title}>{label}</th>;
   return (
-    <th aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : undefined} className={`${base} p-0`}>
+    <th aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : "none"} className={`${base} p-0`}>
       <div className={`group/th flex h-7 w-full items-center justify-between gap-1 px-3 ${align === "right" ? "justify-end" : ""}`}>
         {onSort ? (
           <button
             type="button"
             onClick={onSort}
             onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.stopPropagation()}
-            title={`Sort by ${label.toLowerCase()}`}
+            title={title ?? `Sort by ${label.toLowerCase()}`}
             className={`inline-flex h-7 items-center gap-1 cursor-pointer font-medium transition-colors hover:text-(--text) ${dir ? "text-(--text)" : ""}`}
           >
             {label}
