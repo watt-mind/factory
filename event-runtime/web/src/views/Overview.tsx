@@ -583,12 +583,11 @@ export function Overview({
     function onKey(e: KeyboardEvent) {
       if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey || goPrefixActive()) return;
 
-      const runState = ["QUEUED", "RUNNING", "COMPLETED"][Number(e.key) - 3];
-      if (e.key === "1" || e.key === "2" || runState) {
+      if ("12345".includes(e.key)) {
         e.preventDefault();
         if (e.key === "1") onJumpEvents({});
         else if (e.key === "2") onNavigate("proposals");
-        else onJumpRuns(runState);
+        else onJumpRuns(["QUEUED", "RUNNING", "COMPLETED"][+e.key - 3]);
         return;
       }
 
@@ -740,8 +739,6 @@ export function Overview({
                 ref={(node) => {
                   anomalyRowRefs.current[i] = node;
                 }}
-                role="group"
-                aria-label={`Anomaly ${i + 1} of ${anomalyRows.length}`}
                 tabIndex={-1}
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0 focus-visible:outline-2 focus-visible:outline-(--accent)"
               >

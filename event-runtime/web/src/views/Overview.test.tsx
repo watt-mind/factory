@@ -331,24 +331,23 @@ describe("Overview keyboard navigation (WM-292)", () => {
       const view = renderOverview();
       await waitFor(() => view.getByText(/Anomalies · 2 active issues/));
 
+      const first = view.getByText("expired open proposal").closest('[tabindex="-1"]');
+      const second = view.getByText(/dead-lettered \(github, evt_dead\)/).closest('[tabindex="-1"]');
+      expect(first).toBeTruthy();
+      expect(second).toBeTruthy();
+
       fireEvent.keyDown(document.body, { key: "." });
-      expect(document.activeElement).toBe(
-        view.getByRole("group", { name: "Anomaly 1 of 2" }),
-      );
+      expect(document.activeElement).toBe(first);
       fireEvent.keyDown(document.body, { key: "r" });
       expect(requeue).not.toHaveBeenCalled();
 
       fireEvent.keyDown(document.body, { key: "." });
-      expect(document.activeElement).toBe(
-        view.getByRole("group", { name: "Anomaly 2 of 2" }),
-      );
+      expect(document.activeElement).toBe(second);
       fireEvent.keyDown(document.body, { key: "r" });
       await waitFor(() => expect(requeue).toHaveBeenCalledWith("github", "evt_dead"));
 
       fireEvent.keyDown(document.body, { key: "." });
-      expect(document.activeElement).toBe(
-        view.getByRole("group", { name: "Anomaly 1 of 2" }),
-      );
+      expect(document.activeElement).toBe(first);
     } finally {
       restore();
     }
