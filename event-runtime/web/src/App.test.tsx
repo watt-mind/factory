@@ -38,6 +38,7 @@ const STATUS: StatusView = {
 };
 
 const HEALTH = { ok: true, policyVersion: "test", env: ENV };
+let currentStatus = STATUS;
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -64,10 +65,11 @@ function renderApp() {
 }
 
 beforeEach(() => {
+  currentStatus = STATUS;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/api/health")) return jsonResponse(HEALTH);
-    if (url.includes("/api/status")) return jsonResponse(STATUS);
+    if (url.includes("/api/status")) return jsonResponse(currentStatus);
     if (url.includes("/api/agents")) {
       return jsonResponse({
         agents: [],
@@ -159,6 +161,36 @@ describe("sidebar navigation accessibility", () => {
 });
 
 describe("bottom status bar", () => {
+  test("stale-only fleet agrees with the Workers badge instead of saying no workers (WM-159)", async () => {
+    currentStatus = {
+      ...STATUS,
+      workers: { busy: 0, stale: 1, live: 0 },
+    };
+    const utils = renderApp();
+    const statusBar = utils.getByRole("contentinfo", { name: "Status bar" });
+
+    await waitFor(() => {
+      expect(utils.sidebar.getByRole("button", { name: "Workers" }).textContent).toContain(
+        "1stale",
+      );
+      expect(statusBar.textContent).toContain("1 stale worker");
+    });
+    expect(statusBar.textContent).not.toContain("no workers");
+  });
+
+  test("empty registry still says no workers (WM-159)", async () => {
+    currentStatus = {
+      ...STATUS,
+      workers: { busy: 0, stale: 0, live: 0 },
+    };
+    const utils = renderApp();
+    const statusBar = utils.getByRole("contentinfo", { name: "Status bar" });
+
+    await waitFor(() => {
+      expect(statusBar.textContent).toContain("no workers");
+    });
+  });
+
   test("renders connection status, policy, workers, shortcuts, and theme switcher", async () => {
     const utils = renderApp();
     const statusBar = utils.getByRole("contentinfo", { name: "Status bar" });

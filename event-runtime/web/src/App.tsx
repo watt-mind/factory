@@ -711,9 +711,11 @@ export function App() {
                     }
                   >
                     ·{" "}
-                    {liveWorkers === 0
-                      ? "no workers"
-                      : `${liveWorkers} worker${liveWorkers === 1 ? "" : "s"}`}
+                    {staleWorkers > 0
+                      ? `${staleWorkers} stale worker${staleWorkers === 1 ? "" : "s"}`
+                      : liveWorkers === 0
+                        ? "no workers"
+                        : `${liveWorkers} worker${liveWorkers === 1 ? "" : "s"}`}
                   </span>
                 )}
               </span>
