@@ -1,6 +1,7 @@
 import type {
   AdmittedEvent,
   AgentsView,
+  ArtifactInventoryItem,
   ApproveOutcome,
   CancelOutcome,
   EnvIdentity,
@@ -46,6 +47,15 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     throw new ApiError(message, res.status);
   }
   return json as T;
+}
+
+export function fetchArtifacts(filters?: { kind?: string; orphan?: boolean; search?: string }) {
+  const query = new URLSearchParams();
+  if (filters?.kind) query.set("kind", filters.kind);
+  if (filters?.orphan !== undefined) query.set("orphan", String(filters.orphan));
+  if (filters?.search) query.set("search", filters.search);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return call<{ artifacts: ArtifactInventoryItem[] }>("GET", `/artifacts${suffix}`);
 }
 
 export const api = {

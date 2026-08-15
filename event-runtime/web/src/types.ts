@@ -206,6 +206,24 @@ export interface ArtifactRef {
   sizeBytes: number;
 }
 
+/** Accepted result that keeps an artifact reachable in the content-addressed store. */
+export interface ArtifactReference {
+  runId: string;
+  kind: string | null;
+  agent: string | null;
+  state: RunState | null;
+  createdAt: string | null;
+}
+
+/** One physical file returned by the artifact inventory endpoint. */
+export interface ArtifactInventoryItem {
+  sha256: string;
+  sizeBytes: number;
+  mtime: string;
+  referenced: boolean;
+  references: ArtifactReference[];
+}
+
 export interface RunDetail {
   run: {
     runId: string;

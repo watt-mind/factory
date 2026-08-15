@@ -10,7 +10,7 @@ import {
   rememberOpenRepo,
   type OperatorContext,
 } from "./context";
-import { eventsHash, hashPath, hashProject, hashSearch, withProject } from "./hash";
+import { artifactsHash, eventsHash, hashPath, hashProject, hashSearch, withProject } from "./hash";
 import { keyGuard, THEMES, useHashRoute, useTheme, type Theme } from "./hooks";
 import { goPrefixActive } from "./goSequence";
 import type { EventFocus } from "./types";
@@ -19,6 +19,7 @@ import { InjectDialog } from "./components/InjectDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ToastContainer, copyLink, copyText } from "./components/ui";
 import { Agents } from "./views/Agents";
+import type { ArtifactFilters } from "./views/Artifacts";
 import { Events } from "./views/Events";
 import { Overview } from "./views/Overview";
 import { RunFull } from "./views/RunFull";
@@ -33,6 +34,7 @@ type NavBadge = {
   title?: string;
 };
 
+const Artifacts = lazy(() => import("./views/Artifacts").then((m) => ({ default: m.Artifacts })));
 const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph })));
 const Projects = lazy(() => import("./views/Projects").then((m) => ({ default: m.Projects })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
@@ -114,6 +116,15 @@ export function App() {
   const focusScheduleLoop = view === "schedules" ? (route[1] ?? null) : null;
   const focusWorkerId = view === "workers" ? (route[1] ?? null) : null;
   const focusGraphNode = view === "graph" ? (route[1] ?? null) : null;
+  const artifactQuery = hashSearch(window.location.hash);
+  const artifactFilters: ArtifactFilters = {
+    kind: view === "artifacts" ? artifactQuery.get("kind") : null,
+    orphan:
+      view !== "artifacts" || !artifactQuery.has("orphan")
+        ? null
+        : artifactQuery.get("orphan") === "true",
+    search: view === "artifacts" ? (artifactQuery.get("search") ?? "") : "",
+  };
   const hashEvent: EventFocus | null =
     view === "events" && route[1] && route[2]
       ? { source: route[1], eventId: route[2] }
@@ -210,6 +221,12 @@ export function App() {
     runs: { count: scopedRunsNav ? 0 : activeRuns, hue: "var(--accent)" },
     projects: { count: 0, hue: "var(--accent)" },
     agents: { count: 0, hue: "var(--accent)" },
+    artifacts: {
+      count: status.data?.artifacts.orphans ?? 0,
+      hue: "var(--hue-warn)",
+      word: "orphan",
+      title: `${status.data?.artifacts.orphans ?? 0} unreferenced artifact${status.data?.artifacts.orphans === 1 ? "" : "s"}`,
+    },
     schedules:
       stoppedSchedulesCount > 0
         ? {
@@ -332,6 +349,20 @@ export function App() {
       run: () => selectContext({ kind: "inflight" }),
     },
     { label: "Inject event…", hint: "i", run: () => setInjectOpen(true) },
+    {
+      label: "Show orphan artifacts",
+      group: "Commands" as const,
+      run: () => navigate(artifactsHash({ orphan: true })),
+    },
+    {
+      label: "Search artifacts",
+      hint: "/",
+      group: "Commands" as const,
+      run: () => {
+        setFilterFocus(true);
+        navigate("artifacts");
+      },
+    },
     {
       label: "Focus filter",
       hint: "/",
@@ -549,6 +580,15 @@ export function App() {
               focusWorkerId={focusWorkerId}
               onSelectWorker={(id) => navigate(hashPath("workers", id))}
             />
+          ) : view === "artifacts" ? (
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading artifacts…</div>}>
+              <Artifacts
+                metrics={status.data?.artifacts}
+                filters={artifactFilters}
+                onFiltersChange={(filters) => navigate(artifactsHash(filters))}
+                onJumpRun={jumpToRun}
+              />
+            </Suspense>
           ) : view === "events" ? (
             <Events
               connected={connected}
