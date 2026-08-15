@@ -178,6 +178,18 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 3,
+    name: "metrics_query_indexes",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_lifecycle_at ON lifecycle_events (at);
+        CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs (created_at);
+        CREATE INDEX IF NOT EXISTS idx_events_admitted_at ON events (admitted_at);
+        CREATE INDEX IF NOT EXISTS idx_proposals_created_at ON proposals (created_at);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1].version : 1;
