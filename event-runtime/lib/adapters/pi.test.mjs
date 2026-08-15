@@ -12,6 +12,8 @@ import {
   KILL_GRACE_MS,
   mapStreamEvent,
   PUSH_CREDENTIAL_ENV,
+  MUTATING_TOOLS,
+  piTools,
   READ_ONLY_TOOLS,
   resolvePiCommand,
   safeChildEnvironment,
@@ -126,8 +128,10 @@ describe("extractUsage", () => {
 });
 
 describe("buildPiArgv", () => {
-  test("prompt travels on stdin, not argv — base argv is -p --mode json", () => {
-    expect(buildPiArgv({ def: { mutating: true }, model: null })).toEqual(["-p", "--mode", "json"]);
+  test("prompt travels on stdin, not argv — base argv is -p --mode json plus the allowlist", () => {
+    expect(buildPiArgv({ def: { mutating: true }, model: null })).toEqual([
+      "-p", "--mode", "json", "--tools", MUTATING_TOOLS.join(","),
+    ]);
   });
 
   test("mutating: false → --tools read,grep,find,ls,write,bash (pi's own read-only pattern, not -r)", () => {
@@ -137,8 +141,42 @@ describe("buildPiArgv", () => {
     expect(argv).toEqual(["-p", "--mode", "json", "--tools", "read,grep,find,ls,write,bash"]);
   });
 
-  test("mutating: true → no --tools restriction", () => {
-    expect(buildPiArgv({ def: { mutating: true }, model: null })).not.toContain("--tools");
+  test("mutating: true → an explicit allowlist, never pi's implicit defaults (WM-336)", () => {
+    // The regression this guards: omitting --tools handed mutating agents every
+    // tool pi ships, so the surface widened whenever pi did. dispatch@1 — which
+    // also holds push credentials — was the least constrained agent in the fleet.
+    const argv = buildPiArgv({ def: { mutating: true }, model: null });
+    expect(argv).toContain("--tools");
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write,bash,edit,subagent");
+  });
+
+  test("mutating: true keeps edit and subagent — the tools that make it a dispatch agent", () => {
+    const tools = piTools({ mutating: true });
+    expect(tools).toContain("edit");
+    // dispatch delegates focused work, notably the UX critique (WM-335).
+    expect(tools).toContain("subagent");
+  });
+
+  test("undeclared tools are never passed, however plausible", () => {
+    const tools = piTools({ mutating: true });
+    for (const absent of ["web_search", "fetch_content", "interactive_shell", "chrome_devtools_load"]) {
+      expect(tools).not.toContain(absent);
+    }
+  });
+
+  test("a definition may declare extra tools; they are additive and deduplicated", () => {
+    const tools = piTools({ mutating: false, tools: ["chrome_devtools_load", "read"] });
+    expect(tools).toContain("chrome_devtools_load");
+    for (const base of READ_ONLY_TOOLS) expect(tools).toContain(base);
+    // "read" was already in the base set — declaring it again must not duplicate
+    // it, or the argv (and the transcript) stops being deterministic.
+    expect(tools.filter((t) => t === "read")).toHaveLength(1);
+  });
+
+  test("a missing or malformed tools field falls back to the base set rather than throwing", () => {
+    expect(piTools({ mutating: false })).toEqual(READ_ONLY_TOOLS);
+    expect(piTools({ mutating: false, tools: "read" })).toEqual(READ_ONLY_TOOLS);
+    expect(piTools(undefined)).toEqual(MUTATING_TOOLS);
   });
 
   test("planner-pinned model → --model verbatim; default sentinel, null, or absent → no flag (WM-135)", () => {

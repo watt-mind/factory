@@ -70,6 +70,32 @@ const TEXT_PREVIEW_CHARS = 4000;
 // native capability enforcement (OPS-515).
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write", "bash"];
 
+// The mutating counterpart, and the reason it exists (WM-336): until now
+// `--tools` was passed ONLY for `mutating: false`, so a mutating agent ran on
+// pi's implicit defaults. Measured against pi 0.84.1, that set was:
+//
+//   read bash edit write subagent web_search fetch_content get_search_content
+//   pi_claude_code_provider_web_search interactive_shell intercom vcc_recall
+//   ask_user
+//
+// The agent with the widest surface was therefore `dispatch@1` — the unattended
+// one that also inherits SSH_AUTH_SOCK and GITHUB_TOKEN/GH_TOKEN (WM-223).
+//
+// Be precise about what pinning this buys, because it is easy to overclaim:
+// `bash` is in the set, so egress and arbitrary subprocesses remain reachable
+// regardless. This is NOT a containment boundary — §14 still names the
+// workspace cwd and (once WM-313 lands) the sandbox as the real one. What it
+// buys is that the surface is DECLARED: it cannot widen silently when pi ships
+// a new default tool, and a globally installed pi extension cannot hand every
+// mutating agent a capability nobody reviewed (the reason WM-335 loads the
+// chrome-devtools extension per run rather than via `pi install`).
+//
+// `edit` is the repository-mutation tool and is the whole point of a mutating
+// agent. `subagent` is deliberately included: dispatch delegates focused work —
+// notably the UX critique (WM-335) — and the alternative is one context doing
+// everything, which is what long-run degradation looks like.
+export const MUTATING_TOOLS = ["read", "grep", "find", "ls", "write", "bash", "edit", "subagent"];
+
 export class CliNotFoundError extends Error {
   constructor(message) {
     super(message);
@@ -100,10 +126,26 @@ export function buildPiArgv({ def, model }) {
   if (typeof model === "string" && model !== "" && model !== "default") {
     args.push("--model", model);
   }
-  if (def?.mutating === false) {
-    args.push("--tools", READ_ONLY_TOOLS.join(","));
-  }
+  // Always allowlist (WM-336). Omitting `--tools` does not mean "no tools", it
+  // means "every tool pi currently ships" — a set that grows without review.
+  args.push("--tools", piTools(def).join(","));
   return args;
+}
+
+/**
+ * The tool allowlist for one definition: the base set for its mutability, plus
+ * any tools the definition explicitly declares.
+ *
+ * `def.tools` is additive on purpose. A definition that needs something unusual
+ * (WM-335's critic needs `chrome_devtools_*`) states it in the content-hashed
+ * definition, so widening a surface is a reviewable diff rather than an
+ * environment change. Order is stable and duplicates are dropped so the argv —
+ * and therefore the transcript — is deterministic.
+ */
+export function piTools(def) {
+  const base = def?.mutating === false ? READ_ONLY_TOOLS : MUTATING_TOOLS;
+  const extra = Array.isArray(def?.tools) ? def.tools : [];
+  return [...new Set([...base, ...extra])];
 }
 
 export const BASE_INHERITED_ENV = [
