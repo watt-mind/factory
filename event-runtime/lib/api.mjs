@@ -10,8 +10,9 @@
  * no signature. Operator verbs record "operator" as actor — authenticated
  * actor identity is the web-app step, not this one.
  */
-import { closeSync, createReadStream, openSync, readFileSync, readSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readFileSync, readSync, readdirSync } from "node:fs";
 import http from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 import { findArtifact } from "./artifacts.mjs";
 import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, webhookSecret } from "./config.mjs";
@@ -26,7 +27,7 @@ import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
 import { storeStats } from "./artifacts.mjs";
 import { parseCadence, proposalsPilingUp, scheduleView } from "./schedules.mjs";
-import { listWorkers, stalledWorkers } from "./workers.mjs";
+import { listWorkers, loadWorkerPolicy, stalledWorkers } from "./workers.mjs";
 
 /**
  * Repo names a run or event actually names — optional spec input, not a
@@ -129,8 +130,112 @@ function runCounts(db) {
   return { byState };
 }
 
+/** Node-local pool state: pidfile liveness and workers carrying drain requests. */
+function runtimePoolState(runDir) {
+  const drainingIds = new Set();
+  let names = [];
+  try {
+    names = readdirSync(runDir);
+  } catch {
+    return { drainingIds, supervisor: "absent" };
+  }
+  for (const name of names) {
+    const match = /^(worker-\d+)\.drain$/.exec(name);
+    if (!match) continue;
+    try {
+      const workerId = readFileSync(path.join(runDir, `${match[1]}.id`), "utf8").trim();
+      if (workerId) drainingIds.add(workerId);
+    } catch {
+      // A slot can disappear between directory read and id read; next poll heals it.
+    }
+  }
+  let supervisor = "absent";
+  try {
+    const pid = Number(readFileSync(path.join(runDir, "supervisor.pid"), "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        supervisor = "active";
+      } catch (err) {
+        // EPERM still proves the process exists; only ESRCH means a stale pid.
+        supervisor = err?.code === "EPERM" ? "active" : "stopped";
+      }
+    }
+  } catch {
+    // No pidfile means the fixed-worker fallback, not an error.
+  }
+  return { drainingIds, supervisor };
+}
+
+/**
+ * One projection powers both API surfaces so Overview and Workers cannot show
+ * contradictory numbers. Policy max is the concurrency ceiling after WM-226;
+ * without pool policy the live registry remains the honest capacity fallback.
+ */
+export function workerCapacityView(db, nowMs, { workerPolicy = () => loadWorkerPolicy(), runDir } = {}) {
+  const pool = runtimePoolState(runDir ?? process.env.FACTORY_RUN_DIR ?? path.join(homedir(), ".factory", "run"));
+  const workers = listWorkers(db, { now: nowMs }).map((worker) => ({
+    ...worker,
+    draining: !worker.stale && worker.state !== "stopped" && pool.drainingIds.has(worker.workerId),
+  }));
+  const liveWorkers = workers.filter((worker) => worker.state !== "stopped" && !worker.stale);
+  const running = liveWorkers.filter((worker) => worker.state === "busy").length;
+  const draining = liveWorkers.filter((worker) => worker.draining).length;
+  const idle = liveWorkers.filter((worker) => worker.state !== "busy" && !worker.draining).length;
+  const queued = db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'QUEUED'`).get().n;
+
+  let policy = null;
+  let policyError = null;
+  try {
+    policy = workerPolicy?.() ?? null;
+  } catch (err) {
+    policyError = `worker policy unavailable: ${err.message}`;
+  }
+  const hasPolicy = Number.isInteger(policy?.max) && policy.max > 0;
+  const supervised = pool.supervisor === "active" && hasPolicy;
+  const capacity = supervised ? policy.max : liveWorkers.length;
+  const target = Math.max(0, liveWorkers.length - draining);
+  let limitingFactor = null;
+  if (queued > 0 && idle === 0) {
+    limitingFactor = supervised && liveWorkers.length >= capacity ? "at worker max" : "no idle worker";
+  }
+
+  const classes = [];
+  if (policy?.classes && typeof policy.classes === "object" && !Array.isArray(policy.classes)) {
+    for (const [name, config] of Object.entries(policy.classes)) {
+      const classCapacity = Number.isInteger(config) ? config : config?.max;
+      if (!Number.isInteger(classCapacity) || classCapacity < 0) continue;
+      classes.push({
+        name,
+        capacity: classCapacity,
+        running: liveWorkers.filter((worker) => worker.state === "busy" && worker.labels?.class === name).length,
+      });
+    }
+  }
+
+  return {
+    workers,
+    policyError,
+    capacity: {
+      running,
+      capacity,
+      queued,
+      live: liveWorkers.length,
+      idle,
+      draining,
+      target,
+      min: hasPolicy && Number.isInteger(policy.min) ? policy.min : null,
+      max: hasPolicy ? policy.max : null,
+      supervisor: pool.supervisor,
+      source: supervised ? "worker-policy" : "live-workers",
+      limitingFactor,
+      classes,
+    },
+  };
+}
+
 /** §13 status + doctor view: aggregates plus anomalies, all read-only SQL. */
-function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats } = {}) {
+function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats, workerPolicy, workerRunDir } = {}) {
   const open = openProposals(db, { now: nowMs });
   const expiredOpen = open.filter((p) => p.expired);
   const staleLeases = db
@@ -148,7 +253,8 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
     .all()
     .map((row) => ({ source: row.source, eventId: row.event_id, lastError: row.last_plan_error }));
 
-  const workers = listWorkers(db, { now: nowMs });
+  const fleet = workerCapacityView(db, nowMs, { workerPolicy, runDir: workerRunDir });
+  const workers = fleet.workers;
   const schedules = scheduleView(db, registry, { now: nowMs });
   const store = getStoreStats
     ? getStoreStats(nowMs)
@@ -166,16 +272,18 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
   if (policyVersion === "unknown") {
     configAnomalies.push("policyVersion is unknown");
   }
+  if (fleet.policyError) configAnomalies.push(fleet.policyError);
 
   return {
     events: eventCounts(db),
     proposals: { open: open.length, expired: expiredOpen.length },
     runs,
     workers: {
-      live: workers.filter((w) => w.state !== "stopped" && !w.stale).length,
-      busy: workers.filter((w) => w.state === "busy" && !w.stale).length,
+      live: fleet.capacity.live,
+      busy: fleet.capacity.running,
       stale: workers.filter((w) => w.stale).length,
     },
+    capacity: fleet.capacity,
     artifacts: {
       files: store.files,
       bytes: store.bytes,
@@ -597,6 +705,8 @@ export function createApi({
   // until someone restarted serve. Injectable so tests can point at a fixture
   // instead of whichever repos exist on the machine.
   repos = () => loadRepos(),
+  workerPolicy = () => loadWorkerPolicy(),
+  workerRunDir = process.env.FACTORY_RUN_DIR ?? path.join(homedir(), ".factory", "run"),
   // Host-side janitor spawn (OPS-301). Tests inject a fake; production
   // shells out to orchestrator/janitor.mjs --json, never --force.
   janitor = spawnFactoryJanitor,
@@ -710,7 +820,9 @@ export function createApi({
       if (route === "GET /status") {
         return send(res, 200, {
           env,
-          ...statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats }),
+          ...statusView(db, registry, nowMs, {
+            secret, githubSecret, policyVersion, env, getStoreStats, workerPolicy, workerRunDir,
+          }),
         });
       }
 
@@ -794,7 +906,8 @@ export function createApi({
       }
 
       if (route === "GET /workers") {
-        return send(res, 200, { workers: listWorkers(db, { now: nowMs }) });
+        const fleet = workerCapacityView(db, nowMs, { workerPolicy, runDir: workerRunDir });
+        return send(res, 200, { workers: fleet.workers, capacity: fleet.capacity });
       }
 
       if (route === "GET /agents") {

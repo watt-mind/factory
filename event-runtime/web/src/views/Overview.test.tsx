@@ -29,6 +29,21 @@ function baseStatus(overrides: Partial<StatusView["anomalies"]> = {}): StatusVie
     proposals: { open: 0, expired: 1 },
     runs: { byState: {} },
     workers: { live: 0, busy: 0, stale: 0 },
+    capacity: {
+      running: 0,
+      capacity: 0,
+      queued: 0,
+      live: 0,
+      idle: 0,
+      draining: 0,
+      target: 0,
+      min: null,
+      max: null,
+      supervisor: "absent",
+      source: "live-workers",
+      limitingFactor: null,
+      classes: [],
+    },
     artifacts: { files: 0, bytes: 0, orphans: 0, orphanBytes: 0 },
     anomalies: {
       expiredOpenProposals: [],
@@ -637,7 +652,23 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
     const origJournal = api.journal;
     api.status = async () => ({
       ...baseStatus(),
+      runs: { byState: { QUEUED: 2 } },
       workers: { live: 3, busy: 1, stale: 0 },
+      capacity: {
+        running: 1,
+        capacity: 4,
+        queued: 2,
+        live: 3,
+        idle: 2,
+        draining: 0,
+        target: 3,
+        min: 1,
+        max: 4,
+        supervisor: "active",
+        source: "worker-policy",
+        limitingFactor: "per-repo max_in_flight reached",
+        classes: [{ name: "light", running: 1, capacity: 3 }],
+      },
     });
     api.proposals = async () => ({ proposals: [] });
     api.outbox = async () => ({
@@ -665,10 +696,13 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
     });
 
     try {
-      const { getByText, getByTitle } = renderOverview();
+      const { getByText, getByTitle, getByRole } = renderOverview();
 
       await waitFor(() => getByText(/Worker Fleet Capacity/));
       expect(getByText(/3 live · 1 busy · 2 idle/)).toBeTruthy();
+      expect(getByRole("button", { name: "worker capacity: 1 running of 4, 2 queued" })).toBeTruthy();
+      expect(getByText("per-repo max_in_flight reached")).toBeTruthy();
+      expect(getByText("light 1/3")).toBeTruthy();
 
       // Recent outcomes strip displays completed & failed terminal entries (2 total)
       expect(getByText(/Recent Outcomes · last 2/)).toBeTruthy();
