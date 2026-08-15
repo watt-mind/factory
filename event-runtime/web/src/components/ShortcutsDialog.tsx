@@ -1,6 +1,12 @@
 import { Dialog } from "./ui";
 import { NAV } from "../nav";
 
+const CONTEXT_CHORDS: { chord: string; label: string }[] = [
+  { chord: "g 0", label: "All context" },
+  { chord: "g 1–9", label: "1st–9th repo tab" },
+  { chord: "g i", label: "In flight context" },
+];
+
 const ACTIONS: { keys: string; does: string }[] = [
   { keys: "⌘K", does: "command palette" },
   { keys: "⌘K", does: "copy link to this page" },
@@ -44,6 +50,15 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
               >
                 <span className="mono text-(--text)">g {n.go}</span>
                 <span className="text-right text-(--text-faint)">{n.label}</span>
+              </div>
+            ))}
+            {CONTEXT_CHORDS.map((c) => (
+              <div
+                key={c.chord}
+                className="flex items-baseline justify-between gap-2 border-b border-(--border) py-1.5"
+              >
+                <span className="mono text-(--text)">{c.chord}</span>
+                <span className="text-right text-(--text-faint)">{c.label}</span>
               </div>
             ))}
           </div>

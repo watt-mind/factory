@@ -93,6 +93,7 @@ export function ContextTabs({
   onClose,
   pinnedRuns: propPinnedRuns,
   onUnpinRun: propOnUnpinRun,
+  goArmed = false,
 }: {
   repos: RepoItem[];
   reposError: boolean;
@@ -103,6 +104,7 @@ export function ContextTabs({
   onClose: (name: string) => void;
   pinnedRuns?: string[];
   onUnpinRun?: (runId: string) => void;
+  goArmed?: boolean;
 }) {
   const [picker, setPicker] = useState(false);
   const [pickerHighlight, setPickerHighlight] = useState(0);
@@ -169,7 +171,7 @@ export function ContextTabs({
   const effectiveTabStop =
     tabStopId && tabIds.includes(tabStopId)
       ? tabStopId
-      : tabIds.includes(activeId)
+    : tabIds.includes(activeId)
         ? activeId
         : "all";
 
@@ -305,6 +307,7 @@ export function ContextTabs({
           data-context-tab="all"
           tabIndex={effectiveTabStop === "all" ? 0 : -1}
           aria-pressed={!activeRunId && active.kind === "all"}
+          title="All (g 0)"
           className={tabClass("all")}
           onClick={() => {
             if (activeRunId && typeof window !== "undefined") window.location.hash = "#/runs";
@@ -312,19 +315,28 @@ export function ContextTabs({
           }}
           onFocus={() => setTabStopId("all")}
         >
-          All
+          <span>All</span>
+          {goArmed && (
+            <span
+              aria-hidden="true"
+              className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-[10px] font-semibold text-(--accent)"
+            >
+              0
+            </span>
+          )}
         </button>
         <div
           role="presentation"
           className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto"
         >
-          {openRepos.map((name) => (
+          {openRepos.map((name, idx) => (
             <div key={name} role="presentation" className="flex shrink-0 items-center">
               <button
                 type="button"
                 data-context-tab={name}
                 tabIndex={effectiveTabStop === name ? 0 : -1}
                 aria-pressed={!activeRunId && active.kind === "repo" && active.name === name}
+                title={idx < 9 ? `${name} (g ${idx + 1})` : name}
                 className={tabClass(name)}
                 onClick={() => {
                   if (activeRunId && typeof window !== "undefined") window.location.hash = `#/runs?project=${encodeURIComponent(name)}`;
@@ -332,7 +344,15 @@ export function ContextTabs({
                 }}
                 onFocus={() => setTabStopId(name)}
               >
-                {name}
+                <span>{name}</span>
+                {goArmed && idx < 9 && (
+                  <span
+                    aria-hidden="true"
+                    className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-[10px] font-semibold text-(--accent)"
+                  >
+                    {idx + 1}
+                  </span>
+                )}
               </button>
               <button
                 type="button"
@@ -395,6 +415,7 @@ export function ContextTabs({
           data-context-tab={INFLIGHT}
           tabIndex={effectiveTabStop === INFLIGHT ? 0 : -1}
           aria-pressed={!activeRunId && active.kind === "inflight"}
+          title="In flight (g i)"
           className={tabClass(INFLIGHT)}
           onClick={() => {
             const next = toggleInflight(active);
@@ -405,7 +426,15 @@ export function ContextTabs({
           }}
           onFocus={() => setTabStopId(INFLIGHT)}
         >
-          In flight
+          <span>In flight</span>
+          {goArmed && (
+            <span
+              aria-hidden="true"
+              className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-[10px] font-semibold text-(--accent)"
+            >
+              i
+            </span>
+          )}
         </button>
       </div>
       <div className="relative flex shrink-0 items-center" ref={pickerRef}>

@@ -12,6 +12,7 @@ import {
 } from "./context";
 import { eventsHash, hashPath, hashProject, hashSearch, withProject } from "./hash";
 import { keyGuard, THEMES, useHashRoute, useTheme, type Theme } from "./hooks";
+import { goPrefixActive } from "./goSequence";
 import type { EventFocus } from "./types";
 import { CommandPalette, useGoSequences, type PaletteAction } from "./components/CommandPalette";
 import { InjectDialog } from "./components/InjectDialog";
@@ -54,14 +55,17 @@ export function App() {
     [navigateRaw],
   );
   const hashPathNow = () => window.location.hash.replace(/^#\/?/, "") || "overview";
-  const selectContext = (next: OperatorContext) => {
-    const nextProject = projectFromContext(next);
-    if (next.kind === "inflight" && view !== "runs") {
-      navigateRaw(withProject("runs", nextProject));
-      return;
-    }
-    navigateRaw(withProject(hashPathNow(), nextProject));
-  };
+  const selectContext = useCallback(
+    (next: OperatorContext) => {
+      const nextProject = projectFromContext(next);
+      if (next.kind === "inflight" && view !== "runs") {
+        navigateRaw(withProject("runs", nextProject));
+        return;
+      }
+      navigateRaw(withProject(hashPathNow(), nextProject));
+    },
+    [navigateRaw, view],
+  );
   const openRepo = (name: string) => {
     setOpenRepos((prev) => rememberOpenRepo(prev, name));
     navigateRaw(withProject(hashPathNow(), name));
@@ -246,10 +250,17 @@ export function App() {
       : "…";
 
   const goArmed = useGoSequences(
-    useMemo(
-      () => Object.fromEntries(NAV.map((n) => [n.go, () => navigate(n.key)])),
-      [navigate],
-    ),
+    useMemo(() => {
+      const map: Record<string, () => void> = Object.fromEntries(
+        NAV.map((n) => [n.go, () => navigate(n.key)]),
+      );
+      map["0"] = () => selectContext({ kind: "all" });
+      map["i"] = () => selectContext({ kind: "inflight" });
+      openRepos.slice(0, 9).forEach((name, idx) => {
+        map[String(idx + 1)] = () => selectContext({ kind: "repo", name });
+      });
+      return map;
+    }, [navigate, selectContext, openRepos]),
   );
 
   useEffect(() => {
@@ -272,6 +283,7 @@ export function App() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
       if (e.key === "i") {
         e.preventDefault();
         setInjectOpen(true);
@@ -301,6 +313,24 @@ export function App() {
       group: "Go" as const,
       run: () => navigate(n.key),
     })),
+    {
+      label: "Context: All",
+      hint: "g 0",
+      group: "Go" as const,
+      run: () => selectContext({ kind: "all" }),
+    },
+    ...openRepos.slice(0, 9).map((name, idx) => ({
+      label: `Context: ${name}`,
+      hint: `g ${idx + 1}`,
+      group: "Go" as const,
+      run: () => selectContext({ kind: "repo", name }),
+    })),
+    {
+      label: "Context: In flight",
+      hint: "g i",
+      group: "Go" as const,
+      run: () => selectContext({ kind: "inflight" }),
+    },
     { label: "Inject event…", hint: "i", run: () => setInjectOpen(true) },
     {
       label: "Focus filter",
@@ -329,6 +359,7 @@ export function App() {
         onSelect={selectContext}
         onOpen={openRepo}
         onClose={closeRepo}
+        goArmed={goArmed}
       />
       <div className="flex min-h-0 flex-1">
       <nav
@@ -703,6 +734,15 @@ export function GoPrefixHint({ armed, currentView }: { armed: boolean; currentVi
                 </span>
               );
             })}
+            <span className="whitespace-nowrap text-(--text-faint)">
+              <span className="mono text-(--text)">0</span> All
+            </span>
+            <span className="whitespace-nowrap text-(--text-faint)">
+              <span className="mono text-(--text)">1–9</span> repos
+            </span>
+            <span className="whitespace-nowrap text-(--text-faint)">
+              <span className="mono text-(--text)">i</span> In flight
+            </span>
           </div>
         </>
       )}

@@ -368,6 +368,80 @@ describe("ContextTabs", () => {
     expect(document.activeElement?.getAttribute("aria-label")).toBe("Open a repo tab");
     expect(opened).toEqual([]);
   });
+
+  test("displays subtle shortcut indicators when goArmed is true", () => {
+    const reposList = Array.from({ length: 10 }, (_, i) => `repo-${i + 1}`);
+    const r = render(
+      <ContextTabs
+        repos={reposList.map(repo)}
+        reposError={false}
+        openRepos={reposList}
+        active={{ kind: "all" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+        goArmed={true}
+      />,
+    );
+
+    const allBtn = r.getByRole("button", { name: "All" });
+    expect(allBtn.textContent).toContain("0");
+
+    for (let i = 0; i < 9; i++) {
+      const btn = r.getByRole("button", { name: `repo-${i + 1}` });
+      expect(btn.textContent).toContain(String(i + 1));
+    }
+
+    // 10th open repo tab (index 9) does not receive a shortcut chord
+    const tenthBtn = r.getByRole("button", { name: "repo-10" });
+    expect(tenthBtn.textContent).toBe("repo-10");
+
+    const inflightBtn = r.getByRole("button", { name: "In flight" });
+    expect(inflightBtn.textContent).toContain("i");
+  });
+
+  test("does not display shortcut indicators when goArmed is false", () => {
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory"), repo("client")]}
+        reposError={false}
+        openRepos={["factory", "client"]}
+        active={{ kind: "all" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+        goArmed={false}
+      />,
+    );
+
+    expect(r.getByRole("button", { name: "All" }).textContent).toBe("All");
+    expect(r.getByRole("button", { name: "factory" }).textContent).toBe("factory");
+    expect(r.getByRole("button", { name: "client" }).textContent).toBe("client");
+    expect(r.getByRole("button", { name: "In flight" }).textContent).toBe("In flight");
+  });
+
+  test("provides shortcut hint titles on context tab buttons", () => {
+    const reposList = Array.from({ length: 10 }, (_, i) => `repo-${i + 1}`);
+    const r = render(
+      <ContextTabs
+        repos={reposList.map(repo)}
+        reposError={reposList.length === 0}
+        openRepos={reposList}
+        active={{ kind: "all" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(r.getByRole("button", { name: "All" }).getAttribute("title")).toBe("All (g 0)");
+    for (let i = 0; i < 9; i++) {
+      const btn = r.getByRole("button", { name: `repo-${i + 1}` });
+      expect(btn.getAttribute("title")).toBe(`repo-${i + 1} (g ${i + 1})`);
+    }
+    expect(r.getByRole("button", { name: "repo-10" }).getAttribute("title")).toBe("repo-10");
+    expect(r.getByRole("button", { name: "In flight" }).getAttribute("title")).toBe("In flight (g i)");
+  });
 });
 
 describe("ScopeCaption", () => {
