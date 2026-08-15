@@ -1,10 +1,36 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { useListKeys } from "../hooks";
+import { useDisplayOptions, useListKeys } from "../hooks";
+import {
+  buildSections,
+  cycleColumnSort,
+  flattenSections,
+  grouped,
+  removeCustomColumn,
+  toggleCollapsed,
+  visibleColumns,
+  type DisplayConfig,
+} from "../displayOptions";
+import { DisplayOptions, exportJson } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import type { AgentDef } from "../types";
 import type { OperatorContext } from "../context";
-import { Button, DetailPane, Disclosure, FilterInput, JsonBlock, KV, ListEmpty, ListPane, Section, copyText, copyLink } from "../components/ui";
+import {
+  Button,
+  DetailPane,
+  Disclosure,
+  FilterInput,
+  GroupHeaderRow,
+  JsonBlock,
+  KV,
+  ListEmpty,
+  ListPane,
+  Section,
+  Th,
+  copyText,
+  copyLink,
+} from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
 import { eventsHash } from "../hash";
 import { setContextActions } from "../palette";
@@ -18,6 +44,33 @@ const caps = (a: AgentDef) =>
  * jump behave like one: middle-click, copy link, Back.
  */
 const eventsTypeHref = (type: string) => `#/${eventsHash(null, null, type)}`;
+
+const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
+  view: "agents",
+  groups: [
+    {
+      key: "mutating",
+      label: "Mutating",
+      get: (a) => (a.mutating ? "mutating" : "read-only"),
+      order: ["mutating", "read-only"],
+    },
+    { key: "contract", label: "Contract", get: (a) => a.outputContract },
+  ],
+  sorts: [
+    { key: "ref", label: "Ref", get: (a) => a.ref, column: "ref" },
+    { key: "contract", label: "Contract", get: (a) => a.outputContract, column: "contract" },
+    { key: "timeout", label: "Timeout", get: (a) => a.limits.timeout_seconds ?? 0, column: "timeout" },
+    { key: "attempts", label: "Attempts", get: (a) => a.limits.attempts ?? 0, column: "attempts" },
+  ],
+  columns: [
+    { key: "ref", label: "Ref", always: true },
+    { key: "contract", label: "Contract" },
+    { key: "mutating", label: "Mutating" },
+    { key: "capabilities", label: "Capabilities" },
+    { key: "timeout", label: "Timeout" },
+    { key: "attempts", label: "Attempts" },
+  ],
+};
 
 /**
  * Agents (webui doc §10.6) — the registry, fully readable. An operator
@@ -39,6 +92,8 @@ export function Agents({
   const contracts = query.data?.contracts ?? {};
 
   const [filter, setFilter] = useState("");
+  const [display, setDisplay] = useDisplayOptions(AGENTS_DISPLAY);
+
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return rows;
@@ -48,9 +103,23 @@ export function Agents({
       ),
     );
   }, [rows, filter]);
+
+  const show = useMemo(
+    () =>
+      new Set(
+        display.hiddenColumns.length
+          ? AGENTS_DISPLAY.columns.map((c) => c.key).filter((k) => !display.hiddenColumns.includes(k))
+          : AGENTS_DISPLAY.columns.map((c) => c.key),
+      ),
+    [display.hiddenColumns],
+  );
+  const cols = useMemo(() => visibleColumns(AGENTS_DISPLAY, display), [display]);
+  const sections = useMemo(() => buildSections(visible, AGENTS_DISPLAY, display), [visible, display]);
+  const flat = useMemo(() => flattenSections(sections, display.collapsed), [sections, display.collapsed]);
+
   const selectedRef = focusAgentRef;
-  const selectedIndex = useMemo(() => visible.findIndex((a) => a.ref === selectedRef), [visible, selectedRef]);
-  const sel = selectedIndex >= 0 ? visible[selectedIndex] : null;
+  const selectedIndex = useMemo(() => flat.findIndex((a) => a.ref === selectedRef), [flat, selectedRef]);
+  const sel = selectedIndex >= 0 ? flat[selectedIndex] : null;
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -61,9 +130,9 @@ export function Agents({
   }, [focusAgentRef]);
 
   useListKeys({
-    count: visible.length,
+    count: flat.length,
     selected: selectedIndex,
-    onSelect: (i) => onSelectAgent(visible[i]?.ref ?? null),
+    onSelect: (i) => onSelectAgent(flat[i]?.ref ?? null),
     onClose: () => {
       if (selectedRef) onSelectAgent(null);
       else if (filter) setFilter("");
@@ -85,65 +154,115 @@ export function Agents({
     return () => setContextActions([]);
   }, [sel?.ref]);
 
+  const handleExport = () => exportJson("agents.json", visible);
+
   return (
     <div className="flex h-full min-w-0">
       <ListPane
         chrome={
           <>
-        <h1 className="display mb-4 text-lg font-semibold">Agents</h1>
-        <ScopeCaption context={context} surface="registry" />
-        <div className="mb-3">
-          <FilterInput
-            value={filter}
-            onChange={setFilter}
-            placeholder="Filter ref, contract, event type…"
-            label="Filter agents"
-          />
-        </div>
+            <h1 className="display mb-4 text-lg font-semibold">Agents</h1>
+            <ScopeCaption context={context} surface="registry" />
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className="ml-auto">
+                <DisplayOptions
+                  config={AGENTS_DISPLAY}
+                  state={display}
+                  onChange={setDisplay}
+                  onExport={visible.length > 0 ? handleExport : undefined}
+                  rows={rows}
+                />
+              </span>
+              <FilterInput
+                value={filter}
+                onChange={setFilter}
+                placeholder="Filter ref, contract, event type…"
+                label="Filter agents"
+              />
+            </div>
           </>
         }
       >
-
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Ref</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Contract</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Mutating</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Capabilities</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Timeout</th>
-              <th className="sticky top-0 z-10 bg-(--surface-0) border-b border-(--border) px-3 py-1.5 font-medium">Attempts</th>
+              {cols.map((c) => {
+                const sort = AGENTS_DISPLAY.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
+                return (
+                  <Th
+                    key={c.key}
+                    label={c.label}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(AGENTS_DISPLAY, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {visible.map((a, i) => (
-              <tr
-                key={a.ref}
-                onClick={() => onSelectAgent(a.ref)}
-                aria-selected={i === selectedIndex}
-                className={`cursor-pointer hover:bg-(--surface-1) ${i === selectedIndex ? "row-selected" : ""}`}
-              >
-                <td className="mono border-b border-(--border) px-3 py-1.5">{a.ref}</td>
-                <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{a.outputContract}</td>
-                <td className="border-b border-(--border) px-3 py-1.5">
-                  <span style={{ color: a.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
-                    {a.mutating ? "mutating" : "read-only"}
-                  </span>
-                </td>
-                <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
-                  {caps(a)}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
-                  {a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : "-"}
-                </td>
-                <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
-                  {a.limits.attempts ?? "-"}
-                </td>
-              </tr>
-            ))}
+            {(() => {
+              const renderRow = (a: AgentDef) => (
+                <tr
+                  key={a.ref}
+                  onClick={() => onSelectAgent(a.ref)}
+                  aria-selected={a.ref === selectedRef}
+                  className={`cursor-pointer hover:bg-(--surface-1) ${a.ref === selectedRef ? "row-selected" : ""}`}
+                >
+                  <td className="mono border-b border-(--border) px-3 py-1.5">{a.ref}</td>
+                  {show.has("contract") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{a.outputContract}</td>
+                  )}
+                  {show.has("mutating") && (
+                    <td className="border-b border-(--border) px-3 py-1.5">
+                      <span style={{ color: a.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
+                        {a.mutating ? "mutating" : "read-only"}
+                      </span>
+                    </td>
+                  )}
+                  {show.has("capabilities") && (
+                    <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                      {caps(a)}
+                    </td>
+                  )}
+                  {show.has("timeout") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      {a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : "-"}
+                    </td>
+                  )}
+                  {show.has("attempts") && (
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      {a.limits.attempts ?? "-"}
+                    </td>
+                  )}
+                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    <CustomCell key={c.key} row={a} path={c.key.replace(/^custom:/, "")} />
+                  ))}
+                </tr>
+              );
+              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
+              return sections.map((s) => {
+                const closed = display.collapsed.includes(s.key);
+                return (
+                  <Fragment key={s.key}>
+                    <GroupHeaderRow
+                      colSpan={cols.length}
+                      section={s}
+                      collapsed={closed}
+                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    />
+                    {!closed && s.rows.map(renderRow)}
+                  </Fragment>
+                );
+              });
+            })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={6}
+                colSpan={cols.length}
                 query={query}
                 filtered={rows.length > 0}
                 noun="agents"
@@ -184,7 +303,6 @@ export function Agents({
             </>
           }
         >
-
           <Section title="Definition">
             <KV k="id" v={sel.id} />
             <KV k="version" v={String(sel.version)} />

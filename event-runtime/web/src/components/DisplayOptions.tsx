@@ -1,20 +1,24 @@
 /**
- * The "Display" popover (OPS-493) — Linear's view-options panel for the table
- * views: grouping, sub-grouping, ordering, list options, display properties.
+ * The "Display" popover (OPS-493, WM-214) — Linear's view-options panel for the table
+ * views: grouping, sub-grouping, ordering, list options, display properties,
+ * and dynamic payload/spec custom columns.
  * Pure presentation over `displayOptions.ts`; the owning view holds the state
  * via `useDisplayOptions` and passes it down, so the panel never touches
  * storage and the table never re-derives what the panel showed.
  */
-import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { modal } from "../hooks";
 import {
   DEFAULT_ORDER,
   NONE,
+  addCustomColumn,
   defaultDisplayState,
   isDefaultDisplayState,
+  removeCustomColumn,
   type DisplayConfig,
   type DisplayState,
 } from "../displayOptions";
+import { discoverPayloadFields } from "../schemaDiscovery";
 
 function OptionRow({ label, htmlFor, children }: { label: string; htmlFor?: string; children: ReactNode }) {
   return (
@@ -139,13 +143,16 @@ export function DisplayOptions<T>({
   state,
   onChange,
   onExport,
+  rows,
 }: {
   config: DisplayConfig<T>;
   state: DisplayState;
   onChange: (next: DisplayState | ((state: DisplayState) => DisplayState)) => void;
   onExport?: () => void;
+  rows?: T[];
 }) {
   const [open, setOpen] = useState(false);
+  const [customInput, setCustomInput] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const firstFocusRef = useRef<HTMLSelectElement>(null);
@@ -190,6 +197,18 @@ export function DisplayOptions<T>({
   const groupLabel = (key: string) =>
     config.groups.find((g) => g.key === key)?.label ?? key;
 
+  const discoveredFields = useMemo(() => {
+    if (!open || !rows?.length) return [];
+    return discoverPayloadFields(rows, state.customColumns);
+  }, [open, rows, state.customColumns]);
+
+  const handleAddCustom = (pathToAdd?: string) => {
+    const target = (pathToAdd ?? customInput).trim();
+    if (!target) return;
+    onChange((s) => addCustomColumn(s, target));
+    setCustomInput("");
+  };
+
   return (
     <div ref={rootRef} className="relative">
       <button
@@ -215,7 +234,7 @@ export function DisplayOptions<T>({
         <div
           role="dialog"
           aria-label="Display options"
-          className="absolute right-0 top-full z-30 mt-1.5 w-72 rounded-lg border border-(--border-strong) bg-(--surface-1) p-3 shadow-2xl"
+          className="absolute right-0 top-full z-30 mt-1.5 w-80 max-h-[85vh] overflow-y-auto rounded-lg border border-(--border-strong) bg-(--surface-1) p-3 shadow-2xl"
         >
           <OptionRow label="Grouping" htmlFor={groupId}>
             <Select
@@ -271,6 +290,10 @@ export function DisplayOptions<T>({
                 options={[
                   { value: DEFAULT_ORDER, label: "Default order" },
                   ...config.sorts.map((f) => ({ value: f.key, label: f.label })),
+                  ...(state.customColumns ?? []).map((path) => ({
+                    value: `custom:${path}`,
+                    label: path,
+                  })),
                 ]}
               />
               <button
@@ -326,6 +349,99 @@ export function DisplayOptions<T>({
                 })}
               </div>
             </>
+          )}
+
+          {/* Dynamic / Payload Custom Columns (WM-214) */}
+          <GroupLabel>Custom columns</GroupLabel>
+          {(state.customColumns?.length ?? 0) > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {state.customColumns.map((path) => {
+                const colKey = `custom:${path}`;
+                const shown = !state.hiddenColumns.includes(colKey);
+                return (
+                  <div
+                    key={path}
+                    className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] ${
+                      shown
+                        ? "border-(--border-strong) bg-(--surface-3) text-(--text)"
+                        : "border-(--border) text-(--text-faint)"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      title={shown ? "Hide column" : "Show column"}
+                      onClick={() =>
+                        onChange((s) => ({
+                          ...s,
+                          hiddenColumns: shown
+                            ? [...s.hiddenColumns, colKey]
+                            : s.hiddenColumns.filter((k) => k !== colKey),
+                        }))
+                      }
+                      className="cursor-pointer font-medium hover:underline"
+                    >
+                      {path}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Remove column ${path}`}
+                      title="Remove column"
+                      onClick={() => onChange((s) => removeCustomColumn(s, path))}
+                      className="cursor-pointer text-(--text-faint) hover:text-(--text)"
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const formEl = e.currentTarget;
+              const inputEl = formEl.elements.namedItem("property") as HTMLInputElement | null;
+              const val = inputEl?.value || customInput;
+              handleAddCustom(val);
+            }}
+            className="flex items-center gap-1.5"
+          >
+            <input
+              name="property"
+              type="text"
+              value={customInput}
+              placeholder="e.g. payload.repo, spec.input.model"
+              aria-label="Add custom property path"
+              onChange={(e) => setCustomInput(e.target.value)}
+              className="flex-1 rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-[11px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
+            />
+            <button
+              type="submit"
+              disabled={!customInput.trim()}
+              className="cursor-pointer rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-[11px] font-medium text-(--text-dim) hover:bg-(--surface-3) hover:text-(--text) disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              + Add
+            </button>
+          </form>
+
+          {discoveredFields.length > 0 && (
+            <div className="mt-2.5">
+              <div className="text-[10px] text-(--text-faint)">Discovered in loaded items:</div>
+              <div className="mt-1 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+                {discoveredFields.slice(0, 10).map((field) => (
+                  <button
+                    key={field.path}
+                    type="button"
+                    title={`Value sample: ${field.sampleValue}`}
+                    onClick={() => handleAddCustom(field.path)}
+                    className="cursor-pointer rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[10px] text-(--text-dim) hover:border-(--border-strong) hover:bg-(--surface-3) hover:text-(--text)"
+                  >
+                    + {field.path} <span className="text-(--text-faint)">({field.occurrenceCount})</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
           {(onExport || customized) && (

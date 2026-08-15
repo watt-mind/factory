@@ -497,6 +497,7 @@ export function Th({
   dir,
   naturalDir,
   onSort,
+  onRemove,
 }: {
   label: string;
   align?: "right";
@@ -504,27 +505,48 @@ export function Th({
   /** What the first click will do — the hover hint must not promise "↑" on a newest-first column. */
   naturalDir?: SortDir;
   onSort?: () => void;
+  onRemove?: () => void;
 }) {
   const alignCls = align === "right" ? "text-right" : "text-left";
   const base = `sticky top-0 z-10 h-7 bg-(--surface-0) px-3 font-medium whitespace-nowrap shadow-[inset_0_-1px_0_var(--border)] ${alignCls}`;
-  if (!onSort) return <th className={base}>{label}</th>;
+  if (!onSort && !onRemove) return <th className={base}>{label}</th>;
   return (
     <th aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : undefined} className={`${base} p-0`}>
-      <button
-        type="button"
-        onClick={onSort}
-        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.stopPropagation()}
-        title={`Sort by ${label.toLowerCase()}`}
-        className={`group/th inline-flex h-7 w-full cursor-pointer items-center gap-1 px-3 font-medium transition-colors hover:text-(--text) ${align === "right" ? "justify-end" : ""} ${dir ? "text-(--text)" : ""}`}
-      >
-        {label}
-        <span
-          aria-hidden
-          className={`text-[9px] transition-opacity ${dir ? "opacity-100" : "opacity-0 group-hover/th:opacity-50"}`}
-        >
-          {(dir ?? naturalDir ?? "asc") === "desc" ? "↓" : "↑"}
-        </span>
-      </button>
+      <div className={`group/th flex h-7 w-full items-center justify-between gap-1 px-3 ${align === "right" ? "justify-end" : ""}`}>
+        {onSort ? (
+          <button
+            type="button"
+            onClick={onSort}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.stopPropagation()}
+            title={`Sort by ${label.toLowerCase()}`}
+            className={`inline-flex h-7 items-center gap-1 cursor-pointer font-medium transition-colors hover:text-(--text) ${dir ? "text-(--text)" : ""}`}
+          >
+            {label}
+            <span
+              aria-hidden
+              className={`text-[9px] transition-opacity ${dir ? "opacity-100" : "opacity-0 group-hover/th:opacity-50"}`}
+            >
+              {(dir ?? naturalDir ?? "asc") === "desc" ? "↓" : "↑"}
+            </span>
+          </button>
+        ) : (
+          <span>{label}</span>
+        )}
+        {onRemove && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove();
+            }}
+            title={`Remove column ${label}`}
+            aria-label={`Remove column ${label}`}
+            className="ml-1 inline-flex size-3.5 cursor-pointer items-center justify-center rounded text-[11px] text-(--text-faint) opacity-0 transition-opacity hover:bg-(--surface-2) hover:text-(--text) group-hover/th:opacity-100"
+          >
+            ×
+          </button>
+        )}
+      </div>
     </th>
   );
 }

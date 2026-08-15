@@ -8,12 +8,14 @@ import {
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   sortRows,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
 import type { AdmittedEvent, EventFocus } from "../types";
@@ -604,6 +606,7 @@ export function Events({
               state={display}
               onChange={setDisplay}
               onExport={visible.length > 0 ? handleExport : undefined}
+              rows={scoped}
             />
           </span>
           {/* Last in the row: the token chips are a full-width item, so anything
@@ -626,13 +629,17 @@ export function Events({
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -695,6 +702,9 @@ export function Events({
                         <Ago iso={e.admittedAt} now={now} />
                       </td>
                     )}
+                    {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                      <CustomCell key={c.key} row={e} path={c.key.replace(/^custom:/, "")} />
+                    ))}
                   </tr>
                 );
               };
