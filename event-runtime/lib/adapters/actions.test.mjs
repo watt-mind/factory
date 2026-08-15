@@ -195,3 +195,68 @@ describe("execute refutations", () => {
     expect(readFileSync(path.join(ws, ".actions.log"), "utf8")).toContain("not in the definition's host allowlist");
   });
 });
+
+describe("execute item-list mode (OPS-229, WM-109, WM-116)", () => {
+  test("executes registered actions and records standardized issueId from itemKey", async () => {
+    const ws = tmp("evrt-ws-");
+    const def = {
+      ref: "merge-apply@1",
+      itemsField: "plan",
+      itemKey: "ticket",
+      actionRegistry: {
+        echo_ticket: { argv: ["echo", "ticket={ticket}", "repo={repo}"] },
+        echo_reason: { argv: ["echo", "reason={reason}"] },
+      },
+    };
+    const spec = {
+      input: {
+        repo: "bj29",
+        plan: [
+          { ticket: "WM-116", action: "echo_ticket", reason: "testing item key" },
+          { ticket: "WM-117", action: "echo_reason", reason: "second item" },
+        ],
+      },
+    };
+    const res = await execute({ spec, def, workspaceDir: ws, timeoutMs: 5000 });
+    expect(res.exitCode).toBe(0);
+    expect(res.timedOut).toBe(false);
+
+    const result = JSON.parse(readFileSync(path.join(ws, "result.json"), "utf8"));
+    expect(result.schemaVersion).toBe("factory.agent-result/v1");
+    expect(result.terminalState).toBe("completed");
+    expect(result.artifact).toEqual({
+      repo: "bj29",
+      applied: [
+        { issueId: "WM-116", action: "echo_ticket" },
+        { issueId: "WM-117", action: "echo_reason" },
+      ],
+    });
+  });
+
+  test("refuses before executing any item when an action is unregistered", async () => {
+    const ws = tmp("evrt-ws-");
+    const def = {
+      ref: "test-apply@1",
+      itemsField: "plan",
+      itemKey: "issueId",
+      actionRegistry: {
+        valid_action: { argv: ["echo", "ok"] },
+      },
+    };
+    const spec = {
+      input: {
+        repo: "test-repo",
+        plan: [
+          { issueId: "T-1", action: "valid_action" },
+          { issueId: "T-2", action: "unknown_action" },
+        ],
+      },
+    };
+    const res = await execute({ spec, def, workspaceDir: ws, timeoutMs: 5000 });
+    expect(res.exitCode).toBe(1);
+    expect(readFileSync(path.join(ws, ".actions.log"), "utf8")).toContain(
+      'REFUSED before execution: action "unknown_action" is not in the closed action registry',
+    );
+  });
+});
+

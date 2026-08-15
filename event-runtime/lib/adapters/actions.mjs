@@ -156,7 +156,9 @@ async function executeItemList({ spec, def, workspaceDir, timeoutMs }) {
     const budget = Math.max(1000, deadline - Date.now());
     const proc = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", timeout: budget, cwd: FACTORY_ROOT });
     const raw = `${proc.stdout ?? ""}${proc.stderr ?? ""}`.slice(-OUTPUT_TAIL_CHARS);
-    const key = `${item[def.itemKey]}:${item.action}`;
+    const itemKey = def.itemKey ?? "issueId";
+    const issueId = item[itemKey] ?? item.issueId ?? item.ticket ?? item.action;
+    const key = `${issueId ?? item.action}:${item.action}`;
     outputs[key] = raw;
     appendFileSync(log, `$ ${key}: ${argv.join(" ")}\n${raw}\n`, "utf8");
     if (proc.error?.code === "ETIMEDOUT") {
@@ -169,7 +171,7 @@ async function executeItemList({ spec, def, workspaceDir, timeoutMs }) {
       appendFileSync(log, `FAILED on ${key} (exit ${proc.status}) after ${applied.length} applied\n`, "utf8");
       return { exitCode: proc.status ?? 1, timedOut: false };
     }
-    applied.push({ issueId: item[def.itemKey], action: item.action });
+    applied.push({ issueId, action: item.action });
   }
 
   writeFileSync(

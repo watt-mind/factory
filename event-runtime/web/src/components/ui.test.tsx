@@ -1,8 +1,10 @@
 import "../test-dom";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { Button, clearToasts, Countdown, DetailPane, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, ToastContainer } from "./ui";
 import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
+import { changeInput, typeText } from "../test-render";
 
 function stackOf(r: ReturnType<typeof render>): HTMLElement {
   const parent = r.getByRole("status").parentElement;
@@ -409,3 +411,163 @@ describe("StateBadge dot suppression (WM-136)", () => {
     expect(bare.getByText("RUNNING")).toBeTruthy();
   });
 });
+
+describe("changeInput & typeText test helpers (WM-114)", () => {
+  test("changeInput fires onChange and onInput on controlled <input>", () => {
+    const changes: string[] = [];
+    const inputs: string[] = [];
+    function ControlledInput() {
+      const [val, setVal] = useState("initial");
+      return (
+        <input
+          data-testid="input"
+          value={val}
+          onInput={(e) => inputs.push((e.target as HTMLInputElement).value)}
+          onChange={(e) => {
+            changes.push(e.target.value);
+            setVal(e.target.value);
+          }}
+        />
+      );
+    }
+    const r = render(<ControlledInput />);
+    const input = r.getByTestId("input") as HTMLInputElement;
+    expect(input.value).toBe("initial");
+
+    act(() => {
+      changeInput(input, "updated value");
+    });
+
+    expect(changes).toEqual(["updated value"]);
+    expect(inputs).toEqual(["updated value"]);
+    expect(input.value).toBe("updated value");
+  });
+
+  test("changeInput fires onChange and onInput on controlled <textarea>", () => {
+    const changes: string[] = [];
+    const inputs: string[] = [];
+    function ControlledTextarea() {
+      const [val, setVal] = useState("start line");
+      return (
+        <textarea
+          data-testid="textarea"
+          value={val}
+          onInput={(e) => inputs.push((e.target as HTMLTextAreaElement).value)}
+          onChange={(e) => {
+            changes.push(e.target.value);
+            setVal(e.target.value);
+          }}
+        />
+      );
+    }
+    const r = render(<ControlledTextarea />);
+    const textarea = r.getByTestId("textarea") as HTMLTextAreaElement;
+
+    act(() => {
+      changeInput(textarea, "line 1\nline 2");
+    });
+
+    expect(changes).toEqual(["line 1\nline 2"]);
+    expect(inputs).toEqual(["line 1\nline 2"]);
+    expect(textarea.value).toBe("line 1\nline 2");
+  });
+
+  test("changeInput fires onChange on controlled <select>", () => {
+    const changes: string[] = [];
+    function ControlledSelect() {
+      const [val, setVal] = useState("opt1");
+      return (
+        <select
+          data-testid="select"
+          value={val}
+          onChange={(e) => {
+            changes.push(e.target.value);
+            setVal(e.target.value);
+          }}
+        >
+          <option value="opt1">Option 1</option>
+          <option value="opt2">Option 2</option>
+        </select>
+      );
+    }
+    const r = render(<ControlledSelect />);
+    const select = r.getByTestId("select") as HTMLSelectElement;
+
+    act(() => {
+      changeInput(select, "opt2");
+    });
+
+    expect(changes).toEqual(["opt2"]);
+    expect(select.value).toBe("opt2");
+  });
+
+  test("typeText simulates keystroke-level typing with selection progression and fires onChange on each key", () => {
+    const keydowns: string[] = [];
+    const keyups: string[] = [];
+    const inputs: string[] = [];
+    const changes: string[] = [];
+
+    function ControlledInput() {
+      const [val, setVal] = useState("");
+      return (
+        <input
+          data-testid="input"
+          value={val}
+          onKeyDown={(e) => keydowns.push(e.key)}
+          onKeyUp={(e) => keyups.push(e.key)}
+          onInput={(e) => inputs.push((e.target as HTMLInputElement).value)}
+          onChange={(e) => {
+            changes.push(e.target.value);
+            setVal(e.target.value);
+          }}
+        />
+      );
+    }
+    const r = render(<ControlledInput />);
+    const input = r.getByTestId("input") as HTMLInputElement;
+
+    act(() => {
+      typeText(input, "cat");
+    });
+
+    expect(keydowns).toEqual(["c", "a", "t"]);
+    expect(keyups).toEqual(["c", "a", "t"]);
+    expect(inputs).toEqual(["c", "ca", "cat"]);
+    expect(changes).toEqual(["c", "ca", "cat"]);
+    expect(input.value).toBe("cat");
+    expect(input.selectionStart).toBe(3);
+    expect(input.selectionEnd).toBe(3);
+  });
+
+  test("typeText supports cursor insertion in middle of text and selection replacement", () => {
+    function ControlledInput() {
+      const [val, setVal] = useState("ac");
+      return (
+        <input
+          data-testid="input"
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+        />
+      );
+    }
+    const r = render(<ControlledInput />);
+    const input = r.getByTestId("input") as HTMLInputElement;
+
+    // Mid-text insertion
+    input.setSelectionRange(1, 1);
+    act(() => {
+      typeText(input, "b");
+    });
+    expect(input.value).toBe("abc");
+    expect(input.selectionStart).toBe(2);
+
+    // Range replacement: select "ab" (indices 0..2) and replace with "xy"
+    input.setSelectionRange(0, 2);
+    act(() => {
+      typeText(input, "xy");
+    });
+    expect(input.value).toBe("xyc");
+    expect(input.selectionStart).toBe(2);
+  });
+});
+

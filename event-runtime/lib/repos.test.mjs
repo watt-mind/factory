@@ -65,6 +65,7 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       deployBranch: "master",
       reportOnly: false,
       maxInFlight: 20,
+      smokeDeadlineSeconds: null,
       worktreeRoot: path.join(home, "Develop/.worktrees/full"),
       worktreeUp: "bin/worktree-up.sh",
       worktreeDown: "bin/worktree-down.sh",
@@ -85,6 +86,7 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       // Null, not a number: the dispatcher owns the fallback cap, and a
       // fabricated one here would read as a limit repos.yaml never set.
       maxInFlight: null,
+      smokeDeadlineSeconds: null,
       worktreeRoot: null,
       worktreeDown: null,
       verify: null,
@@ -132,6 +134,38 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
     }
   });
 
+  test("smoke_deadline_seconds parses from top-level or deployment block, validating positive numbers (WM-120)", () => {
+    const valid = loadRepos({
+      root: factoryRoot(`repos:
+  - name: top-level
+    path: /tmp/a
+    smoke_deadline_seconds: 300
+  - name: deploy-level
+    path: /tmp/b
+    deployment:
+      url: https://example.com
+      smoke_deadline_seconds: 900
+  - name: explicit-null
+    path: /tmp/c
+    smoke_deadline_seconds: null
+`),
+    });
+    expect(valid.get("top-level").smokeDeadlineSeconds).toBe(300);
+    expect(valid.get("deploy-level").smokeDeadlineSeconds).toBe(900);
+    expect(valid.get("explicit-null").smokeDeadlineSeconds).toBeNull();
+
+    const invalidCases = [
+      `repos:\n  - name: str-sec\n    path: /tmp/d\n    smoke_deadline_seconds: "600"\n`,
+      `repos:\n  - name: zero-sec\n    path: /tmp/e\n    smoke_deadline_seconds: 0\n`,
+      `repos:\n  - name: neg-sec\n    path: /tmp/f\n    deployment:\n      smoke_deadline_seconds: -10\n`,
+      `repos:\n  - name: bool-sec\n    path: /tmp/g\n    smoke_deadline_seconds: true\n`,
+    ];
+
+    for (const yaml of invalidCases) {
+      expect(() => loadRepos({ root: factoryRoot(yaml) })).toThrow(RepoError);
+    }
+  });
+
   test("malformed YAML throws RepoError with file path and parse error message (OPS-346)", () => {
     const root = factoryRoot("repos: [ invalid: {");
     expect(() => loadRepos({ root })).toThrow(RepoError);
@@ -158,7 +192,7 @@ describe("reposView is what the control API serves", () => {
     for (const row of rows) {
       expect(Object.keys(row).sort()).toEqual([
         "base", "deployBranch", "github", "hasWorktreeDown", "hasWorktreeUp", "hasWorktreeWarm",
-        "maxInFlight", "name", "path", "project", "reportOnly", "team", "verify", "worktreeRoot",
+        "maxInFlight", "name", "path", "project", "reportOnly", "smokeDeadlineSeconds", "team", "verify", "worktreeRoot",
       ]);
     }
     const serialized = JSON.stringify(rows);

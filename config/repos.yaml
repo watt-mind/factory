@@ -34,8 +34,8 @@ repos:
     smoke_url: https://bj29-dev.projects.watt-mind.com
     # Optional public metadata; an origin is queried at /version.json.
     deployment:
-      url: https://bj29-dev.projects.watt-mind.com
-      branch: develop
+      url: https://bj29.projects.watt-mind.com
+      branch: master
 
     # Concurrency. Merges are always serialized regardless; this caps how many
     # ticket agents run at once, and each one costs a worktree on disk.

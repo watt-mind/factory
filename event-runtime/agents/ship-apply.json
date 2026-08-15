@@ -39,14 +39,15 @@
       "argv": [
         "sh",
         "-c",
-        "set -eu\nexpected=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\ndeadline=$(( $(date +%s) + ${SHIP_SMOKE_DEADLINE_SECONDS:-600} ))\ndeployed=\"\"\nwhile :; do\n  deployed=\"$(SMOKE_URL=\"$3\" SMOKE_REVISION_FIELD=\"$6\" FACTORY_ROOT_DIR=\"$4\" bun -e 'const { deployedRevision, metadataUrl } = await import(process.env.FACTORY_ROOT_DIR + \"/lib/repo-status.mjs\"); const res = await fetch(metadataUrl(process.env.SMOKE_URL), { headers: { accept: \"application/json\" } }); if (!res.ok) { console.error(\"endpoint answered \" + res.status); process.exit(1); } const rev = deployedRevision(await res.json(), process.env.SMOKE_REVISION_FIELD || null); if (!rev) { console.error(\"endpoint did not expose a revision\"); process.exit(1); } console.log(rev.value);')\" || deployed=\"\"\n  if [ -n \"$deployed\" ] && [ \"${#deployed}\" -ge 7 ]; then\n    case \"$expected\" in\n      \"$deployed\"*) echo \"smoke green: $2 serves $deployed\"; exit 0 ;;\n    esac\n  fi\n  if [ \"$(date +%s)\" -ge \"$deadline\" ]; then break; fi\n  sleep 15\ndone\nfactory notify \"SMOKE RED $5: $3 serves ${deployed:-no revision}, expected $2@$expected — deploy did not verify; never auto-revert, the human decides\"\necho \"smoke red: $3 serves ${deployed:-no revision}, expected $expected\" >&2\nexit 1",
+        "set -eu\nexpected=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\ndeadline=$(( $(date +%s) + ${SHIP_SMOKE_DEADLINE_SECONDS:-${7:-600}} ))\ndeployed=\"\"\nwhile :; do\n  deployed=\"$(SMOKE_URL=\"$3\" SMOKE_REVISION_FIELD=\"$6\" FACTORY_ROOT_DIR=\"$4\" bun -e 'const { deployedRevision, metadataUrl } = await import(process.env.FACTORY_ROOT_DIR + \"/lib/repo-status.mjs\"); const res = await fetch(metadataUrl(process.env.SMOKE_URL), { headers: { accept: \"application/json\" } }); if (!res.ok) { console.error(\"endpoint answered \" + res.status); process.exit(1); } const rev = deployedRevision(await res.json(), process.env.SMOKE_REVISION_FIELD || null); if (!rev) { console.error(\"endpoint did not expose a revision\"); process.exit(1); } console.log(rev.value);')\" || deployed=\"\"\n  if [ -n \"$deployed\" ] && [ \"${#deployed}\" -ge 7 ]; then\n    case \"$expected\" in\n      \"$deployed\"*) echo \"smoke green: $2 serves $deployed\"; exit 0 ;;\n    esac\n  fi\n  if [ \"$(date +%s)\" -ge \"$deadline\" ]; then break; fi\n  sleep 15\ndone\nfactory notify \"SMOKE RED $5: $3 serves ${deployed:-no revision}, expected $2@$expected — deploy did not verify; never auto-revert, the human decides\"\necho \"smoke red: $3 serves ${deployed:-no revision}, expected $expected\" >&2\nexit 1",
         "smoke_check",
         "{github}",
         "{smokeBranch}",
         "{url}",
         "{factoryRoot}",
         "{repo}",
-        "{revisionField}"
+        "{revisionField}",
+        "{smokeDeadlineSeconds}"
       ]
     }
   },
@@ -67,8 +68,8 @@
   },
   "mutating": true,
   "pins": {
-    "agents/ship-apply.md": "sha256:0c3d40d2b6b6dbe9b3cb27b8ec85017b7bba4c0b71f92845899df8d51a24caa3",
-    "schemas/ship-apply.input.json": "sha256:34c7691643e63e88e4bf68e3f42bba19012be0dc061cda38bfabcda3c4dd17d3",
+    "agents/ship-apply.md": "sha256:4586f05cb6641024b0154299b7b6602143dadb559dd24f0ed0f5a20f3167e062",
+    "schemas/ship-apply.input.json": "sha256:8859dba7f7f8a0f802ee3c342285ef57cdfe091cb0372ec17fd5a87359d1c0e2",
     "schemas/ship-applied.output.json": "sha256:e73f513f50197b344ff320f2f881464028991c6dfb7689790fe3039456ce821b"
   }
 }

@@ -73,6 +73,7 @@ export const IN_PROGRESS = "in progress";
 export const RECLAIM_TO = "todo";
 export const HEARTBEAT_LABEL = "ai:in-progress";
 export const AGENT_LABEL_PREFIX = "agent:";
+export const AGENT_READY_LABEL = "ai:agent-ready";
 const LINEAR_API_URL = "https://api.linear.app/graphql";
 
 function loadEnv() {
@@ -274,7 +275,14 @@ export function lastActivity(issue) {
   return parseTs(issue.updatedAt);
 }
 
-export async function reclaim(issue, todoStateId, minutes, apply, quiet = false) {
+export async function fetchAgentReadyLabelId() {
+  const q = `query { issueLabels(first: 250) { nodes { id name } } }`;
+  const data = await gql(q);
+  const node = (data.issueLabels?.nodes || []).find((l) => (l.name || "").toLowerCase() === AGENT_READY_LABEL);
+  return node?.id || null;
+}
+
+export function computeReclaimLabelIds(issue, isReturningToTodo, agentReadyLabelId = null) {
   const labels = issue.labels?.nodes || [];
   const keep = labels
     .filter((l) => {
@@ -283,7 +291,22 @@ export async function reclaim(issue, todoStateId, minutes, apply, quiet = false)
     })
     .map((l) => l.id);
 
-  if (!apply) return;
+  if (isReturningToTodo && agentReadyLabelId && !keep.includes(agentReadyLabelId)) {
+    keep.push(agentReadyLabelId);
+  }
+  return keep;
+}
+
+export async function reclaim(issue, todoStateId, minutes, apply, quiet = false, agentReadyLabelId = null) {
+  if (todoStateId && !agentReadyLabelId && apply) {
+    try {
+      agentReadyLabelId = await fetchAgentReadyLabelId();
+    } catch {}
+  }
+
+  const keep = computeReclaimLabelIds(issue, Boolean(todoStateId), agentReadyLabelId);
+
+  if (!apply) return { labelIds: keep, stateId: todoStateId, assigneeId: todoStateId ? null : undefined };
 
   // Two different repairs, because the two claims mean different things.
   //
@@ -397,6 +420,12 @@ Options:
   console.log(`=== Stale-claim reaper [${mode}] threshold=${args.minutes}min${args.team ? ` team=${args.team}` : ""} ===\n`);
 
   const teams = await fetchTeams();
+  let agentReadyLabelId = null;
+  if (args.apply) {
+    try {
+      agentReadyLabelId = await fetchAgentReadyLabelId();
+    } catch {}
+  }
   let issues = await fetchInProgress(args.team, args.anyAssignee);
   const now = new Date();
   const cutoff = new Date(now.getTime() - args.minutes * 60 * 1000);
@@ -479,7 +508,7 @@ Options:
     }
 
     try {
-      await reclaim(issue, todoId, args.minutes, args.apply, !todoId);
+      await reclaim(issue, todoId, args.minutes, args.apply, !todoId, agentReadyLabelId);
     } catch (err) {
       console.log(`        ! failed: ${err.message || err}`);
       continue;

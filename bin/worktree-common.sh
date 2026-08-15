@@ -6,6 +6,77 @@ set -euo pipefail
 
 _WORKTREE_COMMON_LOADED=1
 
+# `git fetch` from concurrent bring-ups contends on git's internal locks
+# (.git/FETCH_HEAD.lock, refs/remotes/origin locks, etc.).
+# Capture stderr, retry with exponential backoff on lock contention or transient
+# errors, and safely skip or fallback to the existing base ref when present (WM-117).
+git_fetch() { # <repo> <remote> <ref>
+  local repo="$1" remote="$2" ref="$3"
+  if [[ "${FACTORY_SKIP_FETCH:-0}" -eq 1 || "${SKIP_FETCH:-0}" -eq 1 ]]; then
+    if git -C "$repo" rev-parse --verify --quiet "refs/remotes/$remote/$ref" >/dev/null 2>&1 \
+      || git -C "$repo" rev-parse --verify --quiet "$remote/$ref" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  local attempt=1 max_attempts=5 err=""
+  local delays=(0.1 0.2 0.5 1 2)
+  while :; do
+    err=$(git -C "$repo" fetch "$remote" "$ref" --quiet 2>&1) && return 0
+    if [[ $attempt -lt $max_attempts ]] \
+      && grep -qiE '\.lock|could not lock|cannot lock|unable to create|another git process|temporarily unavailable|resource deadlock|resource temporarily unavailable|device or resource busy|permission denied' <<<"$err"; then
+      local delay_idx=$((attempt - 1))
+      [[ $delay_idx -ge ${#delays[@]} ]] && delay_idx=$((${#delays[@]} - 1))
+      warn "git fetch hit lock contention (attempt $attempt/$max_attempts) — retrying in ${delays[$delay_idx]}s"
+      sleep "${delays[$delay_idx]}"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    # If fetch failed (e.g. offline, CI without remote, transient network) but base ref exists, fallback
+    if git -C "$repo" rev-parse --verify --quiet "refs/remotes/$remote/$ref" >/dev/null 2>&1 \
+      || git -C "$repo" rev-parse --verify --quiet "$remote/$ref" >/dev/null 2>&1; then
+      warn "git fetch failed ($err); using existing $remote/$ref"
+      return 0
+    fi
+    die "could not fetch $remote/$ref: $err"
+  done
+}
+
+# `git worktree add` from concurrent bring-ups contends on git's internal
+# locks and the loser exits 1 with the reason only on stderr (WM-113, WM-117).
+# Capture stderr so the die names the actual failure, and retry briefly with
+# backoff when it looks like lock contention; any other error dies immediately.
+# Branch existence is re-checked per attempt: a lock-interrupted `-b` add can
+# leave the branch created, and a blind `-b` retry would then die on "already
+# exists" instead of finishing the checkout.
+worktree_add() { # <worktree> <branch> <base-ref> [repo]
+  local wt="$1" branch="$2" base="$3"
+  local repo="${4:-$(repo_root)}"
+  local attempt=1 max_attempts=6 err=""
+  local delays=(0.1 0.2 0.5 1 2)
+  while :; do
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+      err=$(git -C "$repo" worktree add --quiet "$wt" "$branch" 2>&1 >/dev/null) && return 0
+    else
+      err=$(git -C "$repo" worktree add --quiet "$wt" -b "$branch" "$base" 2>&1 >/dev/null) && return 0
+    fi
+    if [[ -d "$wt/.git" || -f "$wt/.git" ]] && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ $attempt -lt $max_attempts ]] \
+      && grep -qiE '\.lock|could not lock|cannot lock|unable to create|another git process|temporarily unavailable|resource deadlock|resource temporarily unavailable|device or resource busy|already exists' <<<"$err"; then
+      local delay_idx=$((attempt - 1))
+      [[ $delay_idx -ge ${#delays[@]} ]] && delay_idx=$((${#delays[@]} - 1))
+      warn "git worktree add hit lock contention (attempt $attempt/$max_attempts) — retrying in ${delays[$delay_idx]}s"
+      sleep "${delays[$delay_idx]}"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    die "git worktree add failed: $err"
+  done
+}
+
+
 WT_ROOT="${FACTORY_WT_ROOT:-$HOME/Develop/.worktrees/factory}"
 BASE_BRANCH="${FACTORY_BASE_BRANCH:-develop}"
 

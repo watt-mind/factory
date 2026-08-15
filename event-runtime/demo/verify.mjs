@@ -77,6 +77,14 @@ if (crashFailed) {
   check("multi-attempt attempt records recorded", (crashView?.attempts?.length ?? 0) >= 2);
 }
 
+// Plain retryable run (failed run with attempts < maxAttempts, WM-132)
+const retryableFailed = failedRuns.find((r) => (r.attempts ?? 0) < (r.maxAttempts ?? 1));
+check(
+  "≥1 FAILED run with attempts remaining (attempts < maxAttempts)",
+  Boolean(retryableFailed),
+  retryableFailed ? `${retryableFailed.runId} (${retryableFailed.attempts}/${retryableFailed.maxAttempts})` : "",
+);
+
 // CANCELLED runs
 const cancelledRuns = byState("CANCELLED");
 check("≥2 runs CANCELLED (rejected proposal + operator cancelled)", cancelledRuns.length >= 2, `found ${cancelledRuns.length}`);
@@ -174,13 +182,42 @@ if (triageScanRun) {
   );
 }
 
-// Workspace type coverage across all 3 types
+// 8. Dispatched PR workflow scenario (worktree workspace with PR_OPEN, WM-133)
+const dispatchRun = completedRuns.find((r) => r.agent === "dispatch@1");
+check("dispatch scenario: dispatch@1 run present", Boolean(dispatchRun));
+let dispatchView = null;
+if (dispatchRun) {
+  dispatchView = await client.run(dispatchRun.runId);
+  check("dispatch@1 output contract is factory.dispatch-result/v1", dispatchView.run?.spec?.outputContract === "factory.dispatch-result/v1");
+  check("dispatch@1 workspace type is \"worktree\"", dispatchView.run?.spec?.workspace?.type === "worktree");
+  const expectedLifecycle = ["PROPOSED", "APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"];
+  const actualLifecycle = (dispatchView.lifecycle ?? []).map((e) => e.to_state);
+  check(
+    "dispatch@1 lifecycle sequence moves through RUNNING → VERIFYING → COMPLETED",
+    JSON.stringify(actualLifecycle) === JSON.stringify(expectedLifecycle),
+    actualLifecycle.join(" → "),
+  );
+  check("dispatch@1 artifact outcome is \"PR_OPEN\"", dispatchView.result?.artifact?.outcome === "PR_OPEN");
+  check("dispatch@1 artifact ticket is set", Boolean(dispatchView.result?.artifact?.ticket));
+  check(
+    "dispatch@1 artifact references an open PR URL",
+    typeof dispatchView.result?.artifact?.prUrl === "string" && /^https:\/\/github\.com\/.+\/pull\/\d+$/.test(dispatchView.result.artifact.prUrl),
+    dispatchView.result?.artifact?.prUrl,
+  );
+  check(
+    "dispatch@1 artifact includes passed verification command output",
+    dispatchView.result?.artifact?.verification?.passed === true && Boolean(dispatchView.result?.artifact?.verification?.command),
+  );
+}
+
+// Workspace type coverage across all 4 types
 check(
-  "workspace type 'ephemeral' (default) covered",
+  "workspace type \"ephemeral\" (default) covered",
   statusView?.run?.spec?.workspace === undefined || statusView?.run?.spec?.workspace?.type === "ephemeral" || !statusView?.run?.spec?.workspace?.type,
 );
-check("workspace type 'artifacts' covered", ciDoctorView?.run?.spec?.workspace?.type === "artifacts");
-check("workspace type 'repository' covered", triageScanView?.run?.spec?.workspace?.type === "repository");
+check("workspace type \"artifacts\" covered", ciDoctorView?.run?.spec?.workspace?.type === "artifacts");
+check("workspace type \"repository\" covered", triageScanView?.run?.spec?.workspace?.type === "repository");
+check("workspace type \"worktree\" covered", dispatchView?.run?.spec?.workspace?.type === "worktree");
 
 // 8. Proposals verification
 const { proposals: openProposals } = await client.proposals();

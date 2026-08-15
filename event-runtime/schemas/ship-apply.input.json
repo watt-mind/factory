@@ -96,6 +96,11 @@
             "type": "string",
             "pattern": "^[A-Za-z_]*$",
             "description": "smoke_check: configured deployment.revision_field, or empty for the default candidates"
+          },
+          "smokeDeadlineSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "smoke_check: deadline in seconds to wait for deployment revision endpoint to serve the target commit (defaults to 600)"
           }
         }
       }

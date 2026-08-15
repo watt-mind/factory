@@ -20,9 +20,9 @@
  * *during* the run (triage promoting one, or an agent filing follow-up work)
  * get picked up without waiting for the next supervisor tick.
  */
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync, createWriteStream } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, existsSync, createWriteStream } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
@@ -33,7 +33,124 @@ import { agentLabel } from "../tools/linear.mjs";
 import { LEASE_HEARTBEAT_MS, releaseWorkerLease, renewWorkerLease, writeWorkerLease, liveWorkerLeases } from "../lib/worker-leases.mjs";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
-const argv = process.argv.slice(2);
+export const DISPATCH_FAILURE_THRESHOLD = 3;
+
+export function isDispatchFailureComment(body) {
+  if (!body || typeof body !== "string") return false;
+  return /Dispatch (run )?failed/i.test(body.trim());
+}
+
+export function countPriorDispatchFailures(comments = []) {
+  if (!Array.isArray(comments) || comments.length === 0) return 0;
+  const sorted = [...comments].sort((a, b) => {
+    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return ta - tb;
+  });
+  let count = 0;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const c = sorted[i];
+    if (isDispatchFailureComment(c?.body)) {
+      count++;
+    } else {
+      break;
+    }
+  }
+  return count;
+}
+
+export function isRepeatedDispatchFailure(comments = [], threshold = DISPATCH_FAILURE_THRESHOLD) {
+  return (countPriorDispatchFailures(comments) + 1) >= threshold;
+}
+
+export function computeUnclaimAction({
+  issue,
+  why,
+  log,
+  todoStateId,
+  blockedStateId,
+  allLabels = [],
+  threshold = DISPATCH_FAILURE_THRESHOLD,
+  homedirStr = homedir(),
+}) {
+  const labelId = (n) => allLabels.find((l) => l.name === n)?.id;
+  const keep = (issue.labels?.nodes ?? [])
+    .filter((l) => l.name !== "ai:in-progress" && !l.name.startsWith("agent:") && l.name !== "ai:agent-ready" && l.name !== "ai:blocked")
+    .map((l) => l.id);
+
+  const priorFailures = countPriorDispatchFailures(issue.comments?.nodes ?? []);
+  const totalFailures = priorFailures + 1;
+  const isRepeated = totalFailures >= threshold;
+
+  if (isRepeated) {
+    const blockedLabelId = labelId("ai:blocked");
+    const wantLabels = [...new Set([...keep, blockedLabelId].filter(Boolean))];
+    const targetStateId = blockedStateId ?? todoStateId;
+    const body = `Dispatch run failed repeatedly (${totalFailures} consecutive dispatch failures), moved to Blocked.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedirStr, "~")}\`` : ""}\n\nDemoted with \`ai:blocked\` to prevent infinite re-dispatch loops. Please investigate the cause before re-queuing.`;
+    return {
+      repeated: true,
+      totalFailures,
+      stateId: targetStateId,
+      assigneeId: null,
+      labelIds: wantLabels,
+      commentBody: body,
+    };
+  }
+
+  const readyLabelId = labelId("ai:agent-ready");
+  const wantLabels = [...new Set([...keep, readyLabelId].filter(Boolean))];
+  const body = `Dispatch run failed, claim released back to Todo.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedirStr, "~")}\`` : ""}`;
+  return {
+    repeated: false,
+    totalFailures,
+    stateId: todoStateId,
+    assigneeId: null,
+    labelIds: wantLabels,
+    commentBody: body,
+  };
+}
+
+export function preserveWip(wt, ticketIdentifier) {
+  if (!wt || !existsSync(wt)) return { preserved: false, reason: "no_worktree" };
+  try {
+    const status = spawnSync("git", ["status", "--porcelain"], { cwd: wt, encoding: "utf8" });
+    if (status.status !== 0) return { preserved: false, reason: "git_error", error: status.stderr };
+    const dirty = (status.stdout || "").trim();
+    if (!dirty) return { preserved: false, reason: "clean" };
+
+    const add = spawnSync("git", ["add", "-A"], { cwd: wt, encoding: "utf8" });
+    if (add.status !== 0) {
+      const diff = spawnSync("git", ["diff", "HEAD"], { cwd: wt, encoding: "utf8" });
+      if (diff.stdout) {
+        const patchPath = path.join(tmpdir(), `${ticketIdentifier}-wip.patch`);
+        writeFileSync(patchPath, diff.stdout);
+        return { preserved: true, method: "patch", patchPath };
+      }
+      return { preserved: false, reason: "git_add_failed", error: add.stderr };
+    }
+
+    const commitMsg = `wip: ${ticketIdentifier} uncommitted progress`;
+    const commit = spawnSync("git", ["commit", "-m", commitMsg], { cwd: wt, encoding: "utf8" });
+    if (commit.status === 0) {
+      const rev = spawnSync("git", ["rev-parse", "HEAD"], { cwd: wt, encoding: "utf8" });
+      const hash = (rev.stdout || "").trim();
+      return { preserved: true, method: "commit", hash, message: commitMsg };
+    }
+
+    const diff = spawnSync("git", ["diff", "--cached"], { cwd: wt, encoding: "utf8" });
+    if (diff.stdout) {
+      const patchPath = path.join(tmpdir(), `${ticketIdentifier}-wip.patch`);
+      writeFileSync(patchPath, diff.stdout);
+      return { preserved: true, method: "patch", patchPath };
+    }
+
+    return { preserved: false, reason: "commit_failed", error: commit.stderr };
+  } catch (err) {
+    return { preserved: false, reason: "exception", error: err.message };
+  }
+}
+
+export async function main(argv = process.argv.slice(2)) {
 const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
 const APPLY = argv.includes("--apply");
 const REFILL = !argv.includes("--no-refill");
@@ -167,6 +284,7 @@ const me = (await gql(`query{ viewer{ id name } }`))?.viewer;
 const states = (await gql(`query($t:String!){ team(id:$t){ states(first:50){ nodes{ id name } } } }`, { t: repo.team }))?.team?.states?.nodes ?? [];
 const inProgressId = states.find((s) => s.name.toLowerCase() === "in progress")?.id;
 const todoId = states.find((s) => s.name.toLowerCase() === "todo")?.id;
+const blockedId = states.find((s) => s.name.toLowerCase() === "blocked")?.id;
 const allLabels = (await gql(`query{ issueLabels(first:250){ nodes{ id name } } }`))?.issueLabels?.nodes ?? [];
 const labelId = (n) => allLabels.find((l) => l.name === n)?.id;
 if (!inProgressId) { console.error("no 'In Progress' state on team " + repo.team); process.exit(1); }
@@ -199,19 +317,31 @@ async function claim(t) {
  */
 async function unclaim(t, why, log) {
   const cur = (await gql(
-    `query($id:String!){ issue(id:$id){ state{name} assignee{id} labels(first:20){nodes{id name}} } }`,
+    `query($id:String!){ issue(id:$id){ state{name} assignee{id} labels(first:20){nodes{id name}} comments(last:10){nodes{body createdAt}} } }`,
     { id: t.id }))?.issue;
   if (!cur || cur.state?.name !== "In Progress" || cur.assignee?.id !== me.id) return false;
   if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress")) return false;
 
-  const keep = (cur.labels?.nodes ?? [])
-    .filter((l) => l.name !== "ai:in-progress" && !l.name.startsWith("agent:"))
-    .map((l) => l.id);
+  const action = computeUnclaimAction({
+    issue: cur,
+    why,
+    log,
+    todoStateId: todoId,
+    blockedStateId: blockedId,
+    allLabels,
+    threshold: DISPATCH_FAILURE_THRESHOLD,
+  });
+
   await gql(`mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-    { id: t.id, in: { stateId: todoId ?? undefined, assigneeId: null, labelIds: keep } });
+    { id: t.id, in: { stateId: action.stateId ?? undefined, assigneeId: null, labelIds: action.labelIds } });
   await gql(`mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
-    { in: { issueId: t.id, body: `Dispatch run failed, claim released back to Todo.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}` } });
-  console.log(`${c.dim(clock())} ${c.cyan(t.identifier)} ${c.yellow("un-claimed")} ${c.dim(`— ${why}`)}`);
+    { in: { issueId: t.id, body: action.commentBody } });
+
+  if (action.repeated) {
+    console.log(`${c.dim(clock())} ${c.cyan(t.identifier)} ${c.red("blocked (repeated dispatch failures)")} ${c.dim(`— ${why}`)}`);
+  } else {
+    console.log(`${c.dim(clock())} ${c.cyan(t.identifier)} ${c.yellow("un-claimed")} ${c.dim(`— ${why}`)}`);
+  }
   return true;
 }
 
@@ -262,6 +392,7 @@ function noteEnvFailure(what) {
 }
 
 async function runTicket(t) {
+  const wt = path.join(expand(repo.worktree_root), t.identifier);
   const up = spawnSync("/bin/bash", [repo.worktree_up, t.identifier], { cwd: repoPath, encoding: "utf8" });
   if (up.status !== 0) {
     const why = (up.stderr || up.stdout || "").trim().split("\n").pop();
@@ -271,6 +402,7 @@ async function runTicket(t) {
     // loop via Promise.race in the main dispatch loop below, taking down
     // every OTHER in-flight ticket's tracking with it. Same guard as the
     // other two unclaim() call sites.
+    preserveWip(wt, t.identifier);
     await unclaim(t, `worktree-up failed: ${why}`).catch(() => {});
     noteEnvFailure("worktree-up");
     return;
@@ -278,7 +410,6 @@ async function runTicket(t) {
   // NB: a working worktree-up does not clear the streak — only a run that
   // actually took a turn does (below). Clearing it here let four consecutive
   // zero-turn sessions through, because each one built its worktree fine.
-  const wt = path.join(expand(repo.worktree_root), t.identifier);
   console.log(`${c.dim(clock())} ${c.cyan(t.identifier)} worktree ready ${c.dim(wt)}`);
 
   const log = path.join(LOG_DIR, `${repo.name}-${t.identifier}-${stamp}.jsonl`);
@@ -475,7 +606,10 @@ async function runTicket(t) {
       // A failed run must not keep its claim (unclaim() checks the ticket
       // still looks like ours — Blocked/In Review moves are left alone).
       const r = results.findLast((x) => x.id === t.identifier);
-      if (r && !r.ok) await unclaim(t, r.why ?? "run failed", log).catch(() => {});
+      if (r && !r.ok) {
+        preserveWip(wt, t.identifier);
+        await unclaim(t, r.why ?? "run failed", log).catch(() => {});
+      }
       releaseWorkerLease({ repo: repo.name, ticket: t.identifier, owner: leaseOwner });
       resolve();
     });
@@ -513,6 +647,8 @@ async function shutdown(sig) {
 
   for (const [id, t] of [...inFlight]) {
     releaseWorkerLease({ repo: repo.name, ticket: t.identifier, owner: leaseOwner });
+    const wt = path.join(expand(repo.worktree_root), t.identifier);
+    preserveWip(wt, t.identifier);
     await unclaim(t, `dispatcher interrupted (${sig}) before the run finished`).catch(() => {});
     console.log(c.dim(`  released ${id}`));
   }
@@ -669,7 +805,15 @@ while (running.size) {
 console.log(c.bold("\nsummary"));
 for (const r of results) console.log(`  ${r.ok ? c.green("ok  ") : c.red("FAIL")} ${r.id}${r.log ? c.dim("  " + r.log.replace(homedir(), "~")) : ""}${r.why ? c.dim("  " + r.why) : ""}`);
 const failed = results.filter((r) => !r.ok).length;
-if (tripped) console.log(c.red(`circuit breaker tripped — dispatch stopped after ${envFailures} consecutive environment failures.`));
-console.log(c.dim(`\n${results.length - failed} ok, ${failed} failed, ${startedCount} started. Merging is a separate stage.\n`));
-clearInterval(leaseHeartbeat);
-process.exit(failed || tripped ? 1 : 0);
+  if (tripped) console.log(c.red(`circuit breaker tripped — dispatch stopped after ${envFailures} consecutive environment failures.`));
+  console.log(c.dim(`\n${results.length - failed} ok, ${failed} failed, ${startedCount} started. Merging is a separate stage.\n`));
+  clearInterval(leaseHeartbeat);
+  process.exit(failed || tripped ? 1 : 0);
+}
+
+if (import.meta.main || process.argv[1]?.endsWith("tick.mjs")) {
+  main().catch((err) => {
+    console.error(`Dispatch error: ${err.message || err}`);
+    process.exit(1);
+  });
+}

@@ -104,9 +104,10 @@
     "edges": {
       "DISPATCH": {
         "eventType": "factory.dispatch.requested",
+        "itemsField": "plan",
+        "itemKey": "ticket",
         "input": {
-          "repo": "$.artifact.repo",
-          "ticket": "$.artifact.ticket"
+          "repo": "$.artifact.repo"
         }
       }
     }

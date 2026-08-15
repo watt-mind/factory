@@ -48,8 +48,8 @@ export function expandHome(p) {
 /**
  * @returns {Map<string, {name: string, path: string, github: string|null, base: string,
  *                        deployBranch: string|null, team: string|null, project: string|null,
- *                        reportOnly: boolean, maxInFlight: number|null, worktreeRoot: string|null,
- *                        worktreeUp: string|null, worktreeDown: string|null,
+ *                        reportOnly: boolean, maxInFlight: number|null, smokeDeadlineSeconds: number|null,
+ *                        worktreeRoot: string|null, worktreeUp: string|null, worktreeDown: string|null,
  *                        worktreeWarm: string|null, verify: string|null}>}
  */
 export function loadRepos({ root = reposRoot() } = {}) {
@@ -74,6 +74,16 @@ export function loadRepos({ root = reposRoot() } = {}) {
       }
       maxInFlight = entry.max_in_flight;
     }
+    let smokeDeadlineSeconds = null;
+    const rawSmokeDeadline = entry.smoke_deadline_seconds ?? entry.deployment?.smoke_deadline_seconds;
+    if (rawSmokeDeadline !== undefined && rawSmokeDeadline !== null) {
+      if (typeof rawSmokeDeadline !== "number" || !Number.isFinite(rawSmokeDeadline) || rawSmokeDeadline <= 0) {
+        throw new RepoError(
+          `${file}: repo ${entry.name} smoke_deadline_seconds must be a positive number, got ${JSON.stringify(rawSmokeDeadline)}`,
+        );
+      }
+      smokeDeadlineSeconds = rawSmokeDeadline;
+    }
     repos.set(entry.name, {
       name: entry.name,
       path: expandHome(entry.path),
@@ -89,6 +99,7 @@ export function loadRepos({ root = reposRoot() } = {}) {
       // Null, not a default: the cap's fallback lives with the dispatcher, and
       // inventing a number here would state a limit this file never set.
       maxInFlight,
+      smokeDeadlineSeconds,
       worktreeRoot: entry.worktree_root ? expandHome(entry.worktree_root) : null,
       worktreeUp: entry.worktree_up ?? null,
       worktreeDown: entry.worktree_down ?? null,
@@ -124,6 +135,7 @@ export function reposView(repos) {
     deployBranch: repo.deployBranch,
     reportOnly: repo.reportOnly,
     maxInFlight: repo.maxInFlight,
+    smokeDeadlineSeconds: repo.smokeDeadlineSeconds,
     worktreeRoot: repo.worktreeRoot,
     hasWorktreeUp: repo.worktreeUp !== null,
     hasWorktreeDown: repo.worktreeDown !== null,

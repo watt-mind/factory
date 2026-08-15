@@ -44,6 +44,8 @@
 import { apiClient } from "../lib/client.mjs";
 import { openDb } from "../lib/db.mjs";
 import { dbPath, runtimeHome } from "../lib/config.mjs";
+import { createRun, transition } from "../lib/lifecycle.mjs";
+import { hashJson } from "../lib/canonical.mjs";
 
 const args = process.argv.slice(2);
 const flag = (name) => {
@@ -381,8 +383,156 @@ try {
     deadEnvelope.occurredAt, nowStr, deadEnvelope.correlationId, null,
     JSON.stringify(deadEnvelope), "none", nowStr,
   );
-  db.close();
   log(`${deadEventId} inserted as dead_lettered (dead-letter anomaly)`);
+
+  // WM-132: Update failed-contract run spec to have maxAttempts = 2 so plain Retry is exercisable (attempts < maxAttempts)
+  const contractRow = db
+    .query("SELECT p.run_id, r.spec_json FROM proposals p JOIN runs r ON r.run_id = p.run_id WHERE p.idempotency_key LIKE ?")
+    .get(`%${prefix}-failed-contract%`);
+  if (contractRow) {
+    const spec = JSON.parse(contractRow.spec_json);
+    spec.maxAttempts = 2;
+    const updatedSpecJson = JSON.stringify(spec);
+    db.query("UPDATE runs SET spec_json = ? WHERE run_id = ?").run(updatedSpecJson, contractRow.run_id);
+    db.query("UPDATE proposals SET spec_json = ? WHERE run_id = ?").run(updatedSpecJson, contractRow.run_id);
+    log(`${contractRow.run_id} spec updated to maxAttempts=2 (attempts: 1/2, plain retry exercisable)`);
+  }
+
+  // WM-133: Working PR workflow scenario (dispatch@1 run moving through RUNNING → VERIFYING → COMPLETED with PR_OPEN)
+  const dispatchEventId = `${prefix}-dispatch-wm100`;
+  const dispatchTicket = "WM-100";
+  const dispatchRunId = `run_${prefix}_dispatch_wm100`;
+  const dispatchPropId = `prop_${prefix}_dispatch_wm100`;
+  const dispatchEnvelope = {
+    schemaVersion: "factory.event/v1",
+    eventId: dispatchEventId,
+    type: "factory.dispatch.requested",
+    source: "operator",
+    subject: dispatchTicket,
+    occurredAt: nowStr,
+    correlationId: dispatchEventId,
+    payload: { repo: primaryProject, ticket: dispatchTicket },
+  };
+  const dispatchSpec = {
+    agent: "dispatch@1",
+    adapter: "fake",
+    outputContract: "factory.dispatch-result/v1",
+    workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+    input: { repo: primaryProject, ticket: dispatchTicket },
+    timeoutSeconds: 2700,
+    maxAttempts: 1,
+    budgetUsd: 15,
+    idempotencyKey: dispatchRunId,
+    policyVersion: "v1",
+  };
+  const dispatchSpecJson = JSON.stringify(dispatchSpec);
+  const dispatchSpecHash = hashJson(dispatchSpec);
+
+  db.query(
+    `INSERT INTO events
+       (source, event_id, type, subject, occurred_at, received_at,
+        correlation_id, causation_id, envelope_json, payload_hash, status, plan_failures, last_plan_error, admitted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "resolved", 0, null, ?)
+     ON CONFLICT(source, event_id) DO UPDATE SET status = "resolved"`,
+  ).run(
+    dispatchEnvelope.source, dispatchEventId, dispatchEnvelope.type, dispatchEnvelope.subject,
+    dispatchEnvelope.occurredAt, nowStr, dispatchEnvelope.correlationId, null,
+    JSON.stringify(dispatchEnvelope), hashJson(dispatchEnvelope.payload), nowStr,
+  );
+
+  db.query(
+    `INSERT INTO proposals
+       (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+        idempotency_key, status, reason, created_at, ttl_seconds, decided_at, decided_by)
+     VALUES (?, ?, ?, ?, "run", ?, ?, ?, "approved", null, ?, 1800, ?, "operator")
+     ON CONFLICT(id) DO UPDATE SET status = "approved", run_id = excluded.run_id`,
+  ).run(
+    dispatchPropId, dispatchEnvelope.source, dispatchEventId, dispatchRunId,
+    dispatchSpecJson, dispatchSpecHash, dispatchRunId, nowStr, nowStr,
+  );
+
+  createRun(db, {
+    runId: dispatchRunId,
+    idempotencyKey: dispatchRunId,
+    spec: dispatchSpec,
+    specJson: dispatchSpecJson,
+    specHash: dispatchSpecHash,
+    actor: "operator",
+    correlationId: dispatchEventId,
+    policyVersion: "v1",
+    now: () => nowStr,
+  });
+  transition(db, { runId: dispatchRunId, to: "APPROVED", expectFrom: "PROPOSED", actor: "operator", reason: "approved", policyVersion: "v1", now: () => nowStr });
+  transition(db, { runId: dispatchRunId, to: "QUEUED", expectFrom: "APPROVED", actor: "worker-demo", reason: "queued", policyVersion: "v1", now: () => nowStr });
+  transition(db, { runId: dispatchRunId, to: "LEASED", expectFrom: "QUEUED", actor: "worker-demo", reason: "leased", policyVersion: "v1", now: () => nowStr });
+  transition(db, { runId: dispatchRunId, to: "RUNNING", expectFrom: "LEASED", actor: "worker-demo", reason: "started", attempt: 1, policyVersion: "v1", now: () => nowStr });
+  transition(db, { runId: dispatchRunId, to: "VERIFYING", expectFrom: "RUNNING", actor: "worker-demo", reason: "finished", attempt: 1, policyVersion: "v1", now: () => nowStr });
+  transition(db, { runId: dispatchRunId, to: "COMPLETED", expectFrom: "VERIFYING", actor: "worker-demo", reason: "verified", attempt: 1, policyVersion: "v1", now: () => nowStr });
+
+  db.query("UPDATE runs SET state = \"COMPLETED\", attempts = 1, updated_at = ? WHERE run_id = ?").run(nowStr, dispatchRunId);
+
+  db.query(
+    `INSERT INTO attempts
+       (run_id, attempt, fencing_token, lease_owner, lease_expires_at, started_at, finished_at, terminal_state, reason_code, workspace_path)
+     VALUES (?, 1, 1, "worker-demo", datetime("now", "+1 hour"), ?, ?, "COMPLETED", "ok", ?)
+     ON CONFLICT(run_id, attempt) DO UPDATE SET terminal_state = "COMPLETED", reason_code = "ok"`,
+  ).run(dispatchRunId, nowStr, nowStr, `/tmp/worktrees/${primaryProject}/${dispatchTicket}`);
+
+  const prUrl = `https://github.com/watt-mind/${primaryProject}/pull/42`;
+  const dispatchArtifact = {
+    outcome: "PR_OPEN",
+    repo: primaryProject,
+    ticket: dispatchTicket,
+    prUrl,
+    verification: {
+      command: "bun test",
+      passed: true,
+      output: "3 pass\n0 fail\nRan 3 tests across 1 file.",
+    },
+    summary: `fake dispatch completed with PR open for ${dispatchTicket}`,
+  };
+  const dispatchEvidence = {
+    commands: ["bun test", "gh pr create"],
+    prUrl,
+    ticket: dispatchTicket,
+  };
+  const dispatchResult = {
+    schemaVersion: "factory.agent-result/v1",
+    terminalState: "completed",
+    reasonCode: "ok",
+    artifact: dispatchArtifact,
+    evidence: dispatchEvidence,
+  };
+  const resultJson = JSON.stringify(dispatchResult);
+  const artifactHash = hashJson(dispatchArtifact);
+  const evidenceSetHash = hashJson(dispatchEvidence);
+  const verificationJson = JSON.stringify({
+    verificationStatus: "passed",
+    checks: ["schema_valid", "evidence_recorded"],
+    verifiedAt: nowStr,
+  });
+  const receiptJson = JSON.stringify({
+    runId: dispatchRunId,
+    attempt: 1,
+    terminalState: "COMPLETED",
+    verificationStatus: "passed",
+    evidenceSetHash,
+    acceptedAt: nowStr,
+  });
+  db.query(
+    `INSERT INTO results
+       (run_id, attempt, result_json, artifact_hash, evidence_set_hash, verification_json, receipt_json, accepted_at)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, attempt) DO UPDATE SET
+       result_json = excluded.result_json, artifact_hash = excluded.artifact_hash,
+       evidence_set_hash = excluded.evidence_set_hash, verification_json = excluded.verification_json,
+       receipt_json = excluded.receipt_json, accepted_at = excluded.accepted_at`,
+  ).run(
+    dispatchRunId, resultJson, artifactHash, evidenceSetHash, verificationJson, receiptJson, nowStr,
+  );
+  log(`${dispatchRunId} → COMPLETED (dispatch@1, simulated working PR workflow with PR_OPEN)`);
+
+  db.close();
 } catch (err) {
   log(`warning: could not write direct db anomalies (${err.message})`);
 }

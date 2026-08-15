@@ -345,3 +345,248 @@ describe("Events component harness: cross-tab reveal", () => {
     );
   });
 });
+
+describe("Events component harness: facet chips grouping and visual distinction", () => {
+  test("renders Type and Source category groups with labels and numerical counts", async () => {
+    const e1 = stubEvent("evt_1", "admitted", { type: "pull_request.opened", source: "github" });
+    const e2 = stubEvent("evt_2", "admitted", { type: "pull_request.opened", source: "github" });
+    const e3 = stubEvent("evt_3", "planned", { type: "issue_comment.created", source: "gitlab" });
+
+    await withApi(
+      {
+        events: async () => ({ events: [e1, e2, e3] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole } = renderEvents({});
+
+        // Type and Source groups are rendered with proper accessibility roles & category headers
+        await waitFor(() => {
+          const typeGroup = getByRole("group", { name: "Event types" });
+          expect(typeGroup).toBeTruthy();
+          expect(typeGroup.textContent).toContain("Type:");
+          expect(typeGroup.textContent).toContain("pull_request.opened");
+          expect(typeGroup.textContent).toContain("issue_comment.created");
+
+          const sourceGroup = getByRole("group", { name: "Event sources" });
+          expect(sourceGroup).toBeTruthy();
+          expect(sourceGroup.textContent).toContain("Source:");
+          expect(sourceGroup.textContent).toContain("github");
+          expect(sourceGroup.textContent).toContain("gitlab");
+        });
+
+        // Numerical counts match the scoped events under current tab (All: 3 events)
+        const typeGroup = getByRole("group", { name: "Event types" });
+        const prButton = Array.from(typeGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("pull_request.opened"),
+        );
+        expect(prButton).toBeTruthy();
+        expect(prButton?.textContent).toContain("2");
+
+        const commentButton = Array.from(typeGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("issue_comment.created"),
+        );
+        expect(commentButton?.textContent).toContain("1");
+
+        const sourceGroup = getByRole("group", { name: "Event sources" });
+        const githubButton = Array.from(sourceGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("github"),
+        );
+        expect(githubButton?.textContent).toContain("2");
+
+        const gitlabButton = Array.from(sourceGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("gitlab"),
+        );
+        expect(gitlabButton?.textContent).toContain("1");
+      },
+    );
+  });
+
+  test("facet chip counts reflect the active tab scope", async () => {
+    const e1 = stubEvent("evt_1", "admitted", { type: "pull_request.opened", source: "github" });
+    const e2 = stubEvent("evt_2", "admitted", { type: "pull_request.opened", source: "github" });
+    const e3 = stubEvent("evt_3", "planned", { type: "issue_comment.created", source: "gitlab" });
+
+    await withApi(
+      {
+        events: async (status?: string) => ({
+          events: status && status !== "all" ? [e1, e2, e3].filter((e) => e.status === status) : [e1, e2, e3],
+        }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole } = renderEvents({});
+
+        await waitFor(() => {
+          expect(getByRole("group", { name: "Event types" })).toBeTruthy();
+        });
+
+        // Switch to Admitted tab
+        const admittedTab = getByRole("tab", { name: /^Admitted/i });
+        fireEvent.click(admittedTab);
+
+        await waitFor(() => {
+          expect(admittedTab.getAttribute("aria-selected")).toBe("true");
+        });
+      },
+    );
+  });
+});
+
+describe("Events component harness: facet chips synchronization with FilterInput", () => {
+  test("clicking a Type facet chip synchronizes filter query box and token chips", async () => {
+    const onSelectType = mock(() => {});
+    const e1 = stubEvent("evt_1", "admitted", { type: "pull_request.opened", source: "github" });
+    const e2 = stubEvent("evt_2", "admitted", { type: "issue_comment.created", source: "gitlab" });
+
+    await withApi(
+      {
+        events: async () => ({ events: [e1, e2] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole, getByLabelText, container } = renderEvents({ onSelectType });
+
+        const typeGroup = await waitFor(() => getByRole("group", { name: "Event types" }));
+        const buttons = typeGroup.querySelectorAll("button");
+        const prButton = Array.from(buttons).find((b) => b.textContent?.includes("pull_request.opened"));
+        expect(prButton).toBeTruthy();
+        expect(prButton?.getAttribute("aria-pressed")).toBe("false");
+
+        // Click the chip
+        fireEvent.click(prButton!);
+
+        // Chip becomes active
+        expect(prButton?.getAttribute("aria-pressed")).toBe("true");
+        expect(onSelectType).toHaveBeenCalledWith("pull_request.opened");
+
+        // FilterInput value is updated with type:pull_request.opened
+        const filterInput = getByLabelText("Filter events") as HTMLInputElement;
+        expect(filterInput.value).toBe("type:pull_request.opened");
+
+        // List is filtered to only pull_request.opened
+        await waitFor(() => {
+          expect(container.querySelector("tbody")?.textContent).toContain("evt_1");
+          expect(container.querySelector("tbody")?.textContent).not.toContain("evt_2");
+        });
+
+        // Click again to toggle off
+        fireEvent.click(prButton!);
+        expect(prButton?.getAttribute("aria-pressed")).toBe("false");
+        expect(filterInput.value).toBe("");
+        expect(onSelectType).toHaveBeenCalledWith(null);
+
+        // List returns to full
+        await waitFor(() => {
+          expect(container.querySelector("tbody")?.textContent).toContain("evt_2");
+        });
+      },
+    );
+  });
+
+  test("typing type:<val> or source:<val> in FilterInput updates facet chips active state", async () => {
+    const e1 = stubEvent("evt_1", "admitted", { type: "pull_request.opened", source: "github" });
+    const e2 = stubEvent("evt_2", "admitted", { type: "issue_comment.created", source: "gitlab" });
+
+    await withApi(
+      {
+        events: async () => ({ events: [e1, e2] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole, getByLabelText } = renderEvents({});
+
+        const typeGroup = await waitFor(() => getByRole("group", { name: "Event types" }));
+        const sourceGroup = getByRole("group", { name: "Event sources" });
+
+        const prButton = Array.from(typeGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("pull_request.opened"),
+        );
+        const githubButton = Array.from(sourceGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("github"),
+        );
+
+        expect(prButton?.getAttribute("aria-pressed")).toBe("false");
+        expect(githubButton?.getAttribute("aria-pressed")).toBe("false");
+
+        // Type type:pull_request.opened in FilterInput
+        const filterInput = getByLabelText("Filter events") as HTMLInputElement;
+        act(() => {
+          changeInput(filterInput, "type:pull_request.opened");
+        });
+
+        await waitFor(() => {
+          expect(prButton?.getAttribute("aria-pressed")).toBe("true");
+          expect(githubButton?.getAttribute("aria-pressed")).toBe("false");
+        });
+
+        // Add source:github to query
+        act(() => {
+          changeInput(filterInput, "type:pull_request.opened source:github");
+        });
+
+        await waitFor(() => {
+          expect(prButton?.getAttribute("aria-pressed")).toBe("true");
+          expect(githubButton?.getAttribute("aria-pressed")).toBe("true");
+        });
+
+        // Clear query
+        act(() => {
+          changeInput(filterInput, "");
+        });
+
+        await waitFor(() => {
+          expect(prButton?.getAttribute("aria-pressed")).toBe("false");
+          expect(githubButton?.getAttribute("aria-pressed")).toBe("false");
+        });
+      },
+    );
+  });
+
+  test("Escape key or clearing filter resets active facet chip selections", async () => {
+    const e1 = stubEvent("evt_1", "admitted", { type: "pull_request.opened", source: "github" });
+    const e2 = stubEvent("evt_2", "admitted", { type: "issue_comment.created", source: "gitlab" });
+
+    await withApi(
+      {
+        events: async () => ({ events: [e1, e2] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole, getByLabelText, getByTitle } = renderEvents({});
+
+        const typeGroup = await waitFor(() => getByRole("group", { name: "Event types" }));
+        const prButton = Array.from(typeGroup.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("pull_request.opened"),
+        );
+
+        // Click to activate
+        fireEvent.click(prButton!);
+        expect(prButton?.getAttribute("aria-pressed")).toBe("true");
+
+        // Click clear in token chip bar
+        const clearButton = await waitFor(() => getByTitle("Clear query (Esc)"));
+        fireEvent.click(clearButton);
+
+        await waitFor(() => {
+          expect(prButton?.getAttribute("aria-pressed")).toBe("false");
+          const filterInput = getByLabelText("Filter events") as HTMLInputElement;
+          expect(filterInput.value).toBe("");
+        });
+
+        // Click to activate again
+        fireEvent.click(prButton!);
+        expect(prButton?.getAttribute("aria-pressed")).toBe("true");
+
+        // Press Escape on the FilterInput
+        const filterInput = getByLabelText("Filter events") as HTMLInputElement;
+        fireEvent.keyDown(filterInput, { key: "Escape" });
+
+        await waitFor(() => {
+          expect(prButton?.getAttribute("aria-pressed")).toBe("false");
+          expect(filterInput.value).toBe("");
+        });
+      },
+    );
+  });
+});

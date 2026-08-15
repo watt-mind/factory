@@ -360,12 +360,13 @@ describe("cli", () => {
     );
   });
 
-  test("doctor reports anomalies (stale workers, unreferenced artifacts, orphaned workspaces) and exits non-zero (OPS-428)", async () => {
+  test("doctor reports anomalies (stale workers, unreferenced artifacts, orphaned workspaces, proposals piling up) and exits non-zero (OPS-428, WM-124)", async () => {
     const { getAnomalyLines } = await import("./cli.mjs");
     const statusPayload = {
       anomalies: {
         stalledWorkers: [{ workerId: "w-dead", host: "node-1", runId: "run-99", lastSeen: "2026-08-14T10:00:00Z" }],
         stoppedSchedules: [{ loop: "nightly", error: null, intervalsLate: 3 }],
+        proposalsPilingUp: [{ loop: "reconcile-bj29", count: 4, threshold: 3 }],
         noWorkers: true,
         orphanedWorkspaces: ["/tmp/orphaned-ws-1"],
         unreferencedArtifacts: 5,
@@ -380,6 +381,7 @@ describe("cli", () => {
     const lines = getAnomalyLines(statusPayload);
     expect(lines.some((l) => l.includes("stalled worker w-dead on node-1"))).toBe(true);
     expect(lines.some((l) => l.includes("stopped schedule nightly: 3 intervals late"))).toBe(true);
+    expect(lines.some((l) => l.includes("proposals piling up for schedule reconcile-bj29: 4 open proposals exist (threshold 3)"))).toBe(true);
     expect(lines.some((l) => l.includes("no live workers with queued runs") || l.includes("no workers"))).toBe(true);
     expect(lines.some((l) => l.includes("orphaned workspace: /tmp/orphaned-ws-1"))).toBe(true);
     expect(lines.some((l) => l.includes("unreferenced artifacts: 5"))).toBe(true);
@@ -390,7 +392,12 @@ describe("cli", () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-doc-healthy-"));
     const port = String(59700 + (process.pid % 100));
     const child = spawn("bun", [CLI, "serve", "--port", port], {
-      env: { ...process.env, FACTORY_EVENT_HOME: home, FACTORY_EVENT_SECRET: "test-secret" },
+      env: {
+        ...process.env,
+        FACTORY_EVENT_HOME: home,
+        FACTORY_EVENT_SECRET: "test-secret",
+        FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";

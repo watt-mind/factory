@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { InjectDialog } from "./InjectDialog";
 import { api } from "../api";
 import type { AgentsView } from "../types";
+import { changeInput } from "../test-render";
 
 afterEach(() => {
   cleanup();
@@ -17,11 +18,6 @@ function renderWithClient(ui: React.ReactElement) {
     },
   });
   return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
-}
-
-function changeInput(el: HTMLElement, value: string) {
-  const propsKey = Object.keys(el).find((k) => k.startsWith("__reactProps"))!;
-  (el as any)[propsKey]?.onChange?.({ target: { value } });
 }
 
 // ---------------------------------------------------------------------------

@@ -408,6 +408,9 @@ async function serve(args) {
     if (!process.env.FACTORY_EVENT_SECRET) {
       log("webhook intake: disabled (FACTORY_EVENT_SECRET is unset; webhooks will be rejected with 401)");
     }
+    if (!process.env.FACTORY_GITHUB_WEBHOOK_SECRET) {
+      log("github intake: disabled (FACTORY_GITHUB_WEBHOOK_SECRET is unset; GitHub webhooks will be rejected with 401)");
+    }
     log(
       withWorker
         ? "worker: in-process (--with-worker) — restarting serve interrupts running agents"
@@ -608,6 +611,11 @@ export function getAnomalyLines(s) {
       `stopped schedule ${sc.loop}: ${sc.error ? `error: ${sc.error}` : `${sc.intervalsLate ?? "unknown"} intervals late`}`,
     );
   }
+  for (const p of a.proposalsPilingUp ?? []) {
+    anomalyLines.push(
+      `proposals piling up for schedule ${p.loop}: ${p.count} open proposals exist (threshold ${p.threshold})`,
+    );
+  }
   if (a.noWorkers) anomalyLines.push("no live workers with queued runs");
   if (a.unreferencedArtifacts > 0) {
     anomalyLines.push(`unreferenced artifacts: ${a.unreferencedArtifacts}`);
@@ -628,6 +636,7 @@ export function getAnomalyLines(s) {
     "expiredOpenProposals", "staleLeases", "unpublishedOutbox", "deadLettered",
     "ambiguousOpenProposals", "stalledWorkers", "stoppedSchedules", "noWorkers",
     "unreferencedArtifacts", "orphanedWorkspaces", "orphanWorkspaces", "orphans", "orphanArtifacts",
+    "proposalsPilingUp",
   ]);
 
   for (const [key, val] of Object.entries(a)) {

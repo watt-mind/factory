@@ -6,14 +6,15 @@
  *   configured specifically for unit/component tests with retries and background refetches disabled.
  * - `createTestQueryClient`: factory for test QueryClient instances.
  * - `stubApi` / `restoreApi` / `withApi`: robust API mocking via `bun:test` mocks with comprehensive defaults.
- * - `changeInput`: helper to trigger onChange on controlled inputs in happy-dom.
+ * - `changeInput`: helper to trigger onChange and onInput on controlled form elements in happy-dom.
+ * - `typeText`: helper to simulate keystroke-level typing with cursor progression on inputs/textareas.
  * - Test fixture generators for StatusView, RunListItem, RunDetail, AdmittedEvent, Proposal, Worker, etc.
  *
  * Import this module in DOM component tests. It automatically registers happy-dom globals.
  */
 import "./test-dom";
 import { mock } from "bun:test";
-import { fireEvent, render, type RenderResult } from "@testing-library/react";
+import { render, type RenderResult } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
@@ -430,13 +431,99 @@ export function renderWithClient(
 }
 
 /**
- * Helper to reliably trigger onChange on controlled React inputs in happy-dom.
+ * Sets native value on an HTMLInputElement, HTMLTextAreaElement, or HTMLSelectElement,
+ * invoking the prototype property descriptor setter to bypass React's instance-level
+ * value tracker interceptor.
  */
-export function changeInput(el: HTMLElement, value: string): void {
-  const propsKey = Object.keys(el).find((k) => k.startsWith("__reactProps"));
-  if (propsKey && (el as any)[propsKey]?.onChange) {
-    (el as any)[propsKey].onChange({ target: { value } });
+function setNativeValue(element: HTMLElement, value: string): void {
+  let proto: any = Object.getPrototypeOf(element);
+  let descriptor: PropertyDescriptor | undefined;
+  while (proto) {
+    descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    if (descriptor && descriptor.set) {
+      break;
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+
+  const setter =
+    descriptor?.set ??
+    (element instanceof HTMLTextAreaElement
+      ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set
+      : element instanceof HTMLSelectElement
+        ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set
+        : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set);
+
+  if (setter) {
+    setter.call(element, value);
   } else {
-    fireEvent.change(el, { target: { value } });
+    (element as any).value = value;
   }
 }
+
+/**
+ * Helper to reliably trigger onChange and onInput on controlled React inputs in happy-dom.
+ * Sets the native DOM value via prototype descriptor and dispatches standard bubbling
+ * input and change DOM events, without relying on private React internals.
+ */
+export function changeInput(el: HTMLElement, value: string): void {
+  if (typeof el.focus === "function" && document.activeElement !== el) {
+    try {
+      el.focus();
+    } catch {}
+  }
+  setNativeValue(el, value);
+  try {
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true }));
+  } catch {
+    el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+  }
+  el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true }));
+}
+
+/**
+ * Simulates keystroke-level typing into an input or textarea element.
+ * For each character, emits keyDown, updates value with cursor/selection range progression,
+ * emits input and keyUp, and finally emits change when typing is complete.
+ */
+export function typeText(element: HTMLElement, text: string): void {
+  if (typeof element.focus === "function" && document.activeElement !== element) {
+    try {
+      element.focus();
+    } catch {}
+  }
+  for (const char of text) {
+    element.dispatchEvent(new KeyboardEvent("keydown", { key: char, bubbles: true, cancelable: true }));
+
+    const currentVal = (element as HTMLInputElement | HTMLTextAreaElement).value ?? "";
+    const start = (element as any).selectionStart ?? currentVal.length;
+    const end = (element as any).selectionEnd ?? currentVal.length;
+    const nextVal = currentVal.slice(0, start) + char + currentVal.slice(end);
+
+    setNativeValue(element, nextVal);
+
+    const nextPos = start + char.length;
+    if (typeof (element as any).setSelectionRange === "function") {
+      try {
+        (element as any).setSelectionRange(nextPos, nextPos);
+      } catch {}
+    } else {
+      try {
+        (element as any).selectionStart = nextPos;
+        (element as any).selectionEnd = nextPos;
+      } catch {}
+    }
+
+    try {
+      element.dispatchEvent(new InputEvent("input", { data: char, inputType: "insertText", bubbles: true, cancelable: true }));
+    } catch {
+      element.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+    }
+
+    element.dispatchEvent(new KeyboardEvent("keyup", { key: char, bubbles: true, cancelable: true }));
+  }
+  element.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+}
+

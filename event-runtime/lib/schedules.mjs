@@ -262,3 +262,53 @@ export function autoApproveScheduled(db, registry, approve, { now = Date.now(), 
   }
   return { approved, errors };
 }
+
+export const DEFAULT_PROPOSALS_PILING_THRESHOLD = 3;
+
+/**
+ * Detect open proposals for scheduled loops that pile up beyond threshold (WM-124).
+ * A watched loop with more than `threshold` open proposals is either mis-cadenced
+ * or nobody is watching it (docs/event-runtime-schedules.md §9).
+ *
+ * @returns {Array<{ loop: string, count: number, threshold: number }>}
+ */
+export function proposalsPilingUp(db, registry, { threshold = DEFAULT_PROPOSALS_PILING_THRESHOLD } = {}) {
+  const rows = db
+    .query(
+      `SELECT e.subject, e.envelope_json
+       FROM proposals p
+       JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
+       WHERE p.status = 'open' AND e.source = ?`,
+    )
+    .all(SCHEDULE_SOURCE);
+
+  const countsByLoop = new Map();
+  for (const row of rows) {
+    let loop = row.subject;
+    if (!loop && row.envelope_json) {
+      try {
+        loop = JSON.parse(row.envelope_json).payload?.loop;
+      } catch {
+        // ignore
+      }
+    }
+    if (!loop) continue;
+    countsByLoop.set(loop, (countsByLoop.get(loop) ?? 0) + 1);
+  }
+
+  const piling = [];
+  for (const [loop, count] of countsByLoop.entries()) {
+    const schedule = registry?.schedules?.[loop];
+    const loopThreshold = schedule?.proposalsThreshold ?? threshold;
+    if (count > loopThreshold) {
+      piling.push({
+        loop,
+        count,
+        threshold: loopThreshold,
+      });
+    }
+  }
+  piling.sort((a, b) => a.loop.localeCompare(b.loop));
+  return piling;
+}
+

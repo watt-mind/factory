@@ -95,7 +95,7 @@ describe("merge-scan registration (WM-109)", () => {
     const item = registry.agents.get("merge-scan@1").outputSchema.properties.plan.items;
     expect(item.required).toEqual(["pr", "headSha", "ticket", "action", "reason"]);
     expect(item.properties.headSha.pattern).toBe("^[0-9a-f]{40}$");
-    expect(item.properties.action.enum).toEqual(["merge_pr", "ticket_done"]);
+    expect(item.properties.action.enum).toEqual(["merge_pr", "ticket_done", "notify_escalate"]);
   });
 });
 
@@ -170,86 +170,11 @@ describe("merge-apply is closed by construction (WM-109)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Chain e2e on the fake adapter. The shared fake (lib/adapters/fake.mjs) does
-// not know the merge contracts, so a local wrapper answers them the same way
-// the fake answers triage/sweep — repo-keyed, contract-shaped — and delegates
-// everything else (including merge-notify's command-result) to the fake.
-// ---------------------------------------------------------------------------
-
-const FAKE_PLAN_SHA = "c".repeat(40);
-
-function writeResult(workspaceDir, result) {
-  writeFileSync(path.join(workspaceDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
-}
-
-function mergeScanArtifact(repo) {
-  const base = { repo, github: `watt-mind/${repo}`, plan: [], fix: [], escalate: [] };
-  if (repo === "clean") {
-    return { ...base, recommendation: "NOOP", summary: "fake: no open PRs", noopReason: "no_open_prs" };
-  }
-  if (repo.endsWith("-esc")) {
-    return {
-      ...base,
-      recommendation: "ESCALATE",
-      escalate: [{ pr: 44, ticket: "CLNT-778", reason: "fake: touches auth" }],
-      summary: `fake: PR #44 on ${repo} changes auth behavior`,
-    };
-  }
-  if (repo.endsWith("-fix")) {
-    return {
-      ...base,
-      recommendation: "FIX",
-      fix: [{ pr: 43, ticket: "CLNT-779", finding: "fake: Verify job red" }],
-      summary: `fake: PR #43 on ${repo} needs a fix`,
-    };
-  }
-  return {
-    ...base,
-    recommendation: "MERGE",
-    plan: [
-      { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
-      { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
-    ],
-    summary: `fake merge plan for ${repo}`,
-  };
-}
-
-const mergeFake = {
-  async execute(opts) {
-    const { spec, workspaceDir } = opts;
-    if (spec.outputContract === "factory.merge-plan/v1") {
-      writeResult(workspaceDir, {
-        schemaVersion: "factory.agent-result/v1",
-        terminalState: "completed",
-        reasonCode: "ok",
-        artifact: mergeScanArtifact(spec.input.repo),
-        evidence: { commands: ["fake"], prsSeen: 1 },
-      });
-      return { exitCode: 0, timedOut: false };
-    }
-    if (spec.outputContract === "factory.merge-applied/v1") {
-      writeResult(workspaceDir, {
-        schemaVersion: "factory.agent-result/v1",
-        terminalState: "completed",
-        reasonCode: "ok",
-        artifact: {
-          repo: spec.input.repo,
-          applied: (spec.input.plan ?? []).map((i) => ({ issueId: i.ticket, action: i.action })),
-        },
-        evidence: { commands: ["fake"] },
-      });
-      return { exitCode: 0, timedOut: false };
-    }
-    return fake.execute(opts);
-  },
-};
-
 function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-e2e-ws-"));
-  const adapters = { claude: mergeFake, actions: mergeFake, command: mergeFake };
+  const adapters = { claude: fake, actions: fake, command: fake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function approveNext(agentRef) {
@@ -299,8 +224,8 @@ describe("merge chain: scan → approved apply (WM-109)", () => {
       repo: "bj29",
       github: "watt-mind/bj29",
       plan: [
-        { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
-        { pr: 42, headSha: FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
+        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
+        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
       ],
     });
 
@@ -312,6 +237,42 @@ describe("merge chain: scan → approved apply (WM-109)", () => {
       { issueId: "CLNT-777", action: "ticket_done" },
     ]);
     expect(JSON.parse(row.receipt_json).runId).toBe(applied.runId); // accepted with a receipt
+  });
+
+  test("a MERGE recommendation with escalations includes notify_escalate in the plan and applies both", async () => {
+    const { db, approveNext } = harness();
+    admitEvent(db, registry, mergeEnvelope("wm-merge-esc", "merge-1b"));
+
+    const scan = await approveNext("merge-scan@1");
+    expect(scan.summary.terminalState).toBe("COMPLETED");
+
+    expect(resolveChains(db, registry).emitted).toBe(1);
+    const chainEvent = db
+      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
+      .get(`chain-${scan.runId}`);
+    expect(chainEvent.type).toBe("factory.merge-apply.requested");
+
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    const apply = openProposals(db, {}).find((p) => p.spec?.agent === "merge-apply@1");
+    expect(apply.status).toBe("open");
+    expect(apply.spec.input).toEqual({
+      repo: "wm-merge-esc",
+      github: "watt-mind/wm-merge-esc",
+      plan: [
+        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
+        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
+        { pr: 44, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-778", action: "notify_escalate", reason: "fake: touches auth" },
+      ],
+    });
+
+    const applied = await approveNext("merge-apply@1");
+    expect(applied.summary.terminalState).toBe("COMPLETED");
+    const row = db.query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`).get(applied.runId);
+    expect(JSON.parse(row.result_json).artifact.applied).toEqual([
+      { issueId: "CLNT-777", action: "merge_pr" },
+      { issueId: "CLNT-777", action: "ticket_done" },
+      { issueId: "CLNT-778", action: "notify_escalate" },
+    ]);
   });
 
   test("an ESCALATE recommendation routes to the merge-notify push, watched", async () => {
