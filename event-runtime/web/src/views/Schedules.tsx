@@ -387,19 +387,35 @@ export function Schedules({
             </span>
           }
           actions={
+            <Button
+              variant="primary"
+              disabled={connected === false}
+              onClick={() => setConfirmLoop(sel)}
+            >
+              Run now…
+            </Button>
+          }
+          utility={
             <>
-              <Button
-                variant="primary"
-                disabled={connected === false}
-                onClick={() => setConfirmLoop(sel)}
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.loop, "schedule loop")}
+                className="cursor-pointer hover:text-(--text)"
               >
-                Run now…
-              </Button>
-              <Button onClick={() => copyText(sel.loop, "schedule loop")}>Copy loop</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectSchedule(null)}>Close</Button>
+                loop
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectSchedule(null)}>Close</Button>}
         >
           <div className="space-y-6">
             {sel.stopped && (

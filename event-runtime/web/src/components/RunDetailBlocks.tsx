@@ -5,7 +5,6 @@ import { dur } from "../heartbeat";
 import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunState } from "../types";
 import {
   Ago,
-  Button,
   Disclosure,
   humanSize,
   JsonBlock,
@@ -322,33 +321,27 @@ function InputRows({ input }: { input: unknown }) {
 export function RunDetailBlocks({
   d,
   now,
-  connected,
   origin,
   onJumpAgent,
   onJumpEvent,
-  onCancel,
-  onRetry,
-  onForceRetry,
-  retryPending,
   verbError,
   afterLifecycle,
 }: {
   d: RunDetail;
   now: number;
-  connected: boolean;
+  connected?: boolean;
   /** Origin event from the list join (not served by GET /runs/:id). */
   origin: { eventId?: string | null; eventSource?: string | null } | null;
   onJumpAgent: (ref: string) => void;
   onJumpEvent: (source: string, eventId: string) => void;
-  onCancel: () => void;
-  onRetry: () => void;
-  onForceRetry: () => void;
-  retryPending: boolean;
-  verbError: unknown;
+  onCancel?: () => void;
+  onRetry?: () => void;
+  onForceRetry?: () => void;
+  retryPending?: boolean;
+  verbError?: unknown;
   /** Panel slot for the inline RunTrace; the full page renders its trace in the main column. */
   afterLifecycle?: ReactNode;
 }) {
-  const attemptsExhausted = d.run.attempts >= d.run.spec.maxAttempts;
 
   // The reaper keys off the run's current attempt (`a.attempt = r.attempts`),
   // so that is the only attempt whose deadlines are still running.
@@ -447,24 +440,6 @@ export function RunDetailBlocks({
         </Section>
       )}
 
-      <div className="mb-4 flex gap-2">
-        {isCancellable(d.run.state) && (
-          <Button variant="danger" disabled={!connected} onClick={onCancel}>
-            Cancel <span className="mono ml-1 opacity-70">x</span>
-          </Button>
-        )}
-        {/* §8: only FAILED → QUEUED is a legal retry transition. */}
-        {d.run.state === "FAILED" &&
-          (attemptsExhausted ? (
-            <Button disabled={!connected} onClick={onForceRetry}>
-              Force retry…
-            </Button>
-          ) : (
-            <Button disabled={!connected || retryPending} onClick={onRetry}>
-              Retry
-            </Button>
-          ))}
-      </div>
       <VerbError error={verbError} />
 
       <Section title="Lifecycle">

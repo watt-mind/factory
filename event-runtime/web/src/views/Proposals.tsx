@@ -810,9 +810,45 @@ export function Proposals({
           widthClass="w-[460px]"
           title={<span title={sel.id}>{sel.agent ?? sel.id}</span>}
           actions={
+            isOpen ? (
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="danger"
+                  disabled={!connected || reject.isPending}
+                  onClick={openReject}
+                >
+                  Reject… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">x</span>
+                </Button>
+                {canApprove && (
+                  <Button
+                    variant="primary"
+                    disabled={!connected || approve.isPending}
+                    onClick={() => setConfirmApprove(true)}
+                  >
+                    Approve… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">a</span>
+                  </Button>
+                )}
+              </div>
+            ) : null
+          }
+          utility={
             <>
-              <Button onClick={() => copyText(sel.id, "proposal id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.id, "proposal id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectProposal(null)}>Close</Button>}
@@ -943,22 +979,6 @@ export function Proposals({
             >
               This proposal&apos;s run is already {staleState(sel)} — it can no longer be approved.
               Reject it to clear the queue.
-            </div>
-          )}
-          {isOpen && (
-            <div className="flex gap-2">
-              {canApprove && (
-                <Button
-                  variant="primary"
-                  disabled={!connected || approve.isPending}
-                  onClick={() => setConfirmApprove(true)}
-                >
-                  Approve… <span className="mono ml-1 opacity-70">a</span>
-                </Button>
-              )}
-              <Button variant="danger" disabled={!connected || reject.isPending} onClick={openReject}>
-                Reject… <span className="mono ml-1 opacity-70">x</span>
-              </Button>
             </div>
           )}
 

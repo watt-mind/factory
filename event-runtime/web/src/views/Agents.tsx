@@ -176,13 +176,27 @@ export function Agents({
               {sel.ref}
             </span>
           }
-          actions={
+          utility={
             <>
-              <Button onClick={() => copyText(sel.ref, "agent ref")}>Copy ref</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectAgent(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.ref, "agent ref")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                ref
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectAgent(null)}>Close</Button>}
         >
 
           <Section title="Definition">

@@ -656,15 +656,61 @@ export function Runs({
           }
           actions={
             <>
-              <Button onClick={() => pinRun(sel.runId)}>Open in tab</Button>
-              <Button onClick={() => onOpenFull(sel.runId)}>
-                Expand <span className="mono ml-1 opacity-70">o</span>
-              </Button>
-              <Button onClick={() => copyText(sel.runId, "run id")}>Copy id</Button>
-              <Button onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command")}>
-                Copy CLI
-              </Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              <div className="flex items-center gap-1.5">
+                {d && isCancellable(d.run.state) && (
+                  <Button
+                    variant="danger"
+                    disabled={!connected || cancel.isPending}
+                    onClick={() => setConfirm("cancel")}
+                  >
+                    Cancel <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">x</span>
+                  </Button>
+                )}
+                {d && d.run.state === "FAILED" && (
+                  attemptsExhausted ? (
+                    <Button disabled={!connected} onClick={() => setConfirm("force-retry")}>
+                      Force retry…
+                    </Button>
+                  ) : (
+                    <Button
+                      disabled={!connected || retry.isPending}
+                      onClick={() => retry.mutate({ id: d.run.runId, force: false })}
+                    >
+                      Retry
+                    </Button>
+                  )
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Button onClick={() => onOpenFull(sel.runId)}>
+                  Expand <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">o</span>
+                </Button>
+                <Button onClick={() => pinRun(sel.runId)}>Open in tab</Button>
+              </div>
+            </>
+          }
+          utility={
+            <>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.runId, "run id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                CLI
+              </button>
+              <span>·</span>
+              <button type="button" onClick={copyLink} className="cursor-pointer hover:text-(--text)">
+                link
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectRun(null)}>Close</Button>}

@@ -570,13 +570,27 @@ export function Workers({
               </span>
             </span>
           }
-          actions={
+          utility={
             <>
-              <Button onClick={() => copyText(sel.workerId, "worker id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectWorker(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.workerId, "worker id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectWorker(null)}>Close</Button>}
         >
           {selHeartbeat.kind === "stale" && (
             <div

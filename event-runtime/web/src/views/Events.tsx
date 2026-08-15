@@ -761,8 +761,46 @@ export function Events({
           title={<span title={sel.eventId}>{sel.eventId}</span>}
           actions={
             <>
-              <Button onClick={() => copyText(sel.eventId, "event id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              {canRequeue && (
+                <Button
+                  variant="primary"
+                  disabled={!connected || requeue.isPending}
+                  onClick={() => requeue.mutate(sel)}
+                >
+                  Requeue <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">q</span>
+                </Button>
+              )}
+              <div className="flex items-center gap-1.5">
+                <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
+                  Replay…
+                </Button>
+                <Button
+                  disabled={!connected}
+                  onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
+                >
+                  Trigger again…
+                </Button>
+              </div>
+            </>
+          }
+          utility={
+            <>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.eventId, "event id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectEvent(null)}>Close</Button>}
@@ -829,31 +867,6 @@ export function Events({
             </Disclosure>
           </Section>
 
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
-              {canRequeue && (
-                <Button
-                  variant="primary"
-                  disabled={!connected || requeue.isPending}
-                  onClick={() => requeue.mutate(sel)}
-                >
-                  Requeue <span className="mono ml-1 opacity-70">q</span>
-                </Button>
-              )}
-              <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
-                Replay through intake…
-              </Button>
-              <Button
-                disabled={!connected}
-                onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
-              >
-                Trigger again…
-              </Button>
-            </div>
-            <div className="text-[11px] leading-relaxed text-(--text-faint)">
-              Requeue re-plans this event. Replay re-injects through intake. Trigger again opens inject.
-            </div>
-          </div>
           <VerbError error={requeue.error ?? replay.error} />
         </DetailPane>
       )}

@@ -358,22 +358,38 @@ export function Projects({
             </div>
           }
           actions={
+            sel.github ? (
+              <a
+                href={`https://github.com/${sel.github}`}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 py-1 text-[12px] font-medium text-(--text) transition-colors hover:bg-(--surface-3)"
+              >
+                GitHub
+              </a>
+            ) : null
+          }
+          utility={
             <>
-              <Button onClick={() => copyText(sel.path, "repo path")}>Copy path</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              {sel.github && (
-                <a
-                  href={`https://github.com/${sel.github}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="rounded border border-(--border) px-2 py-1 text-[12px] font-medium text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
-                >
-                  GitHub
-                </a>
-              )}
-              <Button onClick={() => onSelectRepo(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.path, "repo path")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                path
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectRepo(null)}>Close</Button>}
         >
           <div className="space-y-4">
             <Section title="Quick Dispatch (Agent Tasks)">

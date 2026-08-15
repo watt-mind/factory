@@ -1,7 +1,7 @@
 import "../test-dom";
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cleanup, fireEvent, render } from "@testing-library/react";
-import { RunDetailBlocks } from "./RunDetailBlocks";
+import { afterEach, describe, expect, test } from "bun:test";
+import { cleanup, render } from "@testing-library/react";
+import { RunDetailBlocks, isCancellable } from "./RunDetailBlocks";
 import { createLifecycleEventFixture, createRunDetailFixture } from "../test-render";
 import type { RunDetail, RunState } from "../types";
 
@@ -94,15 +94,17 @@ describe("RunDetailBlocks field tiering (WM-129)", () => {
     expect(r.getAllByText(/started/).length).toBeGreaterThanOrEqual(2);
   });
 
-  test("offers Cancel for a cancellable run and wires it to onCancel", () => {
-    const onCancel = mock(noop);
-    const r = renderBlocks(createRunDetailFixture({ run: { state: "RUNNING" } as RunDetail["run"] }), { onCancel });
-    fireEvent.click(r.getByText("Cancel"));
-    expect(onCancel).toHaveBeenCalled();
-    cleanup();
+  test("isCancellable correctly identifies cancellable states (WM-129)", () => {
+    expect(isCancellable("QUEUED")).toBe(true);
+    expect(isCancellable("LEASED")).toBe(true);
+    expect(isCancellable("RUNNING")).toBe(true);
     // VERIFYING has already exited its agent — not cancellable, same rule as the panel.
-    const verifying = renderBlocks(createRunDetailFixture({ run: { state: "VERIFYING" } as RunDetail["run"] }));
-    expect(verifying.queryByText("Cancel")).toBeNull();
+    expect(isCancellable("VERIFYING")).toBe(false);
+    expect(isCancellable("COMPLETED")).toBe(false);
+    expect(isCancellable("FAILED")).toBe(false);
+    expect(isCancellable("TIMED_OUT")).toBe(false);
+    expect(isCancellable("CANCELLED")).toBe(false);
+    expect(isCancellable("REFUSED")).toBe(false);
   });
 });
 
