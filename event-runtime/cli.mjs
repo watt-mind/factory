@@ -983,6 +983,11 @@ function countLine(label, counts, order = Object.keys(counts)) {
   return `${pad(label, 11)}${parts.join("   ")}`;
 }
 
+function spendLine(label, usage) {
+  const cost = Number(usage?.costUSD ?? 0);
+  return `${pad(label, 11)}${usage?.totalTokens ?? 0} tokens   input ${usage?.inputTokens ?? 0}   output ${usage?.outputTokens ?? 0}   cache-write ${usage?.cacheCreationInputTokens ?? 0}   cache-read ${usage?.cacheReadInputTokens ?? 0}   $${cost.toFixed(4)}`;
+}
+
 export function getAnomalyLines(s) {
   const a = s?.anomalies ?? {};
   const anomalyLines = [];
@@ -1089,6 +1094,14 @@ export async function status(client) {
   console.log(countLine("proposals", s.proposals, ["open", "expired"]));
   const states = Object.keys(s.runs.byState);
   console.log(states.length ? countLine("runs", s.runs.byState, states) : `${pad("runs", 11)}none`);
+  const spend = s.runs?.spend;
+  if (spend) {
+    console.log(spendLine("spend 1h", spend.rolling1h));
+    console.log(spendLine("spend 24h", spend.rolling24h));
+    for (const row of spend.byAgent24h ?? []) {
+      console.log(spendLine(`  ${row.agent}`, row));
+    }
+  }
   const pool = getPoolLines(readPool(), s);
   if (pool.line) console.log(pool.line);
   const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
@@ -1173,6 +1186,13 @@ async function inspect(client, runId) {
   console.log(`agent      ${run.spec.agent}   adapter ${run.spec.adapter}   contract ${run.spec.outputContract}`);
   console.log(`created    ${run.created_at}   updated ${run.updated_at}`);
   console.log(`workspace  ${view.workspace ?? "-"}`);
+  if (view.usage) {
+    console.log("\nusage");
+    console.log(`  ${spendLine("total", view.usage.totals).trimStart()}`);
+    for (const row of view.usage.attempts ?? []) {
+      console.log(`  ${spendLine(`attempt ${row.attempt}`, row).trimStart()}   model ${row.model ?? "-"}   adapter ${row.adapter}`);
+    }
+  }
   console.log("\nlifecycle");
   for (const e of view.lifecycle) {
     console.log(`  ${pad(e.at, 26)}${pad(`${e.from_state ?? "·"} → ${e.to_state}`, 26)}${pad(e.actor, 24)}${e.reason ?? ""}`);

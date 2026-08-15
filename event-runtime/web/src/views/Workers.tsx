@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
@@ -15,7 +16,7 @@ import {
 import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
-import type { Worker } from "../types";
+import type { Worker, WorkerCapacity } from "../types";
 import type { OperatorContext } from "../context";
 import {
   dur,
@@ -48,6 +49,42 @@ import { health, WORKER_HUES } from "../workerHealth";
 
 export const WORKER_TABS = ["ALL", "LIVE", "STOPPED"] as const;
 export type WorkerTab = (typeof WORKER_TABS)[number];
+export type WorkerDisplayState = ReturnType<typeof health> | "draining";
+
+const WORKER_STATE_HUES: Record<WorkerDisplayState, string> = {
+  ...WORKER_HUES,
+  draining: "var(--hue-warn)",
+};
+
+/** Stale remains the strongest signal; otherwise a drain request is explicit. */
+export const workerDisplayState = (worker: Worker): WorkerDisplayState =>
+  worker.stale ? "stale" : worker.draining && worker.state !== "stopped" ? "draining" : health(worker);
+
+/** Compatibility projection for an older API that has not added capacity yet. */
+export function capacityFromWorkers(rows: Worker[]): WorkerCapacity {
+  const live = rows.filter((worker) => worker.state !== "stopped" && !worker.stale);
+  const running = live.filter((worker) => worker.state === "busy").length;
+  const draining = live.filter((worker) => worker.draining).length;
+  return {
+    running,
+    capacity: live.length,
+    queued: 0,
+    live: live.length,
+    idle: live.filter((worker) => worker.state !== "busy" && !worker.draining).length,
+    draining,
+    target: Math.max(0, live.length - draining),
+    min: null,
+    max: null,
+    supervisor: "absent",
+    source: "live-workers",
+    limitingFactor: null,
+    classes: [],
+  };
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
 
 /**
  * Live = anything that could still be holding or claiming work: idle, busy, or
@@ -105,9 +142,9 @@ const WORKERS_DISPLAY: DisplayConfig<Worker> = {
     {
       key: "state",
       label: "State",
-      get: health,
-      order: ["busy", "idle", "stale", "stopped"],
-      hue: WORKER_HUES,
+      get: workerDisplayState,
+      order: ["busy", "draining", "idle", "stale", "stopped"],
+      hue: WORKER_STATE_HUES,
     },
     { key: "host", label: "Host", get: (w) => w.host },
   ],
@@ -125,6 +162,7 @@ const WORKERS_DISPLAY: DisplayConfig<Worker> = {
     { key: "labels", label: "Labels" },
     { key: "adapters", label: "Adapters" },
     { key: "run", label: "Current run" },
+    { key: "uptime", label: "Uptime" },
     { key: "heartbeat", label: "Heartbeat" },
   ],
 };
@@ -218,6 +256,52 @@ const openRun = (runId: string) => {
   window.location.hash = `#/runs/${runId}`;
 };
 
+export function CapacityBand({ capacity }: { capacity: WorkerCapacity }) {
+  const constrained = capacity.queued > 0 && capacity.limitingFactor;
+  const hue = constrained ? "var(--hue-warn)" : "var(--hue-ok)";
+  return (
+    <section
+      aria-label="Worker pool capacity"
+      className="mb-3 rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-3"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1.5">
+        <div className="flex items-baseline gap-2">
+          <span className="display text-xl font-semibold tabular-nums" style={{ color: hue }}>
+            {capacity.running} running / {capacity.capacity} capacity
+          </span>
+          <span className="mono text-[12px] text-(--text-dim)">
+            {capacity.queued} queued run{capacity.queued === 1 ? "" : "s"}
+          </span>
+        </div>
+        <span className="text-[11px] text-(--text-faint)">
+          {capacity.live} live · {capacity.idle} idle
+          {capacity.draining > 0 ? ` · ${capacity.draining} draining` : ""}
+          {capacity.source === "worker-policy"
+            ? ` · target ${capacity.target} · supervisor active`
+            : ` · ${capacity.supervisor === "stopped" ? "supervisor stopped · " : ""}live-worker fallback${capacity.max != null ? ` · policy max ${capacity.max}` : ""}`}
+        </span>
+      </div>
+      {constrained && (
+        <div className="mt-2 flex items-center gap-2 text-[12px]" style={{ color: hue }}>
+          <span className="size-1.5 rounded-full" style={{ background: hue }} />
+          <span>
+            Queue is waiting: <strong>{capacity.limitingFactor}</strong>
+          </span>
+        </div>
+      )}
+      {capacity.classes.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5" aria-label="Worker class capacity">
+          {capacity.classes.map((workerClass) => (
+            <span key={workerClass.name} className="mono rounded-full bg-(--surface-2) px-2 py-0.5 text-[11px] text-(--text-dim)">
+              {workerClass.name} {workerClass.running}/{workerClass.capacity}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function FleetStatusBanner({ banner }: { banner: FleetBanner }) {
   const hue = banner.kind === "stale" ? "var(--hue-err)" : "var(--hue-warn)";
   const title =
@@ -279,7 +363,11 @@ export function Workers({
 }) {
   const now = useNow();
   const query = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 2000 });
-  const rows = query.data?.workers ?? [];
+  // GET /workers gained capacity without changing the legacy client method's
+  // minimum response contract; older servers simply exercise the fallback.
+  const response = query.data as ({ workers: Worker[]; capacity?: WorkerCapacity } | undefined);
+  const rows = response?.workers ?? [];
+  const capacity = response?.capacity ?? capacityFromWorkers(rows);
 
   const parts = useMemo(() => partitionWorkers(rows), [rows]);
   const banner = useMemo(() => fleetBanner(rows), [rows]);
@@ -289,6 +377,21 @@ export function Workers({
   const [tabChoice, setTabChoice] = useState<WorkerTab | null>(null);
   const tab = tabChoice ?? defaultWorkerTab(rows);
   useTabKeys(WORKER_TABS, tab, setTabChoice);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= WORKER_TABS.length) {
+        e.preventDefault();
+        setTabChoice(WORKER_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Live before stopped regardless of recency; within a group the registry's
   // own order stands. Display Options grouping/sorting (OPS-493) applies on
@@ -304,7 +407,7 @@ export function Workers({
     const q = filter.trim().toLowerCase();
     if (!q) return byTab;
     return byTab.filter((w) =>
-      [w.workerId, w.host, String(w.pid), health(w), labelText(w.labels), w.adapters.join(","), w.currentRun].some(
+      [w.workerId, w.host, String(w.pid), workerDisplayState(w), labelText(w.labels), w.adapters.join(","), w.currentRun].some(
         (v) => (v ?? "").toLowerCase().includes(q),
       ),
     );
@@ -356,6 +459,8 @@ export function Workers({
     if (tab !== "ALL" && (tab === "LIVE") !== isLive(w)) setTabChoice("ALL");
   }, [focusWorkerId, rows, tab]);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -365,7 +470,17 @@ export function Workers({
       else if (filter) setFilter("");
     },
     keys: {
-      c: () => sel && copyText(sel.workerId, "worker id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.workerId, "worker id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
       o: () => sel?.currentRun && openRun(sel.currentRun),
     },
   });
@@ -379,7 +494,7 @@ export function Workers({
         ...(sel.currentRun
           ? [{ label: `Open run ${sel.currentRun}`, hint: "o", run: () => openRun(sel.currentRun!) }]
           : []),
-        { label: "Copy link to this worker", run: copyLink },
+        { label: "Copy link to this worker", hint: "c l", run: copyLink },
       ]);
     }
     return () => setContextActions([]);
@@ -393,9 +508,10 @@ export function Workers({
           <>
             <h1 className="display mb-4 text-lg font-semibold">Workers</h1>
             <ScopeCaption context={context} surface="fleet" />
+            {query.isSuccess && <CapacityBand capacity={capacity} />}
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto" role="tablist" aria-label="Worker state">
-                {WORKER_TABS.map((t) => {
+                {WORKER_TABS.map((t, idx) => {
                   const count =
                     t === "ALL" ? rows.length : t === "LIVE" ? parts.live.length : parts.stopped.length;
                   return (
@@ -412,6 +528,9 @@ export function Workers({
                     >
                       {t === "ALL" ? "All" : t === "LIVE" ? "Live" : "Stopped"}
                       {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                      <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                        {idx + 1}
+                      </span>
                     </button>
                   );
                 })}
@@ -484,7 +603,7 @@ export function Workers({
                   {show.has("state") && (
                     <td className="border-b border-(--border) px-3 py-1.5">
                       <span className="flex items-baseline gap-1.5">
-                        <StateBadge state={health(w)} hues={WORKER_HUES} />
+                        <StateBadge state={workerDisplayState(w)} hues={WORKER_STATE_HUES} />
                         {w.stale && (
                           <span className="text-[11px] text-(--text-faint)" title="What the worker last reported before its heartbeat stopped">
                             reported {w.state}
@@ -515,6 +634,14 @@ export function Workers({
                       ) : (
                         "-"
                       )}
+                    </td>
+                  )}
+                  {show.has("uptime") && (
+                    <td
+                      className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap tabular-nums text-(--text-faint)"
+                      title={`Started ${w.startedAt}`}
+                    >
+                      <Ago iso={w.startedAt} now={now} />
                     </td>
                   )}
                   {show.has("heartbeat") && (
@@ -578,11 +705,18 @@ export function Workers({
           widthClass="w-[460px]"
           title={
             <span className="flex min-w-0 items-center gap-2">
-              <StateBadge state={health(sel)} hues={WORKER_HUES} />
+              <StateBadge state={workerDisplayState(sel)} hues={WORKER_STATE_HUES} />
               <span className="mono truncate" title={sel.workerId}>
                 {sel.workerId}
               </span>
             </span>
+          }
+          actions={
+            sel.currentRun ? (
+              <Button onClick={() => openRun(sel.currentRun!)}>
+                Open run <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">o</span>
+              </Button>
+            ) : undefined
           }
           utility={
             <>
@@ -592,7 +726,7 @@ export function Workers({
                 onClick={() => copyText(sel.workerId, "worker id")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                id
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -600,7 +734,7 @@ export function Workers({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }
@@ -644,9 +778,9 @@ export function Workers({
             <KV
               k="state"
               v={
-                <span style={{ color: WORKER_HUES[sel.state] ?? "var(--hue-idle)" }}>
-                  {sel.state}
-                  {sel.stale ? " (last reported)" : ""}
+                <span style={{ color: WORKER_STATE_HUES[workerDisplayState(sel)] ?? "var(--hue-idle)" }}>
+                  {workerDisplayState(sel)}
+                  {sel.stale ? ` (last reported ${sel.state})` : ""}
                 </span>
               }
             />

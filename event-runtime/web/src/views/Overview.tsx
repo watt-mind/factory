@@ -639,6 +639,23 @@ export function Overview({
   const finishedTotal = terminalSegs.reduce((a, x) => a + x.value, 0);
   const okTotal = terminalSegs.find((x) => x.key === "COMPLETED")?.value ?? 0;
   const idleWorkers = Math.max(0, (s?.workers.live ?? 0) - (s?.workers.busy ?? 0));
+  const capacity = s
+    ? (s.capacity ?? {
+        running: s.workers.busy,
+        capacity: s.workers.live,
+        queued: s.runs.byState.QUEUED ?? 0,
+        live: s.workers.live,
+        idle: idleWorkers,
+        draining: 0,
+        target: s.workers.live,
+        min: null,
+        max: null,
+        supervisor: "absent" as const,
+        source: "live-workers" as const,
+        limitingFactor: null,
+        classes: [],
+      })
+    : null;
 
   return (
     <div className="h-full min-w-0 overflow-auto p-5">
@@ -924,13 +941,36 @@ export function Overview({
 
             {/* Sub-row 3: Worker Fleet Capacity */}
             <div className="mt-3.5 border-t border-(--border) pt-2.5">
-              <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
+              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                 <span className="font-semibold text-(--text)">
                   Worker Fleet Capacity{factoryWide ? " · factory-wide" : ""}
                 </span>
-                <span className="mono text-(--text-dim)">
-                  {s.workers.live} live · {s.workers.busy} busy · {idleWorkers} idle{s.workers.stale > 0 ? ` · ${s.workers.stale} stale` : ""}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate("workers")}
+                  aria-label={`worker capacity${factoryWide ? " · factory-wide" : ""}: ${capacity!.running} running of ${capacity!.capacity}, ${capacity!.queued} queued`}
+                  className="mono cursor-pointer rounded-full border border-(--border) bg-(--surface-2) px-2.5 py-1 text-(--text-dim) hover:text-(--text)"
+                >
+                  <strong className="text-(--text)">{capacity!.running}/{capacity!.capacity}</strong> capacity · {capacity!.queued} queued
+                  {capacity!.draining > 0 ? ` · ${capacity!.draining} draining` : ""}
+                </button>
+              </div>
+              {capacity!.queued > 0 && capacity!.limitingFactor && (
+                <div className="mb-2 text-[11px] text-(--hue-warn)">
+                  Queue is waiting: <strong>{capacity!.limitingFactor}</strong>
+                </div>
+              )}
+              {capacity!.classes.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5 text-[11px] text-(--text-dim)">
+                  {capacity!.classes.map((workerClass) => (
+                    <span key={workerClass.name} className="mono rounded-full bg-(--surface-2) px-2 py-0.5">
+                      {workerClass.name} {workerClass.running}/{workerClass.capacity}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="mb-1.5 mono text-[11px] text-(--text-dim)">
+                {s.workers.live} live · {s.workers.busy} busy · {idleWorkers} idle{s.workers.stale > 0 ? ` · ${s.workers.stale} stale` : ""}
               </div>
               <SegmentMeter
                 segments={[

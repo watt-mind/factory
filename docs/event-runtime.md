@@ -636,6 +636,18 @@ ephemeral workspace could never be rechecked, and slice 2's recompute needs
 the bytes. Evidence too large to inline waits for the content-addressed
 artifact store rather than being silently dropped.
 
+A typed refusal may be bare or may carry an artifact and evidence explaining
+why the agent could not proceed. When present, that context is not an escape
+from the output contract: the verifier validates the artifact against the
+agent's output schema, applies its closed semantic predicates, retains the
+artifact and bounded evidence in the accepted result, and recomputes their
+hashes. An invalid refusal artifact therefore fails as a contract violation;
+a valid one still produces `REFUSED` with its original reason code and no
+completion event. The refusal's verification receipt records a passed
+contract check, while the accepted result supplies the refusal reason and the
+hash-bound explanatory context; bare refusals continue to have no artifact or
+evidence hashes.
+
 Repository work later adds the exact repository verification command, executed
 separately from the implementing agent. GitHub Actions is not required. The
 verification record binds the immutable source ref, command, environment,

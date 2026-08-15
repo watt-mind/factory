@@ -7,7 +7,8 @@
  * storage and the table never re-derives what the panel showed.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { modal } from "../hooks";
+import { keyGuard, modal } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   DEFAULT_ORDER,
   NONE,
@@ -138,6 +139,10 @@ export function exportJson(filename: string, data: unknown): void {
   }
 }
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
+
 export function DisplayOptions<T>({
   config,
   state,
@@ -159,6 +164,21 @@ export function DisplayOptions<T>({
   const groupId = useId();
   const subId = useId();
   const orderId = useId();
+
+  // 'v' key toggles/opens the popover when not typing
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      if (e.key === "v" && !open) {
+        e.preventDefault();
+        setOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
 
   // The open panel is a light modal: the list's j/k/Enter verbs stand down,
   // Esc closes the panel (not the selection), outside click dismisses.
@@ -225,6 +245,7 @@ export function DisplayOptions<T>({
       >
         <SlidersIcon />
         Display
+        <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">v</span>
         {customized && (
           <span aria-hidden className="size-1.5 rounded-full bg-(--accent)" title="Display options customized" />
         )}

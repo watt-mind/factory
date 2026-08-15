@@ -63,8 +63,14 @@ function vendorChunk(id: string): string | undefined {
 // Re-baselined again for WM-214: the custom-column machinery (payload-path columns,
 // CustomCell, the column picker) landing on top of the WM-134/WM-205 Overview
 // overhaul measured 523.44 kB — genuine app growth, with the vendor split intact.
-// Re-baselined for WM-235: context strip fast jump chords and armed badges measured
-// 531.28 kB on CI Linux.
+// Re-baselined again for WM-234: the hotkey wave (WM-236 action hints and dialog
+// chords already on develop at 529.78 kB, plus this branch's display-options `v`,
+// 1–N status-tab keys, and Projects mode tabs) measured 531.86 kB. The xyflow
+// vendor chunk is byte-identical to develop's and every lazy route chunk is still
+// split out, so this is app code, not a chunking regression.
+// Same 540 kB ceiling reached independently by WM-235 (context strip fast jump
+// chords and armed badges, 531.28 kB on CI Linux) and by WM-233's copy chords;
+// the merged hotkey wave still fits under it with the vendor split intact.
 const ENTRY_CHUNK_BUDGET_BYTES = 540 * 1000;
 
 function entryChunkBudget(): Plugin {

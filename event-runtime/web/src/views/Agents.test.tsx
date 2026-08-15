@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Agents, adapterText, modelText, routeModel, tierText } from "./Agents";
 import { api } from "../api";
@@ -228,6 +228,46 @@ describe("Agents detail pane (WM-211)", () => {
       });
       expect(getAllByText("n/a").length).toBeGreaterThan(0);
       expect(getByText(/adapter command/)).toBeTruthy();
+    });
+  });
+});
+
+describe("Agents copy chords and hints (WM-233)", () => {
+  test("copy chords: c (ref), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const agent = stubAgent("test-agent");
+    await withAgents([agent], async () => {
+      const r = renderAgents(agent.ref);
+      await r.findByText("copy:");
+
+      // Verify utility hint badges
+      const refBtn = r.getByRole("button", { name: "ref" });
+      expect(refBtn.textContent).toContain("c");
+      const linkBtn = r.getByRole("button", { name: "link" });
+      expect(linkBtn.textContent).toContain("c l");
+
+      // 1. Press 'c' -> copies agent.ref
+      fireEvent.keyDown(document.body, { key: "c" });
+      expect(written).toBe(agent.ref);
+
+      // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+      fireEvent.keyDown(document.body, { key: "l" });
+      expect(written).toBe(window.location.href);
     });
   });
 });

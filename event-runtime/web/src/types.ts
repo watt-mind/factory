@@ -307,6 +307,38 @@ export interface AgentsView {
 /** A worker's own report of what it is doing; "stopped" is a clean exit. */
 export type WorkerState = "idle" | "busy" | "stopped";
 
+export type CapacityLimitingFactor =
+  | "at worker max"
+  | "no idle worker"
+  | "per-repo max_in_flight reached"
+  | "owned-paths collision"
+  | "budget ceiling";
+
+export interface WorkerClassCapacity {
+  name: string;
+  running: number;
+  capacity: number;
+}
+
+/** One consistent capacity projection shared by GET /status and GET /workers. */
+export interface WorkerCapacity {
+  running: number;
+  capacity: number;
+  queued: number;
+  live: number;
+  idle: number;
+  draining: number;
+  /** Current non-draining pool size; becomes the supervisor target when persisted. */
+  target: number;
+  min: number | null;
+  max: number | null;
+  supervisor: "active" | "absent" | "stopped";
+  source: "live-workers" | "worker-policy";
+  limitingFactor: CapacityLimitingFactor | null;
+  /** Empty until class-aware worker policy ships. */
+  classes: WorkerClassCapacity[];
+}
+
 /** One registered worker process (GET /workers) — the fleet, not the leases. */
 export interface Worker {
   workerId: string;
@@ -322,6 +354,8 @@ export interface Worker {
   stale: boolean;
   startedAt: string;
   stoppedAt: string | null;
+  /** The pool supervisor has asked this worker to exit at its next idle boundary. */
+  draining?: boolean;
 }
 
 /** A stale worker still holding a run — the doctor's projection, not the row. */
@@ -363,6 +397,8 @@ export interface StatusView {
   runs: { byState: Partial<Record<RunState, number>> };
   /** Fleet counts; `live` and `busy` exclude stale workers, as the API does. */
   workers: { live: number; busy: number; stale: number };
+  /** Absent only when the UI is talking to a pre-WM-228 control API. */
+  capacity?: WorkerCapacity;
   /** Artifact store rollup; `orphans` counts files no result references. Cached ~10s server-side (`at` = when computed). */
   artifacts: { files: number; bytes: number; orphans: number; orphanBytes: number; at?: string };
   anomalies: {

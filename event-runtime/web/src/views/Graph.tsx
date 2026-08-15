@@ -229,6 +229,8 @@ export function Graph({
       ? registry.data?.agents.find((a) => a.ref === selected.label)
       : undefined;
 
+  const pendingC = useRef<number>(0);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -239,8 +241,19 @@ export function Graph({
       if (e.key === "c" && focusNodeId) {
         e.preventDefault();
         const node = graph?.nodes.find((n) => n.id === focusNodeId);
-        if (node) copyText(node.label, node.kind === "agent" ? "agent ref" : "id");
+        if (node) {
+          copyText(node.label, node.kind === "agent" ? "agent ref" : "id");
+          pendingC.current = Date.now();
+        }
         return;
+      }
+      if (e.key === "l" && focusNodeId) {
+        if (pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          e.preventDefault();
+          copyLink();
+          pendingC.current = 0;
+          return;
+        }
       }
       const order = positioned
         ? [...positioned.nodes]
@@ -482,7 +495,7 @@ export function Graph({
                 onClick={() => copyText(selected.label, selected.kind === "agent" ? "agent ref" : "id")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                {selected.kind === "agent" ? "ref" : "id"}
+                {selected.kind === "agent" ? "ref" : "id"} <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -490,7 +503,7 @@ export function Graph({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }

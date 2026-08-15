@@ -5,6 +5,7 @@
 #   factory up --fake            # start with fake adapter (for staging/testing on live db)
 #   factory up --dev             # live-reload stack: serve --watch, vite HMR web,
 #                                # drain-aware worker (WM-213)
+#   factory up --no-build        # serve the existing web bundle without checking it
 #   factory up --workers 1:3     # supervised worker pool instead of one worker (WM-226)
 #   factory down                 # cleanly stop live daemons (drains the pool first)
 #   factory tail                 # tail all live logs (serve.log, worker.log, web.log)
@@ -29,6 +30,8 @@ case "$ACTION" in
   up)
     ADAPTER_FLAG=()
     DEV=0
+    NO_BUILD=0
+    WEB_BUILD_MESSAGE=""
     WORKERS_SPEC=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -37,11 +40,13 @@ case "$ACTION" in
         --port) API_PORT="$2"; shift ;;
         --web-port) WEB_PORT="$2"; shift ;;
         --dev) DEV=1 ;;
+        --no-build) NO_BUILD=1 ;;
         --workers) WORKERS_SPEC="$2"; shift ;;
         -h|--help)
-          echo "usage: factory up [--fake] [--dev] [--workers min:max] [--port 7381] [--web-port 7382]"
-          echo "  --dev      live reload: serve --watch, vite HMR web UI, worker restarts when idle"
-          echo "  --workers  supervised pool scaling between min and max on queue depth (WM-226);"
+          echo "usage: factory up [--fake] [--dev] [--no-build] [--workers min:max] [--port 7381] [--web-port 7382]"
+          echo "  --dev       live reload: serve --watch, vite HMR web UI, worker restarts when idle"
+          echo "  --no-build  serve the existing web bundle without checking whether it is stale"
+          echo "  --workers   supervised pool scaling between min and max on queue depth (WM-226);"
           echo "             without it, a workers: block in config/policy.yaml selects the pool"
           exit 0
           ;;
@@ -92,6 +97,37 @@ case "$ACTION" in
       WORKER_ARGS=(bash "$REPO/bin/live-stack.sh" __supervise-worker --reload-on-change)
       if [[ ! -d "$REPO/event-runtime/web/node_modules" ]]; then
         die "--dev needs the web deps for vite — run: (cd $REPO/event-runtime/web && bun install)"
+      fi
+    elif [[ "$NO_BUILD" -eq 1 ]]; then
+      warn "--no-build: served web bundle may be stale or missing; rerun without --no-build to rebuild"
+    else
+      WEB_DIR="$REPO/event-runtime/web"
+      DIST_INDEX="$WEB_DIR/dist/index.html"
+      WEB_BUNDLE_STALE=0
+      WEB_BUNDLE_REASON="stale"
+      if [[ ! -f "$DIST_INDEX" ]]; then
+        WEB_BUNDLE_STALE=1
+        WEB_BUNDLE_REASON="missing"
+      elif [[ -n "$(find "$WEB_DIR/src" -type f -newer "$DIST_INDEX" -print -quit)" ]]; then
+        WEB_BUNDLE_STALE=1
+      else
+        for WEB_BUILD_INPUT in "$WEB_DIR/index.html" "$WEB_DIR/vite.config.ts" "$WEB_DIR/package.json"; do
+          if [[ -f "$WEB_BUILD_INPUT" && "$WEB_BUILD_INPUT" -nt "$DIST_INDEX" ]]; then
+            WEB_BUNDLE_STALE=1
+            break
+          fi
+        done
+      fi
+
+      if [[ "$WEB_BUNDLE_STALE" -eq 1 ]]; then
+        info "web bundle $WEB_BUNDLE_REASON — rebuilding"
+        WEB_BUILD_STARTED=$(date +%s)
+        if ! (cd "$WEB_DIR" && bun run build); then
+          die "web bundle build failed — run it manually: cd $WEB_DIR && bun run build"
+        fi
+        [[ -f "$DIST_INDEX" ]] || die "web bundle build completed without creating $DIST_INDEX"
+        WEB_BUILD_SECONDS=$(( $(date +%s) - WEB_BUILD_STARTED ))
+        WEB_BUILD_MESSAGE="web bundle $WEB_BUNDLE_REASON — rebuilt in ${WEB_BUILD_SECONDS}s"
       fi
     fi
 
@@ -159,6 +195,9 @@ case "$ACTION" in
       printf '\n\033[32m==>\033[0m \033[1mready — live factory stack (dev, live reload)\033[0m\n\n'
     else
       printf '\n\033[32m==>\033[0m \033[1mready — live factory stack\033[0m\n\n'
+    fi
+    if [[ -n "$WEB_BUILD_MESSAGE" ]]; then
+      printf '  %s\n\n' "$WEB_BUILD_MESSAGE"
     fi
     printf '  event home %s\n' "$HOME_DIR"
     printf '  control    http://127.0.0.1:%s\n' "$API_PORT"

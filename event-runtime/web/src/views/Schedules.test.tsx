@@ -309,3 +309,68 @@ describe("Schedules aria-selected (WM-156)", () => {
     expect(dataRows()[1]!.getAttribute("aria-selected")).toBe("false");
   });
 });
+
+describe("Schedules copy chords and hints (WM-233)", () => {
+  test("copy chords: c (loop), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const r = renderSchedules({
+      connected: true,
+      focusScheduleLoop: "loop-enabled-running",
+    });
+
+    await r.findByText("copy:");
+
+    // Verify utility hint badges
+    const loopBtn = r.getByRole("button", { name: "loop" });
+    expect(loopBtn.textContent).toContain("c");
+    const linkBtn = r.getByRole("button", { name: "link" });
+    expect(linkBtn.textContent).toContain("c l");
+
+    // 1. Press 'c' -> copies loop
+    fireEvent.keyDown(document.body, { key: "c" });
+    expect(written).toBe("loop-enabled-running");
+
+    // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+    fireEvent.keyDown(document.body, { key: "l" });
+    expect(written).toBe(window.location.href);
+  });
+});
+
+describe("Schedules action shortcut badge (WM-236)", () => {
+  test("detail pane 'Run now…' button renders 'r' shortcut hint badge with aria-hidden", async () => {
+    const { container } = renderWithClient(
+      <StatefulSchedules connected={true} initialLoop="loop-enabled-running" />,
+    );
+
+    const detailPane = await waitFor(() => {
+      const el = container.querySelector("aside");
+      if (!el) throw new Error("detail pane not rendered");
+      return el;
+    });
+
+    const buttons = [...detailPane.querySelectorAll("button")];
+    const runBtn = buttons.find((b) => b.textContent?.includes("Run now…"));
+    expect(runBtn).toBeTruthy();
+
+    const badge = runBtn!.querySelector("span.mono");
+    expect(badge).toBeTruthy();
+    expect(badge!.textContent).toBe("r");
+    expect(badge!.getAttribute("aria-hidden")).toBe("true");
+  });
+});
+

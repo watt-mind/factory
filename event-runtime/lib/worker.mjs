@@ -19,7 +19,7 @@ import { LEASE_HEARTBEAT_MS, leaseDir, liveWorkerLeases, releaseWorkerLease, ren
 import { storeCollected } from "./artifacts.mjs";
 import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
-import { nextCounter, tx, txImmediate } from "./db.mjs";
+import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
 import { worktreeDispatchGate } from "./planner.mjs";
@@ -48,11 +48,13 @@ function iso(now) {
   return new Date(resolveNow(now)).toISOString();
 }
 
-function finishAttempt(db, runId, attempt, terminalState, reasonCode, now) {
+function finishAttempt(db, runId, attempt, terminalState, reasonCode, now, usage = {}) {
+  const finishedAt = iso(now);
   db.query(
     `UPDATE attempts SET terminal_state = ?, reason_code = ?, finished_at = ?
      WHERE run_id = ? AND attempt = ?`,
-  ).run(terminalState, reasonCode, iso(now), runId, attempt);
+  ).run(terminalState, reasonCode, finishedAt, runId, attempt);
+  recordRunUsage(db, { runId, attempt, recordedAt: finishedAt, ...usage });
 }
 
 /** Include ignored files: an agent must not be able to hide a repository write. */
@@ -398,6 +400,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
 
   let leaseHeartbeat = null;
   let ticketClaimed = false;
+  let attemptUsage = { adapter: adapterOverride ?? spec.adapter };
 
   let dispatchOpts = dispatch;
   if (!dispatchOpts && process.env.FACTORY_EVENT_HOME && !process.env.LINEAR_API_KEY) {
@@ -455,7 +458,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         runId, to, expectFrom: "RUNNING",
         actor: owner, reason: journalReason, attempt, policyVersion, now: currentNow,
       });
-      finishAttempt(db, runId, attempt, to, reasonCode, currentNow);
+      finishAttempt(db, runId, attempt, to, reasonCode, currentNow, attemptUsage);
       if (requeue && attempt < spec.maxAttempts) {
         transition(db, {
           runId, to: "QUEUED", expectFrom: "FAILED",
@@ -511,7 +514,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         runId, attempt, canonicalJson(result), "none", null,
         canonicalJson(result.verification), canonicalJson(receipt), iso(currentNow),
       );
-      finishAttempt(db, runId, attempt, "REFUSED", reasonCode, currentNow);
+      finishAttempt(db, runId, attempt, "REFUSED", reasonCode, currentNow, attemptUsage);
       return { ok: true, receipt };
     });
 
@@ -623,16 +626,21 @@ export async function executeClaimed(db, registry, adapters, claim, {
       }
     };
 
+    const onUsage = (usage) => {
+      attemptUsage = { adapter: adapterKey, ...(usage ?? {}) };
+    };
     let outcome;
     try {
       outcome = await adapter.execute({
-        spec, def, workspaceDir, timeoutMs: spec.timeoutSeconds * 1000, env, onTrace,
+        spec, def, workspaceDir, timeoutMs: spec.timeoutSeconds * 1000, env, onTrace, onUsage,
         abortSignal: abortController.signal, signal: abortController.signal,
       });
     } finally {
       clearInterval(cancelPoll);
       ACTIVE_EXECUTIONS.delete(runId);
     }
+
+    if (outcome?.usage) attemptUsage = { adapter: adapterKey, ...outcome.usage };
 
     if (abortController.signal.aborted) {
       if (ticketClaimed) {
@@ -646,7 +654,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
           return { fenced: true };
         }
         try {
-          finishAttempt(db, runId, attempt, "CANCELLED", "cancelled", currentNow);
+          finishAttempt(db, runId, attempt, "CANCELLED", "cancelled", currentNow, attemptUsage);
         } catch {
           // ignore
         }
@@ -738,7 +746,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
           actor: owner, reason: `contract_violation: ${err.violations.join(", ")}`,
           attempt, policyVersion, now: currentNow,
         });
-        finishAttempt(db, runId, attempt, "FAILED", "contract_violation", currentNow);
+        finishAttempt(db, runId, attempt, "FAILED", "contract_violation", currentNow, attemptUsage);
         if (attempt < spec.maxAttempts) {
           transition(db, {
             runId, to: "QUEUED", expectFrom: "FAILED",
@@ -803,7 +811,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
           runId, attempt, canonicalJson(refusedResult), "none", null,
           canonicalJson(refusedResult.verification), canonicalJson(receipt), iso(currentNow),
         );
-        finishAttempt(db, runId, attempt, "REFUSED", verified.reasonCode, currentNow);
+        finishAttempt(db, runId, attempt, "REFUSED", verified.reasonCode, currentNow, attemptUsage);
         return { ok: true, receipt };
       });
       destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
@@ -863,7 +871,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         runId, to: "COMPLETED", expectFrom: "VERIFYING",
         actor: owner, reason: "ok", attempt, policyVersion, now: currentNow,
       });
-      finishAttempt(db, runId, attempt, "COMPLETED", "ok", currentNow);
+      finishAttempt(db, runId, attempt, "COMPLETED", "ok", currentNow, attemptUsage);
       return { receipt };
     });
 

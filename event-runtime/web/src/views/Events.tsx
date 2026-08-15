@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
-import { useDisplayOptions, useListKeys, useNow, useRequeuePoll, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useRequeuePoll, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
@@ -94,6 +95,10 @@ function setFacetInQuery(filter: string, key: "type" | "source", value: string):
 
 const STATUS_TABS = ["all", "admitted", "planned", "noop", "human_needed", "dead_lettered"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
 
 /** Only these two statuses may be requeued (planner.mjs requeueEvent). */
 const REQUEUEABLE = new Set(["dead_lettered", "human_needed"]);
@@ -437,6 +442,22 @@ export function Events({
   };
   useTabKeys(STATUS_TABS, tab, selectTab);
 
+  const pendingC = useRef<number>(0);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= STATUS_TABS.length) {
+        e.preventDefault();
+        selectTab(STATUS_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectTab]);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -457,7 +478,17 @@ export function Events({
       // `q` not `r`: `r` is the `g r` navigation suffix, and both listeners
       // see the same keydown — `g r` with a selection must never requeue.
       q: () => canRequeue && connected && sel && requeue.mutate(sel),
-      c: () => sel && copyText(sel.eventId, "event id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.eventId, "event id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -476,7 +507,7 @@ export function Events({
           run: () => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now())),
         },
         { label: `Copy ${sel.eventId}`, hint: "c", run: () => copyText(sel.eventId, "event id") },
-        { label: "Copy link to this event", run: copyLink },
+        { label: "Copy link to this event", hint: "c l", run: copyLink },
       ]);
     }
     return () => setContextActions([]);
@@ -515,7 +546,7 @@ export function Events({
         )}
 
         <div className="mb-3 flex flex-wrap gap-1" role="tablist" aria-label="Event status">
-          {STATUS_TABS.map((t) => {
+          {STATUS_TABS.map((t, idx) => {
             const count = tabCount(t);
             return (
               <button
@@ -531,6 +562,9 @@ export function Events({
               >
                 {TAB_LABEL[t]}
                 {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                  {idx + 1}
+                </span>
               </button>
             );
           })}
@@ -822,7 +856,7 @@ export function Events({
                 onClick={() => copyText(sel.eventId, "event id")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                id
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -830,7 +864,7 @@ export function Events({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }
