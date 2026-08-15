@@ -23,8 +23,11 @@ import { Events } from "./views/Events";
 import { Overview } from "./views/Overview";
 import { RunFull } from "./views/RunFull";
 import { Runs } from "./views/Runs";
-import { Workers, isWorkerHealthFilter, type WorkerHealthFilter } from "./views/Workers";
 import { NAV, type NavKey } from "./nav";
+
+type WorkerHealthFilter = "live" | "busy" | "stale";
+const isWorkerHealthFilter = (value: string | null): value is WorkerHealthFilter =>
+  value === "live" || value === "busy" || value === "stale";
 
 type NavBadge = {
   count: number;
@@ -37,6 +40,7 @@ const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph
 const Projects = lazy(() => import("./views/Projects").then((m) => ({ default: m.Projects })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
 const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default: m.Proposals })));
+const Workers = lazy(() => import("./views/Workers").then((m) => ({ default: m.Workers })));
 
 export function App() {
   const [route, navigateRaw] = useHashRoute();
@@ -551,13 +555,15 @@ export function App() {
               />
             </Suspense>
           ) : view === "workers" ? (
-            <Workers
-              context={context}
-              focusWorkerId={focusWorkerId}
-              onSelectWorker={(id) => navigate(workerHash(id, focusWorkerHealth))}
-              focusHealth={focusWorkerHealth}
-              onFocusHealthChange={(health) => navigate(workerHash(null, health))}
-            />
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading workers…</div>}>
+              <Workers
+                context={context}
+                focusWorkerId={focusWorkerId}
+                onSelectWorker={(id) => navigate(workerHash(id, focusWorkerHealth))}
+                focusHealth={focusWorkerHealth}
+                onFocusHealthChange={(health) => navigate(workerHash(null, health))}
+              />
+            </Suspense>
           ) : view === "events" ? (
             <Events
               connected={connected}
