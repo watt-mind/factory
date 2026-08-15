@@ -126,11 +126,13 @@ jobs:
 
       - name: Unit and integration tests
         # Local full-suite measurement on 2026-08-15: max process RSS fell from
-        # 672,661,504 B to 631,029,760 B (6.2%) with test concurrency serialized,
-        # while wall time fell from 106.90 s to 101.52 s. The host-wide service
-        # measurement remains the conservative capacity input above because it
-        # includes descendants that macOS /usr/bin/time does not aggregate.
-        run: bun test --max-concurrency=1
+        # 672,661,504 B to 665,223,168 B (1.1%) at concurrency 4, while wall time
+        # fell from 106.90 s to 100.26 s. A concurrency of 1 reduced local RSS
+        # further but caused the CI runner to lose communication twice during
+        # the suite, so 4 is the measured non-deadlocking floor. The host-wide
+        # service measurement remains the conservative capacity input above
+        # because it includes descendants macOS /usr/bin/time does not aggregate.
+        run: bun test --max-concurrency=4
 
       - name: Generated tree matches shared/
         # The check that stops a rule from living in one harness and nowhere
