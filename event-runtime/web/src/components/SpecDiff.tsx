@@ -125,6 +125,7 @@ export function SpecDiff({ before, after }: { before: unknown; after: unknown })
           <div
             key={idx}
             data-diff-line
+            className="whitespace-pre"
             style={
               l.type === "del"
                 ? { color: "var(--hue-err)", background: "color-mix(in oklch, var(--hue-err) 8%, transparent)" }
