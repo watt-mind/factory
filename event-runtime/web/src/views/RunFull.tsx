@@ -15,6 +15,7 @@ import {
   notify,
 } from "../components/ui";
 import { RunDetailBlocks, RunFailureBanner, isCancellable } from "../components/RunDetailBlocks";
+import { handleRunArtifactClick } from "./Runs";
 
 /**
  * Full-page run view (`#/run/:id`, webui doc §10.11) — the trace at a
@@ -248,19 +249,21 @@ export function RunFull({
               width below the trace under xl, where there is no room for two
               columns. */}
           <aside className="w-full shrink-0 overflow-y-auto border-(--border) bg-(--surface-1) p-4 xl:w-[460px] xl:border-l">
-            <RunDetailBlocks
-              d={d}
-              now={now}
-              connected={connected}
-              origin={listRow}
-              onJumpAgent={onJumpAgent}
-              onJumpEvent={onJumpEvent}
-              onCancel={() => setConfirm("cancel")}
-              onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
-              onForceRetry={() => setConfirm("force-retry")}
-              retryPending={retry.isPending}
-              verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
-            />
+            <div onClickCapture={handleRunArtifactClick}>
+              <RunDetailBlocks
+                d={d}
+                now={now}
+                connected={connected}
+                origin={listRow}
+                onJumpAgent={onJumpAgent}
+                onJumpEvent={onJumpEvent}
+                onCancel={() => setConfirm("cancel")}
+                onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
+                onForceRetry={() => setConfirm("force-retry")}
+                retryPending={retry.isPending}
+                verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
+              />
+            </div>
           </aside>
         </div>
       )}

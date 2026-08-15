@@ -75,17 +75,21 @@ here is a separate per-loop decision, and the MVP enables no timer (§3).
 Conversely, what no event type above needs yet — and is therefore explicitly
 deferred, with its trigger named:
 
-- **`FOR UPDATE SKIP LOCKED`** — the first *remote* worker node. Fencing
-  tokens shipped with the worker split (OPS-233); the claim is `BEGIN
-  IMMEDIATE` on SQLite (§10), correct for multiple processes on one machine.
+- **API-mediated worker claims** — the first *remote* worker node. The
+  control plane keeps `BEGIN IMMEDIATE` and SQLite behind authenticated
+  `/worker/v1` endpoints; workers receive fencing tokens, never database
+  credentials ([event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)).
+  The former `FOR UPDATE SKIP LOCKED`/shared-Postgres cut-line is rejected and
+  superseded (§10).
 - **Declared workflows with `dependsOn` and deterministic joins (§11)** — the
   first event type that needs a fan-out and a join. What shipped is the
   *discovered* form: one typed recommendation per completed run, resolved
   through `edges.json`.
 - **`mounted`, `container` and `persistent` workspaces (§7)** — filesystem
   isolation as a policy axis, and any run needing a durable named workspace.
-- **Remote workers** — undated; see §10 for why this is a possibility to keep
-  cheap, not a requirement to build toward.
+- **Remote workers** — undated; the protocol and migration are designed, but
+  per-node auth, artifact ingest, and node-local workspace prerequisites remain
+  unbuilt (§10 and [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)).
 
 What has left that list by being built: semantic verification and
 `evidenceSetHash` (slice 2), the chain engine (`lib/chain.mjs`), fencing
@@ -687,32 +691,36 @@ orchestrator keeps its stateless model unchanged.
 Because the contracts must not care where workers run, the logical model avoids
 host-local PIDs, locks, and paths. The physical substrate can start small:
 
-- **MVP: one embedded database.** SQLite (or a local Postgres, if already at
-  hand) with a handful of tables: admitted events; action proposals and
-  approvals; immutable run specifications; run attempts and leases; append-only
-  lifecycle events; accepted results; transactional outbox events. With one
-  worker (§3), lease contention does not exist; `FOR UPDATE SKIP LOCKED` is the
-  mechanism the day a second worker process arrives, and guards nothing before
-  then.
-- **Second process: still SQLite** (shipped, OPS-233). A correction to this
-  section's original plan: splitting the worker out of the API process did not
-  need Postgres. SQLite in WAL mode already serves multiple processes on one
-  machine — what it needed was `BEGIN IMMEDIATE` on the claim (the default
-  deferred transaction lets two workers read the same `QUEUED` row before
-  either writes) and `busy_timeout` set before `journal_mode`. Postgres with
-  `FOR UPDATE SKIP LOCKED` is the **remote node** requirement, not the
-  multi-process one.
-- **Remote workers: a possibility kept cheap, not a requirement built toward**
-  (expanded into a staged, ticket-shaped design in
-  [event-runtime-workers.md](event-runtime-workers.md))**.**
-  The binding constraint today is one machine and one usage window — the same
-  reason architecture.md §4 rejects cross-repo parallelism. Keeping host-local
-  assumptions out of the contracts costs nothing; buying distributed
-  infrastructure ahead of a demonstrated need costs plenty.
+- **MVP: one embedded database.** SQLite holds admitted events; action
+  proposals and approvals; immutable run specifications; run attempts and
+  leases; append-only lifecycle events; accepted results; and transactional
+  outbox events. The control plane is its only database principal.
+- **Second process: still SQLite** (shipped, OPS-233). Splitting the worker out
+  of the API process did not need Postgres. SQLite in WAL mode supports local
+  contention with `BEGIN IMMEDIATE` on claim (the default deferred transaction
+  lets two claimers read the same `QUEUED` row before either writes) and
+  `busy_timeout` set before `journal_mode`.
+- **Remote workers use the control API, not a shared database** (designed in
+  [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)). This
+  is an explicit boundary move and **supersedes this section's former cut-line
+  #1**: do not port `db.mjs` to Postgres for distribution and do not put
+  `FOR UPDATE SKIP LOCKED` or DB credentials in workers. The server performs
+  the same atomic claim transaction behind `POST /worker/v1/claim`, returns a
+  fencing token, accepts heartbeats and cancellation polling, and publishes a
+  verified result plus outbox event transactionally. Local workers migrate to
+  that API over loopback too, so schema evolution and substrate choice remain
+  control-plane concerns.
+- **Remote placement remains earned machinery, not an immediate requirement.**
+  Per-node identity, HTTPS, content-addressed artifact ingest, adapters, repo
+  mirrors/config, and (for tier-2) worktree coordination must exist before a
+  remote node is enabled. The binding constraint today is still one usage
+  window; keeping paths out of contracts is cheap, while deploying a fleet
+  ahead of need is not.
 
-Transcripts and artifact bytes may start on local disk, addressed by content
-hash, and move behind an artifact-store interface when a second node is
-introduced.
+Transcripts and artifact bytes start on local disk, addressed by content hash.
+A remote worker uploads bytes through OPS-298's `POST /artifacts`; the control
+plane recomputes hashes and deduplicates before the result endpoint may bind
+them. Worker-local `file://` paths never cross the protocol.
 
 The append-only event journal is the replay surface. **Replay needs ordering,
 not a chain**: a monotonic sequence column plus per-record content hashes give
@@ -1004,15 +1012,15 @@ Operationally:
   running the coding agents themselves in-guest is a separate piece of work
   rather than a flag flip.
 
-**The control API is a trust surface of its own.** It binds to loopback only,
-so the clients need no authentication story beyond local user access. The web
-app (OPS-212) consumes the same endpoints and deliberately kept that boundary
-rather than adding auth: `ACTOR` is hardcoded `"operator"`, and the web server
-is a loopback static+proxy process. Real authentication and an authenticated
-actor identity are a **precondition** of either surface ever binding to a
-non-loopback address — not something to retrofit after exposure. Loopback is
-not by itself a defence against a browser: see OPS-408 (no `Origin`/`Host`
-check on mutating routes).
+**The control API is a trust surface of its own.** The operator/web routes bind
+loopback today, so they still rely on local-user access: `ACTOR` is hardcoded
+`"operator"`, and the web server is a loopback static+proxy process. The
+separate designed worker surface is never exempt: even a loopback worker uses
+a scoped node credential, and non-loopback worker traffic requires HTTPS
+([event-runtime-worker-protocol.md](event-runtime-worker-protocol.md) §2).
+Real authenticated operator identity remains a **precondition** of exposing
+operator or web routes. Loopback is not by itself a defence against a browser:
+see OPS-408 (no `Origin`/`Host` check on mutating routes).
 
 A rejected event writes no run. It may record a minimal rejection receipt that
 contains hashes and reason codes but not a sensitive webhook body.

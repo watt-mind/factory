@@ -28,6 +28,7 @@ import {
   resolveInboxItem,
 } from "./inbox.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
+import { MetricsQueryError, metricsBreakdownView, metricsView } from "./metrics.mjs";
 import { planEvent, requeueEvent } from "./planner.mjs";
 import { ambiguousOpenProposalRuns, approveProposal, openProposals, rejectProposal } from "./proposals.mjs";
 import { resolveModel } from "./registry.mjs";
@@ -907,6 +908,35 @@ export function createApi({
             secret, githubSecret, policyVersion, env, getStoreStats, workerPolicy, workerRunDir,
           }),
         });
+      }
+
+      if (route === "GET /metrics") {
+        try {
+          return send(res, 200, metricsView(db, {
+            now: nowMs,
+            window: url.searchParams.get("window") ?? "24h",
+            bucket: url.searchParams.get("bucket") ?? "1h",
+            series: url.searchParams.get("series"),
+          }));
+        } catch (err) {
+          if (err instanceof MetricsQueryError) return send(res, 422, err.body);
+          throw err;
+        }
+      }
+
+      if (route === "GET /metrics/breakdown") {
+        try {
+          return send(res, 200, metricsBreakdownView(db, {
+            now: nowMs,
+            window: url.searchParams.get("window") ?? "24h",
+            by: url.searchParams.get("by"),
+            metric: url.searchParams.get("metric"),
+            limit: url.searchParams.get("limit"),
+          }));
+        } catch (err) {
+          if (err instanceof MetricsQueryError) return send(res, 422, err.body);
+          throw err;
+        }
       }
 
       if (route === "GET /events") {

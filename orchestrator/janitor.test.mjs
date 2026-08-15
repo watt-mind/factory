@@ -217,6 +217,43 @@ describe("survey (WM-55: hold wiring and cannot-tell exclusion)", () => {
     getOpenPrs: () => [{ number: 261, headRefName: "feat/CLNT-520" }],
   };
 
+  test("batches more than 250 ticket numbers and categorizes every worktree", async () => {
+    const worktrees = Array.from({ length: 501 }, (_, i) => `CLNT-${i + 1}`);
+    const calls = [];
+    let active = 0;
+    let maxActive = 0;
+    const queryIssues = async (_team, nums) => {
+      calls.push(nums);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      // Match Linear's `issues(first: 250)` response limit. Passing all numbers
+      // in one request silently omits every worktree after the first 250.
+      return nums.slice(0, 250).map((number) => ({
+        identifier: `CLNT-${number}`,
+        state: number % 2 === 0
+          ? { name: "Done", type: "completed" }
+          : { name: "In Progress", type: "started" },
+      }));
+    };
+
+    const res = await survey(repo, { apply: false }, {
+      readdir: () => worktrees,
+      exists: () => true,
+      queryIssues,
+      getBranches: () => ({}),
+      getOpenPrs: () => [],
+    });
+
+    expect(calls.map((nums) => nums.length)).toEqual([250, 250, 1]);
+    expect(maxActive).toBe(3);
+    expect(res.unknown).toEqual([]);
+    expect(res.reclaimable).toHaveLength(250);
+    expect(res.kept).toHaveLength(251);
+    expect(res.kept.at(-1)).toEqual({ id: "CLNT-501", state: "In Progress" });
+  });
+
   test("an open-PR hold populates the held array and is excluded from reclaimable (dry run)", () => {
     const res = survey(repo, { apply: false }, defaultDeps);
     return res.then((surveyRes) => {

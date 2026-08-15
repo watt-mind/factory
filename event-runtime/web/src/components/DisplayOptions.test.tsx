@@ -1,9 +1,10 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import { useState } from "react";
 import { modal } from "../hooks";
 import { goPrefix } from "../goSequence";
+import { changeInput } from "../test-render";
 import {
   buildSections,
   defaultDisplayState,
@@ -20,8 +21,16 @@ interface Row {
   envelope?: {
     payload?: {
       repo?: string;
+      owner?: string;
+      [key: string]: string | undefined;
     };
   };
+  spec?: {
+    input?: {
+      model?: string;
+    };
+  };
+  labels?: Record<string, string>;
 }
 
 const CONFIG: DisplayConfig<Row> = {
@@ -98,24 +107,79 @@ describe("DisplayOptions panel", () => {
     expect(pill.getAttribute("aria-pressed")).toBe("false");
   });
 
-  test("adds and removes dynamic custom column via input", () => {
-    let latest: DisplayState | undefined;
-    const r = render(<Harness onState={(s) => (latest = s)} />);
+  test("groups every discovered path and derives a view-aware placeholder", () => {
+    const sampleRows: Row[] = [
+      {
+        id: "r1",
+        state: "RUNNING",
+        agent: "a",
+        envelope: { payload: { repo: "watt-mind/factory", owner: "watt-mind" } },
+        spec: { input: { model: "claude-sonnet" } },
+        labels: { priority: "high" },
+      },
+    ];
+    const r = render(<Harness rows={sampleRows} />);
     fireEvent.click(r.getByRole("button", { name: /display/i }));
 
-    const input = r.getByPlaceholderText(/e\.g\. payload\.repo/i);
-    fireEvent.change(input, { target: { value: "payload.repo" } });
-    fireEvent.submit(input.closest("form")!);
+    const input = r.getByRole("combobox", { name: "Add custom property path" });
+    expect(input.getAttribute("placeholder")).toContain("labels.priority");
+    fireEvent.focus(input);
 
-    expect(latest?.customColumns).toEqual(["payload.repo"]);
-    expect(r.getByRole("button", { name: "payload.repo" })).toBeTruthy();
+    const listbox = r.getByRole("listbox", { name: "Discovered property paths" });
+    expect(within(listbox).getByText("payload")).toBeTruthy();
+    expect(within(listbox).getByText("spec")).toBeTruthy();
+    expect(within(listbox).getByText("labels")).toBeTruthy();
+    expect(within(listbox).getAllByRole("option")).toHaveLength(4);
+    expect(within(listbox).getByRole("option", { name: /payload\.repo.*watt-mind\/factory.*1 row/i })).toBeTruthy();
 
-    const removeBtn = r.getByLabelText("Remove column payload.repo");
-    fireEvent.click(removeBtn);
-    expect(latest?.customColumns).toEqual([]);
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(r.queryByRole("listbox", { name: "Discovered property paths" })).toBeNull();
+    expect(r.getByRole("dialog", { name: "Display options" })).toBeTruthy();
   });
 
-  test("discovered fields suggestion chip adds column", () => {
+  test("does not cap the full discovered suggestion list at ten paths", () => {
+    const payload = Object.fromEntries(
+      Array.from({ length: 12 }, (_, index) => [`field${index}`, `value${index}`]),
+    );
+    const sampleRows: Row[] = [
+      { id: "r1", state: "RUNNING", agent: "a", envelope: { payload } },
+    ];
+    const r = render(<Harness rows={sampleRows} />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+
+    const input = r.getByRole("combobox", { name: "Add custom property path" });
+    fireEvent.focus(input);
+    expect(within(r.getByRole("listbox", { name: "Discovered property paths" })).getAllByRole("option")).toHaveLength(12);
+  });
+
+  test("filters suggestions and adds the keyboard-highlighted path", () => {
+    let latest: DisplayState | undefined;
+    const sampleRows: Row[] = [
+      {
+        id: "r1",
+        state: "RUNNING",
+        agent: "a",
+        envelope: { payload: { repo: "watt-mind/factory" } },
+        spec: { input: { model: "claude-sonnet" } },
+      },
+    ];
+    const r = render(<Harness onState={(s) => (latest = s)} rows={sampleRows} />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+
+    const input = r.getByRole("combobox", { name: "Add custom property path" });
+    act(() => {
+      changeInput(input as HTMLInputElement, "model");
+    });
+    const options = within(r.getByRole("listbox", { name: "Discovered property paths" })).getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0].textContent).toContain("spec.input.model");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(latest?.customColumns).toEqual(["spec.input.model"]);
+    expect(r.getByRole("button", { name: "spec.input.model" })).toBeTruthy();
+  });
+
+  test("adds an undiscovered free-text path on Enter and explains the empty column", () => {
     let latest: DisplayState | undefined;
     const sampleRows: Row[] = [
       { id: "r1", state: "RUNNING", agent: "a", envelope: { payload: { repo: "watt-mind/factory" } } },
@@ -123,11 +187,17 @@ describe("DisplayOptions panel", () => {
     const r = render(<Harness onState={(s) => (latest = s)} rows={sampleRows} />);
     fireEvent.click(r.getByRole("button", { name: /display/i }));
 
-    const chip = r.getByRole("button", { name: /\+ payload\.repo/i });
-    expect(chip).toBeTruthy();
-    fireEvent.click(chip);
+    const input = r.getByRole("combobox", { name: "Add custom property path" });
+    act(() => {
+      changeInput(input as HTMLInputElement, "payload.futureField");
+    });
+    expect(r.getByText("not seen in loaded items; the column will show — until a row has it")).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(latest?.customColumns).toContain("payload.repo");
+    expect(latest?.customColumns).toEqual(["payload.futureField"]);
+    const removeBtn = r.getByLabelText("Remove column payload.futureField");
+    fireEvent.click(removeBtn);
+    expect(latest?.customColumns).toEqual([]);
   });
 
   test("Escape closes the panel and releases the modal depth", () => {

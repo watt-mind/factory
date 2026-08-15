@@ -14,8 +14,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  shadow-runner-health:
+    name: Shadow runner fleet available
+    # This check must not use the shadow pool: when that pool is dead, the
+    # dedicated light runners are what turn a silent queue into an explicit
+    # failing check. Both pools live on the same host.
+    runs-on: [self-hosted, smoke-test]
+    timeout-minutes: 2
+    steps:
+      - name: Check shadow runner services
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          active=0
+          states=()
+          for index in $(seq 1 8); do
+            unit="actions.runner.watt-mind.watt-mind-runner-${index}.service"
+            state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+            states+=("$unit=$state")
+            if [ "$state" = "active" ]; then
+              active=$((active + 1))
+            fi
+          done
+
+          printf '%s\n' "${states[@]}"
+          if [ "$active" -eq 0 ]; then
+            echo "::error::No shadow-labeled runner service is active on this host; Verify would queue indefinitely."
+            exit 1
+          fi
+          if [ "$active" -lt 8 ]; then
+            echo "::warning::Shadow runner fleet is degraded: $active/8 services active."
+          fi
+
   verify:
     name: Verify
+    needs: shadow-runner-health
     # Self-hosted per project-conventions PC-03 / PC-22 — cloud runners are
     # forbidden, and shadow is the dedicated host runner label.
     runs-on: [self-hosted, shadow]
@@ -37,6 +71,45 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Acquire host memory slot
+        id: memory-slot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The eight shadow-labeled runners are separate services on one 62 GB
+          # host. Each service name ends in 1..8; map those stable names onto
+          # three host-wide flock lanes so no more than three memory-heavy jobs
+          # proceed at once. At the measured 13.7 GB peak this is 41.1 GB,
+          # leaving 20.9 GB (34%) for the host and transient overhead.
+          suffix="${RUNNER_NAME##*-}"
+          if [[ ! "$suffix" =~ ^[0-9]+$ ]]; then
+            echo "::error::Cannot assign a memory slot from runner name '$RUNNER_NAME'."
+            exit 1
+          fi
+          slot=$(( (10#$suffix - 1) % 3 + 1 ))
+          lock="/tmp/factory-verify-memory-slot-${slot}.lock"
+          state_dir="$(mktemp -d /tmp/factory-verify-memory.XXXXXX)"
+          ready="$state_dir/ready"
+          mkfifo "$ready"
+
+          # Keep flock alive across subsequent Actions steps. Reading the FIFO
+          # waits on the real lock acquisition rather than sleep-polling. The
+          # final always() step releases it; runner process cleanup also releases
+          # it if a job is cancelled or its shell is killed.
+          (
+            flock 9
+            printf 'acquired\n' > "$ready"
+            exec tail -f /dev/null >/dev/null 2>&1
+          ) 9>"$lock" &
+          guardian=$!
+          read -r _ < "$ready"
+          rm -f "$ready"
+
+          echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
+          echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
+          echo "Acquired host memory slot $slot on $RUNNER_NAME (guardian $guardian)."
+
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -52,7 +125,14 @@ jobs:
         run: bun run format:check
 
       - name: Unit and integration tests
-        run: bun test
+        # Local full-suite measurement on 2026-08-15: max process RSS fell from
+        # 672,661,504 B to 665,223,168 B (1.1%) at concurrency 4, while wall time
+        # fell from 106.90 s to 100.26 s. A concurrency of 1 reduced local RSS
+        # further but caused the CI runner to lose communication twice during
+        # the suite, so 4 is the measured non-deadlocking floor. The host-wide
+        # service measurement remains the conservative capacity input above
+        # because it includes descendants macOS /usr/bin/time does not aggregate.
+        run: bun test --max-concurrency=4
 
       - name: Generated tree matches shared/
         # The check that stops a rule from living in one harness and nowhere
@@ -127,3 +207,13 @@ jobs:
 
           bun event-runtime/demo/seed.mjs --port "$PORT" --prefix "ci-demo"
           bun event-runtime/demo/verify.mjs --port "$PORT"
+
+      - name: Release host memory slot
+        if: always() && steps.memory-slot.outputs.guardian != ''
+        shell: bash
+        env:
+          GUARDIAN_PID: ${{ steps.memory-slot.outputs.guardian }}
+          SLOT_STATE_DIR: ${{ steps.memory-slot.outputs.state_dir }}
+        run: |
+          kill "$GUARDIAN_PID" 2>/dev/null || true
+          rm -rf "$SLOT_STATE_DIR"

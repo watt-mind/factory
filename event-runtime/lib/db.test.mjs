@@ -122,6 +122,26 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
   });
 
+  test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    for (const migration of MIGRATIONS.filter((entry) => entry.version <= 2)) migration.up(db);
+    setSchemaVersion(db, 2);
+    db.close();
+
+    const migrated = openDb(file);
+    expect(getSchemaVersion(migrated)).toBe(CURRENT_SCHEMA_VERSION);
+    const indexes = migrated
+      .query(`SELECT name FROM sqlite_master WHERE type = 'index'`)
+      .all()
+      .map((row) => row.name);
+    expect(indexes).toContain("idx_lifecycle_at");
+    expect(indexes).toContain("idx_runs_created_at");
+    expect(indexes).toContain("idx_events_admitted_at");
+    expect(indexes).toContain("idx_proposals_created_at");
+    migrated.close();
+  });
+
   test("an older/unversioned database (user_version 0) is migrated on open", () => {
     const file = freshFile();
     // Simulate an unversioned raw sqlite db

@@ -104,17 +104,46 @@ export function lifecycleOf(db, runId) {
   return db.query(`SELECT * FROM lifecycle_events WHERE run_id = ? ORDER BY seq`).all(runId);
 }
 
+const IDEMPOTENCY_TRIGGER_MARKER = ":trigger:";
+
+function idempotencyFamily(db, idempotencyKey) {
+  return db.query(
+    `SELECT run_id, idempotency_key, state, created_at, rowid
+       FROM runs
+      WHERE idempotency_key = ?
+         OR instr(idempotency_key, ? || ?) = 1
+      ORDER BY CASE WHEN state IN ('COMPLETED', 'REFUSED', 'TIMED_OUT', 'CANCELLED') THEN 1 ELSE 0 END,
+               created_at DESC, rowid DESC`,
+  ).all(idempotencyKey, idempotencyKey, IDEMPOTENCY_TRIGGER_MARKER);
+}
+
 /**
- * Resolve an existing run for an idempotency key and event correlation context (§5.4).
- * A duplicate delivery (same idempotencyKey and matching correlationId / causationId)
- * resolves to the existing run. A repeat trigger (different correlationId / eventId)
- * with identical inputHash is NOT falsely suppressed and returns null.
+ * Produce the concrete UNIQUE key for a new run in an idempotency family.
+ * The first generation keeps the declared key. Later generations add the
+ * triggering event identity, allowing a fresh run after the prior generation
+ * is terminal without weakening the schema's per-run UNIQUE guarantee.
+ */
+export function idempotencyKeyForNewRun(db, { idempotencyKey, source, eventId }) {
+  if (idempotencyFamily(db, idempotencyKey).length === 0) return idempotencyKey;
+  return `${idempotencyKey}${IDEMPOTENCY_TRIGGER_MARKER}${hashJson({ source, eventId })}`;
+}
+
+/**
+ * Resolve an existing run for an idempotency family and event context (§5.4).
+ * Any non-terminal generation coalesces repeat triggers into that run. Once
+ * every generation is terminal, only a redelivery of the same correlation /
+ * causation resolves to the terminal run; a distinct trigger returns null so
+ * the planner can create a new generation with its own concrete UNIQUE key.
  */
 export function resolveIdempotency(db, { idempotencyKey, correlationId, causationId, eventId } = {}) {
   if (!idempotencyKey) return null;
-  const run = db.query(`SELECT run_id, idempotency_key, state FROM runs WHERE idempotency_key = ?`).get(idempotencyKey);
-  if (!run) return null;
+  const family = idempotencyFamily(db, idempotencyKey);
+  if (family.length === 0) return null;
 
+  const active = family.find((run) => !TERMINAL_STATES.has(run.state));
+  if (active) return active;
+
+  const run = family[0];
   const correlation = correlationId ?? eventId ?? null;
   if (!correlation && !causationId) return run;
 
@@ -123,11 +152,7 @@ export function resolveIdempotency(db, { idempotencyKey, correlationId, causatio
     .get(run.run_id);
   if (!journal) return run;
 
-  if (correlation && journal.correlation_id && journal.correlation_id !== correlation) {
-    return null;
-  }
-  if (causationId && journal.causation_id && journal.causation_id !== causationId) {
-    return null;
-  }
+  if (correlation && journal.correlation_id !== correlation) return null;
+  if (causationId && journal.causation_id !== causationId) return null;
   return run;
 }

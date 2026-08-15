@@ -21,7 +21,7 @@ import { canonicalJson, hashJson } from "./canonical.mjs";
 import { artifactsRoot, DEAD_LETTER_AFTER, DEFAULT_PROPOSAL_TTL_SECONDS, FACTORY_ROOT } from "./config.mjs";
 import { isBusyError, tx, txImmediate } from "./db.mjs";
 import { newProposalId, newRunId } from "./ids.mjs";
-import { createRun, resolveIdempotency } from "./lifecycle.mjs";
+import { createRun, idempotencyKeyForNewRun, resolveIdempotency } from "./lifecycle.mjs";
 import { getAgent, getEventType, resolveModel } from "./registry.mjs";
 import { getRepo, loadRepos, reposRoot } from "./repos.mjs";
 import { pinRepo } from "./repository.mjs";
@@ -260,6 +260,10 @@ function setEventStatus(db, event, status) {
   db.query(`UPDATE events SET status = ? WHERE source = ? AND event_id = ?`).run(status, event.source, event.event_id);
 }
 
+function isIdempotencyKeyCollision(err) {
+  return err?.code === "SQLITE_CONSTRAINT_UNIQUE" || /UNIQUE constraint failed: runs\.idempotency_key/.test(String(err?.message ?? err));
+}
+
 function humanNeeded(db, event, reason, at, ttlSeconds) {
   const proposal = insertProposal(db, {
     id: newProposalId(), event, decision: "human_needed", status: "open", reason, at, ttlSeconds,
@@ -446,17 +450,41 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
       return { decision: "noop", proposal, runId: existingRun.run_id, reason: "duplicate_run" };
     }
 
+    // A terminal generation releases the family for another trigger. Keep the
+    // schema's concrete-key UNIQUE guarantee by deriving a generation key from
+    // the admitted event; resolveIdempotency still coalesces over the family.
+    idempotencyKey = idempotencyKeyForNewRun(db, {
+      idempotencyKey,
+      source: event.source,
+      eventId: event.event_id,
+    });
     const runId = newRunId();
-    const spec = buildRunSpec(registry, pinnedEnvelope, mapping, { runId, policyVersion, adapterOverride, now });
+    const spec = {
+      ...buildRunSpec(registry, pinnedEnvelope, mapping, { runId, policyVersion, adapterOverride, now }),
+      idempotencyKey,
+    };
     const specJson = canonicalJson(spec);
     const specHash = hashJson(spec);
-    createRun(db, {
-      runId, idempotencyKey, spec, specJson, specHash,
-      actor: "planner",
-      correlationId: envelope.correlationId ?? null,
-      causationId: envelope.causationId ?? null,
-      policyVersion, now,
-    });
+    try {
+      createRun(db, {
+        runId, idempotencyKey, spec, specJson, specHash,
+        actor: "planner",
+        correlationId: envelope.correlationId ?? null,
+        causationId: envelope.causationId ?? null,
+        policyVersion, now,
+      });
+    } catch (err) {
+      if (!isIdempotencyKeyCollision(err)) throw err;
+      const winner = resolveIdempotency(db, { idempotencyKey });
+      if (!winner) throw err;
+      const reason = `idempotency_collision:${winner.run_id}`;
+      const proposal = insertProposal(db, {
+        id: newProposalId(), event, runId: winner.run_id, decision: "noop",
+        idempotencyKey, status: "resolved", reason, at, ttlSeconds,
+      });
+      setEventStatus(db, event, "noop");
+      return { decision: "noop", proposal, runId: winner.run_id, reason };
+    }
     const proposal = insertProposal(db, {
       id: newProposalId(), event, runId, decision: "run",
       specJson, specHash, idempotencyKey, status: "open", at, ttlSeconds,
