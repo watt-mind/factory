@@ -137,6 +137,31 @@ describe("worker capacity and draining state (WM-228)", () => {
   });
 });
 
+describe("Workers responsive state control (WM-163)", () => {
+  test("offers every state in a compact mobile control and keeps bracket cycling in sync", async () => {
+    const workers = [stubWorker("w_idle", "idle"), stubWorker("w_stopped", "stopped")];
+    await withWorkers(workers, async () => {
+      const { getByRole, getByText } = renderWorkers();
+      const stateControl = await waitFor(() => getByRole("combobox", { name: "Worker state" })) as HTMLSelectElement;
+
+      expect(Array.from(stateControl.options).map((option) => option.textContent)).toEqual([
+        "All 2",
+        "Live 1",
+        "Stopped 1",
+      ]);
+      expect(stateControl.value).toBe("LIVE");
+
+      fireEvent.change(stateControl, { target: { value: "STOPPED" } });
+      await waitFor(() => expect(getByText("w_stopped")).toBeTruthy());
+      expect(getByRole("tab", { selected: true }).textContent).toContain("Stopped");
+
+      fireEvent.keyDown(document.body, { key: "]" });
+      await waitFor(() => expect(stateControl.value).toBe("ALL"));
+      expect(getByRole("tab", { selected: true }).textContent).toContain("All");
+    });
+  });
+});
+
 describe("Workers view default visibility (WM-98)", () => {
   test("stopped workers are hidden by default when a live worker exists", async () => {
     const workers = [

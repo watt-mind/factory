@@ -392,6 +392,11 @@ export function Workers({
 
   const parts = useMemo(() => partitionWorkers(rows), [rows]);
   const banner = useMemo(() => fleetBanner(rows), [rows]);
+  const tabCounts: Record<WorkerTab, number> = {
+    ALL: rows.length,
+    LIVE: parts.live.length,
+    STOPPED: parts.stopped.length,
+  };
 
   // `null` = no explicit choice yet: follow the data (live when any worker is
   // live). The first click pins the tab and the default stops moving under it.
@@ -545,33 +550,44 @@ export function Workers({
             <ScopeCaption context={context} surface="fleet" />
             {query.isSuccess && <CapacityBand capacity={capacity} />}
             <div className="mb-3 flex flex-wrap items-center gap-2">
-              <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto" role="tablist" aria-label="Worker state">
-                {WORKER_TABS.map((t, idx) => {
-                  const count =
-                    t === "ALL" ? rows.length : t === "LIVE" ? parts.live.length : parts.stopped.length;
-                  return (
-                    <button
-                      key={t}
-                      type="button"
-                      role="tab"
-                      aria-selected={tab === t}
-                      onClick={() => {
-                        setTabChoice(t);
-                        if (focusHealth) onFocusHealthChange(null);
-                      }}
-                      title={t === "LIVE" ? "idle, busy, or stale" : t === "STOPPED" ? "cleanly stopped — history" : undefined}
-                      className={`shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium ${
-                        tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
-                      }`}
-                    >
-                      {t === "ALL" ? "All" : t === "LIVE" ? "Live" : "Stopped"}
-                      {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
-                      <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
-                        {idx + 1}
-                      </span>
-                    </button>
-                  );
-                })}
+              <select
+                aria-label="Worker state"
+                value={tab}
+                onChange={(event) => {
+                  setTabChoice(event.target.value as WorkerTab);
+                  if (focusHealth) onFocusHealthChange(null);
+                }}
+                className="min-w-0 flex-1 rounded-md border border-(--border) bg-(--surface-1) px-2 py-1 text-[12px] text-(--text) sm:hidden"
+              >
+                {WORKER_TABS.map((t) => (
+                  <option key={t} value={t}>
+                    {t === "ALL" ? "All" : t === "LIVE" ? "Live" : "Stopped"} {tabCounts[t]}
+                  </option>
+                ))}
+              </select>
+              <div className="hidden min-w-0 flex-1 gap-1 sm:flex" role="tablist" aria-label="Worker state">
+                {WORKER_TABS.map((t, idx) => (
+                  <button
+                    key={t}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === t}
+                    onClick={() => {
+                      setTabChoice(t);
+                      if (focusHealth) onFocusHealthChange(null);
+                    }}
+                    title={t === "LIVE" ? "idle, busy, or stale" : t === "STOPPED" ? "cleanly stopped — history" : undefined}
+                    className={`shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                      tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
+                    }`}
+                  >
+                    {t === "ALL" ? "All" : t === "LIVE" ? "Live" : "Stopped"}
+                    {tabCounts[t] > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{tabCounts[t]}</span>}
+                    <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                      {idx + 1}
+                    </span>
+                  </button>
+                ))}
               </div>
               <span className="ml-auto">
                 <DisplayOptions
