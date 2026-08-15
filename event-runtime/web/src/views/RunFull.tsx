@@ -234,7 +234,7 @@ export function RunFull({
           {/* Main column: the trace, at a readable measure — the point of the
               page — scrolling on its own so the sidebar never moves with it. */}
           <main className="min-w-0 flex-1 overflow-y-auto">
-            <div className="p-6 xl:max-w-[900px]">
+            <div className="p-6 xl:mx-auto xl:max-w-[900px]">
               {/* The failure first (WM-93) — renders nothing for other states. */}
               <RunFailureBanner state={d.run.state} lifecycle={d.lifecycle} className="mb-6" />
               <RunTrace key={runId} runId={runId} state={d.run.state} variant="full" />
