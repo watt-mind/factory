@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
-import { hashPath } from "../hash";
 import { useNow, useRequeuePoll } from "../hooks";
 import type { JournalEntry, EventFocus, Proposal, RunState, StatusView } from "../types";
 import type { OperatorContext } from "../context";
@@ -93,6 +92,7 @@ export function StatLegendItem({
   attention = false,
   onClick,
   factoryWide = false,
+  total,
 }: {
   token: string;
   label: string;
@@ -101,16 +101,22 @@ export function StatLegendItem({
   attention?: boolean;
   onClick?: () => void;
   factoryWide?: boolean;
+  total?: number;
 }) {
   const isZero = value === 0 || value === "0";
   const lit = attention && !isZero && hue;
   const fullLabel = factoryWide ? `${label} · factory-wide` : label;
+  const pctStr =
+    typeof total === "number" && total > 0 && typeof value === "number"
+      ? ` (${Math.round((value / total) * 100)}%)`
+      : "";
 
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label={`${fullLabel}: ${value}`}
+      title={`${label}: ${value}${pctStr}`}
       style={lit ? { color: hue } : undefined}
       className={`group flex min-h-7 cursor-pointer items-center gap-1.5 rounded-md border border-transparent px-2 py-0.5 text-left text-[12px] transition-all hover:border-(--border) hover:bg-(--surface-2) focus-visible:border-(--accent) focus-visible:outline-none ${
         isZero ? "opacity-60 text-(--text-faint)" : "text-(--text-dim)"
@@ -298,45 +304,35 @@ export function buildAnomalyRows(
     rows.push({
       kind: "dead_letter",
       text: `dead-lettered (${d.source}, ${d.eventId}): ${d.lastError ?? "unknown error"}`,
-      links: [
-        {
-          label: "View event",
-          go: () => callbacks.onJumpEvents({ status: "dead_lettered", source: d.source, eventId: d.eventId }),
-        },
-      ],
+      links: [{ label: "View event", go: () => callbacks.onJumpEvents({ source: d.source, eventId: d.eventId }) }],
       requeue: { source: d.source, eventId: d.eventId },
     });
   }
   for (const w of anomalies.stalledWorkers) {
-    const ageStr = now ? ago(w.lastSeen, now) : "stalled";
     rows.push({
       kind: "worker",
-      text: `stalled worker ${w.workerId} still holds run ${w.runId} — last heartbeat ${ageStr} on ${w.host}`,
+      text: `stalled worker ${w.workerId} still holds run ${w.runId} (host ${w.host}, last seen ${now ? ago(w.lastSeen, now) : "recently"})`,
       links: [
-        { label: "View worker", go: () => callbacks.onNavigate(hashPath("workers", w.workerId)) },
+        { label: "View worker", go: () => callbacks.onNavigate("workers") },
         { label: "View run", go: () => callbacks.onJumpRun(w.runId) },
       ],
     });
   }
-  for (const amb of anomalies.ambiguousOpenProposals ?? []) {
+  for (const a of anomalies.ambiguousOpenProposals) {
     rows.push({
       kind: "ambiguous",
-      text: `ambiguous open proposals: ${amb.count} open proposals exist for run ${amb.runId}`,
+      text: `ambiguous open proposals: ${a.count} proposals target run ${a.runId}`,
       links: [
-        { label: "View run", go: () => callbacks.onJumpRun(amb.runId) },
         { label: "View proposals", go: () => callbacks.onNavigate("proposals") },
+        { label: "View run", go: () => callbacks.onJumpRun(a.runId) },
       ],
     });
   }
-  if (anomalies.noWorkers) {
-    const queued = s?.runs.byState.QUEUED ?? 0;
+  if (anomalies.noWorkers && (s?.runs.byState?.QUEUED ?? 0) > 0) {
     rows.push({
       kind: "capacity",
-      text: `${queued} queued run${queued === 1 ? "" : "s"} and no live worker to claim ${queued === 1 ? "it" : "them"} — nothing will start until one registers`,
-      links: [
-        { label: "View workers", go: () => callbacks.onNavigate("workers") },
-        { label: "View queued runs", go: () => callbacks.onJumpRuns("QUEUED") },
-      ],
+      text: `${s?.runs.byState?.QUEUED ?? 0} queued runs and no live worker available to claim them`,
+      links: [{ label: "View workers", go: () => callbacks.onNavigate("workers") }],
     });
   }
 
@@ -345,16 +341,16 @@ export function buildAnomalyRows(
 
 function CategoryPill({ kind }: { kind: AnomalyKind }) {
   const labels: Record<AnomalyKind, string> = {
-    proposal: "PROPOSAL",
-    dead_letter: "DEAD-LETTER",
-    lease: "STALLED LEASE",
-    worker: "WORKER LEASE",
-    outbox: "OUTBOX",
-    capacity: "CAPACITY",
-    ambiguous: "AMBIGUOUS",
+    proposal: "proposal",
+    dead_letter: "dead-letter",
+    lease: "stalled lease",
+    worker: "worker lease",
+    outbox: "outbox",
+    capacity: "capacity",
+    ambiguous: "ambiguous",
   };
   return (
-    <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wider bg-(--surface-2) text-(--hue-warn) border border-(--hue-warn)/20">
+    <span className="shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-(--text-dim)">
       {labels[kind]}
     </span>
   );
@@ -391,15 +387,21 @@ function RecentOutcomesStrip({
 
   if (outcomes.length === 0) return null;
 
+  // Chronological left-to-right (oldest -> newest at right)
+  const chrono = outcomes.slice().reverse();
+
   return (
-    <div className="rounded-lg border border-(--border) bg-(--surface-1) p-3.5">
+    <div
+      className="rounded-lg border border-(--border) bg-(--surface-1) p-3.5"
+      title="Recent outcomes (newest on the right)"
+    >
       <div className="mb-2 flex items-baseline justify-between text-[11px]">
         <span className="font-medium uppercase tracking-wide text-(--text-faint)">
           Recent Outcomes · last {outcomes.length}
         </span>
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
-        {outcomes.map((o) => {
+        {chrono.map((o) => {
           const hue =
             o.to === "COMPLETED"
               ? "var(--hue-ok)"
@@ -415,7 +417,7 @@ function RecentOutcomesStrip({
               type="button"
               onClick={() => onJumpRun(o.runId)}
               aria-label={label}
-              className="h-4 w-2 cursor-pointer rounded-xs transition-all hover:scale-125 hover:opacity-100 opacity-80"
+              className="h-4 w-2 cursor-pointer rounded-xs opacity-80 transition-all hover:scale-125 hover:opacity-100 hover:ring-1 hover:ring-(--text) focus-visible:ring-2 focus-visible:ring-(--accent)"
               style={{ backgroundColor: hue }}
               title={`${o.runId} · ${o.to}${o.reason ? ` (${o.reason})` : ""} · ${ago(o.at, now)}`}
             />
@@ -647,11 +649,17 @@ export function Overview({
 
       {/* Band A: Promoted Doctor Deck or Nominal Status (WM-205) */}
       {hasAnomalies ? (
-        <div className="mb-5 rounded-lg border border-(--hue-warn) bg-[color-mix(in_oklch,var(--hue-warn)_8%,var(--surface-1))] p-3">
+        <div
+          className="mb-5 rounded-lg border p-3"
+          style={{
+            borderColor: "var(--hue-warn)",
+            backgroundColor: "color-mix(in oklch, var(--hue-warn) 8%, var(--surface-1))",
+          }}
+        >
           <div className="mb-2 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[12px] font-semibold text-(--hue-warn) uppercase tracking-wide">
+            <div className="flex items-center gap-2 text-[12px] font-semibold text-(--hue-warn)">
               <span className="size-2 rounded-full bg-(--hue-warn) motion-safe:animate-pulse" />
-              Doctor Anomaly Deck · {anomalyRows.length} active issue{anomalyRows.length === 1 ? "" : "s"}
+              Anomalies · {anomalyRows.length} active issue{anomalyRows.length === 1 ? "" : "s"}
               {feedsUnscoped ? " · factory-wide" : ""}
             </div>
           </div>
@@ -664,35 +672,34 @@ export function Overview({
                 <div className="min-w-0 flex items-start sm:items-center gap-2">
                   <CategoryPill kind={a.kind} />
                   {a.proposalId ? (
-                    <span className="min-w-0 flex flex-col gap-0.5 text-[12px] text-(--hue-warn)">
-                      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words">
-                        <span>expired open proposal</span>
-                        <span className="text-(--text-faint)">·</span>
-                        <span>agent: {a.proposal?.agent ?? "—"}</span>
-                        <span className="text-(--text-faint)">·</span>
-                        <span>
-                          {a.proposal?.decision ?? "—"}
-                          {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
-                        </span>
-                        <span className="text-(--text-faint)">·</span>
-                        <span className="text-(--text-faint)">
-                          origin {a.proposal?.eventSource ?? "—"}/{a.proposal?.eventId ?? "—"}
-                        </span>
-                        <span className="text-(--text-faint)">·</span>
-                        {a.proposal?.created_at ? (
-                          <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
-                        ) : (
-                          <span className="text-(--text-faint)">age —</span>
-                        )}
-                      </span>
+                    <div className="min-w-0 flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words text-[12px] text-(--hue-warn)">
+                      <span>expired open proposal</span>
+                      <span className="text-(--text-faint)">·</span>
                       <span
-                        className="mono truncate text-[11px] text-(--text-faint) cursor-pointer"
+                        className="mono text-[11px] text-(--text-dim) cursor-pointer hover:underline"
                         title={`${a.proposalId} — click to copy`}
                         onClick={() => copyText(a.proposalId!, "proposal id")}
                       >
-                        {a.proposalId}
+                        {shortId(a.proposalId)}
                       </span>
-                    </span>
+                      <span className="text-(--text-faint)">·</span>
+                      <span>agent: {a.proposal?.agent ?? "—"}</span>
+                      <span className="text-(--text-faint)">·</span>
+                      <span>
+                        {a.proposal?.decision ?? "—"}
+                        {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
+                      </span>
+                      <span className="text-(--text-faint)">·</span>
+                      <span className="text-(--text-faint)">
+                        origin {a.proposal?.eventSource ?? "—"}/{a.proposal?.eventId ?? "—"}
+                      </span>
+                      <span className="text-(--text-faint)">·</span>
+                      {a.proposal?.created_at ? (
+                        <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
+                      ) : (
+                        <span className="text-(--text-faint)">age —</span>
+                      )}
+                    </div>
                   ) : (
                     <span
                       className="min-w-0 break-words sm:truncate text-[12px]"
@@ -711,14 +718,6 @@ export function Overview({
                   >
                     copy
                   </button>
-                  {a.requeue && (
-                    <Button
-                      disabled={!connected || requeue.isPending}
-                      onClick={() => requeue.mutate(a.requeue!)}
-                    >
-                      Requeue
-                    </Button>
-                  )}
                   {a.dismissProposalId && (
                     <Button
                       disabled={!connected || dismiss.isPending}
@@ -727,8 +726,20 @@ export function Overview({
                       Dismiss
                     </Button>
                   )}
-                  {a.links.map((l) => (
-                    <Button key={l.label} onClick={l.go}>
+                  {a.requeue && (
+                    <Button
+                      disabled={!connected || requeue.isPending}
+                      onClick={() => requeue.mutate(a.requeue!)}
+                    >
+                      Requeue
+                    </Button>
+                  )}
+                  {a.links.map((l, idx) => (
+                    <Button
+                      key={l.label}
+                      variant={idx === 0 ? "primary" : "default"}
+                      onClick={l.go}
+                    >
                       {l.label}
                     </Button>
                   ))}
@@ -770,9 +781,6 @@ export function Overview({
             {/* Sub-row 1: Event Intake */}
             <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
               <span className="font-semibold text-(--text)">Event Intake</span>
-              <span className="mono text-(--text-dim)">
-                {intakeTotal > 0 ? `${intakeTotal} events` : "no events yet"}
-              </span>
             </div>
             {intakeTotal > 0 ? (
               <>
@@ -790,6 +798,7 @@ export function Overview({
                       hue={seg.value > 0 ? seg.hue : undefined}
                       attention={ATTENTION_KEYS.has(seg.key)}
                       onClick={() => onJumpEvents({ status: seg.key })}
+                      total={intakeTotal}
                     />
                   ))}
                 </div>
@@ -821,6 +830,7 @@ export function Overview({
                       value={proposalOpen}
                       hue={proposalOpen > 0 ? "var(--hue-info)" : undefined}
                       onClick={() => onNavigate("proposals")}
+                      total={proposalTotal}
                     />
                     <StatLegendItem
                       token="expired"
@@ -829,6 +839,7 @@ export function Overview({
                       hue={proposalExpired > 0 ? "var(--hue-warn)" : undefined}
                       attention={proposalExpired > 0}
                       onClick={() => onNavigate("proposals")}
+                      total={proposalTotal}
                     />
                   </div>
                 </>
@@ -841,16 +852,15 @@ export function Overview({
           {/* Card 2: Execution & Fleet Capacity */}
           <StageCard
             title="Execution & Fleet Capacity"
-            headline={inflightTotal}
-            headlineHue={inflightTotal > 0 ? "var(--hue-info)" : undefined}
-            meta="in flight"
+            headline={finishedTotal + inflightTotal}
+            meta="runs"
           >
             {/* Sub-row 1: Active In-Flight Workloads */}
             <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
               <span className="font-semibold text-(--text)">Active In-Flight Pipeline</span>
-              <span className="mono text-(--text-dim)">
-                {inflightTotal > 0 ? `${inflightTotal} active` : "nothing in flight"}
-              </span>
+              {inflightTotal > 0 && (
+                <span className="mono text-(--text-dim)">{inflightTotal} active</span>
+              )}
             </div>
             {inflightTotal > 0 ? (
               <>
@@ -867,6 +877,7 @@ export function Overview({
                       value={seg.value}
                       hue={seg.value > 0 ? seg.hue : undefined}
                       onClick={() => onJumpRuns(seg.key)}
+                      total={inflightTotal}
                     />
                   ))}
                 </div>
@@ -901,6 +912,7 @@ export function Overview({
                         hue={seg.value > 0 ? seg.hue : undefined}
                         attention={ATTENTION_KEYS.has(seg.key)}
                         onClick={() => onJumpRuns(seg.key)}
+                        total={finishedTotal}
                       />
                     ))}
                   </div>
@@ -936,6 +948,7 @@ export function Overview({
                   hue={s.workers.live > 0 ? "var(--hue-ok)" : undefined}
                   onClick={() => onNavigate("workers")}
                   factoryWide={factoryWide}
+                  total={s.workers.live + s.workers.stale}
                 />
                 <StatLegendItem
                   token="busy"
@@ -944,6 +957,7 @@ export function Overview({
                   hue={s.workers.busy > 0 ? "var(--hue-info)" : undefined}
                   onClick={() => onNavigate("workers")}
                   factoryWide={factoryWide}
+                  total={s.workers.live + s.workers.stale}
                 />
                 <StatLegendItem
                   token="stale"
@@ -953,6 +967,7 @@ export function Overview({
                   attention={s.workers.stale > 0}
                   onClick={() => onNavigate("workers")}
                   factoryWide={factoryWide}
+                  total={s.workers.live + s.workers.stale}
                 />
               </div>
             </div>

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Overview, groupJournalEntries, buildAnomalyRows } from "./Overview";
+import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
@@ -244,7 +245,7 @@ describe("Overview anomaly deck (WM-95)", () => {
       // Raw id is demoted to secondary, copyable text rather than the primary label.
       const idNode = queryByTitle(`${stubProposal.id} — click to copy`);
       expect(idNode).toBeTruthy();
-      expect(idNode?.textContent).toBe(stubProposal.id);
+      expect(idNode?.textContent).toBe(shortId(stubProposal.id));
     } finally {
       api.status = origStatus;
       api.proposals = origProposals;
@@ -497,13 +498,13 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
 
     try {
       const repo = renderOverview({ kind: "repo", name: "bj29" });
-      await waitFor(() => repo.getByText(/Doctor Anomaly Deck/));
-      expect(repo.getByText(/Doctor Anomaly Deck/).textContent?.toLowerCase()).toMatch(/factory-wide/);
+      await waitFor(() => repo.getByText(/Anomalies ·/));
+      expect(repo.getByText(/Anomalies ·/).textContent?.toLowerCase()).toMatch(/factory-wide/);
       repo.unmount();
 
       const all = renderOverview({ kind: "all" });
-      await waitFor(() => all.getByText(/Doctor Anomaly Deck/));
-      expect(all.getByText(/Doctor Anomaly Deck/).textContent?.toLowerCase()).not.toMatch(/factory-wide/);
+      await waitFor(() => all.getByText(/Anomalies ·/));
+      expect(all.getByText(/Anomalies ·/).textContent?.toLowerCase()).not.toMatch(/factory-wide/);
     } finally {
       restore();
     }
