@@ -47,6 +47,40 @@ jobs:
             echo "::warning::Shadow runner fleet is degraded: $active/8 services active."
           fi
 
+      - name: Check host temp space and memory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The E2E seed + verify scratch measured 45 MiB after completion on
+          # 2026-08-15. A 1 GiB floor leaves more than 22x that measured usage
+          # for Actions' own temp files and transient test growth.
+          temp_floor_kib=$((1024 * 1024))
+          # The full Verify process tree measured a 13.7 GiB peak on this host.
+          # Require 16 GiB available before admitting it: 2.3 GiB (17%) of
+          # headroom beyond the measured peak.
+          memory_floor_kib=$((16 * 1024 * 1024))
+
+          temp_available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')"
+          memory_available_kib="$(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo)"
+          failed=0
+
+          if [ -z "$temp_available_kib" ] || [ "$temp_available_kib" -lt "$temp_floor_kib" ]; then
+            echo "::error::Runner temp space below 1 GiB: ${temp_available_kib:-unknown} KiB available at $RUNNER_TEMP."
+            failed=1
+          else
+            echo "Runner temp space: $temp_available_kib KiB available at $RUNNER_TEMP."
+          fi
+
+          if [ -z "$memory_available_kib" ] || [ "$memory_available_kib" -lt "$memory_floor_kib" ]; then
+            echo "::error::Runner available memory below 16 GiB: ${memory_available_kib:-unknown} KiB MemAvailable."
+            failed=1
+          else
+            echo "Runner available memory: $memory_available_kib KiB MemAvailable."
+          fi
+
+          exit "$failed"
+
   verify:
     name: Verify
     needs: shadow-runner-health
@@ -89,7 +123,7 @@ jobs:
           fi
           slot=$(( (10#$suffix - 1) % 3 + 1 ))
           lock="/tmp/factory-verify-memory-slot-${slot}.lock"
-          state_dir="$(mktemp -d /tmp/factory-verify-memory.XXXXXX)"
+          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-verify-memory.XXXXXX")"
           ready="$state_dir/ready"
           mkfifo "$ready"
 
@@ -171,7 +205,7 @@ jobs:
           # Ask the OS for a free loopback port instead of sharing a fixed
           # one with concurrent Verify jobs on this self-hosted host.
           PORT="$(bun -e 'const probe = Bun.serve({ port: 0, fetch: () => new Response("") }); console.log(probe.port); probe.stop(true)')"
-          DIR=$(mktemp -d)
+          DIR="$(mktemp -d "$RUNNER_TEMP/factory-event-home.XXXXXX")"
           export FACTORY_EVENT_HOME="$DIR"
           export FACTORY_EVENT_PORT="$PORT"
 
