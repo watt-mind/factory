@@ -25,4 +25,35 @@ describe("ShortcutsDialog", () => {
     expect(contextStrip.textContent).toContain("Home / End");
     expect(contextStrip.textContent).toContain("Delete / ⌫");
   });
+
+  test("documents view-specific actions and dialog hotkeys (WM-236)", () => {
+    const r = render(<ShortcutsDialog onClose={() => {}} />);
+    const actionsSection = r.getByRole("region", { name: "Actions" });
+    const content = actionsSection.textContent ?? "";
+
+    // Schedules: 'r'
+    expect(content).toContain("r");
+    expect(content).toMatch(/run schedule now/i);
+
+    // Workers: 'o'
+    expect(content).toContain("o");
+    expect(content).toMatch(/open current run/i);
+
+    // Proposals: 'a', 'x'
+    expect(content).toContain("a");
+    expect(content).toMatch(/approve proposal/i);
+    expect(content).toContain("x");
+    expect(content).toMatch(/reject proposal/i);
+
+    // Events: 'q'
+    expect(content).toContain("q");
+    expect(content).toMatch(/requeue event/i);
+
+    // InjectDialog / dialogs: '⌘+Shift+F', '⌘↵'
+    expect(content).toContain("⌘+Shift+F");
+    expect(content).toMatch(/format JSON/i);
+    expect(content).toContain("⌘↵");
+    expect(content).toMatch(/confirm inject/i);
+  });
 });
+

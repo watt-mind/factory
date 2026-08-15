@@ -676,6 +676,13 @@ export function Workers({
               </span>
             </span>
           }
+          actions={
+            sel.currentRun ? (
+              <Button onClick={() => openRun(sel.currentRun!)}>
+                Open run <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">o</span>
+              </Button>
+            ) : undefined
+          }
           utility={
             <>
               <span>copy:</span>

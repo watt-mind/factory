@@ -217,3 +217,49 @@ describe("fleet banner vs Live tab (WM-155)", () => {
     });
   });
 });
+
+describe("Workers Open run action shortcut badge (WM-236)", () => {
+  test("detail pane renders 'Open run' action button with 'o' shortcut badge when worker has currentRun", async () => {
+    const workerWithRun: Worker = {
+      ...stubWorker("w_busy_1", "busy"),
+      currentRun: "run_active_123",
+    };
+    await withWorkers([workerWithRun], async () => {
+      const { getByRole } = renderWithClient(
+        <Workers context={{ kind: "all" }} focusWorkerId="w_busy_1" onSelectWorker={noop} />,
+      );
+
+      await waitFor(() => {
+        expect(getByRole("button", { name: /^Open run/ })).toBeTruthy();
+      });
+
+      const openBtn = getByRole("button", { name: /^Open run/ });
+      const badge = openBtn.querySelector("span.mono");
+      expect(badge).toBeTruthy();
+      expect(badge!.textContent).toBe("o");
+      expect(badge!.getAttribute("aria-hidden")).toBe("true");
+
+      // Verify click updates window.location.hash
+      const origHash = window.location.hash;
+      openBtn.click();
+      expect(window.location.hash).toBe("#/runs/run_active_123");
+      window.location.hash = origHash;
+    });
+  });
+
+  test("detail pane does not render 'Open run' action button when worker has no currentRun", async () => {
+    const workerIdle: Worker = stubWorker("w_idle_1", "idle");
+    await withWorkers([workerIdle], async () => {
+      const { queryByRole, container } = renderWithClient(
+        <Workers context={{ kind: "all" }} focusWorkerId="w_idle_1" onSelectWorker={noop} />,
+      );
+
+      await waitFor(() => {
+        expect(container.querySelector("aside")).toBeTruthy();
+      });
+
+      expect(queryByRole("button", { name: /^Open run/ })).toBeNull();
+    });
+  });
+});
+
