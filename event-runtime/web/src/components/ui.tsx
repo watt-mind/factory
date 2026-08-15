@@ -824,7 +824,7 @@ export function JumpLink({
   className,
 }: {
   children: ReactNode;
-  onClick?: () => void;
+  onClick?: (e?: React.MouseEvent) => void;
   href?: string;
   title?: string;
   className?: string;
@@ -838,7 +838,7 @@ export function JumpLink({
         title={title}
         onClick={(e) => {
           e.stopPropagation();
-          onClick?.();
+          onClick?.(e);
         }}
       >
         {children}
@@ -852,7 +852,7 @@ export function JumpLink({
       title={title}
       onClick={(e) => {
         e.stopPropagation();
-        onClick?.();
+        onClick?.(e);
       }}
     >
       {children}

@@ -44,6 +44,7 @@ import {
   VerbError,
   copyText,
   copyLink,
+  shortId,
 } from "../components/ui";
 
 const PROPOSAL_TABS = ["open", "history"] as const;
@@ -100,7 +101,6 @@ const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
   columns: [
     { key: "agent", label: "Agent", always: true },
     { key: "status", label: "Status" },
-    { key: "decidedBy", label: "Decided by" },
     { key: "decided", label: "Decided" },
     { key: "origin", label: "Origin" },
     { key: "created", label: "Created" },
@@ -143,7 +143,7 @@ export function Proposals({
   const [tab, setTab] = useState<"open" | "history">("open");
   const query = useQuery({
     queryKey: ["proposals"],
-    queryFn: api.proposals,
+    queryFn: () => api.proposals(),
     refetchInterval: 2000,
   });
   const history = useQuery({
@@ -197,7 +197,7 @@ export function Proposals({
 
   const agentsQuery = useQuery({
     queryKey: ["agents"],
-    queryFn: api.agents,
+    queryFn: () => api.agents(),
     refetchInterval: 5000,
   });
 
@@ -218,7 +218,7 @@ export function Proposals({
   const headerCheckboxRef = useRef<HTMLInputElement>(null);
   const bulkReasonRef = useRef<HTMLInputElement>(null);
 
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: () => api.status(), refetchInterval: 2000 });
   // The expired chip only exists on Open; History rows have no live TTL. Derive
   // the gate once so the row filter and the empty copy can never disagree.
   const expiredFilter = expiredOnly && tab === "open";
@@ -584,6 +584,7 @@ export function Proposals({
                   role="tab"
                   aria-selected={tab === t}
                   onClick={() => selectTab(t)}
+                  title={t}
                   className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"}`}
                 >
                   {t === "open" ? "Open" : "History"}
@@ -592,23 +593,22 @@ export function Proposals({
               );
             })}
           </div>
-          {tab === "open" && (
+          {tab === "open" && expiredCount > 0 && (
             <button
               type="button"
               aria-pressed={expiredOnly}
               onClick={() => setExpiredOnly((v) => !v)}
-              className={`rounded-md px-2 py-1 text-[12px] ${
+              title="Filter to expired open proposals"
+              className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
                 expiredOnly
                   ? "bg-(--surface-3) text-(--text)"
                   : "text-(--text-faint) hover:bg-(--surface-1)"
               }`}
             >
-              expired
-              {expiredCount > 0 && (
-                <span className="ml-1.5 tabular-nums text-(--text-faint)">
-                  {expiredCount}
-                </span>
-              )}
+              Expired
+              <span className="ml-1.5 tabular-nums text-(--text-faint)">
+                {expiredCount}
+              </span>
             </button>
           )}
           <span className="ml-auto">
@@ -684,7 +684,7 @@ export function Proposals({
                       />
                     </td>
                   )}
-                  <td className={tdCls}>
+                  <td className={`${tdCls} max-w-32 truncate`}>
                     {p.agent ? (
                       <JumpLink
                         onClick={() => onJumpAgent(p.agent!)}
@@ -693,11 +693,13 @@ export function Proposals({
                         {p.agent}
                       </JumpLink>
                     ) : (
-                      "—"
+                      <span className="text-(--text-faint)" title="no agent: proposal rejected at planning">
+                        —
+                      </span>
                     )}
                   </td>
                   {show.has("decision") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-28 truncate`}>
                       <StateBadge state={p.decision} hues={DECISION_HUES} />
                       {staleState(p) && (
                         <span className="ml-2" style={{ color: "var(--hue-err)" }}>
@@ -707,44 +709,55 @@ export function Proposals({
                     </td>
                   )}
                   {show.has("ttl") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-20 whitespace-nowrap`}>
                       <Countdown createdAt={p.created_at} ttlSeconds={p.ttl_seconds} />
                     </td>
                   )}
                   {show.has("status") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-28 truncate`}>
                       <StateBadge state={p.status} hues={PROPOSAL_STATUS_HUES} />
                     </td>
                   )}
-                  {show.has("decidedBy") && (
-                    <td className={`${tdCls} text-(--text-dim)`}>{p.decided_by ?? "-"}</td>
-                  )}
                   {show.has("decided") && (
-                    <td className={`${tdCls} text-(--text-faint)`}>
-                      <Ago iso={p.decided_at} now={now} />
+                    <td
+                      className={`max-w-36 truncate ${tdCls} text-(--text-faint)`}
+                      title={
+                        p.decided_at
+                          ? `${new Date(p.decided_at).toLocaleString()}${p.decided_by ? ` · ${p.decided_by}` : ""}`
+                          : undefined
+                      }
+                    >
+                      {p.decided_at ? (
+                        <>
+                          <Ago iso={p.decided_at} now={now} />
+                          {p.decided_by && <span className="text-(--text-faint)"> · {p.decided_by}</span>}
+                        </>
+                      ) : (
+                        "-"
+                      )}
                     </td>
                   )}
                   {show.has("origin") && (
-                    <td className={`mono max-w-40 truncate ${tdCls} text-(--text-faint)`} title={p.eventId ?? undefined}>
+                    <td className={`mono max-w-32 truncate ${tdCls} text-(--text-faint)`} title={p.eventId ?? undefined}>
                       {p.eventId && p.eventSource ? (
                         <JumpLink
                           onClick={() => onJumpEvent(p.eventSource!, p.eventId!)}
-                          title={p.eventId}
+                          title={`Open origin event ${p.eventId}`}
                         >
-                          {p.eventId}
+                          {shortId(p.eventId)}
                         </JumpLink>
                       ) : (
-                        (p.eventId ?? "-")
+                        (p.eventId ? shortId(p.eventId) : "-")
                       )}
                     </td>
                   )}
                   {show.has("created") && (
-                    <td className={`${tdCls} text-(--text-faint)`}>
+                    <td className={`max-w-24 whitespace-nowrap ${tdCls} text-(--text-faint)`}>
                       <Ago iso={p.created_at} now={now} />
                     </td>
                   )}
                   {show.has("reason") && (
-                    <td className={`max-w-64 truncate ${tdCls} text-(--text-dim)`} title={p.reason ?? undefined}>
+                    <td className={`max-w-48 truncate ${tdCls} text-(--text-dim)`} title={p.reason ?? undefined}>
                       {p.reason ?? "-"}
                     </td>
                   )}
@@ -808,7 +821,30 @@ export function Proposals({
       {sel && (
         <DetailPane
           widthClass="w-[460px]"
-          title={<span title={sel.id}>{sel.agent ?? sel.id}</span>}
+          title={
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectProposal(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to proposals list"
+              >
+                Proposals
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
+              </span>
+              <span className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)" aria-current="page">
+                <StateBadge
+                  state={sel.status === "open" ? sel.decision : sel.status}
+                  hues={sel.status === "open" ? DECISION_HUES : PROPOSAL_STATUS_HUES}
+                />
+                <span className="truncate mono" title={sel.id}>
+                  {shortId(sel.id)}
+                </span>
+              </span>
+            </nav>
+          }
           actions={
             isOpen ? (
               <div className="flex items-center gap-1.5">
@@ -872,8 +908,8 @@ export function Proposals({
               k="run"
               v={
                 sel.runId ? (
-                  <JumpLink onClick={() => onRunQueued(sel.runId!)} title="Open run">
-                    {sel.runId}
+                  <JumpLink onClick={() => onRunQueued(sel.runId!)} title={`Open run ${sel.runId}`}>
+                    {shortId(sel.runId)}
                   </JumpLink>
                 ) : null
               }
@@ -887,7 +923,16 @@ export function Proposals({
             <KV k="created" v={<Ago iso={sel.created_at} now={now} />} />
             {sel.decided_at && <KV k="decided at" v={<Ago iso={sel.decided_at} now={now} />} />}
             {sel.decided_by && <KV k="decided by" v={sel.decided_by} />}
-            {sel.reason && <KV k="planner reason" v={sel.reason} />}
+            {sel.reason && (
+              <KV
+                k="planner reason"
+                v={
+                  <span className="break-words whitespace-pre-wrap leading-relaxed text-(--text-dim)">
+                    {sel.reason}
+                  </span>
+                }
+              />
+            )}
           </Section>
 
           {sel.eventId && (
@@ -896,11 +941,11 @@ export function Proposals({
                 k="eventId"
                 v={
                   sel.eventSource ? (
-                    <JumpLink onClick={() => onJumpEvent(sel.eventSource!, sel.eventId!)} title="Open origin event">
-                      {sel.eventId}
+                    <JumpLink onClick={() => onJumpEvent(sel.eventSource!, sel.eventId!)} title={`Open origin event ${sel.eventId}`}>
+                      {shortId(sel.eventId)}
                     </JumpLink>
                   ) : (
-                    sel.eventId
+                    <span title={sel.eventId}>{shortId(sel.eventId)}</span>
                   )
                 }
               />

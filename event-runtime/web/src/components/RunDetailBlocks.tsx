@@ -157,26 +157,25 @@ export function RunFailureBanner({
   return (
     <div
       role="alert"
-      className={`rounded-md border px-3 py-2 ${className}`}
-      style={{ borderColor: hue, background: `color-mix(in oklch, ${hue} 8%, transparent)` }}
+      className={`rounded-md border p-3 ${className}`}
+      style={{ borderColor: hue, background: `color-mix(in oklch, ${hue} 8%, var(--surface-1))` }}
     >
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-[11px] font-medium tracking-wider uppercase" style={{ color: hue }}>
-          {state}
-        </span>
+        <div
+          className="mono text-[12px] leading-relaxed break-words whitespace-pre-wrap font-medium flex-1"
+          style={{ color: hue }}
+        >
+          {reason ?? "No reason recorded on the terminal transition."}
+        </div>
         {reason && (
           <button
             type="button"
             onClick={() => copyText(reason, "failure reason")}
-            className="shrink-0 text-[12px] text-(--text-dim) hover:text-(--accent)"
+            className="shrink-0 cursor-pointer text-[11px] text-(--text-faint) hover:text-(--text) hover:underline"
           >
             Copy reason
           </button>
         )}
-      </div>
-      {/* Full string, wrapping allowed — never truncate the one line that explains the failure. */}
-      <div className="mono mt-1 text-[12px] leading-relaxed break-words whitespace-pre-wrap text-(--text)">
-        {reason ?? "No reason recorded on the terminal transition."}
       </div>
     </div>
   );
@@ -377,12 +376,12 @@ export function RunDetailBlocks({
               origin.eventSource ? (
                 <JumpLink
                   onClick={() => onJumpEvent(origin.eventSource!, origin.eventId!)}
-                  title="Open origin event"
+                  title={origin.eventId}
                 >
-                  {`${origin.eventSource} · ${origin.eventId}`}
+                  {`${origin.eventSource} · ${shortId(origin.eventId)}`}
                 </JumpLink>
               ) : (
-                origin.eventId
+                <span title={origin.eventId}>{shortId(origin.eventId)}</span>
               )
             }
           />
@@ -455,11 +454,15 @@ export function RunDetailBlocks({
             const jumped = prev != null && e.from_state !== prev.to_state;
             const hue = STATE_HUES[e.to_state] ?? "var(--hue-idle)";
             const time = new Date(e.at).toLocaleTimeString([], { hour12: false });
+            const prevTime = prev ? new Date(prev.at).toLocaleTimeString([], { hour12: false }) : null;
+            const isSameTime = prevTime !== null && time === prevTime;
+            const deltaSeconds = prev
+              ? Math.max(0, Math.round((new Date(e.at).getTime() - new Date(prev.at).getTime()) / 1000))
+              : 0;
             return (
               <li key={e.seq} className="flex gap-2.5 py-1">
                 <span className="mono w-[52px] shrink-0 pt-0.5 text-[11px] tabular-nums text-(--text-faint)" title={e.at}>
-                  {/* A burst of transitions shares one second; repeating it reads as noise. */}
-                  {prev && time === new Date(prev.at).toLocaleTimeString([], { hour12: false }) ? "" : time}
+                  {isSameTime ? <span className="opacity-60">+{deltaSeconds}s</span> : time}
                 </span>
                 {/* Rail: a dot per transition, joined to the next one. */}
                 <span className="relative flex w-2 shrink-0 justify-center" aria-hidden="true">
@@ -469,17 +472,13 @@ export function RunDetailBlocks({
                   <span className="relative mt-[7px] size-1.5 shrink-0 rounded-full" style={{ background: hue }} />
                 </span>
                 <span className="flex min-w-0 flex-1 items-start gap-x-2">
-                  {/* Fixed-width badge column, badge's own dot dropped in favor
-                      of the rail's: with it, every actor started at whatever x
-                      its state name happened to end at, and each row carried
-                      two dots for one state (WM-136). */}
                   <span className="flex w-[100px] shrink-0 items-center gap-1">
                     {jumped && (
                       <span className="shrink-0 text-[10px] text-(--text-faint)" title={`from ${e.from_state ?? "·"}`}>
                         {e.from_state ?? "·"}→
                       </span>
                     )}
-                    <StateBadge state={e.to_state} dot={false} />
+                    <StateBadge state={e.to_state} />
                   </span>
                   {/* WM-145: wrap the reason; title includes it, not actor alone. */}
                   <span
