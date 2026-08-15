@@ -135,6 +135,25 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
   });
 
+  test("the inbox migration upgrades an existing v2 database and advances user_version", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    migrateDb(db, { targetVersion: 2 });
+    expect(getSchemaVersion(db)).toBe(2);
+    expect(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inbox_items'").get()).toBeNull();
+    db.close();
+
+    const upgraded = openDb(file);
+    expect(getSchemaVersion(upgraded)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(upgraded.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inbox_items'").get()?.name).toBe("inbox_items");
+    const columns = upgraded.query("PRAGMA table_info(inbox_items)").all().map((row) => row.name);
+    expect(columns).toEqual([
+      "id", "kind", "severity", "title", "body", "refs_json", "source",
+      "created_at", "acked_at", "resolved_at", "resolved_by", "delivery_json",
+    ]);
+    upgraded.close();
+  });
+
   test("a database at a newer user_version refuses to open loudly with a clear message", () => {
     const file = freshFile();
     const db = openDb(file);

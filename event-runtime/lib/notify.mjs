@@ -23,6 +23,8 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
+import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
+import { txImmediate } from "./db.mjs";
 
 export const DEFAULT_NOTIFY_CMD = `python3 ${path.join(homedir(), "Develop", "hdkiller", "scripts", "notify.py")}`;
 
@@ -48,18 +50,24 @@ export function notifyCommand(env = process.env) {
  */
 export function ensureNotifyLog(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS notify_log (
-    kind      TEXT NOT NULL,
-    target    TEXT NOT NULL,
-    message   TEXT NOT NULL,
-    sent_at   TEXT NOT NULL,
-    exit_code INTEGER,
-    error     TEXT,
+    kind          TEXT NOT NULL,
+    target        TEXT NOT NULL,
+    message       TEXT NOT NULL,
+    sent_at       TEXT NOT NULL,
+    exit_code     INTEGER,
+    error         TEXT,
+    inbox_item_id TEXT,
     PRIMARY KEY (kind, target)
   );`);
+  const columns = new Set(db.query("PRAGMA table_info(notify_log)").all().map((row) => row.name));
+  if (!columns.has("inbox_item_id")) db.exec("ALTER TABLE notify_log ADD COLUMN inbox_item_id TEXT;");
 }
 
 const KIND_HUMAN_NEEDED = "human_needed";
-const KIND_PROPOSAL_TTL = "proposal_ttl";
+// Keep the legacy notify_log kind for upgrade-safe dedup while the inbox uses
+// the closed-set name from WM-285.
+const DEDUP_PROPOSAL_TTL = "proposal_ttl";
+const KIND_DECISION_NEEDED = "decision_needed";
 const KIND_PROPOSAL_EXPIRED = "proposal_expired";
 
 function alreadyNotified(db, kind, target) {
@@ -80,7 +88,7 @@ function alreadyNotified(db, kind, target) {
  * and never appears here. Scheduled auto-approved proposals are decided
  * within a tick of creation, so they never age into either threshold.
  *
- * @returns {Array<{ kind: string, target: string, message: string }>}
+ * @returns {Array<{ kind: string, dedupKind?: string, target: string, title: string, refs: object, source: string }>}
  */
 export function pendingNotifications(db, { now = Date.now() } = {}) {
   ensureNotifyLog(db);
@@ -104,7 +112,9 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
     pending.push({
       kind: KIND_HUMAN_NEEDED,
       target,
-      message: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
+      title: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
+      refs: { eventSource: e.source, eventId: e.eventId },
+      source: "serve:notify",
     });
   }
 
@@ -122,15 +132,20 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
         pending.push({
           kind: KIND_PROPOSAL_EXPIRED,
           target: p.id,
-          message: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
+          title: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
+          refs: { proposalId: p.id, eventSource: p.event_source, eventId: p.event_id },
+          source: "serve:notify",
         });
       }
-    } else if (!alreadyNotified(db, KIND_PROPOSAL_TTL, p.id)) {
+    } else if (!alreadyNotified(db, DEDUP_PROPOSAL_TTL, p.id)) {
       const minutesLeft = Math.max(1, Math.ceil((ttlMs - ageMs) / 60_000));
       pending.push({
-        kind: KIND_PROPOSAL_TTL,
+        kind: KIND_DECISION_NEEDED,
+        dedupKind: DEDUP_PROPOSAL_TTL,
         target: p.id,
-        message: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
+        title: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
+        refs: { proposalId: p.id, eventSource: p.event_source, eventId: p.event_id },
+        source: "serve:notify",
       });
     }
   }
@@ -188,8 +203,8 @@ export function sendNotification(command, message, { timeoutMs = NOTIFY_TIMEOUT_
  * far as the tick is concerned; `deliveries` is only there so tests (and
  * curious callers) can await the actual outcomes.
  *
- * With the feature disabled (the default) this returns before touching the
- * database or spawning anything.
+ * The ledger is always populated. `enabled` gates only the Telegram
+ * projection, so turning pushes off never makes human work invisible.
  *
  * @returns {{ sent: Array<{kind, target, message}>, deliveries: Promise<Array> }}
  */
@@ -199,28 +214,43 @@ export function notifyPending(db, {
   command = notifyCommand(),
   log = () => {},
   send = sendNotification,
+  webUrl = process.env.FACTORY_WEB_URL,
 } = {}) {
-  if (!enabled) return { sent: [], deliveries: Promise.resolve([]) };
-
   const pending = pendingNotifications(db, { now });
   const at = new Date(now).toISOString();
   const deliveries = [];
+  const sent = [];
   for (const n of pending) {
-    db.query(`INSERT OR IGNORE INTO notify_log (kind, target, message, sent_at) VALUES (?, ?, ?, ?)`)
-      .run(n.kind, n.target, n.message, at);
-    log(`notify ${n.kind} ${n.target}: ${n.message}`);
+    const dedupKind = n.dedupKind ?? n.kind;
+    const created = txImmediate(db, () => {
+      // Recheck inside the write transaction so two tick triggers cannot both
+      // create a row for one referent.
+      if (alreadyNotified(db, dedupKind, n.target)) return null;
+      const item = createInboxItem(db, n, { now });
+      db.query(
+        `INSERT INTO notify_log (kind, target, message, sent_at, inbox_item_id)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(dedupKind, n.target, n.title, at, item.id);
+      return item;
+    });
+    if (!created) continue;
+    const notification = { ...n, message: n.title, inboxItemId: created.id };
+    log(`inbox ${n.kind} ${n.target}: ${n.title}`);
+    if (!enabled) continue;
+    sent.push(notification);
+    log(`notify ${n.kind} ${n.target}: ${n.title}`);
     deliveries.push(
-      send(command, n.message).then((outcome) => {
+      deliverInboxItem(db, created.id, { command, send, webUrl, now }).then((outcome) => {
         try {
           db.query(`UPDATE notify_log SET exit_code = ?, error = ? WHERE kind = ? AND target = ?`)
-            .run(outcome.exitCode, outcome.error, n.kind, n.target);
+            .run(outcome.exitCode, outcome.error, dedupKind, n.target);
         } catch {
           // db already closed (shutdown mid-delivery) — the log line below is the record
         }
         if (!outcome.ok) log(`notify ${n.kind} ${n.target} failed: ${outcome.error}`);
-        return { ...n, ...outcome };
+        return { ...notification, ...outcome };
       }),
     );
   }
-  return { sent: pending, deliveries: Promise.all(deliveries) };
+  return { sent, deliveries: Promise.all(deliveries) };
 }

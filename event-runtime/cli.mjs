@@ -33,6 +33,7 @@ import { publishOutbox } from "./lib/outbox.mjs";
 import { autoApproveScheduled, emitDueTicks, scheduleView } from "./lib/schedules.mjs";
 import { resolveChains } from "./lib/chain.mjs";
 import { notifyPending } from "./lib/notify.mjs";
+import { reconcileInbox } from "./lib/inbox.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { approveProposal } from "./lib/proposals.mjs";
@@ -78,6 +79,7 @@ usage: bun event-runtime/cli.mjs <command>
   ps [state]                     running event processes/runs (default: RUNNING or LEASED)
   runs [state]                   runs (optionally filtered by state)
   proposals                      open proposals with TTL age
+  inbox                          open items waiting on the human
   agents                         registered agent definitions and event routing
   workers                        worker processes: host, labels, state, heartbeat
   schedule                       recurring loops: cadence, approval, last fire, next due
@@ -133,7 +135,7 @@ async function withClient(fn) {
 // cannot hitch every 1s tick.
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
-export const TICK_SUBSYSTEMS = ["tick emit", "plan", "auto-approve", "notify", "outbox", "GC", "chains"];
+export const TICK_SUBSYSTEMS = ["tick emit", "plan", "auto-approve", "inbox", "notify", "outbox", "GC", "chains"];
 
 /**
  * One serve-loop pass (OPS-412). Each named subsystem is caught on its own
@@ -190,6 +192,12 @@ export async function tick({
   await runStep("announce", () => {
     announceProposals();
     announceTransitions();
+  });
+
+  // Referent state is authoritative: acknowledged or untouched items both
+  // resolve automatically once the proposal/event no longer needs a human.
+  await runStep("inbox", () => {
+    reconcileInbox(db, { now });
   });
 
   // Push channel for states awaiting a human (WM-65): human_needed parks and
@@ -1092,6 +1100,7 @@ export async function status(client) {
   }
   console.log(countLine("events", s.events, ["admitted", "planned", "noop", "human_needed", "dead_lettered"]));
   console.log(countLine("proposals", s.proposals, ["open", "expired"]));
+  if (s.inbox) console.log(countLine("inbox", s.inbox, ["open", "acked"]));
   const states = Object.keys(s.runs.byState);
   console.log(states.length ? countLine("runs", s.runs.byState, states) : `${pad("runs", 11)}none`);
   const spend = s.runs?.spend;
@@ -1176,6 +1185,24 @@ async function proposals(client) {
     );
   }
   console.log(`\napprove with: bun event-runtime/cli.mjs approve <id>`);
+}
+
+async function inbox(client) {
+  const res = await fetch(`http://${client.host}:${client.port}/inbox?status=open`);
+  const body = await res.json();
+  if (!res.ok) {
+    const err = new Error(body?.error ?? `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  if (body.items.length === 0) {
+    console.log("no open inbox items");
+    return;
+  }
+  console.log(`${pad("ID", 44)}${pad("KIND", 18)}${pad("SEVERITY", 11)}${pad("CREATED", 26)}TITLE`);
+  for (const item of body.items) {
+    console.log(`${pad(item.id, 44)}${pad(item.kind, 18)}${pad(item.severity, 11)}${pad(item.createdAt, 26)}${item.title}`);
+  }
 }
 
 async function inspect(client, runId) {
@@ -1447,6 +1474,9 @@ async function main() {
 
     case "proposals":
       return withClient(proposals);
+
+    case "inbox":
+      return withClient(inbox);
 
     case "agents":
       return withClient(agents);

@@ -19,6 +19,14 @@ import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, we
 import { runUsage, usageSpend } from "./db.mjs";
 import { admitEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
+import {
+  ackInboxItem,
+  createInboxItem,
+  deliverInboxItem,
+  inboxCounts,
+  listInboxItems,
+  resolveInboxItem,
+} from "./inbox.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { planEvent, requeueEvent } from "./planner.mjs";
 import { ambiguousOpenProposalRuns, approveProposal, openProposals, rejectProposal } from "./proposals.mjs";
@@ -27,6 +35,7 @@ import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
 import { parseCadence, proposalsPilingUp, scheduleView } from "./schedules.mjs";
+import { notifyCommand, sendNotification } from "./notify.mjs";
 import { listWorkers, loadWorkerPolicy, satisfiesPlacement, stalledWorkers } from "./workers.mjs";
 
 /**
@@ -289,6 +298,7 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
   return {
     events: eventCounts(db),
     proposals: { open: open.length, expired: expiredOpen.length },
+    inbox: inboxCounts(db),
     runs,
     workers: {
       live: fleet.capacity.live,
@@ -724,6 +734,9 @@ export function createApi({
   // Host-side janitor spawn (OPS-301). Tests inject a fake; production
   // shells out to orchestrator/janitor.mjs --json, never --force.
   janitor = spawnFactoryJanitor,
+  inboxSend = sendNotification,
+  inboxCommand = notifyCommand(),
+  inboxWebUrl = process.env.FACTORY_WEB_URL,
 } = {}) {
   const ACTOR = "operator"; // one local operator in the MVP (§14)
   const STORE_STATS_TTL_MS = 10_000;
@@ -829,6 +842,62 @@ export function createApi({
       if (route === "POST /replay") {
         const raw = await readBody(req);
         return admit(db, registry, res, raw, nowMs, onEvent);
+      }
+
+      if (route === "POST /inbox") {
+        const parsed = parseJson(await readBody(req));
+        if (parsed.error) return send(res, 422, { error: parsed.error });
+        try {
+          const item = createInboxItem(db, parsed.value, { now: nowMs });
+          // Item first, projection second: even a failed transport leaves a
+          // queryable row and records the delivery error on it.
+          const delivery = await deliverInboxItem(db, item.id, {
+            command: inboxCommand,
+            send: inboxSend,
+            webUrl: inboxWebUrl,
+            now: nowMs,
+          });
+          return send(res, 201, { item: delivery.item, delivery: {
+            ok: delivery.ok,
+            exitCode: delivery.exitCode,
+            error: delivery.error,
+          } });
+        } catch (err) {
+          return send(res, 422, { error: err.message });
+        }
+      }
+
+      if (route === "GET /inbox") {
+        const status = url.searchParams.get("status") ?? "open";
+        try {
+          return send(res, 200, { items: listInboxItems(db, { status }) });
+        } catch (err) {
+          return send(res, 422, { error: err.message });
+        }
+      }
+
+      const inboxVerb = url.pathname.match(/^\/inbox\/([^/]+)\/(ack|resolve)$/);
+      if (req.method === "POST" && inboxVerb) {
+        const id = decodeURIComponent(inboxVerb[1]);
+        const verb = inboxVerb[2];
+        const raw = await readBody(req);
+        const parsed = raw.length === 0 ? { value: {} } : parseJson(raw);
+        if (parsed.error) return send(res, 422, { error: parsed.error });
+        if (!parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+          return send(res, 422, { error: "body must be an object" });
+        }
+        if (parsed.value.reason !== undefined && typeof parsed.value.reason !== "string") {
+          return send(res, 422, { error: "reason must be a string" });
+        }
+        try {
+          const item = verb === "ack"
+            ? ackInboxItem(db, id, { now: nowMs })
+            : resolveInboxItem(db, id, { now: nowMs, resolvedBy: "operator" });
+          return send(res, 200, { item });
+        } catch (err) {
+          const status = String(err.message).startsWith("unknown inbox item") ? 404 : 409;
+          return send(res, status, { error: err.message });
+        }
       }
 
       if (route === "GET /status") {

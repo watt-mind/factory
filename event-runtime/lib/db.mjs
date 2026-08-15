@@ -178,6 +178,32 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 3,
+    name: "human_inbox_ledger",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS inbox_items (
+          id            TEXT PRIMARY KEY,
+          kind          TEXT NOT NULL,
+          severity      TEXT NOT NULL DEFAULT 'normal',
+          title         TEXT NOT NULL,
+          body          TEXT,
+          refs_json     TEXT NOT NULL DEFAULT '{}',
+          source        TEXT NOT NULL,
+          created_at    TEXT NOT NULL,
+          acked_at      TEXT,
+          resolved_at   TEXT,
+          resolved_by   TEXT,
+          delivery_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_inbox_items_status
+          ON inbox_items (resolved_at, acked_at, created_at);
+        CREATE INDEX IF NOT EXISTS idx_inbox_items_kind
+          ON inbox_items (kind, resolved_at);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1].version : 1;
@@ -194,6 +220,7 @@ export const CORE_TABLES = [
   "counters",
   "attempt_trace",
   "run_usage",
+  "inbox_items",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */

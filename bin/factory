@@ -86,6 +86,7 @@ case "$cmd" in
   tick)         run_bun orchestrator/tick.mjs "$@" ;;
   dispatch)     run_bun tools/dispatch.mjs "$@" ;;
   events)       run_bun event-runtime/cli.mjs "$@" ;;
+  inbox)        run_bun event-runtime/cli.mjs inbox "$@" ;;
   approve)      run_bun event-runtime/cli.mjs approve "$@" ;;
   reject)       run_bun event-runtime/cli.mjs reject "$@" ;;
   inject)       run_bun event-runtime/cli.mjs inject "$@" ;;
@@ -136,9 +137,79 @@ case "$cmd" in
     ;;
   run)          run_sh runners/run-agent.sh "$@" ;;
   notify)
-    # A cwd-independent wrapper for the factory floor's interrupt channel.
-    # FACTORY_NOTIFY_SCRIPT is for tests or a deliberate local override only.
-    exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" "$@"
+    # Durable first, push second (WM-285). A runtime connection failure falls
+    # back to the original direct transport so an offline serve process cannot
+    # swallow the interrupt. HTTP/delivery failures do not double-send.
+    _notify_stdin=0
+    if [[ "${1:-}" == "-" ]]; then
+      _notify_stdin=1
+      # Sentinel keeps command substitution from stripping trailing newlines.
+      _notify_message="$(cat; printf x)"
+      _notify_message="${_notify_message%x}"
+    else
+      _notify_message="$*"
+    fi
+
+    _notify_kind=""
+    if [[ "$_notify_message" =~ ^(BLOCKED|ESCALATED|CI[[:space:]]RED|SMOKE[[:space:]]RED|CIRCUIT[[:space:]]BREAKER|RC[[:space:]]READY)[[:space:]]+.+: ]]; then
+      _notify_kind="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -n "$_notify_kind" ]]; then
+      export FACTORY_INBOX_KIND="$_notify_kind"
+      export FACTORY_INBOX_MESSAGE="$_notify_message"
+      if [[ -n "${FACTORY_RUN_ID:-}" ]]; then
+        export FACTORY_INBOX_SOURCE="agent:${FACTORY_RUN_ID}"
+      else
+        export FACTORY_INBOX_SOURCE="cli"
+      fi
+      set +e
+      bun -e '
+        const message = process.env.FACTORY_INBOX_MESSAGE;
+        const kind = process.env.FACTORY_INBOX_KIND;
+        const prefix = message.slice(kind.length).trimStart().split(":", 1)[0].trim();
+        const refs = {};
+        const issue = prefix.match(/\b[A-Z][A-Z0-9]+-\d+\b/);
+        const pr = prefix.match(/\bPR#?\d+\b/i);
+        const run = prefix.match(/\brun\s+([^\s:]+)/i);
+        if (issue) refs.issue = issue[0];
+        if (pr) refs.pr = pr[0].toUpperCase();
+        if (run) refs.runId = run[1];
+        const repo = prefix.match(/^merge\s+(\S+)/i)
+          || prefix.match(/^(\S+)\s+run\s+/i)
+          || (!issue && !pr ? prefix.match(/^(\S+)/) : null);
+        if (repo) refs.repo = repo[1];
+        try {
+          const response = await fetch(`http://127.0.0.1:${process.env.FACTORY_EVENT_PORT || "7381"}/inbox`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              kind,
+              title: message,
+              refs,
+              source: process.env.FACTORY_INBOX_SOURCE,
+            }),
+          });
+          if (!response.ok) process.exit(10);
+          const body = await response.json();
+          process.exit(body?.delivery?.ok === false ? 12 : 0);
+        } catch {
+          process.exit(11);
+        }
+      ' >/dev/null 2>&1
+      _notify_status=$?
+      set -e
+      if [[ "$_notify_status" -eq 0 ]]; then exit 0; fi
+      if [[ "$_notify_status" -ne 11 ]]; then exit "$_notify_status"; fi
+    fi
+
+    # Unreachable runtime (or an unstructured legacy message): preserve the
+    # old argv/stdin transport exactly.
+    if [[ "$_notify_stdin" -eq 1 ]]; then
+      printf '%s' "$_notify_message" | exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" -
+    else
+      exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" "$@"
+    fi
     ;;
   security)
     # Local security harness (OPS-165): Gitleaks + Semgrep + Actionlint on the
@@ -186,6 +257,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   tick          orchestrator/tick.mjs
   dispatch      tools/dispatch.mjs (swift event task runner: triage, status, janitor)
   events        event-runtime/cli.mjs (status, ps, runs, proposals, approve, reject, inject, requeue)
+  inbox         list open human inbox items
   approve       event-runtime/cli.mjs approve <proposal-id>
   reject        event-runtime/cli.mjs reject <proposal-id> "<reason>"
   inject        event-runtime/cli.mjs inject <envelope.json|->
@@ -196,7 +268,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   tail          tail live daemon logs (~/.factory/run/{serve,worker,web}.log)
   demo          provision & run isolated seeded demo env (use --down to stop)
   run           runners/run-agent.sh
-  notify        ~/Develop/hdkiller/scripts/notify.py (human interrupt channel)
+  notify        durable human inbox + notify.py projection (direct fallback when serve is offline)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
   emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
 
