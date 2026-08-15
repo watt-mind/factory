@@ -15,16 +15,11 @@ import { keyGuard, THEMES, useHashRoute, useTheme, type Theme } from "./hooks";
 import { goPrefixActive } from "./goSequence";
 import type { EventFocus } from "./types";
 import { CommandPalette, useGoSequences, type PaletteAction } from "./components/CommandPalette";
-import { InjectDialog } from "./components/InjectDialog";
-import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ToastContainer, copyLink, copyText } from "./components/ui";
-import { Agents } from "./views/Agents";
 import type { ArtifactFilters } from "./views/Artifacts";
 import { Events } from "./views/Events";
 import { Overview } from "./views/Overview";
-import { RunFull } from "./views/RunFull";
 import { Runs } from "./views/Runs";
-import { Workers } from "./views/Workers";
 import { NAV, type NavKey } from "./nav";
 
 type NavBadge = {
@@ -39,6 +34,15 @@ const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph
 const Projects = lazy(() => import("./views/Projects").then((m) => ({ default: m.Projects })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
 const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default: m.Proposals })));
+const Agents = lazy(() => import("./views/Agents").then((m) => ({ default: m.Agents })));
+const RunFull = lazy(() => import("./views/RunFull").then((m) => ({ default: m.RunFull })));
+const Workers = lazy(() => import("./views/Workers").then((m) => ({ default: m.Workers })));
+const ShortcutsDialog = lazy(() =>
+  import("./components/ShortcutsDialog").then((m) => ({ default: m.ShortcutsDialog })),
+);
+const InjectDialog = lazy(() =>
+  import("./components/InjectDialog").then((m) => ({ default: m.InjectDialog })),
+);
 
 export function App() {
   const [route, navigateRaw] = useHashRoute();
@@ -516,13 +520,15 @@ export function App() {
               />
             </Suspense>
           ) : view === "run" && fullRunId ? (
-            <RunFull
-              runId={fullRunId}
-              connected={connected}
-              onBack={() => navigate(hashPath("runs", fullRunId))}
-              onJumpAgent={jumpToAgent}
-              onJumpEvent={jumpToEvent}
-            />
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading run…</div>}>
+              <RunFull
+                runId={fullRunId}
+                connected={connected}
+                onBack={() => navigate(hashPath("runs", fullRunId))}
+                onJumpAgent={jumpToAgent}
+                onJumpEvent={jumpToEvent}
+              />
+            </Suspense>
           ) : view === "runs" || view === "run" ? (
             <Runs
               connected={connected}
@@ -555,11 +561,13 @@ export function App() {
               />
             </Suspense>
           ) : view === "agents" ? (
-            <Agents
-              context={context}
-              focusAgentRef={focusAgentRef}
-              onSelectAgent={(ref) => navigate(hashPath("agents", ref))}
-            />
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading agents…</div>}>
+              <Agents
+                context={context}
+                focusAgentRef={focusAgentRef}
+                onSelectAgent={(ref) => navigate(hashPath("agents", ref))}
+              />
+            </Suspense>
           ) : view === "schedules" ? (
             <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading schedules…</div>}>
               <Schedules
@@ -575,11 +583,13 @@ export function App() {
               />
             </Suspense>
           ) : view === "workers" ? (
-            <Workers
-              context={context}
-              focusWorkerId={focusWorkerId}
-              onSelectWorker={(id) => navigate(hashPath("workers", id))}
-            />
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading workers…</div>}>
+              <Workers
+                context={context}
+                focusWorkerId={focusWorkerId}
+                onSelectWorker={(id) => navigate(hashPath("workers", id))}
+              />
+            </Suspense>
           ) : view === "artifacts" ? (
             <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading artifacts…</div>}>
               <Artifacts
@@ -695,20 +705,26 @@ export function App() {
         onJumpProject={jumpToProject}
       />
       {injectOpen && (
-        <InjectDialog
-          initialEnvelope={injectSeed}
-          onClose={() => {
-            setInjectOpen(false);
-            setInjectSeed(undefined);
-          }}
-          onAdmitted={(source, eventId) => {
-            setInjectOpen(false);
-            setInjectSeed(undefined);
-            jumpToEvent(source, eventId);
-          }}
-        />
+        <Suspense fallback={null}>
+          <InjectDialog
+            initialEnvelope={injectSeed}
+            onClose={() => {
+              setInjectOpen(false);
+              setInjectSeed(undefined);
+            }}
+            onAdmitted={(source, eventId) => {
+              setInjectOpen(false);
+              setInjectSeed(undefined);
+              jumpToEvent(source, eventId);
+            }}
+          />
+        </Suspense>
       )}
-      {helpOpen && <ShortcutsDialog onClose={() => setHelpOpen(false)} />}
+      {helpOpen && (
+        <Suspense fallback={null}>
+          <ShortcutsDialog onClose={() => setHelpOpen(false)} />
+        </Suspense>
+      )}
       <GoPrefixHint armed={goArmed} currentView={view} />
       <ToastContainer />
     </div>
