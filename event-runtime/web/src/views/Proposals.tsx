@@ -186,6 +186,15 @@ export function Proposals({
     () => rows.filter((p) => p.id === focusProposalId || matchesRepo(p.repos, context)),
     [rows, context, focusProposalId],
   );
+  const hiddenOpenRepoCount = useMemo(
+    () =>
+      context.kind === "repo"
+        ? (query.data?.proposals ?? []).filter(
+            (p) => p.status === "open" && p.id !== focusProposalId && !matchesRepo(p.repos, context),
+          ).length
+        : 0,
+    [context, query.data, focusProposalId],
+  );
 
   // Origin event type, resolved from the shared events cache (cheap: same
   // query key as the Events view's "all" tab).
@@ -619,6 +628,8 @@ export function Proposals({
         {context.kind === "repo" && (
           <p className="mb-3 text-[11px] text-(--text-faint)">
             {`Showing proposals that name ${context.name}.`}
+            {hiddenOpenRepoCount > 0 &&
+              ` ${hiddenOpenRepoCount} open proposal${hiddenOpenRepoCount === 1 ? "" : "s"} ${hiddenOpenRepoCount === 1 ? "does" : "do"} not name this repo and ${hiddenOpenRepoCount === 1 ? "is" : "are"} hidden.`}
           </p>
         )}
 

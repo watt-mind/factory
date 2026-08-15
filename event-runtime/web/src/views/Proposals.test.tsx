@@ -773,6 +773,30 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     expect(r.getByText("Showing proposals that name repo-test.")).toBeTruthy();
   });
 
+  test("repo caption counts open proposals hidden because they do not name the repo", async () => {
+    const matching = stubProposal("prop_matching", "open", {
+      repos: ["repo-test"],
+      agent: "triage-scan",
+    });
+    const unscoped = stubProposal("prop_unscoped", "open", {
+      repos: [],
+      agent: "human-needed",
+    });
+    const otherRepo = stubProposal("prop_other", "open", {
+      repos: ["another-repo"],
+      agent: "review-scan",
+    });
+    api.proposals = async () => ({ proposals: [matching, unscoped, otherRepo] });
+
+    const r = renderProposals({ context: { kind: "repo", name: "repo-test" } });
+    await waitFor(() => expect(r.getByText("triage-scan")).toBeTruthy());
+    expect(r.queryByText("human-needed")).toBeNull();
+    expect(r.queryByText("review-scan")).toBeNull();
+    expect(
+      r.getByText("Showing proposals that name repo-test. 2 open proposals do not name this repo and are hidden."),
+    ).toBeTruthy();
+  });
+
   test("origin column title is the full eventId; reason column title is p.reason", async () => {
     const eventId = "evt_abc123_full_event_id";
     const reason = "Needs a very long planner reason for the truncated cell";
