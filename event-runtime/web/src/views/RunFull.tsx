@@ -86,18 +86,41 @@ export function RunFull({
     },
   });
 
-  // Same verbs as the panel: Esc back to the list, x cancel, c copy id.
+  // Verbs: Esc back to list, x cancel, c copy id, c i / c c copy CLI inspect command, c l copy link.
   useEffect(() => {
+    let pendingC = 0;
     function onKey(e: KeyboardEvent) {
       if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      const now = Date.now();
       if (e.key === "Escape") {
         onBack();
-      } else if (e.key === "x" && d && connected && isCancellable(d.run.state)) {
+        return;
+      }
+      if (e.key === "x" && d && connected && isCancellable(d.run.state)) {
         e.preventDefault();
         setConfirm("cancel");
-      } else if (e.key === "c") {
+        return;
+      }
+      if (pendingC && now - pendingC < 800) {
+        if (e.key === "i" || e.key === "c") {
+          e.preventDefault();
+          pendingC = 0;
+          copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command");
+          return;
+        }
+        if (e.key === "l") {
+          e.preventDefault();
+          pendingC = 0;
+          copyLink();
+          return;
+        }
+      }
+      if (e.key === "c") {
         e.preventDefault();
+        pendingC = now;
         copyText(runId, "run id");
+      } else {
+        pendingC = 0;
       }
     }
     window.addEventListener("keydown", onKey);
@@ -109,7 +132,12 @@ export function RunFull({
     const copy = [
       { label: "Back to Runs", hint: "Esc", run: onBack },
       { label: `Copy ${runId}`, hint: "c", run: () => copyText(runId, "run id") },
-      { label: "Copy link to this run", run: copyLink },
+      {
+        label: "Copy CLI inspect command",
+        hint: "c i",
+        run: () => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command"),
+      },
+      { label: "Copy link to this run", hint: "c l", run: copyLink },
     ];
     if (!d || !connected) {
       setContextActions(copy);
@@ -140,7 +168,10 @@ export function RunFull({
             <ol className="flex min-w-0 flex-wrap items-center gap-2 list-none p-0 m-0 text-[13px]">
               <li className="shrink-0">
                 <Button onClick={onBack}>
-                  ← Runs
+                  <span>← Runs</span>
+                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+                    Esc
+                  </span>
                 </Button>
               </li>
               <li aria-hidden="true" className="text-(--text-faint) shrink-0">
@@ -169,11 +200,24 @@ export function RunFull({
           )}
         </div>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          <Button onClick={() => copyText(runId, "run id")}>Copy id</Button>
-          <Button onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command")}>
-            Copy CLI
+          <Button onClick={() => copyText(runId, "run id")}>
+            <span>Copy id</span>
+            <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+              c
+            </span>
           </Button>
-          <Button onClick={copyLink}>Copy link</Button>
+          <Button onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command")}>
+            <span>Copy CLI</span>
+            <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+              c i
+            </span>
+          </Button>
+          <Button onClick={copyLink}>
+            <span>Copy link</span>
+            <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+              c l
+            </span>
+          </Button>
         </span>
       </header>
 

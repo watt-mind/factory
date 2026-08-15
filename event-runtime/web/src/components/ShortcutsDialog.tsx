@@ -27,6 +27,19 @@ const CONTEXT_STRIP: { keys: string; does: string }[] = [
   { keys: "Delete / ⌫", does: "close focused repo tab (focus returns to active tab)" },
 ];
 
+const TRACE_KEYS: { keys: string; does: string }[] = [
+  { keys: "1–5", does: "switch trace kind (All, Tools, Reasoning, Errors, Usage)" },
+  { keys: "[ ]", does: "previous / next trace filter tab (on run view)" },
+  { keys: "/", does: "focus trace search" },
+  { keys: "e", does: "toggle expand / collapse trace details" },
+  { keys: "l", does: "toggle follow live trace" },
+  { keys: "G", does: "jump to latest trace entry" },
+  { keys: ".", does: "jump to next error entry" },
+  { keys: "c", does: "copy run id" },
+  { keys: "c i", does: "copy CLI inspect command" },
+  { keys: "c l", does: "copy link to run" },
+];
+
 /** Keyboard cheatsheet (Linear's `?`). Spec §5 is the contract; this is the reminder. */
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   return (
@@ -72,6 +85,23 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
           </div>
           <div>
             {CONTEXT_STRIP.map((r) => (
+              <div
+                key={`${r.keys}::${r.does}`}
+                className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 sm:gap-4 border-b border-(--border) py-1.5 last:border-0"
+              >
+                <span className="mono text-(--text)">{r.keys}</span>
+                <span className="text-left sm:text-right text-(--text-faint)">{r.does}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section aria-label="Run & Trace">
+          <div className="mb-2 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
+            Run & Trace
+          </div>
+          <div>
+            {TRACE_KEYS.map((r) => (
               <div
                 key={`${r.keys}::${r.does}`}
                 className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 sm:gap-4 border-b border-(--border) py-1.5 last:border-0"
