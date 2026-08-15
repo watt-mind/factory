@@ -6,32 +6,7 @@ import { GO_CHORD_MS, goPrefix, goSequence } from "../goSequence";
 import { keyGuard, modal } from "../hooks";
 import { useContextActions } from "../palette";
 import { health } from "../workerHealth";
-
-const FOCUSABLE =
-  "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
-
-function tabCycle(root: HTMLElement, e: KeyboardEvent) {
-  const nodes = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
-    (el) => el.offsetParent !== null || el === document.activeElement,
-  );
-  if (nodes.length === 0) {
-    e.preventDefault();
-    root.focus();
-    return;
-  }
-  const first = nodes[0];
-  const last = nodes[nodes.length - 1];
-  const active = document.activeElement;
-  if (e.shiftKey) {
-    if (active === first || !root.contains(active)) {
-      e.preventDefault();
-      last.focus();
-    }
-  } else if (active === last || !root.contains(active)) {
-    e.preventDefault();
-    first.focus();
-  }
-}
+import { tabCycle } from "./ui";
 
 export interface PaletteAction {
   label: string;
