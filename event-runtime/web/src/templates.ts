@@ -96,9 +96,18 @@ export function triggerId(nowMs: number, suffix = ""): string {
   return `web-${stamp}${suffix}`;
 }
 
-export function buildTemplates(view: AgentsView, nowMs: number): TriggerTemplate[] {
-  const byRef = new Map(view.agents.map((a) => [a.ref, a]));
-  return (view.eventTypes ?? []).map((route) => {
+export function buildTemplates(view: unknown, nowMs: number): TriggerTemplate[] {
+  if (!view || typeof view !== "object" || Array.isArray(view)) return [];
+  const agents = Array.isArray((view as Partial<AgentsView>).agents)
+    ? (view as Partial<AgentsView>).agents!
+    : null;
+  const eventTypes = Array.isArray((view as Partial<AgentsView>).eventTypes)
+    ? (view as Partial<AgentsView>).eventTypes!
+    : null;
+  if (!agents || !eventTypes) return [];
+
+  const byRef = new Map(agents.map((a) => [a.ref, a]));
+  return eventTypes.map((route) => {
     const def = byRef.get(route.agent);
     const id = triggerId(nowMs);
     return {

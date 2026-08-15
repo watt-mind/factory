@@ -271,6 +271,15 @@ export function InjectDialog({
 }) {
   const queryClient = useQueryClient();
   const registry = useQuery({ queryKey: ["agents"], queryFn: api.agents });
+  const registryView = useMemo(
+    () =>
+      isPlainObject(registry.data) &&
+      Array.isArray(registry.data.agents) &&
+      Array.isArray(registry.data.eventTypes)
+        ? registry.data
+        : null,
+    [registry.data],
+  );
   const reposQ = useQuery({ queryKey: ["repos"], queryFn: api.repos });
   const repoItems = reposQ.data?.repos ?? [];
 
@@ -279,10 +288,7 @@ export function InjectDialog({
   const [recentEvents, setRecentEvents] = useState<RecentAdmittedEvent[]>(() => loadRecentEvents());
   const submittedRef = useRef(false);
 
-  const templates = useMemo(
-    () => (registry.data ? buildTemplates(registry.data, openedAt) : []),
-    [registry.data, openedAt],
-  );
+  const templates = useMemo(() => buildTemplates(registryView, openedAt), [registryView, openedAt]);
 
   const [search, setSearch] = useState("");
   const lastTemplateRef = useRef(false);
@@ -390,9 +396,9 @@ export function InjectDialog({
 
   /** The registered input schema for an event type, or null. */
   function schemaFor(type: string): Record<string, unknown> | null {
-    const route = registry.data?.eventTypes.find((r) => r.type === type);
+    const route = registryView?.eventTypes.find((r) => r.type === type);
     if (!route) return null;
-    const agent = registry.data?.agents.find((a) => a.ref === route.agent);
+    const agent = registryView.agents.find((a) => a.ref === route.agent);
     const s = agent?.inputSchema;
     return isPlainObject(s) ? s : null;
   }
@@ -535,8 +541,8 @@ export function InjectDialog({
 
   const formSchema = useMemo(
     () => (typeof formBase.type === "string" ? schemaFor(formBase.type) : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- schemaFor reads registry.data
-    [formBase, registry.data],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- schemaFor reads registryView
+    [formBase, registryView],
   );
   const formFields = useMemo(() => schemaFields(formSchema) ?? [], [formSchema]);
   const requiredFields = formFields.filter((f) => f.required);
@@ -639,8 +645,8 @@ export function InjectDialog({
       };
     }
     return { disabled: false, reason: null };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- schemaFor reads registry.data
-  }, [checkedId, text, registry.data]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- schemaFor reads registryView
+  }, [checkedId, text, registryView]);
 
   function selectTab(next: string) {
     if (next === tab) return;
@@ -733,7 +739,7 @@ export function InjectDialog({
       setConfirming(false);
       return;
     }
-    const registered = registry.data?.eventTypes.some((r) => r.type === envelope.type) ?? true;
+    const registered = registryView?.eventTypes.some((r) => r.type === envelope.type) ?? true;
     if (!registered && !unregisteredAck) {
       setClientError(
         `"${envelope.type}" is not a registered event type — it will be admitted, but planning will park it as human_needed. Confirm inject to proceed.`,
@@ -802,8 +808,8 @@ export function InjectDialog({
     const schema = schemaFor(env.type);
     if (!schema) return [];
     return validate(schema, env.payload ?? {}).errors;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- schemaFor reads registry.data
-  }, [tab, text, registry.data]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- schemaFor reads registryView
+  }, [tab, text, registryView]);
 
   // ---------------------------------------------------------------------------
   // Form field rendering
@@ -1027,10 +1033,10 @@ export function InjectDialog({
             />
           </div>
 
-          {registry.isPending && !registry.data && (
+          {registry.isPending && !registryView && (
             <div className="py-2 text-[12px] text-(--text-faint)">Loading templates…</div>
           )}
-          {registry.isError && !registry.data && (
+          {registry.isError && !registryView && (
             <div className="py-2 text-[12px] text-(--text-faint)">
               Cannot reach control API — templates will appear when it is up.
             </div>

@@ -210,6 +210,13 @@ describe("buildTemplates", () => {
     expect(t.envelope.payload).toEqual({});
     expect(t.summary).toBe("no required payload fields");
   });
+
+  test.each([
+    ["an array", []],
+    ["an object missing agents", { eventTypes: view.eventTypes }],
+  ])("returns no templates when the registry response is %s", (_label, response) => {
+    expect(buildTemplates(response as unknown as AgentsView, NOW)).toEqual([]);
+  });
 });
 
 describe("retriggerEnvelope", () => {
