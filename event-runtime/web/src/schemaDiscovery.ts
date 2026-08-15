@@ -9,6 +9,26 @@ export interface DiscoveredField {
   occurrenceCount: number;
 }
 
+export interface DiscoveredFieldGroup {
+  root: string;
+  fields: DiscoveredField[];
+}
+
+/** Preserve discovery relevance order while collecting fields under their root object. */
+export function groupDiscoveredFields(fields: DiscoveredField[]): DiscoveredFieldGroup[] {
+  const groups = new Map<string, DiscoveredField[]>();
+
+  for (const field of fields) {
+    const separator = field.path.indexOf(".");
+    const root = separator === -1 ? "top-level" : field.path.slice(0, separator);
+    const group = groups.get(root);
+    if (group) group.push(field);
+    else groups.set(root, [field]);
+  }
+
+  return Array.from(groups, ([root, groupedFields]) => ({ root, fields: groupedFields }));
+}
+
 const MAX_SCAN_ROWS = 60;
 const MAX_SCAN_DEPTH = 3;
 

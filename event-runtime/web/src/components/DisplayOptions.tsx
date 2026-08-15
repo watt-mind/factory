@@ -6,7 +6,16 @@
  * via `useDisplayOptions` and passes it down, so the panel never touches
  * storage and the table never re-derives what the panel showed.
  */
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { keyGuard, modal } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
@@ -19,7 +28,11 @@ import {
   type DisplayConfig,
   type DisplayState,
 } from "../displayOptions";
-import { discoverPayloadFields } from "../schemaDiscovery";
+import {
+  discoverPayloadFields,
+  groupDiscoveredFields,
+  type DiscoveredField,
+} from "../schemaDiscovery";
 
 function OptionRow({ label, htmlFor, children }: { label: string; htmlFor?: string; children: ReactNode }) {
   return (
@@ -143,6 +156,179 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
 }
 
+/** SuggestInput interaction model with richer, non-selectable discovery groups. */
+function DiscoveredFieldSuggestInput({
+  value,
+  fields,
+  placeholder,
+  onChange,
+  onAdd,
+}: {
+  value: string;
+  fields: DiscoveredField[];
+  placeholder: string;
+  onChange: (value: string) => void;
+  onAdd: (path: string) => void;
+}) {
+  const listId = useId();
+  const listRef = useRef<HTMLUListElement>(null);
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+
+  const filteredFields = useMemo(() => {
+    const query = value.trim().toLowerCase();
+    if (!query) return fields;
+    return fields.filter((field) => field.path.toLowerCase().includes(query));
+  }, [fields, value]);
+  const groups = useMemo(() => groupDiscoveredFields(filteredFields), [filteredFields]);
+  const selectableFields = useMemo(() => groups.flatMap((group) => group.fields), [groups]);
+  const indexedGroups = useMemo(() => {
+    let index = 0;
+    return groups.map((group) => ({
+      ...group,
+      fields: group.fields.map((field) => ({ field, index: index++ })),
+    }));
+  }, [groups]);
+  const show = open && selectableFields.length > 0;
+  const showNotSeenHint = value.trim().length > 0 && selectableFields.length === 0;
+
+  useEffect(() => {
+    setHighlight(0);
+  }, [selectableFields]);
+
+  useEffect(() => {
+    if (!show || !listRef.current) return;
+    listRef.current.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [highlight, show]);
+
+  const pick = (field: DiscoveredField) => {
+    onAdd(field.path);
+    setOpen(false);
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown" && selectableFields.length > 0) {
+      event.preventDefault();
+      setOpen(true);
+      if (show) setHighlight((index) => (index + 1) % selectableFields.length);
+      return;
+    }
+    if (event.key === "ArrowUp" && selectableFields.length > 0) {
+      event.preventDefault();
+      setOpen(true);
+      setHighlight((index) => (show ? (index - 1 + selectableFields.length) % selectableFields.length : selectableFields.length - 1));
+      return;
+    }
+    if (event.key === "Enter") {
+      const selected = show ? selectableFields[highlight] : undefined;
+      if (!selected && !value.trim()) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (selected) pick(selected);
+      else {
+        onAdd(value);
+        setOpen(false);
+      }
+      return;
+    }
+    if (event.key === "Escape" && show) {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          role="combobox"
+          aria-label="Add custom property path"
+          aria-autocomplete="list"
+          aria-expanded={show}
+          aria-controls={show ? listId : undefined}
+          aria-activedescendant={show && selectableFields[highlight] ? `${listId}-option-${highlight}` : undefined}
+          value={value}
+          placeholder={placeholder}
+          spellCheck={false}
+          onChange={(event) => {
+            onChange(event.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setOpen(false)}
+          onKeyDown={onKeyDown}
+          className="mono min-w-0 flex-1 rounded-md border border-(--border) bg-(--surface-0) px-2 py-1 text-[11px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--border-strong)"
+        />
+        <button
+          type="button"
+          disabled={!value.trim()}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onAdd(value);
+            setOpen(false);
+          }}
+          className="cursor-pointer rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-[11px] font-medium text-(--text-dim) hover:bg-(--surface-3) hover:text-(--text) disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          + Add
+        </button>
+      </div>
+
+      {show && (
+        <ul
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label="Discovered property paths"
+          className="mt-1 max-h-60 w-full overflow-auto rounded-md border border-(--border-strong) bg-(--surface-1) p-1 text-[11px] shadow-xl outline-none"
+        >
+          {indexedGroups.map((group) => (
+            <li key={group.root} role="presentation">
+              <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-medium tracking-wide text-(--text-faint) uppercase">
+                {group.root}
+              </div>
+              <ul role="group" aria-label={`${group.root} fields`}>
+                {group.fields.map(({ field, index }) => (
+                  <li
+                    key={field.path}
+                    id={`${listId}-option-${index}`}
+                    role="option"
+                    aria-selected={index === highlight}
+                    aria-label={`${field.path}, ${field.sampleValue}, ${field.occurrenceCount} ${field.occurrenceCount === 1 ? "row" : "rows"}`}
+                    title={`${field.path} — sample: ${field.sampleValue} — ${field.occurrenceCount} rows`}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      pick(field);
+                    }}
+                    className={`cursor-pointer rounded px-2 py-1 select-none ${
+                      index === highlight
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+                    }`}
+                  >
+                    <div className="mono truncate">{field.path}</div>
+                    <div className="flex items-center justify-between gap-2 text-[10px] text-(--text-faint)">
+                      <span className="truncate">{field.sampleValue}</span>
+                      <span className="shrink-0">{field.occurrenceCount} {field.occurrenceCount === 1 ? "row" : "rows"}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {showNotSeenHint && (
+        <div role="status" className="mt-1 text-[10px] text-(--text-faint)">
+          not seen in loaded items; the column will show — until a row has it
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DisplayOptions<T>({
   config,
   state,
@@ -187,6 +373,8 @@ export function DisplayOptions<T>({
     modal.depth += 1;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      const openSuggestInput = rootRef.current?.querySelector('[aria-label="Add custom property path"][aria-expanded="true"]');
+      if (openSuggestInput && e.target === openSuggestInput) return;
       e.stopPropagation();
       setOpen(false);
       triggerRef.current?.focus();
@@ -221,6 +409,14 @@ export function DisplayOptions<T>({
     if (!open || !rows?.length) return [];
     return discoverPayloadFields(rows, state.customColumns);
   }, [open, rows, state.customColumns]);
+
+  const discoveredPlaceholder = useMemo(() => {
+    const examples = groupDiscoveredFields(discoveredFields)
+      .slice(0, 2)
+      .map((group) => group.fields[0]?.path)
+      .filter(Boolean);
+    return examples.length > 0 ? `e.g. ${examples.join(", ")}` : "Enter a property path";
+  }, [discoveredFields]);
 
   const handleAddCustom = (pathToAdd?: string) => {
     const target = (pathToAdd ?? customInput).trim();
@@ -418,52 +614,13 @@ export function DisplayOptions<T>({
             </div>
           )}
 
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const formEl = e.currentTarget;
-              const inputEl = formEl.elements.namedItem("property") as HTMLInputElement | null;
-              const val = inputEl?.value || customInput;
-              handleAddCustom(val);
-            }}
-            className="flex items-center gap-1.5"
-          >
-            <input
-              name="property"
-              type="text"
-              value={customInput}
-              placeholder="e.g. payload.repo, spec.input.model"
-              aria-label="Add custom property path"
-              onChange={(e) => setCustomInput(e.target.value)}
-              className="flex-1 rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-[11px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
-            />
-            <button
-              type="submit"
-              disabled={!customInput.trim()}
-              className="cursor-pointer rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-[11px] font-medium text-(--text-dim) hover:bg-(--surface-3) hover:text-(--text) disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              + Add
-            </button>
-          </form>
-
-          {discoveredFields.length > 0 && (
-            <div className="mt-2.5">
-              <div className="text-[10px] text-(--text-faint)">Discovered in loaded items:</div>
-              <div className="mt-1 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
-                {discoveredFields.slice(0, 10).map((field) => (
-                  <button
-                    key={field.path}
-                    type="button"
-                    title={`Value sample: ${field.sampleValue}`}
-                    onClick={() => handleAddCustom(field.path)}
-                    className="cursor-pointer rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[10px] text-(--text-dim) hover:border-(--border-strong) hover:bg-(--surface-3) hover:text-(--text)"
-                  >
-                    + {field.path} <span className="text-(--text-faint)">({field.occurrenceCount})</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+          <DiscoveredFieldSuggestInput
+            value={customInput}
+            fields={discoveredFields}
+            placeholder={discoveredPlaceholder}
+            onChange={setCustomInput}
+            onAdd={handleAddCustom}
+          />
 
           {(onExport || customized) && (
             <div className="mt-3 flex items-center justify-between border-t border-(--border) pt-2">
