@@ -11,6 +11,7 @@ import {
   Ago,
   Button,
   Disclosure,
+  Dialog,
   EVENT_STATUS_HUES,
   STATE_HUES,
   humanSize,
@@ -508,6 +509,8 @@ export function Overview({
   const now = useNow();
   const queryClient = useQueryClient();
   const pollRequeue = useRequeuePoll(onJumpProposal);
+  const [rejectingProposalId, setRejectingProposalId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const status = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
   const outbox = useQuery({
     queryKey: ["outbox"],
@@ -543,14 +546,32 @@ export function Overview({
     onError: () => queryClient.invalidateQueries(),
   });
 
-  const dismiss = useMutation({
-    mutationFn: (proposalId: string) => api.reject(proposalId),
-    onSuccess: (_, proposalId) => {
+  const reject = useMutation({
+    mutationFn: ({ proposalId, why }: { proposalId: string; why: string }) => {
+      const trimmed = why.trim();
+      if (!trimmed) return Promise.reject(new Error("Rejection reason required"));
+      return api.reject(proposalId, trimmed);
+    },
+    onSuccess: (_, { proposalId }) => {
       queryClient.invalidateQueries();
-      notify(`Dismissed proposal ${proposalId}`, "ok");
+      notify(`Rejected proposal ${proposalId}`, "info");
+      setRejectingProposalId(null);
+      setRejectReason("");
     },
     onError: () => queryClient.invalidateQueries(),
   });
+
+  const closeReject = () => {
+    if (reject.isPending) return;
+    reject.reset();
+    setRejectingProposalId(null);
+    setRejectReason("");
+  };
+
+  const submitReject = () => {
+    if (!rejectingProposalId || !rejectReason.trim() || reject.isPending || !connected) return;
+    reject.mutate({ proposalId: rejectingProposalId, why: rejectReason });
+  };
 
   const s = status.data;
   const anomalies = s?.anomalies;
@@ -793,10 +814,14 @@ export function Overview({
                   </button>
                   {a.dismissProposalId && (
                     <Button
-                      disabled={!connected || dismiss.isPending}
-                      onClick={() => dismiss.mutate(a.dismissProposalId!)}
+                      disabled={!connected || reject.isPending}
+                      onClick={() => {
+                        reject.reset();
+                        setRejectingProposalId(a.dismissProposalId!);
+                        setRejectReason("");
+                      }}
                     >
-                      Dismiss
+                      Reject…
                     </Button>
                   )}
                   {a.requeue && (
@@ -1221,6 +1246,48 @@ export function Overview({
           </div>
         </Section>
       </div>
+
+      {rejectingProposalId && (
+        <Dialog title="Reject expired proposal?" onClose={closeReject}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitReject();
+            }}
+          >
+            <p className="mb-3 text-[12px] text-(--text-dim)">
+              Rejections are audit records. Explain why this proposal should not run.
+            </p>
+            <label
+              htmlFor="overview-rejection-reason"
+              className="mb-1 block text-[11px] font-medium text-(--text-faint)"
+            >
+              Rejection reason
+            </label>
+            <input
+              id="overview-rejection-reason"
+              autoFocus
+              value={rejectReason}
+              onChange={(event) => setRejectReason(event.target.value)}
+              placeholder="Reason (required — rejections are audit records)"
+              className="w-full rounded-md border border-(--border-strong) bg-(--surface-1) px-2.5 py-1.5 text-(--text) outline-none focus:border-(--accent)"
+            />
+            <VerbError error={reject.error} />
+            <div className="mt-4 flex justify-end gap-2">
+              <Button disabled={reject.isPending} onClick={closeReject}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                disabled={!rejectReason.trim() || reject.isPending || !connected}
+                onClick={submitReject}
+              >
+                {reject.isPending ? "Rejecting…" : "Reject proposal"}
+              </Button>
+            </div>
+          </form>
+        </Dialog>
+      )}
     </div>
   );
 }

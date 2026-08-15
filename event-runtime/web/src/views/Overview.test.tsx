@@ -1,12 +1,13 @@
 import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Overview, groupJournalEntries, buildAnomalyRows } from "./Overview";
 import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
+import { changeInput } from "../test-render";
 import type { AdmittedEvent, JournalEntry, Proposal, RunListItem, StatusView } from "../types";
 
 afterEach(() => {
@@ -385,6 +386,57 @@ describe("Overview anomaly deck (WM-95)", () => {
       api.proposals = origProposals;
       api.outbox = origOutbox;
       api.journal = origJournal;
+    }
+  });
+
+  test("rejects an expired proposal only after collecting a non-empty reason", async () => {
+    const origStatus = api.status;
+    const origProposals = api.proposals;
+    const origOutbox = api.outbox;
+    const origJournal = api.journal;
+    const origReject = api.reject;
+    api.status = async () =>
+      baseStatus({ expiredOpenProposals: [stubProposal.id] });
+    api.proposals = async () => ({ proposals: [stubProposal] });
+    api.outbox = async () => ({ outbox: [] });
+    api.journal = async () => ({ entries: [], head: 0 });
+
+    const rejectedCalls: { id: string; why?: string }[] = [];
+    api.reject = async (id: string, why?: string) => {
+      rejectedCalls.push({ id, why });
+      return { rejected: true };
+    };
+
+    try {
+      const view = renderOverview();
+      const reject = await waitFor(() => view.getByRole("button", { name: "Reject…" }));
+
+      expect(view.queryByRole("button", { name: "Dismiss" })).toBeNull();
+      fireEvent.click(reject);
+
+      const confirm = view.getByRole("button", { name: "Reject proposal" }) as HTMLButtonElement;
+      const reasonInput = view.getByLabelText("Rejection reason") as HTMLInputElement;
+      expect(reasonInput.placeholder).toMatch(/Reason \(required/i);
+      expect(confirm.disabled).toBe(true);
+
+      await act(async () => changeInput(reasonInput, "   "));
+      fireEvent.click(confirm);
+      expect(rejectedCalls).toEqual([]);
+
+      await act(async () => changeInput(reasonInput, " No longer actionable "));
+      await waitFor(() => expect(confirm.disabled).toBe(false));
+      await act(async () => fireEvent.click(confirm));
+      await waitFor(() =>
+        expect(rejectedCalls).toEqual([
+          { id: stubProposal.id, why: "No longer actionable" },
+        ]),
+      );
+    } finally {
+      api.status = origStatus;
+      api.proposals = origProposals;
+      api.outbox = origOutbox;
+      api.journal = origJournal;
+      api.reject = origReject;
     }
   });
 
