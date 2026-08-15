@@ -10,6 +10,8 @@
 
 Non-negotiable for every agent in this repo, in any harness. Full protocol: `~/Develop/hdkiller/docs/orgs/linear.md`. If that path doesn't exist where you're running (a cloud sandbox, someone else's machine), this block is the whole contract — follow it as written and don't infer the rest.
 
+**Event-runtime code follows the documented house conventions.** For module shape, dependency injection, adapter contracts, fail-closed boundaries, and tests, read [`docs/event-runtime-conventions.md`](https://github.com/watt-mind/factory/blob/develop/docs/event-runtime-conventions.md) before changing `event-runtime/`.
+
 **Work comes from Linear, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
