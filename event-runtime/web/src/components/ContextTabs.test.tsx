@@ -341,6 +341,139 @@ describe("ContextTabs", () => {
     expect(r.queryByRole("listbox")).toBeNull();
   });
 
+  test("keyboard navigation scrolls each highlighted picker option into view", () => {
+    const scrolls: Array<{ element: HTMLElement; options?: boolean | ScrollIntoViewOptions }> = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (
+      this: HTMLElement,
+      options?: boolean | ScrollIntoViewOptions,
+    ) {
+      scrolls.push({ element: this, options });
+    };
+
+    try {
+      const r = render(
+        <ContextTabs
+          repos={[repo("alpha"), repo("bravo"), repo("charlie")]}
+          reposError={false}
+          openRepos={[]}
+          active={{ kind: "all" }}
+          onSelect={() => {}}
+          onOpen={() => {}}
+          onClose={() => {}}
+        />,
+      );
+
+      act(() => {
+        fireEvent.click(r.getByRole("button", { name: "Open a repo tab" }));
+      });
+      const listbox = r.getByRole("listbox", { name: "Factory repos" });
+      const options = r.getAllByRole("option");
+      scrolls.length = 0;
+
+      for (const [key, expected] of [
+        ["ArrowDown", options[1]],
+        ["End", options[2]],
+        ["ArrowUp", options[1]],
+        ["Home", options[0]],
+      ] as const) {
+        act(() => {
+          fireEvent.keyDown(listbox, { key });
+        });
+        expect(scrolls.at(-1)).toEqual({ element: expected, options: { block: "nearest" } });
+      }
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  test("clamps the picker highlight when available repos change while open", () => {
+    const opened: string[] = [];
+    const props = {
+      repos: [repo("alpha"), repo("bravo"), repo("charlie")],
+      reposError: false,
+      active: { kind: "all" } as OperatorContext,
+      onSelect: () => {},
+      onOpen: (name: string) => opened.push(name),
+      onClose: () => {},
+    };
+    const r = render(<ContextTabs {...props} openRepos={[]} />);
+
+    act(() => {
+      fireEvent.click(r.getByRole("button", { name: "Open a repo tab" }));
+    });
+    const listbox = r.getByRole("listbox", { name: "Factory repos" });
+    act(() => {
+      fireEvent.keyDown(listbox, { key: "End" });
+    });
+    expect(r.getAllByRole("option")[2].getAttribute("aria-selected")).toBe("true");
+
+    r.rerender(<ContextTabs {...props} openRepos={["bravo", "charlie"]} />);
+
+    const remaining = r.getByRole("option", { name: "alpha" });
+    expect(remaining.getAttribute("aria-selected")).toBe("true");
+    expect(r.getByRole("listbox").getAttribute("aria-activedescendant")).toBe(remaining.id);
+    act(() => {
+      fireEvent.keyDown(r.getByRole("listbox"), { key: "Enter" });
+    });
+    expect(opened).toEqual(["alpha"]);
+  });
+
+  test("outside mousedown closes the repo picker and returns focus to +", () => {
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory"), repo("client")]}
+        reposError={false}
+        openRepos={[]}
+        active={{ kind: "all" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    const plus = r.getByRole("button", { name: "Open a repo tab" });
+    act(() => {
+      fireEvent.click(plus);
+    });
+    expect(document.activeElement).toBe(r.getByRole("listbox"));
+
+    act(() => {
+      fireEvent.mouseDown(document.body);
+    });
+    expect(r.queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(plus);
+  });
+
+  test("Tab and Shift+Tab close the repo picker and return focus to +", () => {
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory"), repo("client")]}
+        reposError={false}
+        openRepos={[]}
+        active={{ kind: "all" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const plus = r.getByRole("button", { name: "Open a repo tab" });
+
+    for (const shiftKey of [false, true]) {
+      act(() => {
+        fireEvent.click(plus);
+      });
+      const listbox = r.getByRole("listbox");
+      const tab = createEvent.keyDown(listbox, { key: "Tab", shiftKey });
+      act(() => {
+        fireEvent(listbox, tab);
+      });
+      expect(tab.defaultPrevented).toBe(true);
+      expect(r.queryByRole("listbox")).toBeNull();
+      expect(document.activeElement).toBe(plus);
+    }
+  });
+
   test("Escape closes the repo picker and returns focus to +", () => {
     const opened: string[] = [];
     const r = render(
@@ -452,17 +585,14 @@ describe("ScopeCaption", () => {
     expect(r.container.textContent).toBe("");
   });
 
-  test("Workers/Agents/Schedules/Overview/Graph use view names, not fleet or registry", () => {
-    const cases: Array<{ hash: string; surface: "fleet" | "registry" | "graph" | "overview"; expect: string }> = [
-      { hash: "#/workers", surface: "fleet", expect: "Workers are not scoped to factory" },
-      { hash: "#/agents", surface: "registry", expect: "Agents are not scoped to factory" },
-      { hash: "#/schedules", surface: "registry", expect: "Schedules are not scoped to factory" },
-      { hash: "#/overview", surface: "overview", expect: "Overview counts are not scoped to factory" },
-      { hash: "#/graph", surface: "graph", expect: "Graph is not scoped to factory" },
+  test("fixed surfaces use view names, not internal surface names", () => {
+    const cases = [
+      { surface: "fleet" as const, expect: "Workers are not scoped to factory" },
+      { surface: "overview" as const, expect: "Overview counts are not scoped to factory" },
+      { surface: "graph" as const, expect: "Graph is not scoped to factory" },
     ];
 
     for (const c of cases) {
-      window.location.hash = c.hash;
       const r = render(<ScopeCaption context={repoCtx} surface={c.surface} />);
       const text = r.container.textContent ?? "";
       expect(text).toContain(c.expect);
@@ -472,23 +602,32 @@ describe("ScopeCaption", () => {
     }
   });
 
-  test("surface fallback still avoids jargon when hash is empty", () => {
-    window.location.hash = "";
-    const fleet = render(<ScopeCaption context={repoCtx} surface="fleet" />);
-    expect(fleet.container.textContent).toContain("Workers are not scoped to factory");
-    expect(fleet.container.textContent?.toLowerCase()).not.toContain("fleet");
-    cleanup();
+  test("registry captions use their explicit subject instead of the current hash", () => {
+    const cases = [
+      {
+        hash: "#/schedules",
+        subject: { label: "Agents", plural: true },
+        expect: "Agents are not scoped to factory",
+      },
+      {
+        hash: "#/projects",
+        subject: { label: "Schedules", plural: true },
+        expect: "Schedules are not scoped to factory",
+      },
+      {
+        hash: "#/agents",
+        subject: { label: "registry", plural: false },
+        expect: "registry is not scoped to factory",
+      },
+    ];
 
-    // Empty hash is not Agents/Schedules — keep the factory-wide registry copy (WM-157 Projects).
-    const registry = render(<ScopeCaption context={repoCtx} surface="registry" />);
-    expect(registry.container.textContent).toContain("registry is not scoped to factory");
-    expect(registry.container.textContent).not.toContain("Agents");
-  });
-
-  test("Projects hash keeps factory-wide registry copy, not Agents", () => {
-    window.location.hash = "#/projects";
-    const r = render(<ScopeCaption context={repoCtx} surface="registry" />);
-    expect(r.container.textContent).toContain("registry is not scoped to factory");
-    expect(r.container.textContent).not.toContain("Agents");
+    for (const c of cases) {
+      window.location.hash = c.hash;
+      const r = render(
+        <ScopeCaption context={repoCtx} surface="registry" subject={c.subject} />,
+      );
+      expect(r.container.textContent).toContain(c.expect);
+      cleanup();
+    }
   });
 });

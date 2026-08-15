@@ -256,14 +256,43 @@ export function useNow(): number {
 }
 
 /**
+ * A transient modal can name the live element that should stand in for focus
+ * captured inside it. This matters when selecting a command closes the palette
+ * and mounts another dialog in the same commit: during render the palette input
+ * is still active, but it is about to be detached.
+ */
+const focusReturnScopes = new WeakMap<HTMLElement, HTMLElement>();
+
+export function registerFocusReturnScope(
+  root: HTMLElement,
+  returnTarget: HTMLElement | null,
+): () => void {
+  if (returnTarget) focusReturnScopes.set(root, returnTarget);
+  return () => focusReturnScopes.delete(root);
+}
+
+function resolveFocusReturn(active: HTMLElement): HTMLElement {
+  let node: HTMLElement | null = active;
+  while (node) {
+    const target = focusReturnScopes.get(node);
+    if (target) return target;
+    node = node.parentElement;
+  }
+  return active;
+}
+
+/**
  * Preserves the active element on mount and restores keyboard focus on unmount.
- * Handles edge cases cleanly when the triggering element is no longer in DOM.
+ * An enclosing focus-return scope may substitute a live opener for a transient
+ * active element. Handles edge cases when the target is no longer in the DOM.
  */
 export function useFocusReturn(): void {
   const previousRef = useRef<HTMLElement | null>(null);
   if (previousRef.current === null && typeof document !== "undefined") {
     previousRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      document.activeElement instanceof HTMLElement
+        ? resolveFocusReturn(document.activeElement)
+        : null;
   }
   useEffect(() => {
     const previous = previousRef.current;

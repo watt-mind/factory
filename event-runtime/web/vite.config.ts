@@ -55,23 +55,17 @@ function vendorChunk(id: string): string | undefined {
 // are fetched on demand, and are deliberately over the limit. kB is 1000 bytes
 // here to match how Vite reports sizes.
 //
-// The budget tracks the measured entry with a little slack, not a round number
-// well above it. Slack this thin means ordinary feature work will eventually
-// trip it; that is the trade, and re-baselining is a normal move.
-// Re-baselined for OPS-513 (after landing 17+ UI feature wave including autocomplete,
-// bulk actions, breadcrumbs, and live graph overlays): 499.82 kB measured on CI Linux.
-// Re-baselined again for WM-214: the custom-column machinery (payload-path columns,
-// CustomCell, the column picker) landing on top of the WM-134/WM-205 Overview
-// overhaul measured 523.44 kB — genuine app growth, with the vendor split intact.
-// Re-baselined again for WM-234: the hotkey wave (WM-236 action hints and dialog
-// chords already on develop at 529.78 kB, plus this branch's display-options `v`,
-// 1–N status-tab keys, and Projects mode tabs) measured 531.86 kB. The xyflow
-// vendor chunk is byte-identical to develop's and every lazy route chunk is still
-// split out, so this is app code, not a chunking regression.
-// Same 540 kB ceiling reached independently by WM-235 (context strip fast jump
-// chords and armed badges, 531.28 kB on CI Linux) and by WM-233's copy chords;
-// the merged hotkey wave still fits under it with the vendor split intact.
-const ENTRY_CHUNK_BUDGET_BYTES = 540 * 1000;
+// This budget protects first paint on the operator dashboard: the shared shell
+// and the primary Overview, Runs, and Events views stay eager, while secondary
+// routes (including Agents, Workers, and full-run detail) and occasional dialogs
+// load on demand. Moving one of those surfaces back into the entry is therefore
+// a first-paint tradeoff, not routine feature growth.
+//
+// WM-257 measured the entry at 472.95 kB locally after restoring those splits;
+// 480 kB leaves about 7 kB of slack while keeping the previous 540 kB ratchet
+// from returning. Keep the xyflow and lazy-route chunks visible in build output
+// before considering any future re-baseline.
+const ENTRY_CHUNK_BUDGET_BYTES = 480 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {

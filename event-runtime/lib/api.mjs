@@ -27,7 +27,7 @@ import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
 import { parseCadence, proposalsPilingUp, scheduleView } from "./schedules.mjs";
-import { listWorkers, loadWorkerPolicy, stalledWorkers } from "./workers.mjs";
+import { listWorkers, loadWorkerPolicy, satisfiesPlacement, stalledWorkers } from "./workers.mjs";
 
 /**
  * Repo names a run or event actually names — optional spec input, not a
@@ -255,6 +255,18 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
 
   const fleet = workerCapacityView(db, nowMs, { workerPolicy, runDir: workerRunDir });
   const workers = fleet.workers;
+  const liveWorkers = workers.filter((worker) => worker.state !== "stopped" && !worker.stale);
+  const unmatchedPlacementRuns = db
+    .query(`SELECT run_id, spec_json FROM runs WHERE state = 'QUEUED' ORDER BY created_at, rowid`)
+    .all()
+    .flatMap((row) => {
+      const placement = JSON.parse(row.spec_json).placement;
+      // Unconstrained runs are covered by noWorkers; this anomaly explains why
+      // an apparently healthy fleet still cannot claim a constrained run.
+      if (!placement || Object.keys(placement).length === 0) return [];
+      if (liveWorkers.some((worker) => satisfiesPlacement(worker.labels, placement))) return [];
+      return [{ runId: row.run_id, placement }];
+    });
   const schedules = scheduleView(db, registry, { now: nowMs });
   const store = getStoreStats
     ? getStoreStats(nowMs)
@@ -305,7 +317,8 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
       stoppedSchedules: schedules
         .filter((s) => s.stopped || s.error)
         .map((s) => ({ loop: s.loop, every: s.every, lastSlot: s.lastSlot, intervalsLate: s.intervalsLate, error: s.error })),
-      noWorkers: workers.filter((w) => w.state !== "stopped" && !w.stale).length === 0 && (runs.byState.QUEUED ?? 0) > 0,
+      unmatchedPlacementRuns,
+      noWorkers: liveWorkers.length === 0 && (runs.byState.QUEUED ?? 0) > 0,
       // Two or more open proposals on one run: cancel fail-closes and leaves
       // them open (OPS-245). Unreachable on the TTL replan path.
       ambiguousOpenProposals: ambiguousOpenProposalRuns(db),

@@ -222,7 +222,7 @@ export function Graph({
   );
 
   const selected: GraphNode | undefined = graph?.nodes.find((n) => n.id === focusNodeId);
-  const graphLoaded = Boolean(graph) && !registry.isPending;
+  const graphLoaded = Boolean(graph) && !registry.isPending && !proposalsQ.isPending;
   const staleFocus = missingFocusNode(graph?.nodes, focusNodeId, graphLoaded);
   const agentDef =
     selected?.kind === "agent"

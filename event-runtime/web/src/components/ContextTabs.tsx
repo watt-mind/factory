@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OperatorContext } from "../context";
 import { INFLIGHT, toggleInflight } from "../context";
-import { hashView } from "../hash";
 import { CONTEXT_TABS_ATTR } from "../hooks";
 import type { RepoItem } from "../types";
 
@@ -30,36 +29,21 @@ const getHashRunId = () => {
 };
 
 type CaptionSurface = "fleet" | "registry" | "graph" | "overview";
+type FixedCaptionSurface = Exclude<CaptionSurface, "registry">;
+type CaptionSubject = { label: string; plural: boolean };
+type ScopeCaptionProps = { context: OperatorContext } & (
+  | { surface: "registry"; subject: CaptionSubject }
+  | { surface: FixedCaptionSurface; subject?: never }
+);
 
-const SURFACE_SUBJECT: Record<CaptionSurface, { subject: string; plural: boolean }> = {
-  fleet: { subject: "Workers", plural: true },
-  // Projects also passes surface="registry"; only agents/schedules hashes map to view names below.
-  registry: { subject: "registry", plural: false },
-  graph: { subject: "Graph", plural: false },
-  overview: { subject: "Overview counts", plural: true },
+const SURFACE_SUBJECT: Record<FixedCaptionSurface, CaptionSubject> = {
+  fleet: { label: "Workers", plural: true },
+  graph: { label: "Graph", plural: false },
+  overview: { label: "Overview counts", plural: true },
 };
 
-/** Agents and Schedules both pass surface="registry"; hash is the only discriminator without editing views. */
-const REGISTRY_VIEW_SUBJECT: Record<string, { subject: string; plural: boolean }> = {
-  agents: { subject: "Agents", plural: true },
-  schedules: { subject: "Schedules", plural: true },
-};
-
-function captionSubject(surface: CaptionSurface) {
-  if (surface === "registry" && typeof window !== "undefined") {
-    const fromHash = REGISTRY_VIEW_SUBJECT[hashView(window.location.hash)];
-    if (fromHash) return fromHash;
-  }
-  return SURFACE_SUBJECT[surface];
-}
-
-export function ScopeCaption({
-  context,
-  surface,
-}: {
-  context: OperatorContext;
-  surface: CaptionSurface;
-}) {
+export function ScopeCaption(props: ScopeCaptionProps) {
+  const { context, surface } = props;
   if (context.kind === "all") return null;
   const n = context.kind === "inflight" ? "In flight" : context.name;
   if (context.kind === "inflight") {
@@ -71,10 +55,11 @@ export function ScopeCaption({
       </p>
     );
   }
-  const { subject, plural } = captionSubject(surface);
+  const { label, plural } =
+    surface === "registry" ? props.subject : SURFACE_SUBJECT[surface];
   return (
     <p className="mb-3 text-[11px] text-(--text-faint)">
-      {`${subject} ${plural ? "are" : "is"} not scoped to ${n}.`}
+      {`${label} ${plural ? "are" : "is"} not scoped to ${n}.`}
     </p>
   );
 }
@@ -151,6 +136,14 @@ export function ContextTabs({
     () => repos.filter((r) => !openRepos.includes(r.name)),
     [repos, openRepos],
   );
+  const clampedPickerHighlight =
+    available.length === 0 ? 0 : Math.min(pickerHighlight, available.length - 1);
+
+  useEffect(() => {
+    setPickerHighlight((current) =>
+      available.length === 0 ? 0 : Math.min(current, available.length - 1),
+    );
+  }, [available.length]);
 
   const activeId =
     activeRunId && pinnedRuns.includes(activeRunId)
@@ -198,8 +191,18 @@ export function ContextTabs({
 
   useEffect(() => {
     if (!picker) return;
+    listboxRef.current
+      ?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [picker, clampedPickerHighlight]);
+
+  useEffect(() => {
+    if (!picker) return;
     function onDoc(e: MouseEvent) {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPicker(false);
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPicker(false);
+        plusRef.current?.focus();
+      }
     }
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
@@ -261,7 +264,10 @@ export function ContextTabs({
 
   const handlePickerKeyDown = (e: React.KeyboardEvent) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === "ArrowDown") {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      closePicker(true);
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
       if (available.length === 0) return;
       setPickerHighlight((i) => (i + 1) % available.length);
@@ -278,7 +284,7 @@ export function ContextTabs({
       setPickerHighlight(available.length - 1);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      const choice = available[pickerHighlight];
+      const choice = available[clampedPickerHighlight];
       if (choice) selectPickerRepo(choice.name);
     }
   };
@@ -459,7 +465,9 @@ export function ContextTabs({
             tabIndex={0}
             aria-label="Factory repos"
             aria-activedescendant={
-              available[pickerHighlight] ? `repo-picker-opt-${pickerHighlight}` : undefined
+              available[clampedPickerHighlight]
+                ? `repo-picker-opt-${clampedPickerHighlight}`
+                : undefined
             }
             className="absolute top-full right-0 z-30 mt-1 max-h-72 min-w-48 overflow-auto rounded-md border border-(--border) bg-(--surface-1) py-1 shadow-lg outline-none"
             onKeyDown={handlePickerKeyDown}
@@ -478,9 +486,9 @@ export function ContextTabs({
                   type="button"
                   role="option"
                   tabIndex={-1}
-                  aria-selected={i === pickerHighlight}
+                  aria-selected={i === clampedPickerHighlight}
                   className={`block w-full px-3 py-1.5 text-left text-[12px] text-(--text) ${
-                    i === pickerHighlight
+                    i === clampedPickerHighlight
                       ? "bg-(--surface-2) ring-1 ring-inset ring-(--accent)"
                       : "hover:bg-(--surface-2)"
                   }`}

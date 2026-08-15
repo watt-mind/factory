@@ -12,7 +12,7 @@ const ACTIONS: { keys: string; does: string }[] = [
   { keys: "⌘K", does: "copy link to this page" },
   { keys: "⌘K · footer theme", does: "cycle theme (dark → light → contrast)" },
   { keys: "i", does: "inject event" },
-  { keys: "/", does: "focus filter (Events, if none on this view)" },
+  { keys: "/", does: "focus this view's filter (Artifacts, Events, Runs, and other lists)" },
   { keys: "v", does: "display options" },
   { keys: "j k  ↑↓", does: "move list (or graph) selection" },
   { keys: "[ ]", does: "previous / next status tab" },

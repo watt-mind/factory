@@ -206,6 +206,24 @@ export interface ArtifactRef {
   sizeBytes: number;
 }
 
+/** Accepted result that keeps an artifact reachable in the content-addressed store. */
+export interface ArtifactReference {
+  runId: string;
+  kind: string | null;
+  agent: string | null;
+  state: RunState | null;
+  createdAt: string | null;
+}
+
+/** One physical file returned by the artifact inventory endpoint. */
+export interface ArtifactInventoryItem {
+  sha256: string;
+  sizeBytes: number;
+  mtime: string;
+  referenced: boolean;
+  references: ArtifactReference[];
+}
+
 export interface RunDetail {
   run: {
     runId: string;
@@ -390,6 +408,12 @@ export interface ProposalPilingUp {
   threshold: number;
 }
 
+/** A queued run whose placement requirements match no live worker. */
+export interface UnmatchedPlacementRun {
+  runId: string;
+  placement: Record<string, unknown>;
+}
+
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
@@ -409,6 +433,8 @@ export interface StatusView {
     deadLettered: { source: string; eventId: string; lastError: string | null }[];
     stalledWorkers: StalledWorker[];
     stoppedSchedules?: StoppedSchedule[];
+    /** Placement-constrained queued runs that no active, non-stale worker can claim. */
+    unmatchedPlacementRuns?: UnmatchedPlacementRun[];
     /** Queued runs with no live worker to claim them. */
     noWorkers: boolean;
     ambiguousOpenProposals: { runId: string; count: number }[];

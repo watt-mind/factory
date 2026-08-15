@@ -3,35 +3,10 @@ import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { GO_CHORD_MS, goPrefix, goSequence } from "../goSequence";
-import { keyGuard, modal } from "../hooks";
+import { keyGuard, modal, registerFocusReturnScope } from "../hooks";
 import { useContextActions } from "../palette";
 import { health } from "../workerHealth";
-
-const FOCUSABLE =
-  "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
-
-function tabCycle(root: HTMLElement, e: KeyboardEvent) {
-  const nodes = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
-    (el) => el.offsetParent !== null || el === document.activeElement,
-  );
-  if (nodes.length === 0) {
-    e.preventDefault();
-    root.focus();
-    return;
-  }
-  const first = nodes[0];
-  const last = nodes[nodes.length - 1];
-  const active = document.activeElement;
-  if (e.shiftKey) {
-    if (active === first || !root.contains(active)) {
-      e.preventDefault();
-      last.focus();
-    }
-  } else if (active === last || !root.contains(active)) {
-    e.preventDefault();
-    first.focus();
-  }
-}
+import { tabCycle } from "./ui";
 
 export interface PaletteAction {
   label: string;
@@ -91,7 +66,7 @@ export function CommandPalette({
       if (e.key !== "k" || !(e.metaKey || e.ctrlKey)) return;
       e.preventDefault();
       setOpen((o) => {
-        if (o) return false;
+        if (o) return modal.depth > 1;
         if (modal.depth > 0) return false;
         return true;
       });
@@ -109,11 +84,15 @@ export function CommandPalette({
     };
     window.addEventListener("keydown", onKey);
     const root = panelRef.current;
+    const unregisterFocusReturn = root
+      ? registerFocusReturnScope(root, previousFocusRef.current)
+      : () => {};
     const input = root?.querySelector<HTMLElement>("input");
     (input ?? root)?.focus();
     return () => {
       modal.depth -= 1;
       window.removeEventListener("keydown", onKey);
+      unregisterFocusReturn();
       const active = document.activeElement;
       const claimed =
         active instanceof HTMLElement && active !== document.body && active.isConnected;

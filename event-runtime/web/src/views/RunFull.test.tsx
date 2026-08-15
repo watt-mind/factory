@@ -32,6 +32,30 @@ function renderRunFull(runId: string) {
   );
 }
 
+describe("RunFull layout (WM-194)", () => {
+  test("centers the capped trace container on wide viewports", async () => {
+    const runId = "run_centered_trace";
+    const detail = createRunDetailFixture({ run: { runId, state: "COMPLETED" } as RunDetail["run"] });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({ runs: [createRunListItemFixture({ runId, state: "COMPLETED" })] }),
+      },
+      async () => {
+        const { container } = renderRunFull(runId);
+
+        await waitFor(() => {
+          const traceContainer = container.querySelector("main > div");
+          expect(traceContainer).toBeTruthy();
+          expect(traceContainer!.classList.contains("xl:mx-auto")).toBe(true);
+          expect(traceContainer!.classList.contains("xl:max-w-[900px]")).toBe(true);
+          expect(traceContainer!.classList.contains("p-6")).toBe(true);
+        });
+      },
+    );
+  });
+});
+
 describe("RunFull cancel dialog (WM-144)", () => {
   test("a simulated 409 on cancel shows a persistent inline message in the dialog", async () => {
     const runId = "run_cancel_race";

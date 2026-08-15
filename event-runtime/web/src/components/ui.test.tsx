@@ -615,10 +615,29 @@ describe("SuggestInput popover (WM-79)", () => {
     const input = r.getByRole("combobox", { name: "repo" }) as HTMLInputElement;
     fireEvent.focus(input);
     const options = r.getAllByRole("option");
-    expect(options[0].getAttribute("aria-selected")).toBe("true");
+    const expectSelected = (selectedIndex: number) => {
+      options.forEach((option, index) => {
+        expect(option.getAttribute("aria-selected")).toBe(
+          index === selectedIndex ? "true" : "false",
+        );
+      });
+    };
+    expectSelected(0);
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(options[1].getAttribute("aria-selected")).toBe("true");
+    expectSelected(1);
+
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expectSelected(0);
+
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expectSelected(options.length - 1);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expectSelected(0);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expectSelected(1);
 
     fireEvent.keyDown(input, { key: "Enter" });
     expect(input.value).toBe("factory");

@@ -1298,7 +1298,8 @@ export function Button({
 const FOCUSABLE =
   "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
-function tabCycle(root: HTMLElement, e: KeyboardEvent) {
+/** Keep Tab focus inside a modal while ignoring controls hidden by layout. */
+export function tabCycle(root: HTMLElement, e: KeyboardEvent) {
   const nodes = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
     (el) => el.offsetParent !== null || el === document.activeElement,
   );

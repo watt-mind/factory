@@ -324,7 +324,11 @@ export function Projects({
         chrome={
           <>
             <h1 className="display mb-4 text-lg font-semibold">Projects</h1>
-            <ScopeCaption context={context} surface="registry" />
+            <ScopeCaption
+              context={context}
+              surface="registry"
+              subject={{ label: "registry", plural: false }}
+            />
             <div className="mb-3">
               <FilterInput
                 value={filter}
@@ -545,7 +549,7 @@ export function Projects({
               </div>
             </Section>
 
-            <Section title="Configuration">
+            <Section id="project-configuration" title="Configuration">
               <KV k="Name" v={sel.name} />
               {sel.project && <KV k="Project" v={sel.project} />}
               {sel.team && <KV k="Team" v={sel.team} />}
