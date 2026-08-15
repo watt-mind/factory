@@ -407,6 +407,38 @@ describe("Events component harness: facet chips grouping and visual distinction"
     );
   });
 
+  test("sorts Type and Source facet chips by frequency, then alphabetically", async () => {
+    const events = [
+      stubEvent("evt_1", "admitted", { type: "zeta.frequent", source: "zeta-source" }),
+      stubEvent("evt_2", "admitted", { type: "zeta.frequent", source: "zeta-source" }),
+      stubEvent("evt_3", "admitted", { type: "zeta.frequent", source: "zeta-source" }),
+      stubEvent("evt_4", "admitted", { type: "alpha.rare", source: "alpha-source" }),
+      stubEvent("evt_5", "admitted", { type: "beta.rare", source: "beta-source" }),
+    ];
+
+    await withApi(
+      {
+        events: async () => ({ events }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole } = renderEvents({});
+
+        const typeGroup = await waitFor(() => getByRole("group", { name: "Event types" }));
+        const typeLabels = Array.from(typeGroup.querySelectorAll("button > span:first-child")).map(
+          (span) => span.textContent,
+        );
+        expect(typeLabels).toEqual(["zeta.frequent", "alpha.rare", "beta.rare"]);
+
+        const sourceGroup = getByRole("group", { name: "Event sources" });
+        const sourceLabels = Array.from(sourceGroup.querySelectorAll("button > span:first-child")).map(
+          (span) => span.textContent,
+        );
+        expect(sourceLabels).toEqual(["zeta-source", "alpha-source", "beta-source"]);
+      },
+    );
+  });
+
   test("facet chip counts reflect the active tab scope", async () => {
     const e1 = stubEvent("evt_1", "admitted", { type: "pull_request.opened", source: "github" });
     const e2 = stubEvent("evt_2", "admitted", { type: "pull_request.opened", source: "github" });

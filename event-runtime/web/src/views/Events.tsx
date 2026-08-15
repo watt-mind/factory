@@ -220,9 +220,6 @@ export function Events({
     return scoped;
   }, [scoped, fetchAll, tab]);
 
-  const types = useMemo(() => [...new Set(tabScoped.map((e) => e.type))].sort(), [tabScoped]);
-  const sources = useMemo(() => [...new Set(tabScoped.map((e) => e.source))].sort(), [tabScoped]);
-
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const e of tabScoped) {
@@ -238,6 +235,21 @@ export function Events({
     }
     return counts;
   }, [tabScoped]);
+
+  const types = useMemo(
+    () =>
+      Object.keys(typeCounts).sort(
+        (a, b) => (typeCounts[b] ?? 0) - (typeCounts[a] ?? 0) || a.localeCompare(b),
+      ),
+    [typeCounts],
+  );
+  const sources = useMemo(
+    () =>
+      Object.keys(sourceCounts).sort(
+        (a, b) => (sourceCounts[b] ?? 0) - (sourceCounts[a] ?? 0) || a.localeCompare(b),
+      ),
+    [sourceCounts],
+  );
 
   const parsed = useMemo(() => parseFilterQuery(filter, EVENT_FACETS), [filter]);
 
