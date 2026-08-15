@@ -1,7 +1,7 @@
 import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { Runs } from "./Runs";
+import { Runs, statesForRunTab } from "./Runs";
 import {
   changeInput,
   createLifecycleEventFixture,
@@ -629,4 +629,34 @@ describe("Runs copy chords and hints (WM-233)", () => {
       },
     );
   });
+
+  test("statesForRunTab maps multi-state and single-state tabs to their full run state sets (WM-327)", () => {
+    expect(statesForRunTab("ALL")).toEqual([
+      "PROPOSED",
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+      "REFUSED",
+      "FAILED",
+      "TIMED_OUT",
+      "CANCELLED",
+    ]);
+    expect(statesForRunTab("ACTIVE")).toEqual([
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+    ]);
+    expect(statesForRunTab("FAILED")).toEqual([
+      "FAILED",
+      "TIMED_OUT",
+      "REFUSED",
+    ]);
+    expect(statesForRunTab("COMPLETED")).toEqual(["COMPLETED"]);
+    expect(statesForRunTab("CANCELLED")).toEqual(["CANCELLED"]);
+  });
 });
+

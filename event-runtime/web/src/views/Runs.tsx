@@ -93,6 +93,20 @@ export function matchesRunTab(state: RunState, tab: RunTab): boolean {
   return true;
 }
 
+export function statesForRunTab(tab: RunTab): readonly string[] {
+  if (tab === "ALL") {
+    return [
+      "PROPOSED", "APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING",
+      "COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED",
+    ];
+  }
+  if (tab === "ACTIVE") return ["QUEUED", "LEASED", "RUNNING", "VERIFYING"];
+  if (tab === "FAILED") return ["FAILED", "TIMED_OUT", "REFUSED"];
+  if (tab === "COMPLETED") return ["COMPLETED"];
+  if (tab === "CANCELLED") return ["CANCELLED"];
+  return [];
+}
+
 export function tabForRunState(state: string): RunTab {
   if (["QUEUED", "LEASED", "RUNNING", "VERIFYING"].includes(state)) return "ACTIVE";
   if (["FAILED", "TIMED_OUT", "REFUSED"].includes(state)) return "FAILED";
@@ -263,13 +277,12 @@ export function Runs({
   // empty groups" on the COMPLETED tab must not render ten 0-count bands the
   // tab itself already filtered out.
   const displayConfig = useMemo(
-    () =>
-      tab === "ALL"
-        ? RUNS_DISPLAY
-        : {
-            ...RUNS_DISPLAY,
-            groups: RUNS_DISPLAY.groups.map((g) => (g.key === "state" ? { ...g, order: [tab] } : g)),
-          },
+    () => ({
+      ...RUNS_DISPLAY,
+      groups: RUNS_DISPLAY.groups.map((g) =>
+        g.key === "state" ? { ...g, order: statesForRunTab(tab) } : g,
+      ),
+    }),
     [tab],
   );
   const [display, setDisplay] = useDisplayOptions(displayConfig);
