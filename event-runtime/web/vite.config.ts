@@ -63,7 +63,9 @@ function vendorChunk(id: string): string | undefined {
 // Re-baselined again for WM-214: the custom-column machinery (payload-path columns,
 // CustomCell, the column picker) landing on top of the WM-134/WM-205 Overview
 // overhaul measured 523.44 kB — genuine app growth, with the vendor split intact.
-const ENTRY_CHUNK_BUDGET_BYTES = 530 * 1000;
+// Re-baselined for WM-235: context strip fast jump chords and armed badges measured
+// 531.28 kB on CI Linux.
+const ENTRY_CHUNK_BUDGET_BYTES = 540 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {
