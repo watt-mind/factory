@@ -52,15 +52,23 @@ export const KILL_GRACE_MS = 30_000;
 /** Trace events preview text; the recorder's byte bound is the real limit. */
 const TEXT_PREVIEW_CHARS = 4000;
 
-// pi's documented read-only pattern omits bash/edit from the tool allowlist
-// rather than intercepting calls at runtime — but `write` must stay: every
-// agent-result contract requires the model to write ./result.json, and a run
-// that cannot write it fails contract_violation:missing_result before doing
-// anything (OPS-518; same reasoning as claude.mjs's READ_ONLY_TOOLS keeping
-// Write/Edit). Containment for mutating: false is therefore bash/edit omission
-// plus the workspace-cwd boundary — audited, not enforced, per §14 until
-// stage 2's native capability enforcement (OPS-515).
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write"];
+// Read-only here means "cannot edit the repository", NOT "cannot act". Every
+// tool below is load-bearing for a mutating: false agent, and removing one
+// breaks the run rather than tightening it — this list has been wrong twice:
+//   write  every agent-result contract requires ./result.json; without it a run
+//          fails contract_violation:missing_result before doing anything (OPS-518)
+//   bash   the entire scan fleet works by shelling out — work/triage/sweep/
+//          unblock scans call tools/linear.mjs, merge/ship scans call gh and
+//          git, ci-doctor and disk-diagnose call gh/ssh. Without a shell they
+//          refuse with "reads could not be performed with the available tools"
+//          (WM-301, run_e881a392)
+// `edit` stays out: that is the actual repository-mutation boundary. Same
+// reasoning as claude.mjs, which likewise keeps Bash/Write/Edit for read-only
+// agents and enforces the boundary through workspace confinement instead of
+// tool removal. Containment for mutating: false is therefore the ephemeral or
+// pinned workspace as cwd — audited, not enforced, per §14 until stage 2's
+// native capability enforcement (OPS-515).
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write", "bash"];
 
 export class CliNotFoundError extends Error {
   constructor(message) {
