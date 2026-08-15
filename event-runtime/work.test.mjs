@@ -19,7 +19,7 @@ import { openDb } from "./lib/db.mjs";
 import { admitEvent } from "./lib/intake.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
 import { approveProposal, openProposals } from "./lib/proposals.mjs";
-import { loadRegistry } from "./lib/registry.mjs";
+import { loadRegistry, resolveModel } from "./lib/registry.mjs";
 import { runOnce } from "./lib/worker.mjs";
 
 const registry = loadRegistry();
@@ -198,7 +198,7 @@ function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-work-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-work-ws-"));
-  const adapters = { claude: workFake };
+  const adapters = { pi: workFake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV, dispatch: openWorld };
 
   const planAll = () => planAdmittedEvents(db, registry, { policyVersion: PV, dispatch: openWorld });
@@ -226,7 +226,7 @@ const workEnvelope = (repo, eventId) => ({
 });
 
 describe("work-scan registration (WM-110)", () => {
-  test("work-scan@1 is a read-only claude agent over a repository workspace, like triage-scan", () => {
+  test("work-scan@1 is a read-only pi agent over a repository workspace, like triage-scan", () => {
     const def = registry.agents.get("work-scan@1");
     expect(def.mutating).toBe(false);
     // It verifies Owned Paths globs against real paths, so it reads the
@@ -236,13 +236,56 @@ describe("work-scan registration (WM-110)", () => {
     expect(def.capabilities.services).toEqual(["linear:read", "repo:read"]);
   });
 
-  test("factory.work.requested maps to work-scan@1 on the claude adapter, deduped by inputHash", () => {
+  test("factory.work.requested maps to work-scan@1 on the pi adapter, deduped by inputHash", () => {
     expect(registry.eventTypes["factory.work.requested"]).toEqual({
       agent: "work-scan@1",
-      adapter: "claude",
+      adapter: "pi",
       idempotencyScope: ["inputHash"],
       proposalTtlSeconds: 1800,
     });
+  });
+
+  // WM-215: pi is the default harness, so the one mutating LLM agent in the
+  // registry now rides it. The §14 admission rule that lets a mutating LLM
+  // agent exist at all is the tier-2 worktree carve-out (WM-108, generalized
+  // to any adapter by OPS-296) — assert it holds for dispatch@1 on pi, since
+  // a regression here would refuse the whole registry at load, not just this
+  // route.
+  test("dispatch@1 is admissible as a mutating pi agent over a tier-2 worktree (WM-215)", () => {
+    expect(registry.eventTypes["factory.dispatch.requested"]).toEqual({
+      agent: "dispatch@1",
+      adapter: "pi",
+      idempotencyScope: ["inputHash"],
+      proposalTtlSeconds: 1800,
+    });
+    const def = registry.agents.get("dispatch@1");
+    expect(def.mutating).toBe(true);
+    expect(def.workspace.type).toBe("worktree");
+    // The registry loaded at module scope: loadRegistry() already ran the §14
+    // admission check and the WM-135 fail-closed model resolution over this
+    // route, so a pi+worktree+mutating definition is admitted and its strong
+    // tier resolves against models.pi.
+    expect(def.model_tier).toBe("strong");
+    expect(resolveModel(def, "pi", registry.modelTiers)).toBe(registry.modelTiers.pi.strong);
+  });
+
+  test("every LLM route is the pi adapter; command/actions routes are untouched (WM-215)", () => {
+    const byAdapter = {};
+    for (const mapping of Object.values(registry.eventTypes)) {
+      if (!mapping.agent) continue;
+      (byAdapter[mapping.adapter] ??= []).push(mapping.agent);
+    }
+    // No committed route rides claude. It stays a supported adapter — the
+    // per-route exception and `--adapter-override claude` both select it —
+    // but the default harness is pi.
+    expect(byAdapter.claude).toBeUndefined();
+    expect(byAdapter.pi.length).toBeGreaterThan(0);
+    // Every pi route resolves a model: loadRegistry fails closed otherwise,
+    // but assert the values so a silently-null resolution can't pass.
+    for (const ref of byAdapter.pi) {
+      const resolved = resolveModel(registry.agents.get(ref), "pi", registry.modelTiers);
+      expect(Object.values(registry.modelTiers.pi)).toContain(resolved);
+    }
   });
 
   test("the plan item shape pins {ticket, ownedPaths, reason}; NOOP reasons are the closed set", () => {

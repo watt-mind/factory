@@ -66,11 +66,11 @@ export function tokenizeJson(json: string): JsonToken[] {
 
 /** Semantic token styling using the app's OKLCH color system. */
 export const TOKEN_CLASSES: Record<JsonTokenKind, string> = {
-  key: "text-[color:var(--text)] font-medium",
-  string: "text-[color:var(--hue-ok)]",
-  number: "text-[color:var(--hue-info)]",
-  boolean: "text-[color:var(--hue-warn)] font-medium",
-  null: "text-[color:var(--hue-err)] font-medium",
-  punct: "text-[color:var(--text-faint)]",
+  key: "text-(--text) font-medium",
+  string: "text-(--hue-ok)",
+  number: "text-(--hue-info)",
+  boolean: "text-(--hue-warn) font-medium",
+  null: "text-(--hue-err) font-medium",
+  punct: "text-(--text-faint)",
   plain: "",
 };

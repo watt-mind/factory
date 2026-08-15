@@ -131,13 +131,23 @@ export function placeholderFor(name: string, schema: Record<string, unknown>): s
 /**
  * Route validator errors ("$.host: …", `$: missing required property "x"`)
  * to field names; unrouteable errors land under "" (form-level).
+ * Pattern mismatches never include the raw regex — they reuse placeholderFor
+ * when the field schema is known (WM-86).
  */
-export function errorsByField(errors: string[]): Map<string, string[]> {
+export function errorsByField(errors: string[], fields?: FieldSpec[]): Map<string, string[]> {
+  const byName = new Map((fields ?? []).map((f) => [f.name, f]));
   const out = new Map<string, string[]>();
   const push = (key: string, msg: string) => {
     const list = out.get(key) ?? [];
     list.push(msg);
     out.set(key, list);
+  };
+  const humanize = (name: string, msg: string): string => {
+    if (!/does not match pattern/.test(msg)) return msg;
+    const spec = byName.get(name);
+    const example = spec ? placeholderFor(name, spec.schema) : null;
+    const hint = example ? ` (e.g. ${example})` : "";
+    return msg.replace(/does not match pattern[\s\S]*$/, `does not match expected format${hint}`);
   };
   for (const err of errors) {
     const missing = err.match(/^\$: missing required property "([^"]+)"$/);
@@ -147,12 +157,23 @@ export function errorsByField(errors: string[]): Map<string, string[]> {
     }
     const fielded = err.match(/^\$\.([A-Za-z0-9_$-]+)((?:[.[])[^:]*)?: (.*)$/);
     if (fielded) {
-      push(fielded[1], `${fielded[2] ?? ""}${fielded[2] ? ": " : ""}${fielded[3]}`.trim());
+      const name = fielded[1];
+      const rest = `${fielded[2] ?? ""}${fielded[2] ? ": " : ""}${fielded[3]}`.trim();
+      push(name, humanize(name, rest));
       continue;
     }
-    push("", err.replace(/^\$: /, ""));
+    push("", humanize("", err.replace(/^\$: /, "")));
   }
   return out;
+}
+
+/** Field-level errors stay hidden until the control is touched or submit is attempted. */
+export function fieldErrorVisible(
+  name: string,
+  touched: Record<string, boolean>,
+  submitAttempted: boolean,
+): boolean {
+  return submitAttempted || !!touched[name];
 }
 
 /** Payload keys the schema does not declare — kept, surfaced, never dropped. */

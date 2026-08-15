@@ -2,7 +2,7 @@ import "../test-dom";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { Button, clearToasts, Countdown, DetailPane, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, ToastContainer } from "./ui";
+import { Button, clearToasts, Countdown, DetailPane, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
 import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
 import { changeInput, typeText } from "../test-render";
 
@@ -404,10 +404,10 @@ describe("Section cards and collapse persistence (WM-136)", () => {
 describe("StateBadge dot suppression (WM-136)", () => {
   test("renders its own dot by default and omits it when dot={false}", () => {
     const withDot = render(<StateBadge state="RUNNING" />);
-    expect(withDot.container.querySelector(".rounded-full")).toBeTruthy();
+    expect(withDot.container.querySelector("svg")).toBeTruthy();
     cleanup();
     const bare = render(<StateBadge state="RUNNING" dot={false} />);
-    expect(bare.container.querySelector(".rounded-full")).toBeNull();
+    expect(bare.container.querySelector("svg")).toBeNull();
     expect(bare.getByText("RUNNING")).toBeTruthy();
   });
 });
@@ -568,6 +568,66 @@ describe("changeInput & typeText test helpers (WM-114)", () => {
     });
     expect(input.value).toBe("xyc");
     expect(input.selectionStart).toBe(2);
+  });
+});
+
+describe("SuggestInput popover (WM-79)", () => {
+  function Harness({ initial = "" }: { initial?: string }) {
+    const [value, setValue] = useState(initial);
+    return (
+      <SuggestInput
+        value={value}
+        onChange={setValue}
+        suggestions={["bj29", "factory", "watt-mind/bj29"]}
+        ariaLabel="repo"
+      />
+    );
+  }
+
+  test("does not use a native datalist", () => {
+    const r = render(<Harness />);
+    const input = r.getByRole("combobox", { name: "repo" });
+    expect(input.getAttribute("list")).toBeNull();
+    expect(r.container.querySelector("datalist")).toBeNull();
+  });
+
+  test("opens a styled listbox of suggestions on focus", () => {
+    const r = render(<Harness />);
+    const input = r.getByRole("combobox", { name: "repo" });
+    fireEvent.focus(input);
+    const listbox = r.getByRole("listbox");
+    expect(listbox).toBeTruthy();
+    expect(r.getByRole("option", { name: "bj29" })).toBeTruthy();
+    expect(r.getByRole("option", { name: "factory" })).toBeTruthy();
+  });
+
+  test("keeps free-text write-in when the value is not in the list", () => {
+    const r = render(<Harness />);
+    const input = r.getByRole("combobox", { name: "repo" }) as HTMLInputElement;
+    act(() => {
+      changeInput(input, "custom-repo");
+    });
+    expect(input.value).toBe("custom-repo");
+  });
+
+  test("ArrowDown / ArrowUp / Enter select a suggestion; Escape dismisses", () => {
+    const r = render(<Harness />);
+    const input = r.getByRole("combobox", { name: "repo" }) as HTMLInputElement;
+    fireEvent.focus(input);
+    const options = r.getAllByRole("option");
+    expect(options[0].getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(options[1].getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("factory");
+    expect(r.queryByRole("listbox")).toBeNull();
+
+    fireEvent.focus(input);
+    expect(r.getByRole("listbox")).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(r.queryByRole("listbox")).toBeNull();
   });
 });
 

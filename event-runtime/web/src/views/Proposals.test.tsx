@@ -5,7 +5,10 @@ import { Proposals } from "./Proposals";
 import { api } from "../api";
 import {
   changeInput,
+  createEventFixture,
   createProposalFixture,
+  createRunListItemFixture,
+  createRunSpecFixture,
   createStatusFixture,
   renderWithClient,
   restoreApi,
@@ -81,6 +84,8 @@ describe("Proposals multi-row selection & bulk actions (WM-71)", () => {
     origReject = api.reject;
 
     api.status = async () => stubStatus();
+    api.proposals = async () => ({ proposals: [] });
+    api.proposalHistory = async () => ({ proposals: [] });
     api.runs = async () => ({ runs: [] });
     api.events = async () => ({ events: [] });
     api.agents = async () => ({ agents: [], edges: {}, eventTypes: [], contracts: {} });
@@ -193,10 +198,12 @@ describe("Proposals multi-row selection & bulk actions (WM-71)", () => {
     const selectAll = r.getByLabelText("Select all proposals");
     fireEvent.click(selectAll);
 
-    // Click Approve selected (3)
-    const approveBtn = r.getByText("Approve selected (3)");
+    // Click Approve selected — confirm must appear before any POST
+    const approveBtn = r.getByText("Approve selected (2)");
+    fireEvent.click(approveBtn);
+    expect(approvedIds).toEqual([]);
     await act(async () => {
-      fireEvent.click(approveBtn);
+      fireEvent.click(r.getByRole("button", { name: "Approve and queue" }));
     });
 
     // Should have approved prop_1 and prop_2, skipping prop_3
@@ -571,5 +578,204 @@ describe("Proposals component harness: cross-tab reveal", () => {
         });
       },
     );
+  });
+});
+
+describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
+  let origProposals: typeof api.proposals;
+  let origProposalHistory: typeof api.proposalHistory;
+  let origStatus: typeof api.status;
+  let origRuns: typeof api.runs;
+  let origEvents: typeof api.events;
+  let origAgents: typeof api.agents;
+  let origApprove: typeof api.approve;
+  let origReject: typeof api.reject;
+
+  beforeEach(() => {
+    origProposals = api.proposals;
+    origProposalHistory = api.proposalHistory;
+    origStatus = api.status;
+    origRuns = api.runs;
+    origEvents = api.events;
+    origAgents = api.agents;
+    origApprove = api.approve;
+    origReject = api.reject;
+
+    api.status = async () => stubStatus();
+    api.proposals = async () => ({ proposals: [] });
+    api.runs = async () => ({ runs: [] });
+    api.events = async () => ({ events: [] });
+    api.agents = async () => ({ agents: [], edges: {}, eventTypes: [], contracts: {} });
+    api.proposalHistory = async () => ({ proposals: [] });
+  });
+
+  afterEach(() => {
+    api.proposals = origProposals;
+    api.proposalHistory = origProposalHistory;
+    api.status = origStatus;
+    api.runs = origRuns;
+    api.events = origEvents;
+    api.agents = origAgents;
+    api.approve = origApprove;
+    api.reject = origReject;
+  });
+
+  test("bulk approve does not call api.approve until confirm", async () => {
+    const p1 = stubProposal("prop_1", "open", {
+      agent: "triage-scan",
+      spec: createRunSpecFixture("run_prop_1", { agent: "triage-scan", capabilities: ["read"], timeoutSeconds: 600 }),
+    });
+    const p2 = stubProposal("prop_2", "open", {
+      agent: "security-scan",
+      spec: createRunSpecFixture("run_prop_2", { agent: "security-scan", capabilities: ["net"], timeoutSeconds: 120 }),
+    });
+    const stale = stubProposal("prop_stale", "open", {
+      decision: "run",
+      runId: "run_stale",
+      agent: "stale-agent",
+    });
+    api.proposals = async () => ({ proposals: [p1, p2, stale] });
+    api.runs = async () => ({
+      runs: [createRunListItemFixture({ runId: "run_stale", state: "CANCELLED", agent: "stale-agent" })],
+    });
+
+    const approvedIds: string[] = [];
+    api.approve = async (id: string) => {
+      approvedIds.push(id);
+      return { approved: true, runId: `run_${id}`, proposal: undefined, replanned: false };
+    };
+
+    const r = renderProposals();
+    await waitFor(() => expect(r.getByLabelText("Select proposal prop_1")).toBeTruthy());
+
+    fireEvent.click(r.getByLabelText("Select all proposals"));
+    fireEvent.click(r.getByText("Approve selected (2)"));
+
+    expect(approvedIds).toEqual([]);
+    const dialog = r.getByRole("dialog");
+    expect(dialog).toBeTruthy();
+    expect(dialog.textContent).toMatch(/triage-scan/);
+    expect(dialog.textContent).toMatch(/security-scan/);
+    expect(dialog.textContent).toMatch(/read/);
+    expect(dialog.textContent).toMatch(/net/);
+    expect(dialog.textContent).toMatch(/600s/);
+    expect(dialog.textContent).toMatch(/120s/);
+    expect(dialog.textContent).toContain("timeoutSeconds");
+    expect(dialog.textContent).not.toMatch(/stale-agent/);
+
+    await act(async () => {
+      fireEvent.click(r.getByRole("button", { name: "Approve and queue" }));
+    });
+
+    expect(approvedIds).toEqual(["prop_1", "prop_2"]);
+  });
+
+  test("dismiss/reject never fires without a trimmed reason", async () => {
+    const p1 = stubProposal("prop_1", "open", { agent: "triage-scan" });
+    api.proposals = async () => ({ proposals: [p1] });
+
+    const rejectedCalls: { id: string; why?: string }[] = [];
+    api.reject = async (id: string, why?: string) => {
+      rejectedCalls.push({ id, why });
+      return { rejected: true };
+    };
+
+    const r = renderProposals({ focusProposalId: "prop_1" });
+    await waitFor(() => expect(r.getByRole("button", { name: /^Reject/ })).toBeTruthy());
+
+    const dismiss = r.queryByRole("button", { name: /^Dismiss$/ });
+    if (dismiss) fireEvent.click(dismiss);
+    expect(rejectedCalls).toEqual([]);
+
+    fireEvent.click(r.getByRole("button", { name: /^Reject/ }));
+    const confirm = await waitFor(() => r.getByRole("button", { name: "Confirm" }) as HTMLButtonElement);
+    expect(confirm.disabled).toBe(true);
+
+    const reasonInput = r.getByPlaceholderText(/Reason \(required/i) as HTMLInputElement;
+    await act(async () => {
+      changeInput(reasonInput, "   ");
+    });
+    expect((r.getByRole("button", { name: "Confirm" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(reasonInput, { key: "Enter" });
+    expect(rejectedCalls).toEqual([]);
+
+    await act(async () => {
+      changeInput(reasonInput, " Scope too wide ");
+    });
+    await act(async () => {
+      fireEvent.click(r.getByRole("button", { name: "Confirm" }));
+    });
+    expect(rejectedCalls).toEqual([{ id: "prop_1", why: "Scope too wide" }]);
+  });
+
+  test("one stubbed replan response does not silently continue bulk approve", async () => {
+    const p1 = stubProposal("prop_1", "open", {
+      agent: "triage-scan",
+      spec: createRunSpecFixture("run_prop_1", { timeoutSeconds: 600 }),
+    });
+    const p2 = stubProposal("prop_2", "open", { agent: "security-scan" });
+    const replacement = stubProposal("prop_1b", "open", {
+      agent: "triage-scan",
+      spec: createRunSpecFixture("run_prop_1b", { timeoutSeconds: 900, agent: "triage-scan" }),
+    });
+    api.proposals = async () => ({ proposals: [p1, p2] });
+
+    const approveCalls: string[] = [];
+    api.approve = async (id: string) => {
+      approveCalls.push(id);
+      if (id === "prop_1") {
+        return { approved: false, runId: undefined, replanned: true, proposal: replacement };
+      }
+      return { approved: true, runId: `run_${id}`, proposal: undefined, replanned: false };
+    };
+
+    const r = renderProposals();
+    await waitFor(() => expect(r.getByLabelText("Select proposal prop_1")).toBeTruthy());
+    fireEvent.click(r.getByLabelText("Select all proposals"));
+    fireEvent.click(r.getByText("Approve selected (2)"));
+
+    const confirm = r.queryByRole("button", { name: "Approve and queue" });
+    if (confirm) {
+      await act(async () => {
+        fireEvent.click(confirm);
+      });
+    } else {
+      await act(async () => {});
+    }
+
+    await waitFor(() => expect(approveCalls.length).toBeGreaterThan(0));
+    expect(approveCalls).toEqual(["prop_1"]);
+    expect(r.getByText(/re-planned against current state/i)).toBeTruthy();
+    expect(r.getByText(/nothing runs until you approve the new proposal explicitly/i)).toBeTruthy();
+  });
+
+  test("repo context shows a persistent caption that the list is scoped to that repo", async () => {
+    const p1 = stubProposal("prop_1", "open", { repos: ["repo-test"], agent: "triage-scan" });
+    api.proposals = async () => ({ proposals: [p1] });
+
+    const r = renderProposals({ context: { kind: "repo", name: "repo-test" } });
+    await waitFor(() => expect(r.getByText("triage-scan")).toBeTruthy());
+    expect(r.getByText("Showing proposals that name repo-test.")).toBeTruthy();
+  });
+
+  test("origin column title is the full eventId; reason column title is p.reason", async () => {
+    const eventId = "evt_abc123_full_event_id";
+    const reason = "Needs a very long planner reason for the truncated cell";
+    const p1 = stubProposal("prop_1", "open", {
+      eventId,
+      eventSource: "github",
+      reason,
+      agent: "triage-scan",
+    });
+    api.proposals = async () => ({ proposals: [p1] });
+    api.events = async () => ({
+      events: [createEventFixture({ eventId, source: "github", type: "pull_request.opened" })],
+    });
+
+    const r = renderProposals();
+    const origin = await waitFor(() => r.getByTitle(eventId));
+    expect(origin.closest("td")?.getAttribute("title")).toBe(eventId);
+    const reasonCell = r.getByText(reason);
+    expect(reasonCell.closest("td")?.getAttribute("title")).toBe(reason);
   });
 });

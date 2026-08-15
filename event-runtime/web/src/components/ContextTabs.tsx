@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OperatorContext } from "../context";
 import { INFLIGHT, toggleInflight } from "../context";
+import { hashView } from "../hash";
 import { CONTEXT_TABS_ATTR } from "../hooks";
 import type { RepoItem } from "../types";
 
@@ -28,22 +29,52 @@ const getHashRunId = () => {
   return m ? decodeURIComponent(m[1]) : null;
 };
 
+type CaptionSurface = "fleet" | "registry" | "graph" | "overview";
+
+const SURFACE_SUBJECT: Record<CaptionSurface, { subject: string; plural: boolean }> = {
+  fleet: { subject: "Workers", plural: true },
+  // Projects also passes surface="registry"; only agents/schedules hashes map to view names below.
+  registry: { subject: "registry", plural: false },
+  graph: { subject: "Graph", plural: false },
+  overview: { subject: "Overview counts", plural: true },
+};
+
+/** Agents and Schedules both pass surface="registry"; hash is the only discriminator without editing views. */
+const REGISTRY_VIEW_SUBJECT: Record<string, { subject: string; plural: boolean }> = {
+  agents: { subject: "Agents", plural: true },
+  schedules: { subject: "Schedules", plural: true },
+};
+
+function captionSubject(surface: CaptionSurface) {
+  if (surface === "registry" && typeof window !== "undefined") {
+    const fromHash = REGISTRY_VIEW_SUBJECT[hashView(window.location.hash)];
+    if (fromHash) return fromHash;
+  }
+  return SURFACE_SUBJECT[surface];
+}
+
 export function ScopeCaption({
   context,
   surface,
 }: {
   context: OperatorContext;
-  surface: "fleet" | "registry" | "graph" | "overview";
+  surface: CaptionSurface;
 }) {
   if (context.kind === "all") return null;
   const n = context.kind === "inflight" ? "In flight" : context.name;
+  if (context.kind === "inflight") {
+    return (
+      <p className="mb-3 text-[11px] text-(--text-faint)">
+        {surface === "overview"
+          ? "In flight scopes Runs list — counts are factory-wide."
+          : "In flight scopes Runs list."}
+      </p>
+    );
+  }
+  const { subject, plural } = captionSubject(surface);
   return (
     <p className="mb-3 text-[11px] text-(--text-faint)">
-      {context.kind === "inflight"
-        ? surface === "overview"
-          ? "In flight scopes Runs list — counts are factory-wide."
-          : "In flight scopes Runs list."
-        : `${surface === "overview" ? "Overview counts are" : `${surface} is`} not scoped to ${n}.`}
+      {`${subject} ${plural ? "are" : "is"} not scoped to ${n}.`}
     </p>
   );
 }
@@ -74,7 +105,10 @@ export function ContextTabs({
   onUnpinRun?: (runId: string) => void;
 }) {
   const [picker, setPicker] = useState(false);
+  const [pickerHighlight, setPickerHighlight] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const plusRef = useRef<HTMLButtonElement>(null);
+  const listboxRef = useRef<HTMLDivElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
   const [internalPinned, setInternalPinned] = useState<string[]>(readPinnedRuns);
 
@@ -156,6 +190,12 @@ export function ContextTabs({
 
   useEffect(() => {
     if (!picker) return;
+    setPickerHighlight(0);
+    listboxRef.current?.focus();
+  }, [picker]);
+
+  useEffect(() => {
+    if (!picker) return;
     function onDoc(e: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPicker(false);
     }
@@ -164,6 +204,7 @@ export function ContextTabs({
       e.preventDefault();
       e.stopPropagation();
       setPicker(false);
+      plusRef.current?.focus();
     }
     document.addEventListener("mousedown", onDoc);
     window.addEventListener("keydown", onKey, true);
@@ -191,6 +232,12 @@ export function ContextTabs({
             : tabIds[(currentIndex + delta + tabIds.length) % tabIds.length];
       setTabStopId(nextId);
       stripRef.current?.querySelector<HTMLButtonElement>(`[data-context-tab="${nextId}"]`)?.focus();
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      e.stopPropagation();
+      stripRef.current
+        ?.querySelector<HTMLButtonElement>(`[data-context-tab="${currentId}"]`)
+        ?.click();
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
       e.stopPropagation();
@@ -200,10 +247,44 @@ export function ContextTabs({
     }
   };
 
+  const closePicker = (restorePlus = false) => {
+    setPicker(false);
+    if (restorePlus) plusRef.current?.focus();
+  };
+
+  const selectPickerRepo = (name: string) => {
+    onOpen(name);
+    closePicker(true);
+  };
+
+  const handlePickerKeyDown = (e: React.KeyboardEvent) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (available.length === 0) return;
+      setPickerHighlight((i) => (i + 1) % available.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (available.length === 0) return;
+      setPickerHighlight((i) => (i - 1 + available.length) % available.length);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setPickerHighlight(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      if (available.length === 0) return;
+      setPickerHighlight(available.length - 1);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      const choice = available[pickerHighlight];
+      if (choice) selectPickerRepo(choice.name);
+    }
+  };
+
   // Active state uses the accent tokens (not --surface-3) so it stays visible
   // against --surface-1 in light theme, where the two grays sit too close (WM-91).
   const tabClass = (id: string) =>
-    `flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium ${
+    `flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1) ${
       activeId === id
         ? "bg-(--accent-dim) text-(--text) ring-1 ring-inset ring-(--accent)"
         : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
@@ -213,7 +294,7 @@ export function ContextTabs({
     <div className="flex h-9 shrink-0 items-stretch gap-0.5 border-b border-(--border) bg-(--surface-1) px-2">
       <div
         ref={stripRef}
-        className="flex min-w-0 flex-1 items-stretch gap-0.5"
+        className="flex min-w-0 flex-1 items-stretch gap-0.5 outline-none"
         role="toolbar"
         aria-label="Context"
         onKeyDown={handleKeyDown}
@@ -329,6 +410,7 @@ export function ContextTabs({
       </div>
       <div className="relative flex shrink-0 items-center" ref={pickerRef}>
         <button
+          ref={plusRef}
           type="button"
           aria-expanded={picker}
           aria-haspopup="listbox"
@@ -342,28 +424,39 @@ export function ContextTabs({
         </button>
         {picker && (
           <div
+            ref={listboxRef}
             id="repo-picker-listbox"
             role="listbox"
+            tabIndex={0}
             aria-label="Factory repos"
-            className="absolute top-full right-0 z-30 mt-1 max-h-72 min-w-48 overflow-auto rounded-md border border-(--border) bg-(--surface-1) py-1 shadow-lg"
+            aria-activedescendant={
+              available[pickerHighlight] ? `repo-picker-opt-${pickerHighlight}` : undefined
+            }
+            className="absolute top-full right-0 z-30 mt-1 max-h-72 min-w-48 overflow-auto rounded-md border border-(--border) bg-(--surface-1) py-1 shadow-lg outline-none"
+            onKeyDown={handlePickerKeyDown}
           >
             {reposError ? (
               <div className="px-3 py-2 text-[12px] text-(--text-faint)">Cannot reach /repos.</div>
             ) : available.length === 0 ? (
               <div className="px-3 py-2 text-[12px] text-(--text-faint)">
-                {repos.length === 0 ? "No repos in the registry." : "All repos are open."}
+                {repos.length === 0 ? "No repos available." : "All repos are open."}
               </div>
             ) : (
-              available.map((r) => (
+              available.map((r, i) => (
                 <button
                   key={r.name}
+                  id={`repo-picker-opt-${i}`}
                   type="button"
                   role="option"
-                  className="block w-full px-3 py-1.5 text-left text-[12px] text-(--text) hover:bg-(--surface-2)"
-                  onClick={() => {
-                    onOpen(r.name);
-                    setPicker(false);
-                  }}
+                  tabIndex={-1}
+                  aria-selected={i === pickerHighlight}
+                  className={`block w-full px-3 py-1.5 text-left text-[12px] text-(--text) ${
+                    i === pickerHighlight
+                      ? "bg-(--surface-2) ring-1 ring-inset ring-(--accent)"
+                      : "hover:bg-(--surface-2)"
+                  }`}
+                  onMouseEnter={() => setPickerHighlight(i)}
+                  onClick={() => selectPickerRepo(r.name)}
                 >
                   {r.name}
                   {r.team ? <span className="ml-2 text-(--text-faint)">{r.team}</span> : null}

@@ -1,9 +1,11 @@
 import "../test-dom";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Schedules, scheduleFilterTokens, type ScheduleItem } from "./Schedules";
 import { api } from "../api";
+import { useContextActions } from "../palette";
 
 afterEach(() => {
   cleanup();
@@ -71,18 +73,55 @@ afterEach(() => {
   api.events = origEvents;
 });
 
-function renderSchedules() {
-  return renderWithClient(
-    <Schedules
-      context={{ kind: "all" }}
-      focusScheduleLoop={null}
-      onSelectSchedule={noop}
-      onJumpProposal={noop}
-      onJumpRun={noop}
-      onJumpEvent={noop}
-      onJumpAgent={noop}
-    />,
-  );
+function scheduleViewProps(
+  overrides: Partial<{
+    connected: boolean;
+    focusScheduleLoop: string | null;
+    onSelectSchedule: (loop: string | null) => void;
+  }> = {},
+) {
+  return {
+    context: { kind: "all" as const },
+    focusScheduleLoop: null as string | null,
+    onSelectSchedule: noop,
+    onJumpProposal: noop,
+    onJumpRun: noop,
+    onJumpEvent: noop,
+    onJumpAgent: noop,
+    ...overrides,
+  };
+}
+
+function renderSchedules(
+  overrides: Partial<{
+    connected: boolean;
+    focusScheduleLoop: string | null;
+    onSelectSchedule: (loop: string | null) => void;
+  }> = {},
+) {
+  return renderWithClient(<Schedules {...scheduleViewProps(overrides)} />);
+}
+
+function StatefulSchedules({
+  connected,
+  initialLoop = null,
+}: {
+  connected?: boolean;
+  initialLoop?: string | null;
+}) {
+  const [loop, setLoop] = useState<string | null>(initialLoop);
+  return <Schedules {...scheduleViewProps({ connected, focusScheduleLoop: loop, onSelectSchedule: setLoop })} />;
+}
+
+function PaletteProbe() {
+  const actions = useContextActions();
+  return <div data-testid="palette-probe">{actions.map((a) => a.label).join(" | ")}</div>;
+}
+
+function pressKey(key: string) {
+  act(() => {
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  });
 }
 
 describe("Schedules enabled/state wording (WM-101)", () => {
@@ -164,5 +203,109 @@ describe("Schedules enabled/state wording (WM-101)", () => {
     }
     // error wins the state token
     expect(scheduleFilterTokens(schedule({ loop: "l", error: "bad cadence" }))).toContain("error");
+  });
+});
+
+describe("Schedules connected gating (WM-156)", () => {
+  test("list and detail Run now buttons are disabled when connected={false}", async () => {
+    const { getAllByRole } = renderSchedules({
+      connected: false,
+      focusScheduleLoop: "loop-enabled-running",
+    });
+
+    await waitFor(() => expect(getAllByRole("button", { name: "Run now…" }).length).toBeGreaterThan(1));
+
+    for (const btn of getAllByRole("button", { name: "Run now…" })) {
+      expect((btn as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+
+  test("keyboard r does not open confirm when disconnected", async () => {
+    const { getAllByRole, queryByRole, queryByText } = renderWithClient(
+      <StatefulSchedules connected={false} initialLoop="loop-enabled-running" />,
+    );
+
+    await waitFor(() => expect(getAllByRole("button", { name: "Run now…" }).length).toBeGreaterThan(0));
+    pressKey("r");
+
+    expect(queryByRole("button", { name: "Trigger Run" }) === null).toBe(true);
+    expect(queryByText(/Run schedule/) === null).toBe(true);
+  });
+
+  test("palette omits Run now when disconnected", async () => {
+    const { getAllByRole, getByTestId } = renderWithClient(
+      <>
+        <StatefulSchedules connected={false} initialLoop="loop-enabled-running" />
+        <PaletteProbe />
+      </>,
+    );
+
+    await waitFor(() => expect(getAllByRole("button", { name: "Run now…" }).length).toBeGreaterThan(0));
+    await waitFor(() => expect(getByTestId("palette-probe").textContent).toContain("Copy loop-enabled-running"));
+
+    const labels = getByTestId("palette-probe").textContent ?? "";
+    expect(labels).not.toMatch(/Run .* now/);
+  });
+
+  test("confirm primary stays disabled after connection drops", async () => {
+    function ConfirmThenDisconnect() {
+      const [connected, setConnected] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setConnected(false)}>
+            simulate-disconnect
+          </button>
+          <StatefulSchedules connected={connected} initialLoop="loop-enabled-running" />
+        </>
+      );
+    }
+
+    const { getByText, getByRole, getAllByRole } = renderWithClient(<ConfirmThenDisconnect />);
+
+    await waitFor(() => expect(getAllByRole("button", { name: "Run now…" }).length).toBeGreaterThan(0));
+    fireEvent.click(getAllByRole("button", { name: "Run now…" })[0]!);
+    await waitFor(() => getByRole("button", { name: "Trigger Run" }));
+
+    expect((getByRole("button", { name: "Trigger Run" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(getByText("simulate-disconnect"));
+
+    expect((getByRole("button", { name: "Trigger Run" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test("Run now buttons are enabled when connected={true}", async () => {
+    const { getAllByRole } = renderSchedules({
+      connected: true,
+      focusScheduleLoop: "loop-enabled-running",
+    });
+
+    await waitFor(() => expect(getAllByRole("button", { name: "Run now…" }).length).toBeGreaterThan(1));
+
+    for (const btn of getAllByRole("button", { name: "Run now…" })) {
+      expect((btn as HTMLButtonElement).disabled).toBe(false);
+    }
+  });
+});
+
+describe("Schedules aria-selected (WM-156)", () => {
+  test("selected row has aria-selected=true; others false; updates on click and j/k", async () => {
+    const { getByText, container } = renderWithClient(<StatefulSchedules connected={true} />);
+
+    await waitFor(() => getByText("loop-enabled-running"));
+
+    const dataRows = () => [...container.querySelectorAll("tbody tr")];
+    expect(dataRows().every((row) => row.getAttribute("aria-selected") === "false")).toBe(true);
+
+    fireEvent.click(getByText("loop-enabled-running"));
+    expect(dataRows()[0]!.getAttribute("aria-selected")).toBe("true");
+    expect(dataRows().slice(1).every((row) => row.getAttribute("aria-selected") === "false")).toBe(true);
+
+    pressKey("j");
+    expect(dataRows()[0]!.getAttribute("aria-selected")).toBe("false");
+    expect(dataRows()[1]!.getAttribute("aria-selected")).toBe("true");
+
+    pressKey("k");
+    expect(dataRows()[0]!.getAttribute("aria-selected")).toBe("true");
+    expect(dataRows()[1]!.getAttribute("aria-selected")).toBe("false");
   });
 });

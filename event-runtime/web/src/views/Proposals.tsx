@@ -7,11 +7,13 @@ import {
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import type { Proposal } from "../types";
 import type { OperatorContext } from "../context";
@@ -44,6 +46,7 @@ import {
   VerbError,
   copyText,
   copyLink,
+  shortId,
 } from "../components/ui";
 
 const PROPOSAL_TABS = ["open", "history"] as const;
@@ -100,7 +103,6 @@ const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
   columns: [
     { key: "agent", label: "Agent", always: true },
     { key: "status", label: "Status" },
-    { key: "decidedBy", label: "Decided by" },
     { key: "decided", label: "Decided" },
     { key: "origin", label: "Origin" },
     { key: "created", label: "Created" },
@@ -143,7 +145,7 @@ export function Proposals({
   const [tab, setTab] = useState<"open" | "history">("open");
   const query = useQuery({
     queryKey: ["proposals"],
-    queryFn: api.proposals,
+    queryFn: () => api.proposals(),
     refetchInterval: 2000,
   });
   const history = useQuery({
@@ -197,7 +199,7 @@ export function Proposals({
 
   const agentsQuery = useQuery({
     queryKey: ["agents"],
-    queryFn: api.agents,
+    queryFn: () => api.agents(),
     refetchInterval: 5000,
   });
 
@@ -211,13 +213,14 @@ export function Proposals({
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkApproving, setBulkApproving] = useState(false);
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
   const [bulkRejectOpen, setBulkRejectOpen] = useState(false);
   const [bulkRejecting, setBulkRejecting] = useState(false);
   const [bulkReason, setBulkReason] = useState("");
   const headerCheckboxRef = useRef<HTMLInputElement>(null);
   const bulkReasonRef = useRef<HTMLInputElement>(null);
 
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: () => api.status(), refetchInterval: 2000 });
   // The expired chip only exists on Open; History rows have no live TTL. Derive
   // the gate once so the row filter and the empty copy can never disagree.
   const expiredFilter = expiredOnly && tab === "open";
@@ -282,29 +285,44 @@ export function Proposals({
   );
 
   const handleBulkApprove = async () => {
-    if (!approvableSelected.length) return;
+    if (!connected || !approvableSelected.length) return;
+    setBulkConfirmOpen(false);
     setBulkApproving(true);
     let ok = 0;
-    let replanned = 0;
     let err = 0;
+    const processed = new Set<string>();
+    let haltedOnReplan: { before: Proposal; after: Proposal } | null = null;
     for (const p of approvableSelected) {
       try {
         const o = await api.approve(p.id);
+        processed.add(p.id);
         if (o.approved && o.runId) {
           ok++;
           onRunQueued(o.runId);
         } else if (o.replanned && o.proposal) {
-          replanned++;
+          haltedOnReplan = { before: p, after: o.proposal };
+          break;
         }
       } catch {
         err++;
+        processed.add(p.id);
       }
     }
     invalidate();
-    setSelectedIds(new Set());
     setBulkApproving(false);
+    if (haltedOnReplan) {
+      setReplan(haltedOnReplan);
+      onSelectProposal(haltedOnReplan.after.id);
+      notify(`Proposal expired — re-planned new spec`, "info");
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of processed) next.delete(id);
+        return next;
+      });
+    } else {
+      setSelectedIds(new Set());
+    }
     if (ok) notify(`Approved ${ok} proposal${ok === 1 ? "" : "s"}`, "ok");
-    if (replanned) notify(`${replanned} proposal${replanned === 1 ? "" : "s"} expired and re-planned`, "info");
     if (err) notify(`Failed to approve ${err} proposal${err === 1 ? "" : "s"}`, "err");
   };
 
@@ -466,7 +484,11 @@ export function Proposals({
   });
 
   const reject = useMutation({
-    mutationFn: ({ id, why }: { id: string; why?: string }) => api.reject(id, why),
+    mutationFn: ({ id, why }: { id: string; why: string }) => {
+      const trimmed = why.trim();
+      if (!trimmed) return Promise.reject(new Error("Rejection reason required"));
+      return api.reject(id, trimmed);
+    },
     onSuccess: (_, { id }) => {
       invalidate();
       notify(`Rejected proposal ${id}`, "info");
@@ -545,6 +567,11 @@ export function Proposals({
           <>
         <h1 className="display mb-4 text-lg font-semibold">Proposals</h1>
         {context.kind === "inflight" && <ScopeCaption context={context} surface="fleet" />}
+        {context.kind === "repo" && (
+          <p className="mb-3 text-[11px] text-(--text-faint)">
+            {`Showing proposals that name ${context.name}.`}
+          </p>
+        )}
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <div className="flex gap-1" role="tablist" aria-label="Proposal status">
@@ -559,6 +586,7 @@ export function Proposals({
                   role="tab"
                   aria-selected={tab === t}
                   onClick={() => selectTab(t)}
+                  title={t}
                   className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"}`}
                 >
                   {t === "open" ? "Open" : "History"}
@@ -567,27 +595,31 @@ export function Proposals({
               );
             })}
           </div>
-          {tab === "open" && (
+          {tab === "open" && expiredCount > 0 && (
             <button
               type="button"
               aria-pressed={expiredOnly}
               onClick={() => setExpiredOnly((v) => !v)}
-              className={`rounded-md px-2 py-1 text-[12px] ${
+              title="Filter to expired open proposals"
+              className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
                 expiredOnly
                   ? "bg-(--surface-3) text-(--text)"
                   : "text-(--text-faint) hover:bg-(--surface-1)"
               }`}
             >
-              expired
-              {expiredCount > 0 && (
-                <span className="ml-1.5 tabular-nums text-(--text-faint)">
-                  {expiredCount}
-                </span>
-              )}
+              Expired
+              <span className="ml-1.5 tabular-nums text-(--text-faint)">
+                {expiredCount}
+              </span>
             </button>
           )}
           <span className="ml-auto">
-            <DisplayOptions config={displayConfig} state={display} onChange={setDisplay} />
+            <DisplayOptions
+              config={displayConfig}
+              state={display}
+              onChange={setDisplay}
+              rows={scoped}
+            />
           </span>
           {/* Last in the row: the token chips are a full-width item, so anything
               after the filter box would be pushed onto a third line the moment
@@ -622,13 +654,17 @@ export function Proposals({
               )}
               {cols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -659,7 +695,7 @@ export function Proposals({
                       />
                     </td>
                   )}
-                  <td className={tdCls}>
+                  <td className={`${tdCls} max-w-32 truncate`}>
                     {p.agent ? (
                       <JumpLink
                         onClick={() => onJumpAgent(p.agent!)}
@@ -668,11 +704,13 @@ export function Proposals({
                         {p.agent}
                       </JumpLink>
                     ) : (
-                      "—"
+                      <span className="text-(--text-faint)" title="no agent: proposal rejected at planning">
+                        —
+                      </span>
                     )}
                   </td>
                   {show.has("decision") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-28 truncate`}>
                       <StateBadge state={p.decision} hues={DECISION_HUES} />
                       {staleState(p) && (
                         <span className="ml-2" style={{ color: "var(--hue-err)" }}>
@@ -682,45 +720,61 @@ export function Proposals({
                     </td>
                   )}
                   {show.has("ttl") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-20 whitespace-nowrap`}>
                       <Countdown createdAt={p.created_at} ttlSeconds={p.ttl_seconds} />
                     </td>
                   )}
                   {show.has("status") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-28 truncate`}>
                       <StateBadge state={p.status} hues={PROPOSAL_STATUS_HUES} />
                     </td>
                   )}
-                  {show.has("decidedBy") && (
-                    <td className={`${tdCls} text-(--text-dim)`}>{p.decided_by ?? "-"}</td>
-                  )}
                   {show.has("decided") && (
-                    <td className={`${tdCls} text-(--text-faint)`}>
-                      <Ago iso={p.decided_at} now={now} />
+                    <td
+                      className={`max-w-36 truncate ${tdCls} text-(--text-faint)`}
+                      title={
+                        p.decided_at
+                          ? `${new Date(p.decided_at).toLocaleString()}${p.decided_by ? ` · ${p.decided_by}` : ""}`
+                          : undefined
+                      }
+                    >
+                      {p.decided_at ? (
+                        <>
+                          <Ago iso={p.decided_at} now={now} />
+                          {p.decided_by && <span className="text-(--text-faint)"> · {p.decided_by}</span>}
+                        </>
+                      ) : (
+                        "-"
+                      )}
                     </td>
                   )}
                   {show.has("origin") && (
-                    <td className={`mono max-w-40 truncate ${tdCls} text-(--text-faint)`} title={originType(p) ?? undefined}>
+                    <td className={`mono max-w-32 truncate ${tdCls} text-(--text-faint)`} title={p.eventId ?? undefined}>
                       {p.eventId && p.eventSource ? (
                         <JumpLink
                           onClick={() => onJumpEvent(p.eventSource!, p.eventId!)}
-                          title={originType(p) ?? "Open origin event"}
+                          title={`Open origin event ${p.eventId}`}
                         >
-                          {p.eventId}
+                          {shortId(p.eventId)}
                         </JumpLink>
                       ) : (
-                        (p.eventId ?? "-")
+                        (p.eventId ? shortId(p.eventId) : "-")
                       )}
                     </td>
                   )}
                   {show.has("created") && (
-                    <td className={`${tdCls} text-(--text-faint)`}>
+                    <td className={`max-w-24 whitespace-nowrap ${tdCls} text-(--text-faint)`}>
                       <Ago iso={p.created_at} now={now} />
                     </td>
                   )}
                   {show.has("reason") && (
-                    <td className={`max-w-64 truncate ${tdCls} text-(--text-dim)`}>{p.reason ?? "-"}</td>
+                    <td className={`max-w-48 truncate ${tdCls} text-(--text-dim)`} title={p.reason ?? undefined}>
+                      {p.reason ?? "-"}
+                    </td>
                   )}
+                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    <CustomCell key={c.key} row={p} path={c.key.replace(/^custom:/, "")} />
+                  ))}
                 </tr>
               );
               if (!grouped(display)) return sections[0]?.rows.map(renderRow);
@@ -781,11 +835,70 @@ export function Proposals({
       {sel && (
         <DetailPane
           widthClass="w-[460px]"
-          title={<span title={sel.id}>{sel.agent ?? sel.id}</span>}
+          title={
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectProposal(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to proposals list"
+              >
+                Proposals
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
+              </span>
+              <span className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)" aria-current="page">
+                <StateBadge
+                  state={sel.status === "open" ? sel.decision : sel.status}
+                  hues={sel.status === "open" ? DECISION_HUES : PROPOSAL_STATUS_HUES}
+                />
+                <span className="truncate mono" title={sel.id}>
+                  {shortId(sel.id)}
+                </span>
+              </span>
+            </nav>
+          }
           actions={
+            isOpen ? (
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="danger"
+                  disabled={!connected || reject.isPending}
+                  onClick={openReject}
+                >
+                  Reject… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">x</span>
+                </Button>
+                {canApprove && (
+                  <Button
+                    variant="primary"
+                    disabled={!connected || approve.isPending}
+                    onClick={() => setConfirmApprove(true)}
+                  >
+                    Approve… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">a</span>
+                  </Button>
+                )}
+              </div>
+            ) : null
+          }
+          utility={
             <>
-              <Button onClick={() => copyText(sel.id, "proposal id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.id, "proposal id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectProposal(null)}>Close</Button>}
@@ -809,8 +922,8 @@ export function Proposals({
               k="run"
               v={
                 sel.runId ? (
-                  <JumpLink onClick={() => onRunQueued(sel.runId!)} title="Open run">
-                    {sel.runId}
+                  <JumpLink onClick={() => onRunQueued(sel.runId!)} title={`Open run ${sel.runId}`}>
+                    {shortId(sel.runId)}
                   </JumpLink>
                 ) : null
               }
@@ -824,7 +937,16 @@ export function Proposals({
             <KV k="created" v={<Ago iso={sel.created_at} now={now} />} />
             {sel.decided_at && <KV k="decided at" v={<Ago iso={sel.decided_at} now={now} />} />}
             {sel.decided_by && <KV k="decided by" v={sel.decided_by} />}
-            {sel.reason && <KV k="planner reason" v={sel.reason} />}
+            {sel.reason && (
+              <KV
+                k="planner reason"
+                v={
+                  <span className="break-words whitespace-pre-wrap leading-relaxed text-(--text-dim)">
+                    {sel.reason}
+                  </span>
+                }
+              />
+            )}
           </Section>
 
           {sel.eventId && (
@@ -833,11 +955,11 @@ export function Proposals({
                 k="eventId"
                 v={
                   sel.eventSource ? (
-                    <JumpLink onClick={() => onJumpEvent(sel.eventSource!, sel.eventId!)} title="Open origin event">
-                      {sel.eventId}
+                    <JumpLink onClick={() => onJumpEvent(sel.eventSource!, sel.eventId!)} title={`Open origin event ${sel.eventId}`}>
+                      {shortId(sel.eventId)}
                     </JumpLink>
                   ) : (
-                    sel.eventId
+                    <span title={sel.eventId}>{shortId(sel.eventId)}</span>
                   )
                 }
               />
@@ -867,7 +989,7 @@ export function Proposals({
                   <div className="mb-2 flex items-center justify-between border-b border-(--border) pb-2">
                     <div className="flex gap-2">
                       <span className="rounded px-2 py-0.5 text-[11px] font-semibold uppercase" style={{ color: mut ? "var(--hue-err)" : "var(--hue-ok)", background: `color-mix(in oklch, ${mut ? "var(--hue-err)" : "var(--hue-ok)"} 12%, transparent)` }}>
-                        {mut ? "🔴 Mutating" : "🟢 Read-Only"}
+                        {mut ? "Mutating" : "Read-Only"}
                       </span>
                       <span className="rounded px-2 py-0.5 text-[11px] font-semibold uppercase" style={{ color: blastHue, background: `color-mix(in oklch, ${blastHue} 12%, transparent)` }}>
                         Radar: {blast} Risk
@@ -876,16 +998,16 @@ export function Proposals({
                     <span className="mono text-[11px] text-(--text-faint)">{sel.spec.adapter}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Target Repo</div><div className="mono truncate text-(--text-dim)" title={repo}>{repo}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Target Branch</div><div className="mono truncate text-(--text-dim)" title={branch}>{branch}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Issue ID</div><div className="mono truncate text-(--text-dim)" title={issue}>{issue}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Host</div><div className="mono truncate text-(--text-dim)" title={host}>{host}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Budget</div><div className="mono text-(--text-dim)">{sel.spec.timeoutSeconds}s · max {sel.spec.maxAttempts} att</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Egress</div><div className="mono truncate text-(--text-dim)">{egress.length ? egress.join(", ") : "none"}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Target Repo</div><div className="mono truncate text-(--text-dim)" title={repo}>{repo}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Target Branch</div><div className="mono truncate text-(--text-dim)" title={branch}>{branch}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Issue ID</div><div className="mono truncate text-(--text-dim)" title={issue}>{issue}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Host</div><div className="mono truncate text-(--text-dim)" title={host}>{host}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Budget</div><div className="mono text-(--text-dim)">{sel.spec.timeoutSeconds}s · max {sel.spec.maxAttempts} att</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Egress</div><div className="mono truncate text-(--text-dim)">{egress.length ? egress.join(", ") : "none"}</div></div>
                     <div className="col-span-2">
-                      <div className="text-[10px] uppercase text-(--text-faint)">Capabilities</div>
+                      <div className="text-[11px] uppercase text-(--text-faint)">Capabilities</div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {caps.length ? caps.map((c) => <span key={c} className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[10.5px] text-(--text-dim)">{c}</span>) : <span className="text-[11px] text-(--text-faint)">none (sandboxed)</span>}
+                        {caps.length ? caps.map((c) => <span key={c} className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11.5px] text-(--text-dim)">{c}</span>) : <span className="text-[11px] text-(--text-faint)">none (sandboxed)</span>}
                       </div>
                     </div>
                   </div>
@@ -916,29 +1038,6 @@ export function Proposals({
             >
               This proposal&apos;s run is already {staleState(sel)} — it can no longer be approved.
               Reject it to clear the queue.
-            </div>
-          )}
-          {isOpen && (
-            <div className="flex gap-2">
-              {canApprove && (
-                <Button
-                  variant="primary"
-                  disabled={!connected || approve.isPending}
-                  onClick={() => setConfirmApprove(true)}
-                >
-                  Approve… <span className="mono ml-1 opacity-70">a</span>
-                </Button>
-              )}
-              <Button
-                variant="danger"
-                disabled={!connected || reject.isPending}
-                onClick={() => reject.mutate({ id: sel.id })}
-              >
-                Dismiss
-              </Button>
-              <Button variant="danger" disabled={!connected || reject.isPending} onClick={openReject}>
-                Reject… <span className="mono ml-1 opacity-70">x</span>
-              </Button>
             </div>
           )}
 
@@ -1006,12 +1105,15 @@ export function Proposals({
             <KV k="attempts" v={String(sel.spec?.maxAttempts)} />
             <KV k="ttl" v={<Countdown createdAt={sel.created_at} ttlSeconds={sel.ttl_seconds} />} />
           </div>
-          {sel.spec && <JsonBlock value={sel.spec} />}
+          {sel.spec && (
+            <div className="mb-3 max-h-[50vh] overflow-auto">
+              <JsonBlock value={sel.spec} />
+            </div>
+          )}
           <div className="mt-3 flex justify-end gap-2">
             <Button onClick={() => setConfirmApprove(false)}>Not yet</Button>
             <Button
               variant="primary"
-              autoFocus
               disabled={!connected || approve.isPending}
               onClick={() => {
                 setConfirmApprove(false);
@@ -1032,7 +1134,7 @@ export function Proposals({
           </div>
           <SpecDiff before={replan.before.spec} after={replan.after.spec} />
           <div className="mt-3 flex justify-end gap-2">
-            <Button onClick={() => setReplan(null)}>Not now</Button>
+            <Button onClick={() => setReplan(null)}>Not yet</Button>
             <Button
               variant="primary"
               disabled={!connected || approve.isPending}
@@ -1053,9 +1155,9 @@ export function Proposals({
           <Button
             variant="primary"
             disabled={!connected || bulkApproving || approvableSelected.length === 0}
-            onClick={handleBulkApprove}
+            onClick={() => setBulkConfirmOpen(true)}
           >
-            {bulkApproving ? "Approving…" : `Approve selected (${selectedIds.size})`}
+            {bulkApproving ? "Approving…" : `Approve selected (${approvableSelected.length})`}
           </Button>
           <Button
             variant="danger"
@@ -1068,6 +1170,44 @@ export function Proposals({
             Reject selected ({selectedIds.size})
           </Button>
         </BulkActionBar>
+      )}
+
+      {bulkConfirmOpen && approvableSelected.length > 0 && (
+        <Dialog
+          title={`Approve and queue ${approvableSelected.length} run${approvableSelected.length === 1 ? "" : "s"}?`}
+          onClose={() => setBulkConfirmOpen(false)}
+          wide
+        >
+          <div className="mb-3 text-[12px] text-(--text-dim)">
+            You are approving {approvableSelected.length === 1 ? "this exact immutable spec" : "these exact immutable specs"}{" "}
+            — each agent below runs with these capabilities the moment you confirm. Stale and non-run
+            rows are skipped.
+          </div>
+          <div className="flex max-h-[60vh] flex-col gap-4 overflow-auto">
+            {approvableSelected.map((p) => (
+              <div key={p.id} className="rounded-md border border-(--border) bg-(--surface-0) p-2.5">
+                <div className="mb-2 font-medium text-[12px]">{p.agent ?? p.id}</div>
+                <KV k="agent" v={p.spec?.agent} />
+                <KV k="capabilities" v={p.spec?.capabilities.join(", ") || "none"} />
+                <KV k="timeout" v={`${p.spec?.timeoutSeconds}s`} />
+                {p.spec && <JsonBlock value={p.spec} />}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex justify-end gap-2">
+            <Button onClick={() => setBulkConfirmOpen(false)}>Not yet</Button>
+            <Button
+              variant="primary"
+              autoFocus
+              disabled={!connected || bulkApproving}
+              onClick={() => {
+                void handleBulkApprove();
+              }}
+            >
+              Approve and queue
+            </Button>
+          </div>
+        </Dialog>
       )}
 
       {bulkRejectOpen && (

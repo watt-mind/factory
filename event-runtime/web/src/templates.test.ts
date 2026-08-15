@@ -24,6 +24,8 @@ const agent = (over: Record<string, unknown> = {}) =>
     command: null,
     actionRegistry: null,
     hosts: null,
+    modelTier: null,
+    model: null,
     eventTypes: [],
     ...over,
   }) as AgentsView["agents"][number];

@@ -1,14 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { GO_CHORD_MS, goSequence } from "./goSequence";
+import { NAV } from "./nav";
+
+/** Every `g`-chord suffix registered in nav — single source for the matrix. */
+const NAV_SUFFIXES: string[] = NAV.map((n) => n.go);
 
 /** A stepper over the real nav suffixes, with a clock the test drives. */
-function chord(targets = ["g", "o", "e", "p", "r", "t", "w"]) {
+function chord(targets = NAV_SUFFIXES) {
   let now = GO_CHORD_MS;
   const seq = goSequence((k) => targets.includes(k), () => now);
   return { press: seq.press, armed: seq.armed, at: (t: number) => (now = t) };
 }
 
 describe("goSequence", () => {
+  test("chord matrix covers every NAV suffix — new views cannot drift silently", () => {
+    expect(NAV_SUFFIXES).toEqual(NAV.map((n) => n.go));
+  });
+
   test("g g completes the chord inside the window — the Graph suffix is not swallowed", () => {
     const c = chord();
     expect(c.press("g")).toBe(false);
@@ -17,7 +25,7 @@ describe("goSequence", () => {
   });
 
   test("a single g still arms the prefix for every other suffix", () => {
-    for (const suffix of ["o", "e", "p", "r", "t", "w"]) {
+    for (const suffix of NAV_SUFFIXES.filter((k) => k !== "g")) {
       const c = chord();
       expect(c.press("g")).toBe(false);
       expect(c.press(suffix)).toBe(true);

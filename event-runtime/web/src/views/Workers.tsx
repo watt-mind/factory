@@ -7,11 +7,13 @@ import {
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import type { Worker } from "../types";
 import type { OperatorContext } from "../context";
@@ -53,6 +55,32 @@ export type WorkerTab = (typeof WORKER_TABS)[number];
  * look at, while a cleanly stopped one is history.
  */
 export const isLive = (w: Worker) => health(w) !== "stopped";
+
+export type FleetBanner =
+  | { kind: "empty" }
+  | { kind: "all-stopped"; count: number }
+  | { kind: "stale"; stale: number; stopped: number };
+
+/**
+ * Banner that agrees with `isLive` / the Live tab. Stale workers are live
+ * (they may still hold a run), so a stale-only fleet is not “no live workers”.
+ * Returns null when at least one idle/busy worker can claim work.
+ */
+export function fleetBanner(rows: Worker[]): FleetBanner | null {
+  if (rows.length === 0) return { kind: "empty" };
+  let stale = 0;
+  let stopped = 0;
+  let claiming = 0;
+  for (const w of rows) {
+    const h = health(w);
+    if (h === "stale") stale += 1;
+    else if (h === "stopped") stopped += 1;
+    else claiming += 1;
+  }
+  if (claiming > 0) return null;
+  if (stale > 0) return { kind: "stale", stale, stopped };
+  return { kind: "all-stopped", count: stopped };
+}
 
 /** Split the registry into live and stopped, preserving order within each group. */
 export function partitionWorkers(rows: Worker[]): { live: Worker[]; stopped: Worker[] } {
@@ -190,6 +218,50 @@ const openRun = (runId: string) => {
   window.location.hash = `#/runs/${runId}`;
 };
 
+function FleetStatusBanner({ banner }: { banner: FleetBanner }) {
+  const hue = banner.kind === "stale" ? "var(--hue-err)" : "var(--hue-warn)";
+  const title =
+    banner.kind === "empty"
+      ? "No workers registered"
+      : banner.kind === "all-stopped"
+        ? "All workers are stopped"
+        : "Workers are stale";
+  const lead =
+    banner.kind === "empty"
+      ? "No workers have registered with the runtime."
+      : banner.kind === "all-stopped"
+        ? `${banner.count} registered worker${banner.count === 1 ? " is" : "s are"} stopped.`
+        : `${banner.stale} worker${banner.stale === 1 ? "" : "s"} missed the heartbeat window${
+            banner.stopped > 0 ? ` (${banner.stopped} stopped)` : ""
+          } and may still hold a run.`;
+  return (
+    <div
+      className="mb-3 rounded-md border p-3 text-[12px]"
+      style={{
+        color: hue,
+        borderColor: hue,
+        background: `color-mix(in oklch, ${hue} 8%, var(--surface-1))`,
+      }}
+    >
+      <div className="flex items-center gap-2 font-semibold">
+        <span
+          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "motion-safe:animate-pulse"}`}
+          style={{ background: hue }}
+        />
+        <span>{title}</span>
+      </div>
+      <div className="mt-1 text-(--text-dim)">
+        {lead}{" "}
+        Queued runs will remain waiting until a worker is started with{" "}
+        <code className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-[11px] text-(--text)">
+          bun event-runtime/cli.mjs work
+        </code>
+        .
+      </div>
+    </div>
+  );
+}
+
 /**
  * Workers — the registry the CLI `workers` command prints, made legible. The
  * question this view answers is who could claim the next run and who only
@@ -209,12 +281,8 @@ export function Workers({
   const query = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 2000 });
   const rows = query.data?.workers ?? [];
 
-  const liveCount = useMemo(
-    () => rows.filter((w) => !w.stale && w.state !== "stopped").length,
-    [rows],
-  );
-
   const parts = useMemo(() => partitionWorkers(rows), [rows]);
+  const banner = useMemo(() => fleetBanner(rows), [rows]);
 
   // `null` = no explicit choice yet: follow the data (live when any worker is
   // live). The first click pins the tab and the default stops moving under it.
@@ -349,7 +417,12 @@ export function Workers({
                 })}
               </div>
               <span className="ml-auto">
-                <DisplayOptions config={WORKERS_DISPLAY} state={display} onChange={setDisplay} />
+                <DisplayOptions
+                  config={WORKERS_DISPLAY}
+                  state={display}
+                  onChange={setDisplay}
+                  rows={byTab}
+                />
               </span>
               <FilterInput
                 value={filter}
@@ -358,27 +431,7 @@ export function Workers({
                 label="Filter workers"
               />
             </div>
-            {query.isSuccess && liveCount === 0 && (
-              <div
-                className="mb-3 rounded-md border border-[color:var(--hue-warn)] bg-[color:color-mix(in_oklch,var(--hue-warn)_8%,var(--surface-1))] p-3 text-[12px]"
-                style={{ color: "var(--hue-warn)" }}
-              >
-                <div className="flex items-center gap-2 font-semibold">
-                  <span className="size-2 shrink-0 rounded-full bg-[color:var(--hue-warn)] animate-pulse" />
-                  <span>No live workers detected</span>
-                </div>
-                <div className="mt-1 text-(--text-dim)">
-                  {rows.length === 0
-                    ? "No workers have registered with the runtime."
-                    : `${rows.length} registered worker${rows.length === 1 ? " is" : "s are"} stopped or stale.`}{" "}
-                  Queued runs will remain waiting until a worker is started with{" "}
-                  <code className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-[11px] text-(--text)">
-                    bun event-runtime/cli.mjs work
-                  </code>
-                  .
-                </div>
-              </div>
-            )}
+            {query.isSuccess && banner && <FleetStatusBanner banner={banner} />}
           </>
         }
       >
@@ -387,13 +440,17 @@ export function Workers({
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
                 const sort = WORKERS_DISPLAY.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(WORKERS_DISPLAY, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(WORKERS_DISPLAY, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -465,6 +522,9 @@ export function Workers({
                       <HeartbeatCell w={w} now={now} />
                     </td>
                   )}
+                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    <CustomCell key={c.key} row={w} path={c.key.replace(/^custom:/, "")} />
+                  ))}
                 </tr>
               );
               if (!grouped(display)) return sections[0]?.rows.map(renderRow);
@@ -524,13 +584,27 @@ export function Workers({
               </span>
             </span>
           }
-          actions={
+          utility={
             <>
-              <Button onClick={() => copyText(sel.workerId, "worker id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectWorker(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.workerId, "worker id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectWorker(null)}>Close</Button>}
         >
           {selHeartbeat.kind === "stale" && (
             <div

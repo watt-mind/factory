@@ -172,7 +172,7 @@ describe("POC chain: capture a CI log, diagnose from the stored bytes (OPS-372)"
     const db = openDb(path.join(dir, "runtime.db"));
     const workspaces = tmp("evrt-poc-ws-");
     const artifactStore = tmp("evrt-poc-store-");
-    const adapters = { claude: fake, command: fake };
+    const adapters = { pi: fake, command: fake };
     const opts = { workspacesRoot: workspaces, artifactStore, owner: "w", policyVersion: "git:test" };
 
     admitEvent(db, registry, {

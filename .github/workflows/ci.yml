@@ -82,12 +82,14 @@ jobs:
       - name: E2E demo runtime seed and verify
         run: |
           set -e
-          PORT=7399
+          # Ask the OS for a free loopback port instead of sharing a fixed
+          # one with concurrent Verify jobs on this self-hosted host.
+          PORT="$(bun -e 'const probe = Bun.serve({ port: 0, fetch: () => new Response("") }); console.log(probe.port); probe.stop(true)')"
           DIR=$(mktemp -d)
           export FACTORY_EVENT_HOME="$DIR"
           export FACTORY_EVENT_PORT="$PORT"
 
-          bun event-runtime/cli.mjs serve --adapter-override fake &
+          bun event-runtime/cli.mjs serve --adapter-override fake --port "$PORT" &
           SERVE_PID=$!
           bun event-runtime/cli.mjs work --adapter-override fake &
           WORK_PID=$!
@@ -98,10 +100,24 @@ jobs:
           }
           trap cleanup EXIT
 
+          ready=0
           for i in $(seq 50); do
-            curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break
+            if kill -0 "$SERVE_PID" 2>/dev/null && \
+              HEALTH="$(curl -sf "http://127.0.0.1:$PORT/health")" && \
+              EXPECTED_HOME="$DIR" HEALTH="$HEALTH" bun -e '
+                const health = JSON.parse(process.env.HEALTH);
+                if (health.ok !== true || health.env?.home !== process.env.EXPECTED_HOME) process.exit(1);
+              '
+            then
+              ready=1
+              break
+            fi
             sleep 0.1
           done
+          if [ "$ready" -ne 1 ]; then
+            echo "demo runtime did not become healthy as serve pid $SERVE_PID with event home $DIR" >&2
+            exit 1
+          fi
 
           bun event-runtime/demo/seed.mjs --port "$PORT" --prefix "ci-demo"
           bun event-runtime/demo/verify.mjs --port "$PORT"

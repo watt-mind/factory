@@ -2,7 +2,7 @@ import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Workers, defaultWorkerTab, isLive, partitionWorkers } from "./Workers";
+import { Workers, defaultWorkerTab, fleetBanner, isLive, partitionWorkers } from "./Workers";
 import { api } from "../api";
 import type { Worker, WorkerState } from "../types";
 
@@ -115,6 +115,56 @@ describe("Workers view default visibility (WM-98)", () => {
       });
       expect(getByText("w_stopped_2")).toBeTruthy();
       expect(getByRole("tab", { selected: true }).textContent).toContain("All");
+    });
+  });
+});
+
+describe("fleet banner vs Live tab (WM-155)", () => {
+  test("classifier: empty, all-stopped, and stale-only are distinct; idle/busy suppress the banner", () => {
+    expect(fleetBanner([])).toEqual({ kind: "empty" });
+    expect(fleetBanner([stubWorker("w_stopped", "stopped")])).toEqual({ kind: "all-stopped", count: 1 });
+    expect(fleetBanner([stubWorker("w_stale", "busy", true)])).toEqual({ kind: "stale", stale: 1, stopped: 0 });
+    expect(
+      fleetBanner([stubWorker("w_stale", "idle", true), stubWorker("w_stopped", "stopped")]),
+    ).toEqual({ kind: "stale", stale: 1, stopped: 1 });
+    expect(fleetBanner([stubWorker("w_idle", "idle")])).toBeNull();
+    expect(fleetBanner([stubWorker("w_idle", "idle"), stubWorker("w_stale", "busy", true)])).toBeNull();
+  });
+
+  test("stale-only fleet opens on Live with the stale row and does not say “No live workers detected”", async () => {
+    const workers = [stubWorker("w_stale_only", "busy", true)];
+    await withWorkers(workers, async () => {
+      const { getByText, queryByText, getByRole } = renderWorkers();
+      await waitFor(() => {
+        expect(getByText("w_stale_only")).toBeTruthy();
+      });
+      expect(getByRole("tab", { selected: true }).textContent).toContain("Live");
+      expect(queryByText("No live workers detected")).toBeNull();
+      expect(getByText("Workers are stale")).toBeTruthy();
+      expect(getByText(/missed the heartbeat window/i)).toBeTruthy();
+    });
+  });
+
+  test("empty registry banner says no workers registered, not “No live workers detected”", async () => {
+    await withWorkers([], async () => {
+      const { getByText, queryByText, findByText } = renderWorkers();
+      expect(await findByText("No workers registered")).toBeTruthy();
+      expect(queryByText("No live workers detected")).toBeNull();
+      expect(getByText(/No workers have registered with the runtime/i)).toBeTruthy();
+    });
+  });
+
+  test("all-stopped banner says workers are stopped, not stale-or-stopped", async () => {
+    const workers = [stubWorker("w_stopped_1", "stopped"), stubWorker("w_stopped_2", "stopped")];
+    await withWorkers(workers, async () => {
+      const { getByText, queryByText } = renderWorkers();
+      await waitFor(() => {
+        expect(getByText("w_stopped_1")).toBeTruthy();
+      });
+      expect(getByText("All workers are stopped")).toBeTruthy();
+      expect(queryByText("No live workers detected")).toBeNull();
+      expect(queryByText(/stopped or stale/)).toBeNull();
+      expect(getByText(/2 registered workers are stopped/)).toBeTruthy();
     });
   });
 });

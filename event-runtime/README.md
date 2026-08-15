@@ -24,6 +24,53 @@ all-in-one for a demo. Start `serve` first and let it reach `/health` before
 starting `work`: on a brand-new database both processes race the WAL
 journal-mode switch (OPS-376). `bin/worktree-up.sh` already sequences them.
 
+## Dev live reload — `factory up --dev` (WM-213)
+
+```bash
+factory up --dev   # serve --watch + vite HMR web UI + drain-aware worker
+factory tail       # all three logs, same as always
+factory down       # stops all three, same as always
+```
+
+Plain `factory up` is untouched by this flag; `--dev` only swaps each of the
+three daemons for its reloading twin.
+
+The worker is the interesting one. A naive watch-restart would kill an agent
+mid-dispatch, so the worker does **not** watch the filesystem: it records a
+**code stamp** at startup (`git rev-parse HEAD` plus a content hash of
+`event-runtime/lib/**` and `event-runtime/cli.mjs`, so uncommitted edits count)
+and re-computes it **between claims**. On a change it exits `75` and
+`bin/live-stack.sh __supervise-worker` re-execs it on the new code. If a run is
+in flight the reload is latched and logged once —
+
+```
+code changed (a1b2c3d4e5f6:9f8e7d6c5b4a → a1b2c3d4e5f6:11223344aabb) — reload deferred until run_x finishes
+```
+
+— and taken at the next idle poll. A run in flight when code changes therefore
+**finishes on the old code**, which is correct: its RunSpec and pins were made
+under that code. Reload latency is bounded by the poll interval; a running
+agent can never be interrupted by construction, because the idle check and the
+reload are the same branch.
+
+`bun event-runtime/cli.mjs work --reload-on-change` is the flag by itself, for
+a worker you supervise some other way. `FACTORY_CODE_STAMP_ROOT` points the
+stamp at a checkout other than the one the worker was started from.
+
+**Which change needs which reload:**
+
+| You changed | What reloads it | How fast |
+| :--- | :--- | :--- |
+| `event-runtime/lib/**`, `event-runtime/cli.mjs` | serve: `bun --watch` (in-flight planner work is dropped). worker: exit 75 at the next **idle** poll, then supervisor re-exec | serve immediately; worker after the current run |
+| `event-runtime/web/**` | vite HMR — the open tab updates, no restart | immediate |
+| `agents/*.md`, `schemas/**` | **neither** — definitions are read per plan/claim, but the pinned content hash is not. Run `bun event-runtime/cli.mjs update-pins` | on the next plan/claim after re-pinning |
+| `config/repos.yaml`, `config/schedule.yaml` | serve re-reads on restart — `--watch` covers it only if the edit also touches `event-runtime/` | restart serve |
+| `bin/live-stack.sh` itself | nothing — `factory down && factory up --dev` | manual |
+
+Two things `--dev` does not do: it does not restart the worker for an edit
+under `event-runtime/web/**` (vite owns that), and it does not touch a run
+already dispatched to an agent subprocess.
+
 Operator verbs (clients of the control API — they need `serve` running):
 
 ```bash
@@ -65,7 +112,8 @@ bun event-runtime/web/serve.mjs                        # http://127.0.0.1:7382 (
 ```
 
 Dev loop: `cd event-runtime/web && bunx vite` (proxies /api to the control
-API). Keyboard-first: `⌘K` palette, `g` + a view letter to navigate (the armed
+API), or `factory up --dev` to get it wired into the whole stack — see
+[Dev live reload](#dev-live-reload--factory-up---dev-wm-213). Keyboard-first: `⌘K` palette, `g` + a view letter to navigate (the armed
 prefix shows on screen), `j/k` + `Enter` on lists, `a`/`x` to approve/reject the
 selected proposal, `?` for the full legend.
 

@@ -1,0 +1,180 @@
+import "../test-dom";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { modal } from "../hooks";
+import { CommandPalette, type PaletteAction } from "./CommandPalette";
+
+const ACTIONS: PaletteAction[] = [
+  { label: "Overview", hint: "g g", group: "Go", run: () => {} },
+  { label: "Copy id", hint: "c", run: () => {} },
+];
+
+const NOOP = () => {};
+
+function jsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+const realFetch = globalThis.fetch;
+
+function renderPalette(actions: PaletteAction[] = ACTIONS) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchInterval: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <button type="button" data-testid="outside">
+        nav
+      </button>
+      <input data-testid="view-filter" data-view-filter />
+      <CommandPalette
+        actions={actions}
+        onJumpRun={NOOP}
+        onJumpProposal={NOOP}
+        onJumpEvent={NOOP}
+        onJumpAgent={NOOP}
+        onJumpWorker={NOOP}
+      />
+    </QueryClientProvider>,
+  );
+}
+
+function chordK() {
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+}
+
+function appendExtra(dialog: HTMLElement): HTMLButtonElement {
+  const extra = document.createElement("button");
+  extra.type = "button";
+  extra.dataset.testid = "extra";
+  extra.textContent = "extra";
+  dialog.appendChild(extra);
+  return extra;
+}
+
+beforeEach(() => {
+  modal.depth = 0;
+  globalThis.fetch = (async (_input: RequestInfo | URL) =>
+    jsonResponse({
+      runs: [],
+      proposals: [],
+      events: [],
+      agents: [],
+      workers: [],
+      repos: [],
+    })) as typeof fetch;
+});
+
+afterEach(() => {
+  modal.depth = 0;
+  globalThis.fetch = realFetch;
+  cleanup();
+});
+
+describe("CommandPalette", () => {
+  test("⌘K does not open while another modal owns the stack", () => {
+    const r = renderPalette();
+    modal.depth = 1;
+    chordK();
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+  });
+
+  test("⌘K still closes the palette when it is already open", () => {
+    const r = renderPalette();
+    chordK();
+    expect(r.getByRole("dialog", { name: "Command palette" })).toBeTruthy();
+    expect(modal.depth).toBe(1);
+    chordK();
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+    expect(modal.depth).toBe(0);
+  });
+
+  test("opening focuses the search input", () => {
+    const r = renderPalette();
+    chordK();
+    expect(document.activeElement).toBe(r.getByPlaceholderText("Type a command…"));
+  });
+
+  test("Tab from the last control wraps to the first inside the panel", () => {
+    const r = renderPalette();
+    chordK();
+    const dialog = r.getByRole("dialog", { name: "Command palette" });
+    const input = r.getByPlaceholderText("Type a command…");
+    const extra = appendExtra(dialog);
+    extra.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("Shift+Tab from the first control wraps to the last inside the panel", () => {
+    const r = renderPalette();
+    chordK();
+    const dialog = r.getByRole("dialog", { name: "Command palette" });
+    const input = r.getByPlaceholderText("Type a command…");
+    const extra = appendExtra(dialog);
+    input.focus();
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(extra);
+  });
+
+  test("closing via Escape restores focus to the previously focused element", () => {
+    const r = renderPalette();
+    const outside = r.getByTestId("outside");
+    outside.focus();
+    chordK();
+    expect(r.getByRole("dialog", { name: "Command palette" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  test("closing via backdrop restores focus to the previously focused element", () => {
+    const r = renderPalette();
+    const outside = r.getByTestId("outside");
+    outside.focus();
+    chordK();
+    fireEvent.mouseDown(r.getByTestId("palette-overlay"));
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  test("selecting an item restores focus to the previously focused element", () => {
+    let ran = false;
+    const r = renderPalette([{ label: "Overview", group: "Go", run: () => { ran = true; } }]);
+    const outside = r.getByTestId("outside");
+    outside.focus();
+    chordK();
+    fireEvent.click(r.getByText("Overview"));
+    expect(ran).toBe(true);
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  test("selecting an item that focuses another element keeps that focus", () => {
+    const r = renderPalette([
+      {
+        label: "Focus filter",
+        run: () => {
+          document.querySelector<HTMLElement>("[data-view-filter]")?.focus();
+        },
+      },
+    ]);
+    r.getByTestId("outside").focus();
+    chordK();
+    fireEvent.click(r.getByText("Focus filter"));
+    expect(r.queryByRole("dialog", { name: "Command palette" }) == null).toBe(true);
+    expect(document.activeElement).toBe(r.getByTestId("view-filter"));
+  });
+
+  test("search input uses an accent focus border and no outline", () => {
+    const r = renderPalette();
+    chordK();
+    const classes = r.getByPlaceholderText("Type a command…").className.split(/\s+/);
+    expect(classes).toContain("outline-none");
+    expect(classes).toContain("focus:border-(--accent)");
+  });
+});

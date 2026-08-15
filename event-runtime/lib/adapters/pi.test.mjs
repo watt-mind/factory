@@ -1,8 +1,8 @@
-import { describe, expect, test, afterAll } from "bun:test";
+import { describe, expect, test, afterAll, afterEach } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PROMPT_SUFFIX } from "./claude.mjs";
+import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV as CLAUDE_PUSH_CREDENTIAL_ENV } from "./claude.mjs";
 import {
   buildPiArgv,
   CliNotFoundError,
@@ -11,6 +11,7 @@ import {
   isHarnessDenial,
   KILL_GRACE_MS,
   mapStreamEvent,
+  PUSH_CREDENTIAL_ENV,
   READ_ONLY_TOOLS,
   resolvePiCommand,
   safeChildEnvironment,
@@ -170,6 +171,12 @@ describe("resolvePiCommand", () => {
 });
 
 describe("safeChildEnvironment", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
   test("strips every provider API key pi recognizes, keeps declared env", () => {
     const env = safeChildEnvironment({
       ANTHROPIC_API_KEY: "a",
@@ -186,6 +193,73 @@ describe("safeChildEnvironment", () => {
       expect(env[key]).toBeUndefined();
     }
     expect(env.CUSTOM_VAR).toBe("kept");
+  });
+
+  // Mirrors claude.test.mjs's "safeChildEnvironment (WM-128)" block: the pi
+  // adapter had no mutating/non-mutating distinction at all until WM-223, so a
+  // pi-routed dispatch run reached the push step with no credentials.
+  test("strips push credentials for non-mutating runs (WM-128 parity, WM-223)", () => {
+    const childEnv = safeChildEnvironment({
+      SSH_AUTH_SOCK: "/tmp/test.sock",
+      SSH_AGENT_PID: "12345",
+      GITHUB_TOKEN: "ghp_secret_token",
+      GH_TOKEN: "ghp_other_token",
+      OPENAI_API_KEY: "sk-secret",
+      CUSTOM_INSPECT_VAR: "allowed",
+    }, { mutating: false });
+
+    expect(childEnv.CUSTOM_INSPECT_VAR).toBe("allowed");
+    for (const key of PUSH_CREDENTIAL_ENV) {
+      expect(childEnv[key]).toBeUndefined();
+    }
+    expect(childEnv.OPENAI_API_KEY).toBeUndefined();
+  });
+
+  test("preserves push credentials while stripping provider keys for mutating runs (WM-128 parity, WM-223)", () => {
+    const childEnv = safeChildEnvironment({
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      SSH_AGENT_PID: "54321",
+      GITHUB_TOKEN: "ghp_mutating_token",
+      GH_TOKEN: "ghp_gh_token",
+      OPENAI_API_KEY: "sk-secret",
+      CUSTOM_MUTATING_VAR: "allowed",
+    }, { mutating: true });
+
+    expect(childEnv.CUSTOM_MUTATING_VAR).toBe("allowed");
+    expect(childEnv.SSH_AUTH_SOCK).toBe("/tmp/agent.sock");
+    expect(childEnv.SSH_AGENT_PID).toBe("54321");
+    expect(childEnv.GITHUB_TOKEN).toBe("ghp_mutating_token");
+    expect(childEnv.GH_TOKEN).toBe("ghp_gh_token");
+    expect(childEnv.OPENAI_API_KEY).toBeUndefined();
+  });
+
+  test("inherits push credentials from process.env only when mutating", () => {
+    process.env.SSH_AUTH_SOCK = "/tmp/inherited.sock";
+    process.env.GITHUB_TOKEN = "ghp_inherited_token";
+
+    const mutatingEnv = safeChildEnvironment({}, { mutating: true });
+    expect(mutatingEnv.SSH_AUTH_SOCK).toBe("/tmp/inherited.sock");
+    expect(mutatingEnv.GITHUB_TOKEN).toBe("ghp_inherited_token");
+
+    const readOnlyEnv = safeChildEnvironment({}, { mutating: false });
+    expect(readOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
+    expect(readOnlyEnv.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  // The real call site passes the agent definition itself (execute() → def), so
+  // an omitted `mutating` must land on the stripping side, not the inheriting one.
+  test("defaults to stripping when no definition, an empty one, or a boolean is passed", () => {
+    process.env.SSH_AUTH_SOCK = "/tmp/inherited.sock";
+
+    expect(safeChildEnvironment({}).SSH_AUTH_SOCK).toBeUndefined();
+    expect(safeChildEnvironment({}, {}).SSH_AUTH_SOCK).toBeUndefined();
+    expect(safeChildEnvironment({}, { mutating: undefined }).SSH_AUTH_SOCK).toBeUndefined();
+    expect(safeChildEnvironment({}, false).SSH_AUTH_SOCK).toBeUndefined();
+    expect(safeChildEnvironment({}, true).SSH_AUTH_SOCK).toBe("/tmp/inherited.sock");
+  });
+
+  test("shares one push-credential list with the claude adapter (no drift)", () => {
+    expect(PUSH_CREDENTIAL_ENV).toBe(CLAUDE_PUSH_CREDENTIAL_ENV);
   });
 });
 

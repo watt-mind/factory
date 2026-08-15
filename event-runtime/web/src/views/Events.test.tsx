@@ -10,6 +10,7 @@ import {
   restoreApi,
   withApi,
 } from "../test-render";
+import { shortId } from "../components/ui";
 import type { AdmittedEvent, EventFocus } from "../types";
 
 afterEach(() => {
@@ -65,9 +66,13 @@ describe("Events component harness: selection & detail view", () => {
         status: async () => createStatusFixture(),
       },
       async () => {
-        const { getByText } = renderEvents({ onSelectEvent });
+        const { container } = renderEvents({ onSelectEvent });
 
-        const cell = await waitFor(() => getByText("evt_click_test"));
+        const cell = await waitFor(() => {
+          const el = container.querySelector('td[title="evt_click_test"]');
+          if (!el) throw new Error("event row not rendered");
+          return el;
+        });
         const row = cell.closest("tr");
         expect(row).toBeTruthy();
         fireEvent.click(row!);
@@ -146,7 +151,7 @@ describe("Events component harness: filter retention", () => {
         const { getByLabelText, container } = renderEvents({ focusEvent });
 
         await waitFor(() => container.querySelector("tr.row-selected"));
-        expect(container.querySelector("tbody")?.textContent).toContain("evt_pr_closed");
+        expect(container.querySelector('td[title="evt_pr_closed"]')).toBeTruthy();
 
         const filterInput = getByLabelText("Filter events") as HTMLInputElement;
         act(() => {
@@ -154,14 +159,14 @@ describe("Events component harness: filter retention", () => {
         });
 
         await waitFor(() => {
-          expect(container.querySelector("tbody")?.textContent).toContain("evt_pr_opened");
-          expect(container.querySelector("tbody")?.textContent).not.toContain("evt_pr_closed");
+          expect(container.querySelector('td[title="evt_pr_opened"]')).toBeTruthy();
+          expect(container.querySelector('td[title="evt_pr_closed"]')).toBeNull();
         });
 
         // Selected event remains highlighted
         const selectedRow = container.querySelector("tr.row-selected");
         expect(selectedRow).toBeTruthy();
-        expect(selectedRow?.textContent).toContain("evt_pr_opened");
+        expect(selectedRow?.querySelector('td[title="evt_pr_opened"]')).toBeTruthy();
       },
     );
   });
@@ -214,7 +219,7 @@ describe("Events component harness: cross-tab reveal", () => {
         await waitFor(() => {
           const allTab = getByRole("tab", { name: /^All/i });
           expect(allTab.getAttribute("aria-selected")).toBe("true");
-          expect(container.querySelector("tbody")?.textContent).toContain("evt_dead_lettered_1");
+          expect(container.querySelector('td[title="evt_dead_lettered_1"]')).toBeTruthy();
         });
       },
     );
@@ -586,6 +591,60 @@ describe("Events component harness: facet chips synchronization with FilterInput
           expect(prButton?.getAttribute("aria-pressed")).toBe("false");
           expect(filterInput.value).toBe("");
         });
+      },
+    );
+  });
+});
+
+describe("Events repo scope caption (WM-142)", () => {
+  test("repo context renders scope caption while rows are filtered", async () => {
+    const matching = stubEvent("evt_repo_match", "admitted", { repos: ["factory"] });
+    const other = stubEvent("evt_other_repo", "admitted", { repos: ["other-repo"] });
+
+    await withApi(
+      {
+        events: async () => ({ events: [matching, other] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByText, container } = renderEvents({
+          context: { kind: "repo", name: "factory" },
+        });
+
+        await waitFor(() => {
+          expect(getByText(/Scoped to/i)).toBeTruthy();
+          expect(getByText(/factory/i)).toBeTruthy();
+          expect(getByText(/only rows naming this repo/i)).toBeTruthy();
+        });
+
+        expect(container.querySelector('td[title="evt_repo_match"]')).toBeTruthy();
+        expect(container.querySelector('td[title="evt_other_repo"]')).toBeNull();
+      },
+    );
+  });
+});
+
+describe("Events table short event ids (WM-142)", () => {
+  test("event id cell displays the short form and carries the full id as title", async () => {
+    const eventId = "evt_ec9c87f9-4c1d-4f4a-9d7e-2c2f3a1b0c9d";
+    const e1 = stubEvent(eventId, "admitted");
+
+    await withApi(
+      {
+        events: async () => ({ events: [e1] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container } = renderEvents({
+          focusEvent: { source: "github", eventId },
+        });
+
+        const cell = await waitFor(() => {
+          const el = container.querySelector(`td[title="${eventId}"]`);
+          if (!el) throw new Error("event id cell with full-id title is missing");
+          return el;
+        });
+        expect(cell.textContent).toBe(shortId(eventId));
       },
     );
   });

@@ -68,6 +68,32 @@ bun deploy/gen.mjs
 
 That is the gate CI applies to every pull request and to every push to `develop` and `main`. The web install comes first because the web `.test.tsx` files resolve React's JSX runtime out of `event-runtime/web/node_modules`; without it `bun test` reports a green that CI will not reproduce (OPS-384). `--check` is the half that proves the generated tree still matches `shared/`.
 
+## 6. The dev loop — `factory up --dev` (WM-213)
+
+`factory up` is the live stack. `factory up --dev` is the same three daemons with reload wired in, so iterating no longer means `factory down && factory up` after every edit:
+
+```bash
+factory up --dev     # serve --watch + vite HMR web UI + drain-aware worker
+factory tail         # all three logs (serve, worker, web)
+factory down         # stops all three
+```
+
+It needs the web deps (`cd event-runtime/web && bun install`) because the UI runs under vite instead of the static `serve.mjs` build; `--dev` says so and exits rather than failing inside vite. Plain `factory up` behaves exactly as before.
+
+**The worker reloads only when idle.** It stamps its own code at startup (HEAD plus a content hash of `event-runtime/lib/**` and `event-runtime/cli.mjs`, so uncommitted edits count) and re-checks that stamp *between claims*. On a change it exits `75` and the supervisor re-execs it. A run in flight keeps the old code to completion — logged as `reload deferred until <run> finishes` — and the reload happens at the next idle poll. Nothing can interrupt a running agent, which is the reason this is a poll-boundary check and not a file watcher.
+
+**Which change needs which reload:**
+
+| You changed | What reloads it |
+| :--- | :--- |
+| `event-runtime/lib/**`, `event-runtime/cli.mjs` | serve restarts immediately (`bun --watch`, drops in-flight planner work); the worker restarts at its next idle poll |
+| `event-runtime/web/**` | vite HMR — the open tab updates, nothing restarts |
+| `agents/*.md`, `schemas/**` | **neither.** Definitions are read per plan/claim but their pinned hashes are not: run `bun event-runtime/cli.mjs update-pins` |
+| `config/*.yaml` | restart serve |
+| `bin/live-stack.sh` | `factory down && factory up --dev` |
+
+Details, including the `work --reload-on-change` flag and `FACTORY_CODE_STAMP_ROOT`, are in [event-runtime/README.md](event-runtime/README.md#dev-live-reload--factory-up---dev-wm-213).
+
 ## Known gaps
 
 These are deliberate — the scaffold ships honest about what isn't built.

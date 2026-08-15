@@ -1,7 +1,7 @@
 import "./test-dom";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, waitFor, within } from "@testing-library/react";
 import { App } from "./App";
 import { NAV } from "./nav";
 import type { StatusView } from "./types";
@@ -60,6 +60,17 @@ beforeEach(() => {
     const url = String(input);
     if (url.includes("/api/health")) return jsonResponse(HEALTH);
     if (url.includes("/api/status")) return jsonResponse(STATUS);
+    if (url.includes("/api/agents")) {
+      return jsonResponse({
+        agents: [],
+        eventTypes: [],
+        edges: {},
+        contracts: {},
+        schemaHash: "test",
+        publishedAt: new Date().toISOString(),
+      });
+    }
+    if (url.includes("/api/repos")) return jsonResponse({ repos: [] });
     // Views poll their own endpoints; an empty list keeps them quiet.
     return jsonResponse([]);
   }) as typeof fetch;
@@ -134,11 +145,39 @@ describe("bottom status bar", () => {
       expect(statusBar.textContent).toContain("test");
       expect(statusBar.textContent).toContain("1 worker");
       expect(statusBar.textContent).toContain("⌘K commands");
+      expect(statusBar.textContent).toContain("i inject");
       expect(statusBar.textContent).toContain("g go");
       expect(statusBar.textContent).toContain("? keys");
     });
 
     const themeButton = within(statusBar).getByRole("button", { name: /Theme:/i });
     expect(themeButton).toBeTruthy();
+    expect(themeButton.getAttribute("aria-label")).toBe("Theme: dark. Switch to light.");
+
+    act(() => {
+      themeButton.click();
+    });
+    expect(themeButton.getAttribute("aria-label")).toBe("Theme: light. Switch to contrast.");
+
+    act(() => {
+      themeButton.click();
+    });
+    expect(themeButton.getAttribute("aria-label")).toBe("Theme: contrast. Switch to dark.");
+
+    act(() => {
+      themeButton.click();
+    });
+    expect(themeButton.getAttribute("aria-label")).toBe("Theme: dark. Switch to light.");
+  });
+});
+
+describe("inject hotkey (WM-80)", () => {
+  test("`i` opens the inject dialog with template search focused", async () => {
+    const { findByPlaceholderText } = renderApp();
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "i", bubbles: true }));
+    });
+    const search = await findByPlaceholderText(/search event types/i);
+    expect(document.activeElement === search).toBe(true);
   });
 });

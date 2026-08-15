@@ -223,11 +223,16 @@ export function useDisplayOptions<T>(
 export const THEMES = ["dark", "light", "contrast"] as const;
 export type Theme = (typeof THEMES)[number];
 
+function isTheme(value: string | null): value is Theme {
+  return value !== null && (THEMES as readonly string[]).includes(value);
+}
+
 /** Theme state on <html data-theme>; dark is the default (spec §5.1). */
 export function useTheme(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem("evrt-theme") as Theme) || "dark",
-  );
+  const [theme, setTheme] = useState<Theme>(() => {
+    const stored = localStorage.getItem("evrt-theme");
+    return isTheme(stored) ? stored : "dark";
+  });
   useEffect(() => {
     if (theme === "dark") delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = theme;

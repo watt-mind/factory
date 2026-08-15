@@ -39,6 +39,48 @@ export function matchesInFlight(state: string, ctx: OperatorContext): boolean {
   return state === "LEASED" || state === "RUNNING";
 }
 
+/**
+ * Count rows that would appear under the current operator context — the same
+ * `matchesRepo` / `matchesInFlight` filter Events, Proposals, and Runs apply.
+ * Pass `state` for run lists so In flight keeps only LEASED and RUNNING.
+ */
+export function scopedCount<T>(
+  items: readonly T[],
+  ctx: OperatorContext,
+  pick: {
+    repos: (item: T) => string[] | undefined;
+    state?: (item: T) => string;
+  },
+): number {
+  let n = 0;
+  for (const item of items) {
+    if (!matchesRepo(pick.repos(item), ctx)) continue;
+    if (pick.state && !matchesInFlight(pick.state(item), ctx)) continue;
+    n += 1;
+  }
+  return n;
+}
+
+/** Tally the same filtered rows by a key (event status, run state). */
+export function scopedTally<T>(
+  items: readonly T[],
+  ctx: OperatorContext,
+  pick: {
+    repos: (item: T) => string[] | undefined;
+    state?: (item: T) => string;
+    key: (item: T) => string;
+  },
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const item of items) {
+    if (!matchesRepo(pick.repos(item), ctx)) continue;
+    if (pick.state && !matchesInFlight(pick.state(item), ctx)) continue;
+    const k = pick.key(item);
+    out[k] = (out[k] ?? 0) + 1;
+  }
+  return out;
+}
+
 /** In flight is a toggle: clicking it while active exits to All (WM-91). */
 export function toggleInflight(active: OperatorContext): OperatorContext {
   return active.kind === "inflight" ? { kind: "all" } : { kind: "inflight" };

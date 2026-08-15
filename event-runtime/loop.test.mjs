@@ -148,7 +148,7 @@ async function dispatchTo(outcome, eventId, ticket) {
   const proposal = openProposals(db, {}).find((p) => p.spec?.agent === "dispatch@1");
   expect(proposal).toBeTruthy();
   const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
-  const summary = await runOnce(db, registry, { claude: dispatchFake(outcome) }, {
+  const summary = await runOnce(db, registry, { pi: dispatchFake(outcome) }, {
     workspacesRoot: workspaces, owner: "w-test", policyVersion: PV,
   });
   expect(summary.terminalState).toBe("COMPLETED");

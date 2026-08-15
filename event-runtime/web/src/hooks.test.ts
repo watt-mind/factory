@@ -2,13 +2,20 @@ import "./test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, cleanup, render } from "@testing-library/react";
 import { createElement as h, useState } from "react";
-import { modal, useHashRoute, useListKeys } from "./hooks";
+import { modal, useHashRoute, useListKeys, useTheme } from "./hooks";
 
 afterEach(() => {
   cleanup();
   modal.depth = 0;
   window.location.hash = "";
+  localStorage.removeItem("evrt-theme");
+  delete document.documentElement.dataset.theme;
 });
+
+function ThemeProbe() {
+  const [theme] = useTheme();
+  return h("span", { "data-testid": "theme" }, theme);
+}
 
 /** Helper list component driving useListKeys */
 function InteractiveList(props: {
@@ -85,6 +92,16 @@ function HashSyncedList(props: { count: number; prefix: string }) {
     ),
   );
 }
+
+describe("useTheme", () => {
+  test("corrupt evrt-theme in localStorage resets to dark and rewrites storage", () => {
+    localStorage.setItem("evrt-theme", "foo");
+    const r = render(h(ThemeProbe));
+    expect(r.getByTestId("theme").textContent).toBe("dark");
+    expect(localStorage.getItem("evrt-theme")).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+});
 
 describe("useListKeys unit tests — rapid j/k keydown movement", () => {
   test("holding 'j' across rapid keydown events advances selection to count - 1", () => {

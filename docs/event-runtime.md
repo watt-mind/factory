@@ -250,7 +250,7 @@ returns the existing admission record and never spawns a second run.
     "type": "ephemeral",
     "retainOnFailure": true
   },
-  "adapter": "claude",
+  "adapter": "pi",
   "promptVersion": "git:7d91d88",
   "policyVersion": "git:7d91d88",
   "outputContract": "factory.status-report/v1",
@@ -378,9 +378,9 @@ is readable in `GET /registry`.
 optional `"model_tier": "strong" | "standard" | "light"` — a statement of
 intent, never a concrete model id. What each tier means is operator policy:
 the `models:` block in `config/policy.yaml`, keyed per adapter
-(`models.claude.standard: sonnet`), so retiering the fleet is a one-line
-policy PR instead of an edit fanned across definitions. The literal value
-`default` is a sentinel meaning "pass no model flag — ride the CLI's own
+(`models.pi.standard: openai-codex/gpt-5.6-terra`), so retiering the fleet is
+a one-line policy PR instead of an edit fanned across definitions. The literal
+value `default` is a sentinel meaning "pass no model flag — ride the CLI's own
 default"; any other value is passed verbatim as `--model`. The **planner
 resolves tier → model at plan time and pins the result into the RunSpec**
 (`modelTier` + `model`, the same pattern as `repoPin`), so the proposal the
@@ -391,23 +391,40 @@ per-route resolved value. Resolution order: per-definition `"model"` override
 wins) > tier map > adapter default (absent fields = no spec fields = today's
 behavior). A declared tier with no mapping for a routed model-consuming
 adapter is a **load error, fail closed** — never a silent fall-through to the
-adapter default. Only the `claude` adapter consumes models; on
+adapter default. Only the LLM adapters (`claude`, `pi`) consume models; on
 `command`/`actions`/`fake` routes a declared tier is recorded as not
-applicable (`model: null`), never an error. Tier assignments are intent the
-runtime cannot yet audit: per-run usage observability (WM-66) is what will
+applicable (`model: null`), never an error. Since WM-215 every committed LLM
+route is `pi`, so `models.pi` is the map that has to cover every tier the
+registry declares (`strong`/`standard`/`light` → sol/terra/luna);
+`models.claude` stays populated for the per-route exception and for
+`--adapter-override claude`. Tier assignments are intent the runtime cannot
+yet audit: per-run usage observability (WM-66) is what will
 show whether a tier is over- or under-provisioned and inform re-mapping.
 
-**Adapters are a registry, not a flag.** `"adapter": "claude"` in the run spec
+**Adapters are a registry, not a flag.** `"adapter": "pi"` in the run spec
 names an entry in a small adapter registry, one per harness the runtime has
 actually tested. The emit pipeline targets several harnesses (Claude Code,
 Codex, Gemini, Cursor, Pi); the event runtime admits only adapters with a
 passing conformance test covering structured output, timeout and shutdown
-behavior, and workspace confinement. The registry has entries for `claude`
-(the primary LLM harness), `pi` (OPS-296, a second LLM harness on the Codex
-subscription window), `command` (a closed argv template), `actions` (an
-approved action list resolved against a closed registry, remote-SSH or
-local-argv), and `fake` (tests and demo environments). It does not inherit the
-current runner's entire adapter surface.
+behavior, and workspace confinement. The registry has entries for `pi`
+(OPS-296, the default LLM harness on the Codex subscription window, WM-215),
+`claude` (Claude Code, still fully supported), `command` (a closed argv
+template), `actions` (an approved action list resolved against a closed
+registry, remote-SSH or local-argv), and `fake` (tests and demo
+environments). It does not inherit the current runner's entire adapter
+surface.
+
+**pi is the default harness, per route, not per mode (WM-215).** Every
+LLM-routed event type in `event-runtime/event-types.json` declares
+`"adapter": "pi"`; `command`/`actions` routes are untouched. The choice lives
+in one field per route, so routing a single event type back to Claude Code is
+a one-line edit of that route — there is no global harness mode to flip, and
+no route inherits a default. `claude` remains a first-class adapter: it is
+what the per-route exception selects, and `--adapter-override claude`
+(`cli.mjs serve`/`work`) forces runs onto it without touching the
+registry. Note that an adapter override changes execution only — the model
+still resolves against the **registered** route's adapter (§6, WM-135), so an
+overridden run carries the pinned `models.pi` value.
 
 **The `pi` adapter (`lib/adapters/pi.mjs`, OPS-296) mirrors `claude.mjs`,
 adapted to a different CLI shape.** `pi -p --mode json` (prompt piped to
@@ -416,11 +433,14 @@ stdin, matching `runners/run-agent.sh`'s existing invocation) rather than
 directly (`openai-codex/gpt-5.6-terra`), no separate `--provider` flag. There
 is no `--max-budget-usd` equivalent and no per-tool settings/sandbox policy —
 those, and native capability enforcement derived from `spec.capabilities`, are
-deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls`:
-pi's own documented read-only pattern is omitting bash/edit/write from the
+deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls,write`:
+pi's own documented read-only pattern is omitting bash/edit from the
 tool allowlist entirely, never exposing them to the model, rather than
 intercepting a call to them at runtime the way claude's settings/sandbox
-policy does — see §14. (An earlier draft of this design read `-r` as pi's
+policy does — see §14. (`write` stays even on a read-only run: every
+agent-result contract requires the model to write `./result.json`, so a run
+without it fails `contract_violation:missing_result` before doing anything —
+the same reasoning that keeps Write/Edit in claude's `READ_ONLY_TOOLS`.) (An earlier draft of this design read `-r` as pi's
 read-only flag; the installed CLI's own `--help` says otherwise — `-r` is
 `--resume`, a session selector, unrelated to tool access. Verify adapter flags
 against the actual CLI before relying on ticket text.) `mutating: true` pi
@@ -438,6 +458,38 @@ message the way claude's `type: "result"` is one, so `usage` is accumulated
 across every assistant turn's own reported tokens/cost and emitted once at
 process close; fields pi never reported land as explicit `null`/`{}`, never a
 guessed value.
+
+**Both LLM adapters apply the same push-credential carve-out (WM-128,
+WM-223).** `safeChildEnvironment(env, def)` in either adapter hands a mutating
+run `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GITHUB_TOKEN` and `GH_TOKEN` on top of
+the base inherited set, and strips all four from a non-mutating one — after the
+caller's `env` is merged, so a read-only run cannot be handed a token through
+`env` either. `pi.mjs` imports `PUSH_CREDENTIAL_ENV` from `claude.mjs` rather
+than restating it: one list, no drift. Until WM-223 pi had no
+mutating/non-mutating distinction at all, which meant the runtime's only
+mutating LLM agent (`dispatch@1`, pi-routed since WM-215) reached its push step
+with no credential of any kind — surviving only because `gh` reads its own
+stored OAuth from `~/.config/gh/hosts.yml` through the inherited
+`HOME`/`XDG_CONFIG_HOME`, and git picks up the `gh` credential helper the same
+way. That gh-over-HTTPS route remains the paved road a dispatch run should
+push on (`agents/dispatch.md` step 5); the carve-out is what makes an SSH or
+token push a real fallback rather than a guaranteed failure. The optional
+`gh auth status` preflight refusal considered alongside this was deliberately
+not adopted: with the credentials restored, a mutating run can legitimately
+push without gh being authenticated, so gating the start of the run on it would
+refuse work that would have succeeded.
+
+**One wrinkle the carve-out leaves open: `SSH_AUTH_SOCK` is not only a push
+credential.** It is also how an agent reaches infrastructure over SSH, and a
+read-only infra agent — `disk-diagnose` declares `mutating: false` with
+`services: ["ssh:read:lab", "ssh:read:web"]` — may legitimately want the agent
+socket despite being non-mutating. Both adapters strip it from such a run
+today; `disk-diagnose` works because key-file authentication is reachable
+through the inherited `HOME`, not because the socket survives. The fix, if that
+ever becomes a real failure, is a capability-driven exception (a declared
+`ssh:read` service inheriting the socket), **not** widening the non-mutating
+default — the point of the strip is that a read-only run holds no authority it
+did not declare.
 
 **Live trace is an optional adapter capability (`factory.trace/v1`).** An
 adapter may stream what the agent is doing mid-run — via the `onTrace`
@@ -875,6 +927,70 @@ The remaining enforcement path, in order:
 
 Until one of these exists, a compromised or confused agent is limited by the
 watched approval gate and read-only scope, not by the capability list.
+
+### 14.1 The Gondolin microVM sandbox (WM-185)
+
+Paths 1 and 3 above now exist for **one adapter**, and the scope limit is the
+important part of this section: a `command`-adapter definition may declare a
+`sandbox` block, which moves that run off the host and into a Gondolin
+microVM. **The claude and pi adapters still execute on the host** with the
+worker's environment — the sandbox is not yet where the LLM agents run, and
+nothing here should be read as if it were.
+
+```json
+"sandbox": {
+  "provider": "gondolin",
+  "allowedHosts": ["api.github.com"],
+  "secrets": { "GITHUB_TOKEN": { "hosts": ["api.github.com"], "env": "GH_FACTORY_TOKEN" } }
+}
+```
+
+What that buys, verified by real-VM tests in
+`lib/sandbox/invariants.test.mjs` rather than asserted:
+
+- **Filesystem.** The workspace is mounted read-write at `/workspace` and
+  nothing else is visible — not the runtime home, not `~/.config`, not the
+  rest of the checkout. Writes cross the boundary, so `result.json` and
+  captured artifacts work unchanged.
+- **Network.** Egress is default-deny at the host proxy. **An omitted
+  `allowedHosts` denies everything**, which deliberately inverts the SDK's own
+  default of allow-all-on-omission: a definition that forgets the key must not
+  silently get the internet.
+- **Secrets.** A definition names a host env var; it never carries a value.
+  The guest receives an opaque `GONDOLIN_SECRET_…` placeholder, and the host
+  proxy substitutes the real credential only on that secret's allowlisted
+  upstreams. A placeholder sent anywhere else stays a meaningless string. A
+  secret scoped to a host the allowlist does not permit is a policy error, not
+  a no-op.
+
+The result contract is identical to the host path — same `result.json`, same
+artifacts, same exit-code semantics — so verification and receipts cannot tell
+which path ran.
+
+**The VM host runs under Node, not Bun, and that boundary is load-bearing.**
+Measured against `@earendil-works/gondolin` 0.12.0 on macOS arm64: under Bun
+the VM boots, the VFS mounts, and `vm.exec()` works, but the host-side TLS
+mediation never answers — an allowlisted request hangs until its own timeout,
+with no error and no debug output. Under Node it returns normally. So
+`lib/sandbox/gondolin.mjs` (Bun) spawns `lib/sandbox/runner.mjs` (Node) as a
+child and they speak NDJSON over a pipe; resolved secrets travel on **stdin**,
+never argv, which any process can read via `ps`.
+
+Operationally:
+
+- `bun event-runtime/cli.mjs sandbox doctor` reports whether this host can
+  honour a sandboxed run (QEMU, a Node ≥ 23.6, the SDK), and names what is
+  missing when it cannot.
+- `bun event-runtime/cli.mjs sandbox exec --dir . --allow api.github.com -- …`
+  runs anything inside the sandbox by hand, without an event or a worker.
+- A worker advertises `sandbox=gondolin` **only when that preflight passes**,
+  so placement never routes a sandboxed run to a host that would just fail it.
+  An explicit `--label sandbox=…` always wins, so a node can be forced off.
+- Warm boot measured 51–93 ms; the first boot on a machine is ~10 s while
+  ~200 MB of guest assets load once. The guest is Alpine with `bash`, `curl`,
+  `node`, `npm`, and `python3` — **no `git`**, which is the main reason
+  running the coding agents themselves in-guest is a separate piece of work
+  rather than a flag flip.
 
 **The control API is a trust surface of its own.** It binds to loopback only,
 so the clients need no authentication story beyond local user access. The web

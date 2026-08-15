@@ -1,6 +1,7 @@
 // Line diff for two RunSpecs — the §12 replan path must show the operator
 // exactly what changed before they approve the re-planned spec.
 
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, copyText } from "./ui";
 
 export type DiffLine = { type: "same" | "del" | "add"; text: string };
@@ -40,12 +41,61 @@ export function formatDiff(lines: DiffLine[]): string {
     .join("\n");
 }
 
+function countLinesBelowViewport(scroller: HTMLElement): number {
+  const scrollBottom = scroller.scrollTop + scroller.clientHeight;
+  const lineEls = scroller.querySelectorAll("[data-diff-line]");
+  let below = 0;
+  for (const line of lineEls) {
+    const el = line as HTMLElement;
+    if (el.offsetTop + el.offsetHeight > scrollBottom + 1) below++;
+  }
+  return below;
+}
+
 export function SpecDiff({ before, after }: { before: unknown; after: unknown }) {
   const lines = diffLines(
     JSON.stringify(before, null, 2).split("\n"),
     JSON.stringify(after, null, 2).split("\n"),
   );
   const changed = lines.filter((l) => l.type !== "same").length;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [linesBelow, setLinesBelow] = useState(0);
+
+  const updateOverflow = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const hasOverflow = el.scrollHeight > el.clientHeight + 1;
+    if (!hasOverflow) {
+      setLinesBelow(0);
+      return;
+    }
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 4;
+    if (atBottom) {
+      setLinesBelow(0);
+      return;
+    }
+    let below = countLinesBelowViewport(el);
+    if (below === 0) {
+      const scrollable = el.scrollHeight - el.clientHeight;
+      const remaining = scrollable - el.scrollTop;
+      const totalLines = el.querySelectorAll("[data-diff-line]").length;
+      below = Math.max(1, Math.ceil((remaining / scrollable) * totalLines));
+    }
+    setLinesBelow(below);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    updateOverflow();
+    const ro = new ResizeObserver(updateOverflow);
+    ro.observe(el);
+    el.addEventListener("scroll", updateOverflow, { passive: true });
+    return () => {
+      ro.disconnect();
+      el.removeEventListener("scroll", updateOverflow);
+    };
+  }, [lines, updateOverflow]);
 
   if (changed === 0) {
     return (
@@ -56,17 +106,25 @@ export function SpecDiff({ before, after }: { before: unknown; after: unknown })
   }
 
   return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between text-[11px] text-(--text-faint)">
+    <div
+      ref={scrollRef}
+      data-testid="spec-diff-scroll"
+      className="mono relative max-h-80 overflow-auto rounded-md border border-(--border) bg-(--surface-0)"
+    >
+      <div
+        data-testid="spec-diff-header"
+        className="sticky top-0 z-10 flex items-center justify-between border-b border-(--border) bg-(--surface-0) px-3 py-1.5 text-[11px] text-(--text-faint)"
+      >
         <span>{`${changed} changed line${changed === 1 ? "" : "s"}`}</span>
         <Button onClick={() => copyText(formatDiff(lines), "diff")}>
           Copy diff
         </Button>
       </div>
-      <pre className="mono max-h-80 overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-3 leading-relaxed">
+      <div data-testid="spec-diff-body" className="whitespace-pre-wrap p-3 leading-relaxed">
         {lines.map((l, idx) => (
           <div
             key={idx}
+            data-diff-line
             style={
               l.type === "del"
                 ? { color: "var(--hue-err)", background: "color-mix(in oklch, var(--hue-err) 8%, transparent)" }
@@ -79,7 +137,18 @@ export function SpecDiff({ before, after }: { before: unknown; after: unknown })
             {l.text}
           </div>
         ))}
-      </pre>
+      </div>
+      {linesBelow > 0 && (
+        <>
+          <div
+            className="pointer-events-none sticky bottom-0 -mt-8 h-8 bg-linear-to-t from-(--surface-0) to-transparent"
+            aria-hidden
+          />
+          <div className="sticky bottom-0 bg-(--surface-0) px-3 pb-2 pt-0.5 text-center text-[10px] text-(--text-faint)">
+            {`${linesBelow} more line${linesBelow === 1 ? "" : "s"} below`}
+          </div>
+        </>
+      )}
     </div>
   );
 }

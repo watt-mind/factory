@@ -1,7 +1,7 @@
 import "../test-dom";
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cleanup, fireEvent, render } from "@testing-library/react";
-import { RunDetailBlocks } from "./RunDetailBlocks";
+import { afterEach, describe, expect, test } from "bun:test";
+import { cleanup, render } from "@testing-library/react";
+import { RunDetailBlocks, isCancellable } from "./RunDetailBlocks";
 import { createLifecycleEventFixture, createRunDetailFixture } from "../test-render";
 import type { RunDetail, RunState } from "../types";
 
@@ -94,15 +94,17 @@ describe("RunDetailBlocks field tiering (WM-129)", () => {
     expect(r.getAllByText(/started/).length).toBeGreaterThanOrEqual(2);
   });
 
-  test("offers Cancel for a cancellable run and wires it to onCancel", () => {
-    const onCancel = mock(noop);
-    const r = renderBlocks(createRunDetailFixture({ run: { state: "RUNNING" } as RunDetail["run"] }), { onCancel });
-    fireEvent.click(r.getByText("Cancel"));
-    expect(onCancel).toHaveBeenCalled();
-    cleanup();
+  test("isCancellable correctly identifies cancellable states (WM-129)", () => {
+    expect(isCancellable("QUEUED")).toBe(true);
+    expect(isCancellable("LEASED")).toBe(true);
+    expect(isCancellable("RUNNING")).toBe(true);
     // VERIFYING has already exited its agent — not cancellable, same rule as the panel.
-    const verifying = renderBlocks(createRunDetailFixture({ run: { state: "VERIFYING" } as RunDetail["run"] }));
-    expect(verifying.queryByText("Cancel")).toBeNull();
+    expect(isCancellable("VERIFYING")).toBe(false);
+    expect(isCancellable("COMPLETED")).toBe(false);
+    expect(isCancellable("FAILED")).toBe(false);
+    expect(isCancellable("TIMED_OUT")).toBe(false);
+    expect(isCancellable("CANCELLED")).toBe(false);
+    expect(isCancellable("REFUSED")).toBe(false);
   });
 });
 
@@ -143,5 +145,35 @@ describe("Lifecycle timeline (WM-136)", () => {
     const r = renderBlocks(d);
     expect(r.queryByText("QUEUED→")).toBeNull();
     expect(r.getByText("LEASED→")).toBeTruthy();
+  });
+});
+
+describe("Lifecycle reason readability (WM-145)", () => {
+  const LONG_REASON =
+    "planner refused: the worker exceeded the attempt budget after waiting on a hung adapter handshake that never completed";
+
+  test("exposes a long lifecycle reason via title, not actor-only, and does not truncate it", () => {
+    const now = new Date().toISOString();
+    const lifecycle = [
+      createLifecycleEventFixture(1, "run_x", null, "QUEUED", null, now),
+      createLifecycleEventFixture(2, "run_x", "QUEUED", "FAILED", LONG_REASON, now),
+    ];
+    const d = createRunDetailFixture({ run: { state: "FAILED" } as RunDetail["run"], lifecycle });
+    const r = renderBlocks(d);
+
+    const failedRow = Array.from(r.container.querySelectorAll("li")).find((li) =>
+      li.textContent?.includes(LONG_REASON),
+    );
+    expect(failedRow).toBeTruthy();
+
+    const titled = Array.from(failedRow!.querySelectorAll("[title]")).filter((el) =>
+      (el.getAttribute("title") ?? "").includes(LONG_REASON),
+    );
+    expect(titled.length).toBeGreaterThan(0);
+
+    const truncated = Array.from(failedRow!.querySelectorAll(".truncate")).filter((el) =>
+      el.textContent?.includes(LONG_REASON),
+    );
+    expect(truncated.length).toBe(0);
   });
 });

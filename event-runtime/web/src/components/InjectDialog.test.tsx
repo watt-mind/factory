@@ -9,6 +9,10 @@ import { changeInput } from "../test-render";
 
 afterEach(() => {
   cleanup();
+  try {
+    sessionStorage.clear();
+    localStorage.clear();
+  } catch {}
 });
 
 function renderWithClient(ui: React.ReactElement) {
@@ -188,6 +192,8 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
       expect([...host.querySelectorAll("option")].map((o) => o.value)).toContain("web");
       const usedPct = r.getByLabelText("usedPct") as HTMLInputElement;
       expect(usedPct.getAttribute("type")).toBe("number");
+      expect(usedPct.getAttribute("min")).toBe("0");
+      expect(usedPct.getAttribute("max")).toBe("100");
       expect(r.getByLabelText("mount")).toBeTruthy();
       expect(r.getByLabelText("alertId")).toBeTruthy();
       // Envelope preview disclosure is present in Form mode.
@@ -207,16 +213,16 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
     withSchemaApi(async (r) => {
       await selectTemplate(r, /triage\.scan\.requested/i);
       const optionsOf = (input: HTMLInputElement) => {
-        const listId = input.getAttribute("list");
-        expect(listId).toBeTruthy();
-        const list = document.getElementById(listId!);
-        expect(list).toBeTruthy();
-        return [...list!.querySelectorAll("option")].map((o) => o.getAttribute("value"));
+        act(() => {
+          fireEvent.focus(input);
+        });
+        return r.getAllByRole("option").map((o) => o.textContent);
       };
       const repo = r.getByLabelText("repo") as HTMLInputElement;
       let options = optionsOf(repo);
       expect(options).toContain("bj29");
       expect(options).toContain("factory");
+      expect(repo.getAttribute("list")).toBeNull();
 
       await selectTemplate(r, /ci\.run\.failed/i);
       options = optionsOf(r.getByLabelText("repo") as HTMLInputElement);
@@ -242,12 +248,13 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
       expect((r.getByLabelText("scheduledAt") as HTMLInputElement).value).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     }));
 
-  test("validation flags a bad payload with a field-level error", () =>
+  test("validation flags a bad payload with a field-level error after blur", () =>
     withSchemaApi(async (r) => {
       await selectTemplate(r, /disk\.diagnose/i);
       const usedPct = r.getByLabelText("usedPct") as HTMLInputElement;
       act(() => {
         changeInput(usedPct, "150");
+        fireEvent.blur(usedPct);
       });
       expect(r.getByText(/above maximum 100/i)).toBeTruthy();
     }));
@@ -313,7 +320,9 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
         // Not submitted yet: warned and waiting on explicit acknowledgement.
         expect(sent.length).toBe(0);
         expect(r.getByText(/does not validate/i)).toBeTruthy();
-        const confirm = r.getByRole("button", { name: /confirm inject/i });
+        expect(r.getByRole("button", { name: /inject anyway/i })).toBeTruthy();
+        expect(r.queryByRole("button", { name: /^confirm inject$/i })).toBeNull();
+        const confirm = r.getByRole("button", { name: /inject anyway/i });
         await act(async () => {
           fireEvent.click(confirm);
         });
@@ -338,13 +347,17 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
       expect(logArtifact.getAttribute("placeholder") ?? "").not.toContain("^");
     }));
 
-  test("string arrays with minItems seed zero chips; the minItems warning covers the ask (critique r1)", () =>
+  test("string arrays with minItems seed zero chips; the minItems warning waits until submit (WM-78)", () =>
     withSchemaApi(async (r) => {
       await selectTemplate(r, /factory\.status\.requested/i);
       // No bare unlabeled "×" chip from a seeded empty string.
       expect(r.queryAllByRole("button", { name: /^remove/i }).length).toBe(0);
-      // The requirement is still surfaced, as a validation warning.
-      expect(r.getByText(/fewer than minItems 1/i)).toBeTruthy();
+      // Fresh form must not look broken (WM-78).
+      expect(r.queryAllByText(/fewer than minItems 1/i)).toHaveLength(0);
+      act(() => {
+        fireEvent.click(r.getByRole("button", { name: /inject/i }));
+      });
+      expect(r.getAllByText(/fewer than minItems 1/i).length).toBeGreaterThan(0);
     }));
 
   test("array-of-objects field renders a JSON sub-editor with parse indicator", () =>
@@ -463,4 +476,227 @@ describe("InjectDialog template selection sync (OPS-344)", () => {
       api.agents = origAgents;
     }
   });
+});
+
+describe("InjectDialog field errors wait until blur or submit (WM-78)", () => {
+  test("required empty strings do not show minLength errors on template select", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /triage\.scan\.requested/i);
+      expect(r.getByLabelText("repo")).toBeTruthy();
+      expect(r.queryAllByText(/shorter than minLength/i)).toHaveLength(0);
+      expect(r.queryAllByText(/missing required/i)).toHaveLength(0);
+    }));
+
+  test("blurring an invalid field reveals its error", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /triage\.scan\.requested/i);
+      const repo = r.getByLabelText("repo") as HTMLInputElement;
+      expect(r.queryAllByText(/shorter than minLength/i)).toHaveLength(0);
+      act(() => {
+        fireEvent.blur(repo);
+      });
+      expect(r.getByText(/shorter than minLength/i)).toBeTruthy();
+    }));
+
+  test("a submit attempt reveals field errors without changing the ack flow", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /disk\.diagnose/i);
+      const mount = r.getByLabelText("mount") as HTMLInputElement;
+      expect(mount.value).toBe("");
+      expect(r.queryAllByText(/does not match pattern/i)).toHaveLength(0);
+      act(() => {
+        fireEvent.click(r.getByRole("button", { name: /inject/i }));
+      });
+      expect(r.getAllByText(/does not match pattern/i).length).toBeGreaterThan(0);
+      expect(r.getByText(/does not validate/i)).toBeTruthy();
+      expect(r.getByRole("button", { name: /inject anyway/i })).toBeTruthy();
+    }));
+});
+
+describe("InjectDialog Form-tab envelope guard and picker reset (WM-84)", () => {
+  test("submitForm reports missing required envelope fields instead of confirming", () =>
+    withSchemaApi(async (r) => {
+      const origReplay = api.replay;
+      const sent: unknown[] = [];
+      api.replay = async (envelope: unknown) => {
+        sent.push(envelope);
+        return { admitted: true, duplicate: false, eventId: "e1" };
+      };
+      try {
+        await selectTemplate(r, /disk\.diagnose/i);
+        act(() => {
+          fireEvent.click(r.getByRole("tab", { name: /json/i }));
+        });
+        const textarea = r.getByLabelText(/event envelope json/i) as HTMLTextAreaElement;
+        const parsed = JSON.parse(textarea.value);
+        delete parsed.eventId;
+        act(() => {
+          changeInput(textarea, JSON.stringify(parsed, null, 2));
+        });
+        act(() => {
+          fireEvent.click(r.getByRole("tab", { name: /form/i }));
+        });
+        act(() => {
+          fireEvent.click(r.getByRole("button", { name: /inject/i }));
+        });
+        expect(sent.length).toBe(0);
+        expect(r.getByText(/missing required string field/i)).toBeTruthy();
+        expect(r.getByText(/eventId/i)).toBeTruthy();
+        expect(r.queryByRole("button", { name: /confirm inject/i })).toBeNull();
+      } finally {
+        api.replay = origReplay;
+      }
+    }));
+
+  test("picking blank envelope resets stale Form state", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /disk\.diagnose/i);
+      expect(r.getByLabelText("usedPct")).toBeTruthy();
+      await selectTemplate(r, /blank envelope/i);
+      expect(r.getByRole("tab", { name: /json/i }).getAttribute("aria-selected")).toBe("true");
+      expect(r.queryAllByLabelText("usedPct")).toHaveLength(0);
+      expect(r.queryAllByLabelText("mount")).toHaveLength(0);
+    }));
+
+  test("picking this envelope resets Form state from the given payload", () =>
+    withSchemaApi(async () => {
+      cleanup();
+      const given = {
+        schemaVersion: "factory.event/v1",
+        eventId: "given-1",
+        type: "triage.scan.requested",
+        source: "web-trigger",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+        payload: { repo: "factory" },
+      };
+      const view = renderWithClient(<InjectDialog onClose={() => {}} initialEnvelope={given} />);
+      await selectTemplate(view, /disk\.diagnose/i);
+      expect(view.getByLabelText("usedPct")).toBeTruthy();
+      await selectTemplate(view, /this envelope/i);
+      expect(view.getByRole("tab", { name: /json/i }).getAttribute("aria-selected")).toBe("true");
+      expect(view.queryAllByLabelText("usedPct")).toHaveLength(0);
+      expect(view.queryAllByLabelText("mount")).toHaveLength(0);
+    }));
+});
+
+describe("InjectDialog humanized errors and hidden planner fields (WM-86)", () => {
+  test("pattern field errors do not leak the raw regex", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /disk\.diagnose/i);
+      const mount = r.getByLabelText("mount") as HTMLInputElement;
+      act(() => {
+        changeInput(mount, "not-a-path");
+        fireEvent.blur(mount);
+      });
+      expect(r.queryAllByText(/\^\/\[A-Za-z0-9/).length).toBe(0);
+      expect(r.getAllByText(/expected format/i).length).toBeGreaterThan(0);
+    }));
+
+  test("hidden planner-field errors name the JSON tab", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /triage\.scan\.requested/i);
+      act(() => {
+        fireEvent.click(r.getByRole("tab", { name: /json/i }));
+      });
+      const textarea = r.getByLabelText(/event envelope json/i) as HTMLTextAreaElement;
+      const parsed = JSON.parse(textarea.value);
+      parsed.payload.repo = "factory";
+      parsed.payload.repoPin = { repo: "factory", sha: "not-a-sha" };
+      act(() => {
+        changeInput(textarea, JSON.stringify(parsed, null, 2));
+      });
+      act(() => {
+        fireEvent.click(r.getByRole("tab", { name: /form/i }));
+      });
+      const banner = r.container.textContent ?? "";
+      expect(banner).toMatch(/repoPin/i);
+      expect(banner).toMatch(/JSON tab/i);
+      expect(banner).not.toMatch(/\^\[0-9a-f\]\{40\}/);
+    }));
+});
+
+describe("InjectDialog keyboard search (WM-80)", () => {
+  test("template search is the autofocus target when the dialog opens", () =>
+    withSchemaApi(async (r) => {
+      const search = r.getByPlaceholderText(/search event types/i);
+      expect(search.getAttribute("autofocus")).not.toBeNull();
+      expect(document.activeElement).toBe(search);
+    }));
+
+  test("ArrowDown from search focuses the first template result", () =>
+    withSchemaApi(async (r) => {
+      const search = r.getByPlaceholderText(/search event types/i) as HTMLInputElement;
+      act(() => {
+        search.focus();
+      });
+      act(() => {
+        fireEvent.keyDown(search, { key: "ArrowDown" });
+      });
+      const radios = r.getAllByRole("radio");
+      expect(radios.length).toBeGreaterThan(0);
+      expect(document.activeElement).toBe(radios[0]);
+    }));
+});
+
+describe("InjectDialog invalid-payload confirm is distinct (WM-85)", () => {
+  test("schema-invalid confirm is labeled Inject anyway, not Confirm inject", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /disk\.diagnose/i);
+      act(() => {
+        changeInput(r.getByLabelText("usedPct"), "150");
+      });
+      act(() => {
+        fireEvent.click(r.getByRole("button", { name: /inject/i }));
+      });
+      expect(r.getByRole("button", { name: /inject anyway/i })).toBeTruthy();
+      expect(r.queryAllByRole("button", { name: /^confirm inject$/i })).toHaveLength(0);
+    }));
+
+  test("valid payload still confirms with Confirm inject", () =>
+    withSchemaApi(async (r) => {
+      await selectTemplate(r, /disk\.diagnose/i);
+      act(() => {
+        changeInput(r.getByLabelText("mount"), "/var");
+      });
+      act(() => {
+        fireEvent.click(r.getByRole("button", { name: /inject/i }));
+      });
+      expect(r.getByRole("button", { name: /^confirm inject$/i })).toBeTruthy();
+      expect(r.queryAllByRole("button", { name: /inject anyway/i })).toHaveLength(0);
+    }));
+});
+
+describe("InjectDialog last-used template (WM-81)", () => {
+  test("preselects the last injected template on the next open; blank remains one click", () =>
+    withSchemaApi(async (r) => {
+      const origReplay = api.replay;
+      api.replay = async () => ({ admitted: true, duplicate: false, eventId: "e-last" });
+      try {
+        await selectTemplate(r, /disk\.diagnose/i);
+        act(() => {
+          changeInput(r.getByLabelText("mount"), "/var");
+        });
+        act(() => {
+          fireEvent.click(r.getByRole("button", { name: /inject/i }));
+        });
+        await act(async () => {
+          fireEvent.click(r.getByRole("button", { name: /^confirm inject$/i }));
+        });
+        r.unmount();
+        const r2 = renderWithClient(<InjectDialog onClose={() => {}} />);
+        const chip = await r2.findByRole("radio", {
+          name: (n) => n.includes("disk.diagnose") && n.includes("disk@1"),
+        });
+        expect(chip.getAttribute("aria-checked")).toBe("true");
+        expect(r2.getByRole("tab", { name: /form/i }).getAttribute("aria-selected")).toBe("true");
+        expect(r2.getByLabelText("usedPct")).toBeTruthy();
+        act(() => {
+          fireEvent.click(r2.getByRole("radio", { name: /blank envelope/i }));
+        });
+        expect(r2.getByRole("radio", { name: /blank envelope/i }).getAttribute("aria-checked")).toBe("true");
+        expect(r2.getByRole("tab", { name: /json/i }).getAttribute("aria-selected")).toBe("true");
+      } finally {
+        api.replay = origReplay;
+      }
+    }));
 });

@@ -221,7 +221,7 @@ describe("dispatch planner refusals (WM-108, dispatch doc §§2–5)", () => {
 });
 
 describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", () => {
-  // A local contract-shaped fake for the claude adapter: the run's value here
+  // A local contract-shaped fake for the pi adapter: the run's value here
   // is the pipeline around it — worktree delegation, verification, receipt —
   // not the model. It proves the delegated tree is reachable where the prompt
   // says (./repo) before reporting success.
@@ -267,7 +267,7 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     expect(calls()).not.toContain("up WM-501"); // claim → worktree → spawn: nothing before approval
 
     const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
-    const summary = await runOnce(db, registry, { claude: dispatchFake }, {
+    const summary = await runOnce(db, registry, { pi: dispatchFake }, {
       workspacesRoot: workspaces, owner: "w-test", policyVersion: PV,
     });
 
@@ -304,7 +304,7 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     const spec = { ...proposal.spec, workspace: { ...proposal.spec.workspace, retainOnFailure: false } };
     db.query(`UPDATE runs SET spec_json = ? WHERE run_id = ?`).run(JSON.stringify(spec), proposal.run_id);
 
-    const summary = await runOnce(db, registry, { claude: crashing }, {
+    const summary = await runOnce(db, registry, { pi: crashing }, {
       workspacesRoot: workspaces, owner: "w-test", policyVersion: PV,
     });
     expect(summary.terminalState).toBe("FAILED");

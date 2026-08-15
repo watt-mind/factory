@@ -17,7 +17,8 @@ export function goPrefixActive(now: number = Date.now()): boolean {
 
 /**
  * The `g`-prefix chord state machine (spec §5): `g g`, `g o`, `g e`, `g p`,
- * `g r`, `g t`, `g w`. Kept free of React and the DOM so it is testable —
+ * `g r`, `g f`, `g t`, `g s`, `g w`. Kept free of React and the DOM so it is
+ * testable —
  * `useGoSequences` owns the listener, the key guard and `preventDefault`.
  *
  * Returns a stepper: feed it key names through `press`, and it answers whether

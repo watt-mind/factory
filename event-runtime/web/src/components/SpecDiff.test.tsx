@@ -52,7 +52,7 @@ describe("SpecDiff component", () => {
 
     expect(r.getByText("No spec changes.")).toBeDefined();
     expect(r.queryByText("Copy diff")).toBeNull();
-    expect(r.container.querySelector("pre")).toBeNull();
+    expect(r.queryByTestId("spec-diff-scroll")).toBeNull();
   });
 
   test("renders diff header and changed lines when specs differ", () => {
@@ -64,10 +64,10 @@ describe("SpecDiff component", () => {
     expect(r.getByText("2 changed lines")).toBeDefined();
     expect(r.getByRole("button", { name: "Copy diff" })).toBeDefined();
 
-    const pre = r.container.querySelector("pre");
-    expect(pre).not.toBeNull();
-    expect(pre?.textContent).toContain("-   \"maxAttempts\": 3");
-    expect(pre?.textContent).toContain("+   \"maxAttempts\": 5");
+    const scroller = r.getByTestId("spec-diff-scroll");
+    expect(scroller).not.toBeNull();
+    expect(scroller.textContent).toContain("-   \"maxAttempts\": 3");
+    expect(scroller.textContent).toContain("+   \"maxAttempts\": 5");
   });
 
   test("singular changed line count when exactly 1 line changes", () => {
@@ -75,6 +75,67 @@ describe("SpecDiff component", () => {
     // An addition of a single line to a multi-line array:
     const r = render(<SpecDiff before={["a"]} after={["a", "b"]} />);
     expect(r.container.textContent).toContain("changed line");
+  });
+
+  function mockScrollerDimensions(
+    scroller: HTMLElement,
+    { clientHeight, scrollHeight, scrollTop = 0 }: { clientHeight: number; scrollHeight: number; scrollTop?: number },
+  ) {
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: clientHeight });
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: scrollHeight });
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: scrollTop, writable: true });
+  }
+
+  test("does not show overflow affordance when diff fits within max height", () => {
+    const before = { maxAttempts: 3 };
+    const after = { maxAttempts: 5 };
+    const r = render(<SpecDiff before={before} after={after} />);
+
+    const scroller = r.getByTestId("spec-diff-scroll");
+    mockScrollerDimensions(scroller, { clientHeight: 500, scrollHeight: 120 });
+
+    act(() => {
+      fireEvent.scroll(scroller);
+    });
+
+    expect(r.queryByText(/more lines below/)).toBeNull();
+  });
+
+  test("shows overflow affordance when diff exceeds max height", () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `line-${i}`);
+    const before = { input: lines };
+    const after = { input: [...lines, "added-line"] };
+    const r = render(<SpecDiff before={before} after={after} />);
+
+    const scroller = r.getByTestId("spec-diff-scroll");
+    mockScrollerDimensions(scroller, { clientHeight: 120, scrollHeight: 800 });
+
+    act(() => {
+      fireEvent.scroll(scroller);
+    });
+
+    expect(r.getByText(/\d+ more lines below/)).toBeDefined();
+  });
+
+  test("preserves JSON indent after dropping pre (whitespace-pre-wrap on body)", () => {
+    const before = { maxAttempts: 3 };
+    const after = { maxAttempts: 5 };
+    const r = render(<SpecDiff before={before} after={after} />);
+
+    const body = r.getByTestId("spec-diff-body");
+    expect(body.className).toContain("whitespace-pre-wrap");
+    const indented = [...body.querySelectorAll("[data-diff-line]")].map((el) => el.textContent ?? "");
+    expect(indented.some((t) => t.startsWith("-   \"maxAttempts\"") || t.startsWith("+   \"maxAttempts\""))).toBe(true);
+  });
+
+  test("keeps changed-line header sticky while scrolling diff body", () => {
+    const before = { maxAttempts: 3 };
+    const after = { maxAttempts: 5 };
+    const r = render(<SpecDiff before={before} after={after} />);
+
+    const header = r.getByTestId("spec-diff-header");
+    expect(header.className).toContain("sticky");
+    expect(header.className).toContain("top-0");
   });
 
   test("clicking Copy diff writes to clipboard and produces toast feedback", () => {

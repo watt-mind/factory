@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { RunState, TraceEntry, TracePayload } from "../types";
+import { isCancellable } from "./RunDetailBlocks";
 import { humanSize, JsonBlock, Section, notify } from "./ui";
 
 function copyText(text: string, label: string = "text") {
@@ -127,7 +128,7 @@ export function MarkdownView({
     return (
       <div className={`relative ${className}`}>
         {allowToggle && (
-          <div className="mb-1 flex justify-end gap-2 text-[10.5px]">
+          <div className="mb-1 flex justify-end gap-2 text-[11px]">
             <button type="button" onClick={() => copyText(text, "raw markdown")} className="text-(--text-faint) hover:text-(--text)">Copy</button>
             <button type="button" onClick={() => setRaw(false)} className="text-(--accent) hover:underline">Formatted view</button>
           </div>
@@ -180,7 +181,7 @@ export function MarkdownView({
         const codeText = codeBuffer.join("\n");
         blocks.push(
           <div key={`code-${i}`} className="my-1.5 overflow-hidden rounded-md border border-(--border) bg-(--surface-0)">
-            <div className="flex items-center justify-between border-b border-(--border) bg-(--surface-1) px-2.5 py-0.5 text-[10px] text-(--text-faint) mono">
+            <div className="flex items-center justify-between border-b border-(--border) bg-(--surface-1) px-2.5 py-0.5 text-[11px] text-(--text-faint) mono">
               <span>{codeLang || "code"}</span>
               <button type="button" onClick={() => copyText(codeText, "code block")} className="hover:text-(--text)">Copy</button>
             </div>
@@ -209,11 +210,11 @@ export function MarkdownView({
       const level = headingMatch[1].length;
       const content = headingMatch[2];
       if (level === 1) {
-        blocks.push(<h1 key={i} className="mb-1.5 mt-2 text-[14.5px] font-bold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h1>);
+        blocks.push(<h1 key={i} className="mb-1.5 mt-2 text-[14px] font-semibold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h1>);
       } else if (level === 2) {
-        blocks.push(<h2 key={i} className="mb-1 mt-2 text-[13.5px] font-semibold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h2>);
+        blocks.push(<h2 key={i} className="mb-1 mt-2 text-[13px] font-semibold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h2>);
       } else if (level === 3) {
-        blocks.push(<h3 key={i} className="mb-0.5 mt-1.5 text-[12.5px] font-semibold text-(--text)">{renderInlineMarkdown(content)}</h3>);
+        blocks.push(<h3 key={i} className="mb-0.5 mt-1.5 text-[12px] font-semibold text-(--text)">{renderInlineMarkdown(content)}</h3>);
       } else {
         blocks.push(<h4 key={i} className="mb-0.5 mt-1 text-[12px] font-semibold text-(--text)">{renderInlineMarkdown(content)}</h4>);
       }
@@ -262,7 +263,7 @@ export function MarkdownView({
   return (
     <div className={`relative ${className}`}>
       {allowToggle && text.length > 50 && (
-        <div className="mb-1 flex justify-end gap-2 text-[10px]">
+        <div className="mb-1 flex justify-end gap-2 text-[11px]">
           <button type="button" onClick={() => copyText(text, "markdown text")} className="text-(--text-faint) hover:text-(--text)">Copy</button>
           <button type="button" onClick={() => setRaw(true)} className="text-(--text-faint) hover:text-(--accent)">Raw</button>
         </div>
@@ -372,7 +373,7 @@ function TraceBody({
   if (p.truncated) {
     return (
       <div className="min-w-0 flex-1">
-        <span className="text-[11px]" style={{ color: "var(--hue-warn)" }}>
+        <span className="text-[11px] text-(--hue-warn)">
           {kind} payload truncated · original {humanSize(p.originalBytes ?? 0)}
         </span>
         {p.preview && (
@@ -407,7 +408,7 @@ function TraceBody({
     return (
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="mono">🔧 {p.name ?? "unknown tool"}</span>
+          <span className="mono">tool · {p.name ?? "unknown tool"}</span>
           {durationMs != null && maxMs != null && <TimingWaterfall durationMs={durationMs} maxMs={maxMs} />}
         </div>
         {p.input !== undefined && (
@@ -477,6 +478,12 @@ const isErrorKind = (e: TraceEntry) =>
   (e.kind === "lifecycle" && e.payload?.note === "trace_truncated");
 const isUsageKind = (k: string) => k === "usage";
 
+const FILTER_ORDER: TraceFilterKind[] = ["all", "tools", "reasoning", "errors", "usage"];
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
+
 /**
  * Trace (webui doc §10.10, §10.11, controls OPS-358) — the factory.trace/v1 stream:
  * what the model is saying and which tools it is calling, live while the run
@@ -493,11 +500,14 @@ export function RunTrace({
   state,
   variant = "panel",
   onExpand,
+  onCancelShortcut,
 }: {
   runId: string;
   state: RunState;
   variant?: "panel" | "full";
   onExpand?: () => void;
+  /** Opens the parent's cancel confirm. Search `x` calls this instead of typing. */
+  onCancelShortcut?: () => void;
 }) {
   const full = variant === "full";
   const live = LIVE_STATES.includes(state);
@@ -612,6 +622,44 @@ export function RunTrace({
   }, [shown, search]);
 
   const scroller = useRef<HTMLDivElement>(null);
+  const regionRef = useRef<HTMLDivElement>(null);
+
+  const onTraceRegionKeyDown = (e: ReactKeyboardEvent) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTypingTarget(e.target)) return;
+    const i = FILTER_ORDER.indexOf(filter);
+    if (i < 0) return;
+    let next: TraceFilterKind | null = null;
+    if (e.key === "ArrowRight") next = FILTER_ORDER[(i + 1) % FILTER_ORDER.length];
+    else if (e.key === "ArrowLeft") next = FILTER_ORDER[(i - 1 + FILTER_ORDER.length) % FILTER_ORDER.length];
+    else if (e.key === "Home") next = FILTER_ORDER[0];
+    else if (e.key === "End") next = FILTER_ORDER[FILTER_ORDER.length - 1];
+    if (!next || next === filter) {
+      if (next === filter) e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    setFilter(next);
+    if ((e.target as HTMLElement).closest('[role="tab"]')) {
+      const key = next;
+      queueMicrotask(() => {
+        regionRef.current?.querySelector<HTMLElement>(`[role="tab"][data-filter="${key}"]`)?.focus();
+      });
+    }
+  };
+
+  const onSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "x" || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!isCancellable(state)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (onCancelShortcut) {
+      onCancelShortcut();
+      return;
+    }
+    e.currentTarget.blur();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true }));
+  };
 
   // Jump to active search match:
   useEffect(() => {
@@ -700,7 +748,7 @@ export function RunTrace({
   ];
 
   const body = (
-    <>
+    <div ref={regionRef} onKeyDown={onTraceRegionKeyDown}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         {live ? (
           <div className="flex items-center gap-2">
@@ -722,13 +770,13 @@ export function RunTrace({
               title={followLive ? "Auto-scrolling live. Click to pause." : "Auto-scroll paused. Click to follow live."}
             >
               <span
-                className={`size-1.5 rounded-full ${followLive ? "animate-pulse" : ""}`}
+                className={`size-1.5 rounded-full ${followLive ? "motion-safe:animate-pulse" : ""}`}
                 style={{ background: followLive ? "var(--hue-warn)" : "var(--text-faint)" }}
               />
               <span>{followLive ? "Follow live" : "Follow live (paused)"}</span>
             </button>
             {unreadCount > 0 && !followLive ? (
-              <span className="text-[11px] font-medium" style={{ color: "var(--hue-warn)" }}>
+              <span className="text-[11px] font-medium text-(--hue-warn)">
                 {unreadCount} new {unreadCount === 1 ? "event" : "events"}
               </span>
             ) : null}
@@ -736,8 +784,8 @@ export function RunTrace({
         ) : <div />}
 
         {tokenStats.hasTokens && (
-          <div className="flex items-center gap-1.5 rounded bg-(--surface-1) border border-(--border) px-2 py-0.5 text-[10.5px] mono text-(--text-dim)">
-            <span title="Cumulative token burn across trace">🔥 {tokenStats.promptTokens.toLocaleString()} in · {tokenStats.completionTokens.toLocaleString()} out</span>
+          <div className="flex items-center gap-1.5 rounded bg-(--surface-1) border border-(--border) px-2 py-0.5 text-[11px] mono text-(--text-dim)">
+            <span title="Cumulative token burn across trace">{tokenStats.promptTokens.toLocaleString()} in · {tokenStats.completionTokens.toLocaleString()} out</span>
             {tokenStats.totalCost > 0 && <span className="text-(--text-faint)">(${tokenStats.totalCost.toFixed(4)})</span>}
           </div>
         )}
@@ -745,11 +793,15 @@ export function RunTrace({
 
       {entries.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap gap-1" role="tablist" aria-label="Trace kind">
             {filterTabs.map((t) => (
               <button
                 key={t.key}
                 type="button"
+                role="tab"
+                data-filter={t.key}
+                aria-selected={filter === t.key}
+                tabIndex={filter === t.key ? 0 : -1}
                 onClick={() => setFilter(t.key)}
                 className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
                   filter === t.key
@@ -777,7 +829,6 @@ export function RunTrace({
                 }}
                 title="Jump to next error entry"
               >
-                <span>⚠️</span>
                 <span>{counts.errors === 1 ? "1 error" : `${counts.errors} errors`}</span>
                 {activeErrorIdx !== null && (
                   <span className="mono text-[10px] opacity-75">
@@ -794,7 +845,9 @@ export function RunTrace({
                   setSearch(e.target.value);
                   setActiveMatch(0);
                 }}
+                onKeyDown={onSearchKeyDown}
                 placeholder="Search trace…"
+                aria-label="Search trace"
                 className="w-24 bg-transparent outline-none text-(--text) placeholder:text-(--text-faint) sm:w-32"
               />
               {search && (
@@ -809,16 +862,18 @@ export function RunTrace({
                         onClick={() => setActiveMatch((m) => (m - 1 + searchMatches.length) % searchMatches.length)}
                         className="text-(--text-faint) hover:text-(--text)"
                         title="Previous match"
+                        aria-label="Previous match"
                       >
-                        ↑
+                        <span aria-hidden="true">↑</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => setActiveMatch((m) => (m + 1) % searchMatches.length)}
                         className="text-(--text-faint) hover:text-(--text)"
                         title="Next match"
+                        aria-label="Next match"
                       >
-                        ↓
+                        <span aria-hidden="true">↓</span>
                       </button>
                     </>
                   )}
@@ -826,8 +881,10 @@ export function RunTrace({
                     type="button"
                     onClick={() => setSearch("")}
                     className="text-(--text-faint) hover:text-(--text)"
+                    title="Clear search"
+                    aria-label="Clear search"
                   >
-                    ✕
+                    <span aria-hidden="true">×</span>
                   </button>
                 </>
               )}
@@ -916,7 +973,6 @@ export function RunTrace({
                 onClick={jumpToLatest}
                 className="flex items-center gap-1.5 rounded-full bg-(--accent) px-3 py-1 text-[11px] font-medium text-white shadow-lg transition-transform hover:scale-105 active:scale-95"
               >
-                <span>⬇</span>
                 <span>
                   {unreadCount > 0
                     ? `New activity (${unreadCount}) — Jump to latest`
@@ -941,7 +997,7 @@ export function RunTrace({
           )}
         </div>
       )}
-    </>
+    </div>
   );
 
   if (full) {

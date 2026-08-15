@@ -11,7 +11,7 @@ import {
   type OperatorContext,
 } from "./context";
 import { eventsHash, hashPath, hashProject, hashSearch, withProject } from "./hash";
-import { keyGuard, THEMES, useHashRoute, useTheme } from "./hooks";
+import { keyGuard, THEMES, useHashRoute, useTheme, type Theme } from "./hooks";
 import type { EventFocus } from "./types";
 import { CommandPalette, useGoSequences, type PaletteAction } from "./components/CommandPalette";
 import { InjectDialog } from "./components/InjectDialog";
@@ -342,7 +342,7 @@ export function App() {
           </div>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase"
+            className="rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
             title={
               env
                 ? `${env.home} · policy ${health.data?.policyVersion} — click to copy home`
@@ -387,7 +387,7 @@ export function App() {
                     title={badge.title}
                     style={{
                       color: badge.hue,
-                      background: `color-mix(in oklch, ${badge.hue} 14%, transparent)`,
+                      background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
                     }}
                   >
                     {badge.count}
@@ -599,18 +599,17 @@ export function App() {
 
         <div className="flex items-center gap-3">
           <div className="text-(--text-faint)">
-            <span className="mono">⌘K</span> commands · <span className="mono">g</span> go ·{" "}
-            <span className="mono">?</span> keys
+            <span className="mono">⌘K</span> commands · <span className="mono">i</span> inject ·{" "}
+            <span className="mono">g</span> go · <span className="mono">?</span> keys
           </div>
           <button
             type="button"
             onClick={cycleTheme}
             title={`Theme ${theme} — click for ${nextTheme}`}
             aria-label={`Theme: ${theme}. Switch to ${nextTheme}.`}
-            className="flex cursor-pointer items-center gap-1.5 rounded border border-(--border-strong) bg-(--surface-2) px-1.5 py-0.5 text-[10px] text-(--text-dim) hover:bg-(--surface-3) hover:text-(--text)"
+            className="flex cursor-pointer items-center justify-center rounded p-1 text-(--text-faint) hover:bg-(--surface-2) hover:text-(--text) focus-visible:outline focus-visible:outline-1 focus-visible:outline-(--focus-ring) transition-colors"
           >
-            <span>Theme</span>
-            <span className="text-(--text)">{theme}</span>
+            <ThemeIcon theme={theme} />
           </button>
         </div>
       </footer>
@@ -710,3 +709,29 @@ export function GoPrefixHint({ armed, currentView }: { armed: boolean; currentVi
     </div>
   );
 }
+
+/** Subtle theme glyph reflecting active theme state (dark / light / contrast). */
+function ThemeIcon({ theme }: { theme: Theme }) {
+  if (theme === "light") {
+    return (
+      <svg aria-hidden width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+        <circle cx="8" cy="8" r="3.5" />
+        <path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" />
+      </svg>
+    );
+  }
+  if (theme === "contrast") {
+    return (
+      <svg aria-hidden width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <circle cx="8" cy="8" r="6" />
+        <path d="M8 2a6 6 0 0 1 0 12V2z" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M13.5 10.2A6 6 0 0 1 5.8 2.5 6 6 0 1 0 13.5 10.2z" fill="currentColor" fillOpacity="0.2" />
+    </svg>
+  );
+}
+

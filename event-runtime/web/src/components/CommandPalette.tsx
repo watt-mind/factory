@@ -1,11 +1,37 @@
 import { useQuery } from "@tanstack/react-query";
 import { Command } from "cmdk";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { GO_CHORD_MS, goPrefix, goSequence } from "../goSequence";
 import { keyGuard, modal } from "../hooks";
 import { useContextActions } from "../palette";
 import { health } from "../workerHealth";
+
+const FOCUSABLE =
+  "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
+
+function tabCycle(root: HTMLElement, e: KeyboardEvent) {
+  const nodes = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (el) => el.offsetParent !== null || el === document.activeElement,
+  );
+  if (nodes.length === 0) {
+    e.preventDefault();
+    root.focus();
+    return;
+  }
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey) {
+    if (active === first || !root.contains(active)) {
+      e.preventDefault();
+      last.focus();
+    }
+  } else if (active === last || !root.contains(active)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
 
 export interface PaletteAction {
   label: string;
@@ -33,7 +59,19 @@ export function CommandPalette({
   onJumpProject?: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
   const contextActions = useContextActions();
+
+  // Capture the trigger before autoFocus moves into the search box. CommandPalette
+  // stays mounted while closed, so Dialog's mount/unmount useFocusReturn would
+  // restore on the wrong lifetime.
+  if (open && !wasOpenRef.current) {
+    const active = document.activeElement;
+    previousFocusRef.current = active instanceof HTMLElement ? active : null;
+  }
+  wasOpenRef.current = open;
 
   // Jump targets load only while the palette is open; cache keys shared with
   // the views, so this is usually a cache hit, not a request.
@@ -50,10 +88,13 @@ export function CommandPalette({
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        setOpen((o) => !o);
-      }
+      if (e.key !== "k" || !(e.metaKey || e.ctrlKey)) return;
+      e.preventDefault();
+      setOpen((o) => {
+        if (o) return false;
+        if (modal.depth > 0) return false;
+        return true;
+      });
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -64,17 +105,34 @@ export function CommandPalette({
     modal.depth += 1;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
+      else if (e.key === "Tab" && panelRef.current) tabCycle(panelRef.current, e);
     };
     window.addEventListener("keydown", onKey);
+    const root = panelRef.current;
+    const input = root?.querySelector<HTMLElement>("input");
+    (input ?? root)?.focus();
     return () => {
       modal.depth -= 1;
       window.removeEventListener("keydown", onKey);
+      const active = document.activeElement;
+      const claimed =
+        active instanceof HTMLElement && active !== document.body && active.isConnected;
+      if (claimed) return;
+      const previous = previousFocusRef.current;
+      if (previous && (previous.isConnected ?? document.contains(previous))) {
+        try {
+          previous.focus();
+        } catch {
+          // detached or unfocusable
+        }
+      }
     };
   }, [open]);
 
   if (!open) return null;
   return (
     <div
+      data-testid="palette-overlay"
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-[16vh]"
       onMouseDown={(e) => e.target === e.currentTarget && setOpen(false)}
     >
@@ -83,11 +141,17 @@ export function CommandPalette({
         loop
         label="Command palette"
       >
-        <div role="dialog" aria-modal="true" aria-label="Command palette">
+        <div
+          ref={panelRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Command palette"
+          tabIndex={-1}
+        >
         <Command.Input
           autoFocus
           placeholder="Type a command…"
-          className="w-full border-b border-(--border) bg-transparent px-4 py-3 text-[14px] text-(--text) outline-none placeholder:text-(--text-faint)"
+          className="w-full border-b border-(--border) bg-transparent px-4 py-3 text-[14px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
         />
         <Command.List className="max-h-72 overflow-auto p-1.5">
           <Command.Empty className="px-3 py-6 text-center text-(--text-faint)">
