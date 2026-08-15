@@ -14,7 +14,7 @@
  */
 import "./test-dom";
 import { mock } from "bun:test";
-import { fireEvent, render, type RenderResult } from "@testing-library/react";
+import { render, type RenderResult } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
