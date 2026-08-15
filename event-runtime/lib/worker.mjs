@@ -11,7 +11,8 @@
  * publishing nothing.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { LEASE_HEARTBEAT_MS, leaseDir, liveWorkerLeases, releaseWorkerLease, renewWorkerLease, writeWorkerLease } from "../../lib/worker-leases.mjs";
@@ -201,6 +202,128 @@ export function acquireClaimLock(lockFile, { pid = process.pid, now = Date.now()
 
 export function releaseClaimLock(lockFile) {
   try { unlinkSync(lockFile); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Dev live-reload: code stamp + drain-aware reload watcher (WM-213)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exit code the worker uses to ask its supervisor for a restart. Distinct from
+ * 0 (drained cleanly — stay down) and from any crash, so `bin/live-stack.sh
+ * __supervise-worker` re-execs on exactly this and nothing else.
+ */
+export const CODE_RELOAD_EXIT = 75;
+
+/** What "the worker's code" is: everything the claim loop actually executes. */
+export const CODE_STAMP_PATHS = ["event-runtime/lib", "event-runtime/cli.mjs"];
+
+/** Re-stamping cadence. The poll loop is faster (500ms) and must not re-hash twice a second. */
+export const RELOAD_CHECK_INTERVAL_MS = 1_000;
+
+/**
+ * Which checkout the stamp describes. `FACTORY_CODE_STAMP_ROOT` exists because
+ * a worker can be started from a different checkout than the one it watches —
+ * and because tests must be able to dirty a tree that is not this repo.
+ */
+export function codeStampRoot() {
+  return process.env.FACTORY_CODE_STAMP_ROOT || FACTORY_ROOT;
+}
+
+function walkStampFiles(dir, out) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkStampFiles(abs, out);
+    else if (entry.isFile()) out.push(abs);
+  }
+  return out;
+}
+
+/** Repo-relative, sorted list of the files the stamp covers. */
+export function codeStampFiles(repoRoot = codeStampRoot(), paths = CODE_STAMP_PATHS) {
+  const files = [];
+  for (const rel of paths) {
+    const abs = path.join(repoRoot, rel);
+    let st;
+    try { st = statSync(abs); } catch { continue; }
+    if (st.isDirectory()) walkStampFiles(abs, files);
+    else if (st.isFile()) files.push(abs);
+  }
+  return files.map((f) => path.relative(repoRoot, f)).sort();
+}
+
+function gitHead(repoRoot) {
+  const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim().slice(0, 12) : "nogit";
+}
+
+/**
+ * A short, stable identity for the code this worker is running: HEAD plus a
+ * content hash of the stamp paths.
+ *
+ * Contents, not mtimes — a `git checkout` that rewrites a file back to what it
+ * already was must NOT bounce the worker, and an uncommitted edit must, which
+ * a HEAD-only stamp misses entirely. Reading ~1MB once a second is free next
+ * to the agent runs this loop supervises.
+ */
+export function codeStamp(repoRoot = codeStampRoot(), paths = CODE_STAMP_PATHS) {
+  const hash = createHash("sha256");
+  for (const rel of codeStampFiles(repoRoot, paths)) {
+    hash.update(rel);
+    hash.update("\0");
+    try { hash.update(readFileSync(path.join(repoRoot, rel))); } catch { hash.update("<unreadable>"); }
+    hash.update("\0");
+  }
+  return `${gitHead(repoRoot)}:${hash.digest("hex").slice(0, 12)}`;
+}
+
+/**
+ * Poll-boundary reload detection. `check(inFlight)` is called by the claim
+ * loop *between* claims and returns one of:
+ *
+ *   none      nothing changed (or it is not time to re-stamp yet)
+ *   deferred  code changed but this worker holds a lease — keep going
+ *   reload    code changed and the worker is idle — exit CODE_RELOAD_EXIT
+ *
+ * `deferred` can never become `reload` inside the same call, so a running
+ * agent cannot be killed by a code change *by construction* — that is the
+ * whole reason this is a poll-boundary check and not an fs watcher. Once a
+ * change is seen it is latched (`pending`), so the reload happens on the very
+ * next idle check rather than one interval later, and the stamp is not
+ * recomputed while it waits.
+ */
+export function createReloadWatcher({
+  repoRoot = codeStampRoot(),
+  intervalMs = RELOAD_CHECK_INTERVAL_MS,
+  stamp = () => codeStamp(repoRoot),
+  now = () => Date.now(),
+} = {}) {
+  const from = stamp();
+  let lastCheck = now();
+  let pending = null;
+  let deferredSeen = false;
+
+  return {
+    from,
+    check(inFlight = null) {
+      if (!pending) {
+        const at = now();
+        if (at - lastCheck < intervalMs) return { action: "none", from, to: from };
+        lastCheck = at;
+        const to = stamp();
+        if (to === from) return { action: "none", from, to };
+        pending = to;
+      }
+      if (inFlight) {
+        const first = !deferredSeen;
+        deferredSeen = true;
+        return { action: "deferred", from, to: pending, runId: inFlight, first };
+      }
+      return { action: "reload", from, to: pending };
+    },
+  };
 }
 
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");

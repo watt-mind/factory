@@ -37,7 +37,9 @@ import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { approveProposal } from "./lib/proposals.mjs";
 import { startApi } from "./lib/api.mjs";
-import { claimNext, executeClaimed, runOnce } from "./lib/worker.mjs";
+import {
+  claimNext, CODE_RELOAD_EXIT, createReloadWatcher, executeClaimed, RELOAD_CHECK_INTERVAL_MS, runOnce,
+} from "./lib/worker.mjs";
 import { reapExpiredLeases } from "./lib/reaper.mjs";
 import { deregisterWorker, heartbeat, registerWorker } from "./lib/workers.mjs";
 
@@ -53,8 +55,12 @@ usage: bun event-runtime/cli.mjs <command>
                                  never kill a running agent.
                                  --watch restarts on event-runtime/ changes
   work [--label k=v ...] [--adapter-override fake] [--drain-timeout N]
+       [--reload-on-change]
                                  worker process: claim, execute, verify, and publish
                                  runs from the database
+                                 --reload-on-change exits ${CODE_RELOAD_EXIT} for a supervisor to
+                                 restart when event-runtime code changes, but
+                                 only between claims (dev; see factory up --dev)
   status                         events, proposals, runs, anomalies
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
@@ -463,6 +469,7 @@ async function serve(args) {
  * claiming correct; Postgres is what remote nodes need, not this.
  *
  *   bun event-runtime/cli.mjs work [--label k=v ...] [--adapter-override fake] [--poll-ms 500]
+ *                                 [--reload-on-change]
  */
 async function work(args) {
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
@@ -499,6 +506,11 @@ async function work(args) {
   let draining = false;
   let inFlight = null;
 
+  // Dev live-reload (WM-213). Off unless asked for: a production worker must
+  // never decide on its own that it is out of date.
+  const watcher = args.includes("--reload-on-change") ? createReloadWatcher() : null;
+  if (watcher) log(`reload-on-change: armed at code stamp ${watcher.from} (reloads only between claims)`);
+
   // The heartbeat runs on its own timer, NOT inside the claim loop: that loop
   // blocks for the whole duration of an agent run (up to the spec timeout),
   // so a loop-driven heartbeat would mark every legitimately busy worker as
@@ -510,9 +522,30 @@ async function work(args) {
   );
   beat.unref?.();
 
+  /**
+   * True when this worker should exit for a supervisor to restart it. Consulted
+   * from two places for one reason each: the timer notices a change *during* a
+   * run so the deferral is logged while it is still true, and the loop top is
+   * the idle boundary where acting on it is safe.
+   */
+  function reloadWanted() {
+    if (!watcher || draining) return false;
+    const r = watcher.check(inFlight);
+    if (r.action === "deferred") {
+      if (r.first) log(`code changed (${r.from} → ${r.to}) — reload deferred until ${r.runId} finishes`);
+      return false;
+    }
+    if (r.action === "reload") {
+      log(`code changed (${r.from} → ${r.to}) — reloading worker (exit ${CODE_RELOAD_EXIT})`);
+      return true;
+    }
+    return false;
+  }
+
   async function loop() {
     while (!draining) {
       try {
+        if (reloadWanted()) return finish("code_reload", CODE_RELOAD_EXIT);
         heartbeat(db, workerId, { state: inFlight ? "busy" : "idle", runId: inFlight });
         const claim = claimNext(db, {
           owner: workerId, policyVersion: pv, labels,
@@ -549,12 +582,21 @@ async function work(args) {
   // the grace period the worker leaves honestly and says what happens next —
   // the lease expires and the reaper requeues the run.
   const drainTimeoutMs = Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
-  const finish = (reason) => {
+  const finish = (reason, code = 0) => {
     clearInterval(beat);
     deregisterWorker(db, workerId);
     log(`worker stopped (${reason})`);
-    process.exit(0);
+    process.exit(code);
   };
+
+  // Armed only after `finish` exists — this timer is the path that notices a
+  // change while a run is in flight, which is where the deferral line comes from.
+  if (watcher) {
+    const reloadTimer = setInterval(() => {
+      if (reloadWanted()) finish("code_reload", CODE_RELOAD_EXIT);
+    }, RELOAD_CHECK_INTERVAL_MS);
+    reloadTimer.unref?.();
+  }
   const drain = (signal) => {
     if (draining) {
       // A second signal means "now": the operator has decided.
