@@ -50,6 +50,17 @@ import { health, WORKER_HUES } from "../workerHealth";
 export const WORKER_TABS = ["ALL", "LIVE", "STOPPED"] as const;
 export type WorkerTab = (typeof WORKER_TABS)[number];
 export type WorkerDisplayState = ReturnType<typeof health> | "draining";
+export const WORKER_HEALTH_FILTERS = ["live", "busy", "stale"] as const;
+export type WorkerHealthFilter = (typeof WORKER_HEALTH_FILTERS)[number];
+
+export const isWorkerHealthFilter = (value: string | null): value is WorkerHealthFilter =>
+  WORKER_HEALTH_FILTERS.some((filter) => filter === value);
+
+/** Overview health counts are disjoint: live excludes stale and stopped workers. */
+export const workerMatchesHealth = (worker: Worker, filter: WorkerHealthFilter): boolean => {
+  const state = health(worker);
+  return filter === "live" ? state === "idle" || state === "busy" : state === filter;
+};
 
 const WORKER_STATE_HUES: Record<WorkerDisplayState, string> = {
   ...WORKER_HUES,
@@ -362,10 +373,14 @@ export function Workers({
   context,
   focusWorkerId,
   onSelectWorker,
+  focusHealth = null,
+  onFocusHealthChange = () => {},
 }: {
   context: OperatorContext;
   focusWorkerId: string | null;
   onSelectWorker: (id: string | null) => void;
+  focusHealth?: WorkerHealthFilter | null;
+  onFocusHealthChange?: (health: WorkerHealthFilter | null) => void;
 }) {
   const now = useNow();
   const query = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 2000 });
@@ -409,15 +424,28 @@ export function Workers({
   );
 
   const [filter, setFilter] = useState("");
+
+  // A jump from Overview is explicit: pin the lifecycle tab that contains all
+  // three supported health states and remove any stale text query.
+  useEffect(() => {
+    if (!focusHealth) return;
+    setTabChoice("LIVE");
+    setFilter("");
+  }, [focusHealth]);
+
+  const byHealth = useMemo(
+    () => (focusHealth ? byTab.filter((worker) => workerMatchesHealth(worker, focusHealth)) : byTab),
+    [byTab, focusHealth],
+  );
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return byTab;
-    return byTab.filter((w) =>
+    if (!q) return byHealth;
+    return byHealth.filter((w) =>
       [w.workerId, w.host, String(w.pid), workerDisplayState(w), labelText(w.labels), w.adapters.join(","), w.currentRun].some(
         (v) => (v ?? "").toLowerCase().includes(q),
       ),
     );
-  }, [byTab, filter]);
+  }, [byHealth, filter]);
 
   // Display options (OPS-493): partition into sections, order inside them,
   // and feed keyboard navigation only the rows of open sections.
@@ -474,6 +502,7 @@ export function Workers({
     onClose: () => {
       if (selectedId) onSelectWorker(null);
       else if (filter) setFilter("");
+      else if (focusHealth) onFocusHealthChange(null);
     },
     keys: {
       c: () => {
@@ -526,7 +555,10 @@ export function Workers({
                       type="button"
                       role="tab"
                       aria-selected={tab === t}
-                      onClick={() => setTabChoice(t)}
+                      onClick={() => {
+                        setTabChoice(t);
+                        if (focusHealth) onFocusHealthChange(null);
+                      }}
                       title={t === "LIVE" ? "idle, busy, or stale" : t === "STOPPED" ? "cleanly stopped — history" : undefined}
                       className={`shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium ${
                         tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
@@ -546,9 +578,26 @@ export function Workers({
                   config={WORKERS_DISPLAY}
                   state={display}
                   onChange={setDisplay}
-                  rows={byTab}
+                  rows={byHealth}
                 />
               </span>
+              <label className="flex items-center gap-1.5 text-[11px] text-(--text-faint)">
+                <span>Health</span>
+                <select
+                  aria-label="Filter workers by health"
+                  value={focusHealth ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    onFocusHealthChange(isWorkerHealthFilter(value) ? value : null);
+                  }}
+                  className="rounded-md border border-(--border) bg-(--surface-1) px-2 py-1 text-[12px] text-(--text)"
+                >
+                  <option value="">Any</option>
+                  <option value="live">Live</option>
+                  <option value="busy">Busy</option>
+                  <option value="stale">Stale</option>
+                </select>
+              </label>
               <FilterInput
                 value={filter}
                 onChange={setFilter}
@@ -697,8 +746,15 @@ export function Workers({
               <ListEmpty
                 colSpan={cols.length}
                 query={query}
-                filtered={byTab.length > 0}
-                onClear={filter.trim() ? () => setFilter("") : undefined}
+                filtered={Boolean(focusHealth || (filter.trim() && byTab.length > 0))}
+                onClear={
+                  focusHealth || filter.trim()
+                    ? () => {
+                        setFilter("");
+                        if (focusHealth) onFocusHealthChange(null);
+                      }
+                    : undefined
+                }
                 noun="workers"
                 empty="No workers have registered — start one with bun event-runtime/cli.mjs work"
               />
