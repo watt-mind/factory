@@ -23,6 +23,7 @@ import {
   RunFailureBanner,
   clockTo,
   isCancellable,
+  pinnedModelText,
 } from "../components/RunDetailBlocks";
 import { readPinnedRuns, savePinnedRuns } from "../components/ContextTabs";
 import type { OperatorContext } from "../context";
@@ -54,6 +55,14 @@ const STATE_TABS: (RunState | "ALL")[] = [
   "ALL", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED",
 ];
 /**
+ * The pinned model as a list cell (WM-221) — the pair to the Agents view's
+ * Model column (WM-211), same words for the same facts. The *observed* model
+ * is deliberately detail-only: answering it per row means opening one stored
+ * transcript per run.
+ */
+const rowModel = (r: RunListItem) => pinnedModelText(r.adapter, r.model);
+
+/**
  * Grouping/ordering/columns (OPS-493). One config for every status tab: the
  * tabs only filter rows, the column set never changes with them.
  */
@@ -72,6 +81,7 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     },
     { key: "agent", label: "Agent", get: (r) => r.agent },
     { key: "adapter", label: "Adapter", get: (r) => r.adapter },
+    { key: "model", label: "Model", get: rowModel },
   ],
   subGroups: ["agent", "adapter", "state"],
   sorts: [
@@ -79,12 +89,14 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     { key: "updated", label: "Updated", get: (r) => r.updated_at, defaultDir: "desc", column: "updated" },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
     { key: "attempts", label: "Attempts", get: (r) => r.attempts, defaultDir: "desc", column: "attempts" },
+    { key: "model", label: "Model", get: rowModel, column: "model" },
   ],
   columns: [
     { key: "run", label: "Run", always: true },
     { key: "state", label: "State" },
     { key: "agent", label: "Agent" },
     { key: "adapter", label: "Adapter" },
+    { key: "model", label: "Model" },
     { key: "attempts", label: "Attempts" },
     { key: "reason", label: "Reason" },
     { key: "origin", label: "Origin" },
@@ -521,6 +533,20 @@ export function Runs({
                   )}
                   {show.has("adapter") && (
                     <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">{r.adapter}</td>
+                  )}
+                  {show.has("model") && (
+                    <td
+                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      title={
+                        rowModel(r) === "n/a"
+                          ? `The ${r.adapter} adapter runs a fixed argv, not a model.`
+                          : r.model && r.model !== "default"
+                            ? `Pinned into the RunSpec at plan time${r.modelTier ? ` from model_tier "${r.modelTier}"` : ""} — open the run for the model it was observed on.`
+                            : "This run pinned no model, so the CLI picked — open the run for the one it was observed on."
+                      }
+                    >
+                      {rowModel(r)}
+                    </td>
                   )}
                   {show.has("attempts") && (
                     <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">

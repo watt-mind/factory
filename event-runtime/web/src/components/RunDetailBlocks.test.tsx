@@ -1,7 +1,7 @@
 import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { RunDetailBlocks } from "./RunDetailBlocks";
+import { RunDetailBlocks, modelTierText, pinnedModelText } from "./RunDetailBlocks";
 import { createLifecycleEventFixture, createRunDetailFixture } from "../test-render";
 import type { RunDetail, RunState } from "../types";
 
@@ -173,5 +173,88 @@ describe("Lifecycle reason readability (WM-145)", () => {
       el.textContent?.includes(LONG_REASON),
     );
     expect(truncated.length).toBe(0);
+  });
+});
+
+describe("model surfacing (WM-221)", () => {
+  const modelDetail = (spec: Partial<RunDetail["run"]["spec"]>, observedModel: string | null = null) =>
+    createRunDetailFixture({
+      run: { spec: { adapter: "claude", ...spec } } as RunDetail["run"],
+      observedModel,
+    });
+
+  test("shows tier, pinned model, and observed model beside the adapter", () => {
+    const r = renderBlocks(
+      modelDetail({ modelTier: "standard", model: "sonnet" }, "claude-sonnet-5"),
+    );
+    expect(r.getByText("model tier")).toBeTruthy();
+    expect(r.getByText("standard")).toBeTruthy();
+    expect(r.getByText("model (pinned)")).toBeTruthy();
+    expect(r.getByText("sonnet")).toBeTruthy();
+    expect(r.getByText("model (observed)")).toBeTruthy();
+    expect(r.getByText("claude-sonnet-5")).toBeTruthy();
+  });
+
+  test("renders the `default` sentinel distinctly, never as a missing value", () => {
+    const r = renderBlocks(modelDetail({ modelTier: "strong", model: "default" }, "claude-fable-5"));
+    const pinned = r.getByText("default (CLI)");
+    expect(pinned).toBeTruthy();
+    expect(pinned.getAttribute("title")).toContain("sentinel");
+    // The sentinel is exactly the case the observed row exists to answer.
+    expect(r.getByText("claude-fable-5")).toBeTruthy();
+  });
+
+  test("a spec that declares nothing still reads as the CLI's default, not a blank", () => {
+    const r = renderBlocks(modelDetail({}));
+    expect(r.getByText("not declared")).toBeTruthy();
+    expect(r.getByText("default (CLI)")).toBeTruthy();
+    expect(r.getByText("not recorded")).toBeTruthy();
+  });
+
+  test("an exact-id override with no tier reads as `override`", () => {
+    const r = renderBlocks(modelDetail({ model: "claude-opus-4-1" }));
+    expect(r.getByText("override")).toBeTruthy();
+    expect(r.getByText("claude-opus-4-1")).toBeTruthy();
+  });
+
+  test("a non-model adapter gets one explicit n/a row, never three blanks", () => {
+    const r = renderBlocks(
+      createRunDetailFixture({ run: { spec: { adapter: "command" } } as RunDetail["run"] }),
+    );
+    const na = r.getByText("n/a");
+    expect(na).toBeTruthy();
+    expect(na.getAttribute("title")).toContain("fixed argv");
+    expect(r.queryByText("model (pinned)")).toBeNull();
+    expect(r.queryByText("model (observed)")).toBeNull();
+  });
+
+  test("a tier declared on a non-model adapter is named in the tooltip, not dropped", () => {
+    const r = renderBlocks(
+      createRunDetailFixture({
+        run: { spec: { adapter: "command", modelTier: "light", model: null } } as RunDetail["run"],
+      }),
+    );
+    expect(r.getByText("n/a").getAttribute("title")).toContain("light");
+  });
+});
+
+describe("pinnedModelText / modelTierText (WM-221)", () => {
+  test("splits the two meanings of a null model the way the Agents view does", () => {
+    expect(pinnedModelText("claude", "sonnet")).toBe("sonnet");
+    expect(pinnedModelText("claude", "default")).toBe("default (CLI)");
+    expect(pinnedModelText("pi", null)).toBe("default (CLI)");
+    expect(pinnedModelText("pi", undefined)).toBe("default (CLI)");
+    // No model by construction — a different fact from "pinned nothing".
+    expect(pinnedModelText("command", null)).toBe("n/a");
+    expect(pinnedModelText("actions", "sonnet")).toBe("n/a");
+  });
+
+  test("tier text prefers the declaration, then the override, then honest absence", () => {
+    expect(modelTierText({ adapter: "claude", modelTier: "strong", model: "default" })).toBe("strong");
+    expect(modelTierText({ adapter: "claude", modelTier: null, model: "claude-opus-4-1" })).toBe("override");
+    expect(modelTierText({ adapter: "claude", modelTier: null, model: null })).toBe("not declared");
+    expect(modelTierText({ adapter: "fake", modelTier: null, model: null })).toBe("n/a");
+    // A declared tier survives even where the adapter cannot use it.
+    expect(modelTierText({ adapter: "command", modelTier: "light", model: null })).toBe("light");
   });
 });

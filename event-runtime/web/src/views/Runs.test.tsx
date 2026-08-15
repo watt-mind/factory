@@ -465,3 +465,47 @@ describe("Runs component harness: cross-tab reveal", () => {
     );
   });
 });
+
+describe("Runs Model column (WM-221)", () => {
+  test("renders the pinned model per row, with the sentinel and n/a spelled out", async () => {
+    const modelRows = [
+      stubListItem("run_pinned", "COMPLETED", { adapter: "claude", modelTier: "standard", model: "sonnet" }),
+      stubListItem("run_sentinel", "COMPLETED", { adapter: "claude", modelTier: "strong", model: "default" }),
+      stubListItem("run_command", "COMPLETED", { adapter: "command", modelTier: null, model: null }),
+    ];
+    await withApi(
+      {
+        runs: async () => ({ runs: modelRows }),
+        run: async () => stubDetail("run_pinned", "COMPLETED", []),
+        status: async () => createStatusFixture(),
+        trace: async () => ({ head: 0, entries: [] }),
+      },
+      async () => {
+        const { findByText, getByText } = renderRuns();
+        // The column is offered like every other one, and on by default —
+        // same call as the Agents view's Model column (WM-211).
+        expect(await findByText("sonnet")).toBeTruthy();
+        expect(getByText("default (CLI)")).toBeTruthy();
+        expect(getByText("n/a")).toBeTruthy();
+      },
+    );
+  });
+
+  test("the column can be hidden through Display Options like any other", async () => {
+    localStorage.setItem("evrt-display-runs", JSON.stringify({ hiddenColumns: ["model"] }));
+    const modelRows = [stubListItem("run_pinned", "COMPLETED", { adapter: "claude", model: "sonnet" })];
+    await withApi(
+      {
+        runs: async () => ({ runs: modelRows }),
+        run: async () => stubDetail("run_pinned", "COMPLETED", []),
+        status: async () => createStatusFixture(),
+        trace: async () => ({ head: 0, entries: [] }),
+      },
+      async () => {
+        const { findByText, queryByText } = renderRuns();
+        await findByText("run_pinned");
+        expect(queryByText("sonnet")).toBeNull();
+      },
+    );
+  });
+});

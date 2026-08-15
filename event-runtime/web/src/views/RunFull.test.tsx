@@ -65,3 +65,32 @@ describe("RunFull cancel dialog (WM-144)", () => {
     );
   });
 });
+
+describe("RunFull model rows (WM-221)", () => {
+  test("the full page's sidebar answers which model the run used, pinned and observed", async () => {
+    const runId = "run_model_full";
+    const detail = createRunDetailFixture({
+      run: {
+        runId,
+        state: "COMPLETED",
+        spec: { adapter: "claude", modelTier: "strong", model: "default" },
+      } as RunDetail["run"],
+      observedModel: "claude-opus-5[1m]",
+    });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({ runs: [createRunListItemFixture({ runId, state: "COMPLETED" })] }),
+      },
+      async () => {
+        const { getByText } = renderRunFull(runId);
+        await waitFor(() => getByText("model (observed)"));
+        // The header already names the adapter; the sidebar now names the model.
+        expect(getByText("model tier")).toBeTruthy();
+        expect(getByText("strong")).toBeTruthy();
+        expect(getByText("default (CLI)")).toBeTruthy();
+        expect(getByText("claude-opus-5[1m]")).toBeTruthy();
+      },
+    );
+  });
+});

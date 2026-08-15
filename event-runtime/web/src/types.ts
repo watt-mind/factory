@@ -30,6 +30,15 @@ export interface RunSpec {
   maxAttempts: number;
   idempotencyKey: string;
   placement?: Record<string, unknown> | null;
+  /**
+   * Declared intent and the model it resolved to at plan time (WM-135). Both
+   * fields appear together or not at all: a definition that declares neither
+   * produces a spec byte-identical to the pre-WM-135 shape, which is why these
+   * are optional here and `null` is a different fact from absent — `null`
+   * means the routed adapter takes no model.
+   */
+  modelTier?: string | null;
+  model?: string | null;
 }
 
 export interface Proposal {
@@ -82,6 +91,14 @@ export interface RunListItem {
   eventSource: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Plan-time pins (WM-135), flattened out of the spec for the Model column
+   * (WM-221). Optional for the same reason they are optional on `RunSpec`:
+   * absent is a third state next to `null`, and the column renders it the
+   * same way — "this run pinned nothing" — rather than guessing.
+   */
+  modelTier?: string | null;
+  model?: string | null;
   /** Repos the spec input names. Empty if unscoped. */
   repos: string[];
 }
@@ -212,6 +229,13 @@ export interface RunDetail {
   } | null;
   receipt: Record<string, string | null> | null;
   workspace: string | null;
+  /**
+   * What the harness reported it actually ran on, read out of the stored
+   * transcript (WM-221) — the only source for a run whose spec pins the
+   * `default` sentinel. Null when no transcript was captured, the adapter
+   * takes no model, or the harness named none.
+   */
+  observedModel: string | null;
 }
 
 /** Which event types route to an agent, and how (GET /agents). */

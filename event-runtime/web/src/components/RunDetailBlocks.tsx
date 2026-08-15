@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import { dur } from "../heartbeat";
-import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunState } from "../types";
+import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
 import {
   Ago,
   Button,
@@ -282,6 +282,128 @@ export function ArtifactRow({ a }: { a: ArtifactRef }) {
   );
 }
 
+/**
+ * The adapters that take a model at all — the web-side mirror of
+ * `MODEL_ADAPTERS` in `event-runtime/lib/registry.mjs` (WM-135), same set the
+ * Agents view mirrors for its Model column (WM-211).
+ */
+export const MODEL_ADAPTERS = new Set(["claude", "pi"]);
+
+/**
+ * The sentinel a tier resolves to when the answer is "let the CLI decide"
+ * (`config/policy.yaml` models map). Both adapters treat it as "pass no
+ * `--model`", so it is a real pin with an unknowable value, not a missing one.
+ */
+export const DEFAULT_MODEL = "default";
+
+/** Rendered for the sentinel and for a spec that pins nothing: same outcome. */
+const DEFAULT_MODEL_TEXT = "default (CLI)";
+
+/**
+ * What the spec pinned, as an operator reads it (WM-221). Every branch renders
+ * a word: an empty model cell is the ambiguity this row exists to remove.
+ *
+ * - a non-model adapter has no model *by construction* → `n/a`
+ * - the `default` sentinel, and a spec that declares nothing at all, both mean
+ *   the CLI chose → `default (CLI)`; `model (observed)` is what it chose
+ */
+export const pinnedModelText = (adapter: string, model: string | null | undefined): string => {
+  if (!MODEL_ADAPTERS.has(adapter)) return "n/a";
+  return model == null || model === DEFAULT_MODEL ? DEFAULT_MODEL_TEXT : model;
+};
+
+/**
+ * Declared intent — same split as `tierText` in the Agents view (WM-211): an
+ * exact-id override answers for a definition that names no tier.
+ */
+export const modelTierText = (spec: Pick<RunSpec, "adapter" | "modelTier" | "model">): string => {
+  if (spec.modelTier) return spec.modelTier;
+  if (!MODEL_ADAPTERS.has(spec.adapter)) return "n/a";
+  return spec.model ? "override" : "not declared";
+};
+
+/**
+ * The model rows, next to `adapter` (WM-221): tier and pinned come from the
+ * spec, observed from the transcript the runtime stored. A non-model adapter
+ * collapses to one honest `n/a` row rather than three — a declared tier that
+ * the adapter cannot use is named in its tooltip rather than dropped.
+ */
+function ModelRows({ spec, observed }: { spec: RunSpec; observed: string | null }) {
+  if (!MODEL_ADAPTERS.has(spec.adapter)) {
+    return (
+      <KV
+        k="model"
+        v={
+          <span
+            className="text-(--text-dim)"
+            title={
+              spec.modelTier
+                ? `Declared model_tier "${spec.modelTier}", but the ${spec.adapter} adapter runs a fixed argv, not a model.`
+                : `The ${spec.adapter} adapter runs a fixed argv, not a model.`
+            }
+          >
+            n/a
+          </span>
+        }
+      />
+    );
+  }
+  const pinned = pinnedModelText(spec.adapter, spec.model);
+  return (
+    <>
+      <KV
+        k="model tier"
+        v={
+          <span
+            className="text-(--text-dim)"
+            title={
+              spec.modelTier
+                ? "Declared intent, resolved to a model at plan time (WM-135)."
+                : spec.model
+                  ? "This definition names an exact model instead of a tier."
+                  : "This definition declares no tier, so dispatch rides the CLI's own default."
+            }
+          >
+            {modelTierText(spec)}
+          </span>
+        }
+      />
+      <KV
+        k="model (pinned)"
+        v={
+          <span
+            className={pinned === DEFAULT_MODEL_TEXT ? "text-(--text-dim)" : "mono text-(--text-dim)"}
+            title={
+              pinned !== DEFAULT_MODEL_TEXT
+                ? "What the planner pinned into this RunSpec — passed to the CLI as --model."
+                : spec.model === DEFAULT_MODEL
+                  ? "The tier resolved to the `default` sentinel: no --model is passed and the CLI picks."
+                  : "This spec pins nothing, so no --model was passed and the CLI picked."
+            }
+          >
+            {pinned}
+          </span>
+        }
+      />
+      <KV
+        k="model (observed)"
+        v={
+          <span
+            className={observed ? "mono text-(--text-dim)" : "text-(--text-faint)"}
+            title={
+              observed
+                ? "What the harness reported it ran on, read from this run's stored transcript."
+                : "No model id in this run's transcript — it may predate the capture, or none was stored."
+            }
+          >
+            {observed ?? "not recorded"}
+          </span>
+        }
+      />
+    </>
+  );
+}
+
 /** A deep value on a glance row earns ~one line, no more; the RunSpec JSON has the rest. */
 const compactValue = (v: unknown): string => {
   const s = typeof v === "string" ? v : JSON.stringify(v);
@@ -372,6 +494,9 @@ export function RunDetailBlocks({
           }
         />
         <KV k="adapter" v={d.run.spec.adapter} />
+        {/* The harness is only half the answer: which model it ran is the
+            other half, and it used to appear nowhere on the page (WM-221). */}
+        <ModelRows spec={d.run.spec} observed={d.observedModel ?? null} />
         {/* A count, not an identifier — mono bought it nothing but a mismatched
             font next to "any worker" and "26m ago" on the rows around it. */}
         <KV k="attempts" v={`${d.run.attempts}/${d.run.spec.maxAttempts}`} mono={false} />
