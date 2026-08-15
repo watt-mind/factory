@@ -47,7 +47,7 @@ function Shell({
 function Line({ children, dim }: { children: React.ReactNode; dim?: boolean }) {
   return (
     <div
-      className="mono truncate text-[10.5px]"
+      className="mono truncate text-[11.5px]"
       style={{ color: dim ? "var(--text-faint)" : "var(--text-dim)" }}
     >
       {children}
@@ -72,7 +72,7 @@ export function EventTypeNode({ data, selected }: NodeProps) {
           <span className="flex items-center gap-1">
             {admitted > 0 && (
               <span
-                className="rounded px-1 text-[9.5px] font-medium"
+                className="rounded px-1 text-[11px] font-medium"
                 style={{
                   color: "var(--hue-info)",
                   background: "color-mix(in oklch, var(--hue-info) 12%, transparent)",
@@ -83,7 +83,7 @@ export function EventTypeNode({ data, selected }: NodeProps) {
             )}
             {planned > 0 && (
               <span
-                className="rounded px-1 text-[9.5px] font-medium"
+                className="rounded px-1 text-[11px] font-medium"
                 style={{
                   color: "var(--hue-ok)",
                   background: "color-mix(in oklch, var(--hue-ok) 12%, transparent)",
@@ -124,10 +124,10 @@ export function AgentNode({ data, selected }: NodeProps) {
         <div className="flex items-center gap-1">
           {node.mutating && (
             <span
-              className="rounded px-1 text-[9.5px] font-semibold tracking-wide uppercase"
+              className="rounded px-1 text-[11px] font-semibold tracking-wide uppercase"
               style={{
                 color: NODE_STYLES.agentMutating.accent,
-                background: `color-mix(in oklch, ${NODE_STYLES.agentMutating.accent} 15%, transparent)`,
+                background: `color-mix(in oklch, ${NODE_STYLES.agentMutating.accent} 12%, transparent)`,
               }}
             >
               mutating

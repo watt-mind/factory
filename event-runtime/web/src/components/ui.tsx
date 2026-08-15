@@ -55,6 +55,14 @@ export const DECISION_HUES: Record<string, string> = {
   noop: "var(--hue-idle)",
 };
 
+/** Four mutually exclusive worker health tokens (webui spec §5.2 + §10.9). */
+export const WORKER_HUES: Record<string, string> = {
+  idle: "var(--hue-ok)",
+  busy: "var(--hue-warn)",
+  stopped: "var(--hue-idle)",
+  stale: "var(--hue-err)",
+};
+
 /**
  * Returns the matching theme hue for a facet value (states, statuses, decisions).
  */
@@ -412,17 +420,19 @@ export function ListPane({ chrome, children }: { chrome: ReactNode; children: Re
   );
 }
 
-/** Pinned copy/close bar; the spec and payload scroll underneath. */
+/** Pinned title, verb, and utility rows; the spec and payload scroll underneath (WM-209). */
 export function DetailPane({
   widthClass,
   title,
   actions,
+  utility,
   close,
   children,
 }: {
   widthClass: string;
   title: ReactNode;
-  actions: ReactNode;
+  actions?: ReactNode;
+  utility?: ReactNode;
   /** Escape hatch pinned at the top-right, outside the wrapping action row,
    *  so it stays visible and clickable no matter how many actions the view
    *  stacks up or how narrow the panel gets (WM-97). */
@@ -432,14 +442,21 @@ export function DetailPane({
   return (
     <aside className={`${widthClass} flex min-h-0 shrink-0 flex-col border-l border-(--border) bg-(--surface-1)`}>
       <div className="shrink-0 border-b border-(--border) px-4 py-3">
+        {/* Row 1: Title & Close */}
         <div className="flex items-center justify-between gap-2">
           <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">{title}</div>
           {close != null && <div className="shrink-0">{close}</div>}
         </div>
-        {/* Own row under the title, and no shrink-0: the actions must be free
-            to wrap when the panel is narrower than the button row, instead of
-            crushing the title or clipping past the panel edge (WM-97). */}
-        <div className="mt-2 flex flex-wrap justify-end gap-1.5">{actions}</div>
+        {/* Row 2: Verb Row (≤ 3 bordered buttons) */}
+        {actions != null && (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">{actions}</div>
+        )}
+        {/* Row 3: Utility Row (copy/share quiet text line) */}
+        {utility != null && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
+            {utility}
+          </div>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">{children}</div>
     </aside>
@@ -609,6 +626,160 @@ export function GroupHeaderRow({
   );
 }
 
+/**
+ * 14px viewBox, 1.5px stroke state icons per OPS-498 / §5.2.
+ * Shape is redundancy for color-blind and peripheral reading.
+ */
+export function StateIcon({
+  state,
+  className = "size-3.5 shrink-0",
+}: {
+  state: string;
+  className?: string;
+}) {
+  const norm = state.toLowerCase();
+  switch (norm) {
+    case "admitted":
+      return (
+        <svg viewBox="0 0 14 14" fill="currentColor" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="3" />
+        </svg>
+      );
+    case "planned":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
+          <polygon points="5,3.5 10.5,7 5,10.5" fill="currentColor" fillOpacity="0.2" />
+        </svg>
+      );
+    case "noop":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <line x1="4" y1="7" x2="10" y2="7" />
+        </svg>
+      );
+    case "human_needed":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+          <path d="M7 2.5 L12 11.5 L2 11.5 Z" fill="currentColor" fillOpacity="0.18" />
+          <line x1="7" y1="5.5" x2="7" y2="8" />
+          <circle cx="7" cy="9.8" r="0.5" fill="currentColor" />
+        </svg>
+      );
+    case "dead_lettered":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <line x1="3.8" y1="10.2" x2="10.2" y2="3.8" />
+        </svg>
+      );
+    case "queued":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2 2" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+        </svg>
+      );
+    case "leased":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <circle cx="7" cy="7" r="1.8" fill="currentColor" />
+        </svg>
+      );
+    case "running":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <path d="M7 2.5 A4.5 4.5 0 0 1 7 11.5 Z" fill="currentColor" />
+        </svg>
+      );
+    case "verifying":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="6" cy="6" r="3.5" />
+          <line x1="8.5" y1="8.5" x2="11.5" y2="11.5" />
+        </svg>
+      );
+    case "completed":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
+          <polyline points="4.8,7.2 6.3,8.7 9.3,5.3" />
+        </svg>
+      );
+    case "failed":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
+          <line x1="5" y1="5" x2="9" y2="9" />
+          <line x1="9" y1="5" x2="5" y2="9" />
+        </svg>
+      );
+    case "timed_out":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <polyline points="7,4.5 7,7 9,7" />
+        </svg>
+      );
+    case "cancelled":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <line x1="4" y1="7" x2="10" y2="7" />
+        </svg>
+      );
+    case "refused":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <line x1="10" y1="4" x2="4" y2="10" />
+        </svg>
+      );
+    case "open":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" strokeDasharray="3 2" />
+        </svg>
+      );
+    case "expired":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
+          <line x1="7" y1="4" x2="7" y2="7.5" />
+          <circle cx="7" cy="9.5" r="0.5" fill="currentColor" />
+        </svg>
+      );
+    case "live":
+    case "idle":
+      return (
+        <svg viewBox="0 0 14 14" fill="currentColor" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="3.5" />
+        </svg>
+      );
+    case "busy":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" />
+          <path d="M7 2.5 A4.5 4.5 0 0 1 7 11.5 Z" fill="currentColor" />
+        </svg>
+      );
+    case "stale":
+      return (
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
+          <line x1="7" y1="4" x2="7" y2="7.5" />
+          <circle cx="7" cy="9.5" r="0.5" fill="currentColor" />
+        </svg>
+      );
+    default:
+      return (
+        <svg viewBox="0 0 14 14" fill="currentColor" className={className} aria-hidden="true">
+          <circle cx="7" cy="7" r="2.5" />
+        </svg>
+      );
+  }
+}
+
 export function StateBadge({
   state,
   hues = STATE_HUES,
@@ -627,7 +798,7 @@ export function StateBadge({
       className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] font-medium"
       style={{ color: hue, background: `color-mix(in oklch, ${hue} 12%, transparent)` }}
     >
-      {dot && <span className="size-1.5 rounded-full" style={{ background: hue }} />}
+      {dot && <StateIcon state={state} className="size-3 shrink-0" />}
       {state}
     </span>
   );
@@ -675,7 +846,7 @@ export function JumpLink({
   className,
 }: {
   children: ReactNode;
-  onClick?: () => void;
+  onClick?: (e?: React.MouseEvent) => void;
   href?: string;
   title?: string;
   className?: string;
@@ -689,7 +860,7 @@ export function JumpLink({
         title={title}
         onClick={(e) => {
           e.stopPropagation();
-          onClick?.();
+          onClick?.(e);
         }}
       >
         {children}
@@ -703,7 +874,7 @@ export function JumpLink({
       title={title}
       onClick={(e) => {
         e.stopPropagation();
-        onClick?.();
+        onClick?.(e);
       }}
     >
       {children}
@@ -924,10 +1095,21 @@ export function Disclosure({
   children: ReactNode;
   defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(!!defaultOpen);
   return (
-    <details open={defaultOpen} className="mb-1.5">
-      <summary className="cursor-pointer text-[11px] text-(--text-faint) select-none hover:text-(--text-dim)">
-        {label}
+    <details
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+      className="group mb-1.5 list-none"
+    >
+      <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-(--text-faint) select-none hover:text-(--text-dim) [&::-webkit-details-marker]:hidden list-none">
+        <span
+          aria-hidden
+          className={`inline-block text-[9px] text-(--text-faint) transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+        >
+          ▶
+        </span>
+        <span>{label}</span>
       </summary>
       <div className="mt-1.5">{children}</div>
     </details>
@@ -1089,7 +1271,7 @@ export function Button({
     default: "border-(--border-strong) bg-(--surface-2) text-(--text) hover:bg-(--surface-3)",
     primary: "border-transparent bg-(--accent) text-(--on-accent) hover:opacity-90",
     danger:
-      "border-(--border-strong) bg-(--surface-2) hover:bg-(--surface-3) text-[color:var(--hue-err)]",
+      "border-(--border-strong) bg-(--surface-2) hover:bg-(--surface-3) text-(--hue-err)",
   }[variant];
   return (
     <button

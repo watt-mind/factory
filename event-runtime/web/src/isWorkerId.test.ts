@@ -3,6 +3,7 @@ import "./test-dom";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { ActorRef, isWorkerId } from "./components/RunDetailBlocks";
+import { shortId } from "./components/ui";
 
 describe("isWorkerId", () => {
   test("static system actors and bare worker are not worker ids", () => {
@@ -56,7 +57,7 @@ describe("ActorRef component", () => {
     const workerId = "worker_12345_a1b2c3d4";
     const { getByRole } = render(createElement(ActorRef, { actor: workerId }));
     const link = getByRole("button");
-    expect(link.textContent).toBe(workerId);
+    expect(link.textContent).toBe(shortId(workerId));
     expect(link.getAttribute("title")).toBe(workerId);
 
     fireEvent.click(link);

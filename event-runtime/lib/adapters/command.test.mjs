@@ -8,6 +8,7 @@ import { planAdmittedEvents } from "../planner.mjs";
 import { loadRegistry } from "../registry.mjs";
 import { validate } from "../schema.mjs";
 import { emitDueTicks } from "../schedules.mjs";
+import { preflight } from "../sandbox/gondolin.mjs";
 import { execute, resolveTemplate } from "./command.mjs";
 
 const def = (command) => ({ ref: "test-cmd@1", command });
@@ -280,4 +281,78 @@ describe("command-adapter registry (OPS-404)", () => {
     const result = JSON.parse(readFileSync(path.join(workspaceDir, "result.json"), "utf8"));
     expect(result.artifact.command).toEqual(["test", "-f", REAPER_SCRIPT]);
   });
+});
+
+describe("sandboxed execution (WM-185)", () => {
+  const sandboxDef = (command, extra = {}) => ({
+    ref: "sandboxed-cmd@1",
+    command,
+    sandbox: { provider: "gondolin", allowedHosts: [] },
+    ...extra,
+  });
+
+  test("a sandboxed definition must name an absolute guest path", async () => {
+    // Array-form exec inside the guest does not search $PATH, and a host path
+    // like /opt/homebrew/bin/bun does not exist in the Alpine guest — so a
+    // bare "bun" would fail deep inside the VM with a useless message.
+    await expect(
+      execute({ spec: spec({}), def: sandboxDef(["bun", "--version"]), workspaceDir: ws(), timeoutMs: 5000 }),
+    ).rejects.toThrow(/must start with an absolute guest path/);
+  });
+
+  test("an invalid sandbox policy is refused before any VM is booted", async () => {
+    await expect(
+      execute({
+        spec: spec({}),
+        def: sandboxDef(["/bin/true"], { sandbox: { provider: "firecracker" } }),
+        workspaceDir: ws(),
+        timeoutMs: 5000,
+      }),
+    ).rejects.toThrow(/unknown sandbox provider/);
+  });
+
+  const report = preflight();
+  const itVM = report.available ? test : test.skip;
+
+  itVM(
+    "produces the same result contract as the host path, from inside the VM",
+    async () => {
+      const workspaceDir = ws();
+      const def = sandboxDef(["/bin/sh", "-c", "echo sandboxed-output > /workspace/captured.txt; echo sandboxed-output"], {
+        captureStdout: "captured.txt",
+      });
+
+      const outcome = await execute({ spec: spec({}), def, workspaceDir, timeoutMs: 120_000 });
+      expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+
+      // result.json is written on the host, with the same shape the
+      // unsandboxed path produces — downstream verification cannot tell which
+      // path ran, which is the point.
+      const result = JSON.parse(readFileSync(path.join(workspaceDir, "result.json"), "utf8"));
+      expect(result.schemaVersion).toBe("factory.agent-result/v1");
+      expect(result.terminalState).toBe("completed");
+      expect(result.artifact.exitCode).toBe(0);
+      expect(result.artifact.outputTail).toContain("sandboxed-output");
+      expect(result.artifacts).toEqual([{ kind: "output", path: "captured.txt" }]);
+      // The guest wrote this file through the mount; the host must see it.
+      expect(readFileSync(path.join(workspaceDir, "captured.txt"), "utf8")).toContain("sandboxed-output");
+    },
+    180_000,
+  );
+
+  itVM(
+    "a nonzero guest exit writes no result, exactly like the host path",
+    async () => {
+      const workspaceDir = ws();
+      const outcome = await execute({
+        spec: spec({}),
+        def: sandboxDef(["/bin/sh", "-c", "exit 3"]),
+        workspaceDir,
+        timeoutMs: 120_000,
+      });
+      expect(outcome).toEqual({ exitCode: 3, timedOut: false });
+      expect(existsSync(path.join(workspaceDir, "result.json"))).toBe(false);
+    },
+    180_000,
+  );
 });

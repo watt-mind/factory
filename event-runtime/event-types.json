@@ -1,7 +1,7 @@
 {
   "factory.status-report.requested": {
     "agent": "factory-status-report@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "correlationId",
       "inputHash"
@@ -34,7 +34,7 @@
   },
   "keephq.disk-alert.raised": {
     "agent": "disk-diagnose@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "subject",
       "correlationId"
@@ -51,7 +51,7 @@
   },
   "factory.triage.requested": {
     "agent": "triage-scan@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -83,7 +83,7 @@
   },
   "factory.ci-diagnose.requested": {
     "agent": "ci-doctor@2",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -91,7 +91,7 @@
   },
   "factory.run-postmortem.requested": {
     "agent": "run-postmortem@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -123,7 +123,7 @@
   },
   "factory.unblock.requested": {
     "agent": "unblock-scan@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -139,7 +139,7 @@
   },
   "factory.sweep.requested": {
     "agent": "sweep-scan@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -155,7 +155,7 @@
   },
   "factory.merge.requested": {
     "agent": "merge-scan@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -187,7 +187,7 @@
   },
   "factory.dispatch.requested": {
     "agent": "dispatch@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -195,7 +195,7 @@
   },
   "factory.work.requested": {
     "agent": "work-scan@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -203,7 +203,7 @@
   },
   "factory.ship.requested": {
     "agent": "ship-scan@1",
-    "adapter": "claude",
+    "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
     ],

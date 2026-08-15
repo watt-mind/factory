@@ -37,8 +37,11 @@ import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { approveProposal } from "./lib/proposals.mjs";
 import { startApi } from "./lib/api.mjs";
-import { claimNext, executeClaimed, runOnce } from "./lib/worker.mjs";
+import {
+  claimNext, CODE_RELOAD_EXIT, createReloadWatcher, executeClaimed, RELOAD_CHECK_INTERVAL_MS, runOnce,
+} from "./lib/worker.mjs";
 import { reapExpiredLeases } from "./lib/reaper.mjs";
+import { preflight as sandboxPreflight, runInSandbox } from "./lib/sandbox/gondolin.mjs";
 import { deregisterWorker, heartbeat, registerWorker } from "./lib/workers.mjs";
 
 const USAGE = `event-runtime — watched event → agent runtime (docs/event-runtime.md)
@@ -53,8 +56,12 @@ usage: bun event-runtime/cli.mjs <command>
                                  never kill a running agent.
                                  --watch restarts on event-runtime/ changes
   work [--label k=v ...] [--adapter-override fake] [--drain-timeout N]
+       [--reload-on-change]
                                  worker process: claim, execute, verify, and publish
                                  runs from the database
+                                 --reload-on-change exits ${CODE_RELOAD_EXIT} for a supervisor to
+                                 restart when event-runtime code changes, but
+                                 only between claims (dev; see factory up --dev)
   status                         events, proposals, runs, anomalies
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
@@ -65,6 +72,12 @@ usage: bun event-runtime/cli.mjs <command>
   workers                        worker processes: host, labels, state, heartbeat
   schedule                       recurring loops: cadence, approval, last fire, next due
   repos                          factory repos: team, base, dispatch vs report-only
+  sandbox doctor                 Gondolin microVM sandbox availability (qemu, node, sdk)
+  sandbox exec [--dir P] [--allow HOST]... [--secret NAME=ENVVAR]... [--shell]
+              [--timeout S] -- <command>
+                                 run a command inside a microVM: P mounted at
+                                 /workspace, egress default-deny, secrets
+                                 injected host-side (guest sees placeholders)
   approve <proposal-id>          approve an open proposal
   reject <proposal-id> <reason>  reject an open proposal
   inject <envelope.json|->       replay an event envelope (same intake as the webhook)
@@ -463,6 +476,7 @@ async function serve(args) {
  * claiming correct; Postgres is what remote nodes need, not this.
  *
  *   bun event-runtime/cli.mjs work [--label k=v ...] [--adapter-override fake] [--poll-ms 500]
+ *                                 [--reload-on-change]
  */
 async function work(args) {
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
@@ -484,6 +498,16 @@ async function work(args) {
     labels[key] = rest.join("=");
   }
 
+  // Advertise sandbox capability only when this host can actually honour it
+  // (WM-185). Placement matches on labels, so claiming `sandbox=gondolin`
+  // without a working hypervisor would route sandboxed runs here purely to
+  // fail them. An operator-supplied --label always wins, so the capability
+  // can be forced off for a node under investigation.
+  const sandboxReport = sandboxPreflight();
+  if (labels.sandbox === undefined && sandboxReport.available) {
+    labels.sandbox = "gondolin";
+  }
+
   ensureHome();
   const db = openDb();
   const registry = loadRegistry();
@@ -494,10 +518,16 @@ async function work(args) {
   registerWorker(db, { workerId, labels, adapters: adapterNames });
   log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
   if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
+  if (!sandboxReport.available) log(`sandbox: unavailable — ${sandboxReport.reason}`);
   if (adapterOverride) log(`adapter override: executing every run with "${adapterOverride}"`);
 
   let draining = false;
   let inFlight = null;
+
+  // Dev live-reload (WM-213). Off unless asked for: a production worker must
+  // never decide on its own that it is out of date.
+  const watcher = args.includes("--reload-on-change") ? createReloadWatcher() : null;
+  if (watcher) log(`reload-on-change: armed at code stamp ${watcher.from} (reloads only between claims)`);
 
   // The heartbeat runs on its own timer, NOT inside the claim loop: that loop
   // blocks for the whole duration of an agent run (up to the spec timeout),
@@ -510,9 +540,30 @@ async function work(args) {
   );
   beat.unref?.();
 
+  /**
+   * True when this worker should exit for a supervisor to restart it. Consulted
+   * from two places for one reason each: the timer notices a change *during* a
+   * run so the deferral is logged while it is still true, and the loop top is
+   * the idle boundary where acting on it is safe.
+   */
+  function reloadWanted() {
+    if (!watcher || draining) return false;
+    const r = watcher.check(inFlight);
+    if (r.action === "deferred") {
+      if (r.first) log(`code changed (${r.from} → ${r.to}) — reload deferred until ${r.runId} finishes`);
+      return false;
+    }
+    if (r.action === "reload") {
+      log(`code changed (${r.from} → ${r.to}) — reloading worker (exit ${CODE_RELOAD_EXIT})`);
+      return true;
+    }
+    return false;
+  }
+
   async function loop() {
     while (!draining) {
       try {
+        if (reloadWanted()) return finish("code_reload", CODE_RELOAD_EXIT);
         heartbeat(db, workerId, { state: inFlight ? "busy" : "idle", runId: inFlight });
         const claim = claimNext(db, {
           owner: workerId, policyVersion: pv, labels,
@@ -549,12 +600,21 @@ async function work(args) {
   // the grace period the worker leaves honestly and says what happens next —
   // the lease expires and the reaper requeues the run.
   const drainTimeoutMs = Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
-  const finish = (reason) => {
+  const finish = (reason, code = 0) => {
     clearInterval(beat);
     deregisterWorker(db, workerId);
     log(`worker stopped (${reason})`);
-    process.exit(0);
+    process.exit(code);
   };
+
+  // Armed only after `finish` exists — this timer is the path that notices a
+  // change while a run is in flight, which is where the deferral line comes from.
+  if (watcher) {
+    const reloadTimer = setInterval(() => {
+      if (reloadWanted()) finish("code_reload", CODE_RELOAD_EXIT);
+    }, RELOAD_CHECK_INTERVAL_MS);
+    reloadTimer.unref?.();
+  }
   const drain = (signal) => {
     if (draining) {
       // A second signal means "now": the operator has decided.
@@ -889,6 +949,93 @@ async function inject(client, file) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Hand-driven sandbox access (WM-185) — the way to try a Gondolin microVM
+ * without wiring an event, an agent definition, or a worker:
+ *
+ *   sandbox doctor
+ *   sandbox exec --dir . --allow api.github.com --secret GITHUB_TOKEN=GH_TOKEN --shell -- \
+ *     'curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user'
+ *
+ * `--secret NAME=ENVVAR` reads ENVVAR from this shell and scopes it to every
+ * --allow host; the guest only ever sees a placeholder. `--shell` runs the
+ * command through the guest's /bin/sh, which is a convenience for interactive
+ * use — the command adapter always uses argv form, with no shell at all.
+ */
+async function sandbox(args) {
+  const sub = args[0];
+
+  if (sub === "doctor") {
+    const report = sandboxPreflight();
+    console.log(`${pad("available", 14)}${report.available ? "yes" : "no"}`);
+    console.log(`${pad("qemu", 14)}${report.qemu ?? "-"}`);
+    console.log(`${pad("node", 14)}${report.node ?? "-"}${report.nodeVersion ? `   (v${report.nodeVersion})` : ""}`);
+    console.log(`${pad("sdk", 14)}${report.sdk ? "@earendil-works/gondolin installed" : "-"}`);
+    if (!report.available) {
+      console.log(`\n${report.reason}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub !== "exec") {
+    fail("usage: sandbox doctor | sandbox exec [--dir P] [--allow HOST]... [--secret NAME=ENVVAR]... [--shell] [--timeout S] -- <command>");
+  }
+
+  const rest = args.slice(1);
+  const separator = rest.indexOf("--");
+  if (separator === -1 || separator === rest.length - 1) {
+    fail("sandbox exec: the command must follow `--` (e.g. sandbox exec --dir . -- /bin/ls -la /workspace)");
+  }
+  const flags = rest.slice(0, separator);
+  const commandArgv = rest.slice(separator + 1);
+
+  const dir = path.resolve(flagValue(flags, "--dir") ?? process.cwd());
+  const shell = flags.includes("--shell");
+  const timeoutSeconds = Number(flagValue(flags, "--timeout") ?? 120);
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) fail("sandbox exec: --timeout must be a positive number of seconds");
+
+  const allowedHosts = [];
+  const secrets = {};
+  for (let i = 0; i < flags.length; i += 1) {
+    if (flags[i] === "--allow") {
+      const host = flags[i + 1];
+      if (!host) fail("sandbox exec: --allow expects a host");
+      allowedHosts.push(host);
+    }
+    if (flags[i] === "--secret") {
+      const [name, ...envRest] = String(flags[i + 1] ?? "").split("=");
+      if (!name) fail("sandbox exec: --secret expects NAME or NAME=ENVVAR");
+      secrets[name] = { env: envRest.length > 0 ? envRest.join("=") : name };
+    }
+  }
+  // A secret is scoped to whatever egress was actually allowed; policy
+  // normalization rejects any wider claim, so this can never over-grant.
+  for (const secret of Object.values(secrets)) secret.hosts = allowedHosts;
+
+  const report = sandboxPreflight();
+  if (!report.available) fail(`sandbox exec: ${report.reason}`);
+
+  try {
+    const { exitCode, timedOut, bootMs } = await runInSandbox({
+      policy: { provider: "gondolin", allowedHosts, secrets },
+      command: shell ? commandArgv.join(" ") : commandArgv,
+      workspaceDir: dir,
+      timeoutMs: timeoutSeconds * 1000,
+      shell,
+      onStdout: (chunk) => process.stdout.write(chunk),
+      onStderr: (chunk) => process.stderr.write(chunk),
+    });
+    console.error(
+      `\n[sandbox] ${dir} mounted at /workspace   egress: ${allowedHosts.length ? allowedHosts.join(", ") : "deny-all"}   boot ${bootMs ?? "?"}ms`,
+    );
+    if (timedOut) fail(`sandbox exec: timed out after ${timeoutSeconds}s`);
+    process.exit(exitCode ?? 1);
+  } catch (err) {
+    fail(`sandbox exec: ${err.message}`);
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
 
@@ -928,6 +1075,9 @@ async function main() {
 
     case "repos":
       return withClient(repos);
+
+    case "sandbox":
+      return sandbox(args);
 
     case "approve": {
       if (!args[0]) fail("usage: approve <proposal-id>");

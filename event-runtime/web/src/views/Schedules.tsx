@@ -238,13 +238,13 @@ export function Schedules({
                     isSel ? "row-selected bg-(--surface-3)" : ""
                   }`}
                 >
-                  <td className="mono border-b border-(--border) px-3 py-2 font-medium text-(--text)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 font-medium text-(--text)">
                     {s.loop}
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-2 text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
                     {s.every}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2">
+                  <td className="border-b border-(--border) px-3 py-1.5">
                     {s.enabled ? (
                       <span
                         className="mono text-[11px] text-(--hue-ok)"
@@ -261,10 +261,10 @@ export function Schedules({
                       </span>
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2">
+                  <td className="border-b border-(--border) px-3 py-1.5">
                     {isAuto ? (
                       <span
-                        className="rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase"
+                        className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
                         title="approval: auto — executes unattended without operator prompt"
                         style={{
                           color: "var(--hue-warn)",
@@ -278,13 +278,13 @@ export function Schedules({
                       <span className="text-[11px] text-(--text-dim)">watched</span>
                     )}
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-2 text-[11px] text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
                     {s.catchUp}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2 text-[11px] text-(--text-dim)">
+                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
                     {s.lastSlot ? <Ago iso={s.lastSlot} now={now} /> : <span className="text-(--text-faint)">never</span>}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2 text-[11px] text-(--text-dim)">
+                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
                     {!s.enabled ? (
                       <span className="text-(--text-faint)">-</span>
                     ) : s.error ? (
@@ -300,11 +300,11 @@ export function Schedules({
                       "-"
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2">
+                  <td className="border-b border-(--border) px-3 py-1.5">
                     {s.error ? (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-err)"
-                        style={{ background: "color-mix(in oklch, var(--hue-err) 14%, transparent)" }}
+                        style={{ background: "color-mix(in oklch, var(--hue-err) 12%, transparent)" }}
                         title={s.error}
                       >
                         error
@@ -320,7 +320,7 @@ export function Schedules({
                     ) : s.stopped ? (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-err)"
-                        style={{ background: "color-mix(in oklch, var(--hue-err) 14%, transparent)" }}
+                        style={{ background: "color-mix(in oklch, var(--hue-err) 12%, transparent)" }}
                         title={`Stopped: enabled: true but the scheduler loop is not ticking — no ticks for ${s.intervalsLate} intervals. Check the event runtime serve process.`}
                       >
                         stopped ({s.intervalsLate} late)
@@ -328,14 +328,14 @@ export function Schedules({
                     ) : (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-ok)"
-                        style={{ background: "color-mix(in oklch, var(--hue-ok) 14%, transparent)" }}
+                        style={{ background: "color-mix(in oklch, var(--hue-ok) 12%, transparent)" }}
                         title="Running: enabled: true and the scheduler loop is ticking on cadence"
                       >
                         running
                       </span>
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2 text-right">
+                  <td className="border-b border-(--border) px-3 py-1.5 text-right">
                     <Button
                       disabled={connected === false}
                       onClick={() => setConfirmLoop(s)}
@@ -374,7 +374,7 @@ export function Schedules({
               </span>
               {sel.approval === "auto" && (
                 <span
-                  className="rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase"
+                  className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
                   style={{
                     color: "var(--hue-warn)",
                     borderColor: "color-mix(in oklch, var(--hue-warn) 40%, var(--border))",
@@ -387,25 +387,40 @@ export function Schedules({
             </span>
           }
           actions={
+            <Button
+              variant="primary"
+              disabled={connected === false}
+              onClick={() => setConfirmLoop(sel)}
+            >
+              Run now…
+            </Button>
+          }
+          utility={
             <>
-              <Button
-                variant="primary"
-                disabled={connected === false}
-                onClick={() => setConfirmLoop(sel)}
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.loop, "schedule loop")}
+                className="cursor-pointer hover:text-(--text)"
               >
-                Run now…
-              </Button>
-              <Button onClick={() => copyText(sel.loop, "schedule loop")}>Copy loop</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectSchedule(null)}>Close</Button>
+                loop
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectSchedule(null)}>Close</Button>}
         >
           <div className="space-y-6">
             {sel.stopped && (
               <div
-                className="rounded-md border border-[color:var(--hue-err)] bg-[color:color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px]"
-                style={{ color: "var(--hue-err)" }}
+                className="rounded-md border border-(--hue-err) bg-[color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px] text-(--hue-err)"
               >
                 <div className="font-semibold">Schedule clock stopped</div>
                 <div className="mt-1 text-(--text-dim)">
@@ -417,8 +432,7 @@ export function Schedules({
 
             {sel.error && (
               <div
-                className="rounded-md border border-[color:var(--hue-err)] bg-[color:color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px]"
-                style={{ color: "var(--hue-err)" }}
+                className="rounded-md border border-(--hue-err) bg-[color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px] text-(--hue-err)"
               >
                 <div className="font-semibold">Cadence configuration error</div>
                 <div className="mono mt-1 text-(--text-dim)">{sel.error}</div>
@@ -564,7 +578,7 @@ export function Schedules({
                               {e.eventId}
                             </JumpLink>
                             {isAdhoc && (
-                              <span className="rounded bg-(--surface-3) px-1 text-[10px] text-(--hue-info)">
+                              <span className="rounded bg-(--surface-3) px-1 text-[11px] text-(--hue-info)">
                                 ad-hoc
                               </span>
                             )}

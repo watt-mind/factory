@@ -400,16 +400,28 @@ export function Graph({
         <DetailPane
           widthClass="w-[420px]"
           title={selected.label}
-          actions={
+          actions={<Button onClick={revealSelected}>Show on canvas</Button>}
+          utility={
             <>
-              <Button onClick={() => copyText(selected.label, selected.kind === "agent" ? "agent ref" : "id")}>
-                {selected.kind === "agent" ? "Copy ref" : "Copy id"}
-              </Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={revealSelected}>Show on canvas</Button>
-              <Button onClick={() => onSelectNode(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(selected.label, selected.kind === "agent" ? "agent ref" : "id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                {selected.kind === "agent" ? "ref" : "id"}
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectNode(null)}>Close</Button>}
         >
 
           {selected.kind === "eventType" && (

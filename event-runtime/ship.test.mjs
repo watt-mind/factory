@@ -33,7 +33,7 @@ const DEPLOY_SHA = "b".repeat(40);
 const MOVED_SHA = "c".repeat(40);
 
 describe("ship-scan registration (WM-111)", () => {
-  test("ship-scan@1 is a read-only claude agent with no repository workspace", () => {
+  test("ship-scan@1 is a read-only pi agent with no repository workspace", () => {
     const def = registry.agents.get("ship-scan@1");
     expect(def.mutating).toBe(false);
     // It reads branches and CI via gh, not a source tree — ephemeral, like
@@ -43,10 +43,10 @@ describe("ship-scan registration (WM-111)", () => {
     expect(def.capabilities.services).toContain("gh:read");
   });
 
-  test("factory.ship.requested maps to ship-scan@1 on the claude adapter, deduped by inputHash", () => {
+  test("factory.ship.requested maps to ship-scan@1 on the pi adapter, deduped by inputHash", () => {
     expect(registry.eventTypes["factory.ship.requested"]).toEqual({
       agent: "ship-scan@1",
-      adapter: "claude",
+      adapter: "pi",
       idempotencyScope: ["inputHash"],
       proposalTtlSeconds: 1800,
     });
@@ -514,7 +514,7 @@ function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-e2e-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-e2e-ws-"));
-  const adapters = { claude: shipFake, actions: shipFake, command: shipFake };
+  const adapters = { pi: shipFake, actions: shipFake, command: shipFake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function approveNext(agentRef) {

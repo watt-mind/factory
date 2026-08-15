@@ -342,7 +342,7 @@ export function App() {
           </div>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase"
+            className="rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
             title={
               env
                 ? `${env.home} · policy ${health.data?.policyVersion} — click to copy home`
@@ -387,7 +387,7 @@ export function App() {
                     title={badge.title}
                     style={{
                       color: badge.hue,
-                      background: `color-mix(in oklch, ${badge.hue} 14%, transparent)`,
+                      background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
                     }}
                   >
                     {badge.count}

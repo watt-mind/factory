@@ -239,13 +239,13 @@ function FleetStatusBanner({ banner }: { banner: FleetBanner }) {
       className="mb-3 rounded-md border p-3 text-[12px]"
       style={{
         color: hue,
-        borderColor: `color-mix(in oklch, ${hue} 55%, var(--border))`,
+        borderColor: hue,
         background: `color-mix(in oklch, ${hue} 8%, var(--surface-1))`,
       }}
     >
       <div className="flex items-center gap-2 font-semibold">
         <span
-          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "animate-pulse"}`}
+          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "motion-safe:animate-pulse"}`}
           style={{ background: hue }}
         />
         <span>{title}</span>
@@ -584,13 +584,27 @@ export function Workers({
               </span>
             </span>
           }
-          actions={
+          utility={
             <>
-              <Button onClick={() => copyText(sel.workerId, "worker id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectWorker(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.workerId, "worker id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectWorker(null)}>Close</Button>}
         >
           {selHeartbeat.kind === "stale" && (
             <div

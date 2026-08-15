@@ -524,6 +524,7 @@ export function Events({
                 role="tab"
                 aria-selected={tab === t}
                 onClick={() => selectTab(t)}
+                title={t}
                 className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
                   tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
                 }`}
@@ -535,68 +536,65 @@ export function Events({
           })}
         </div>
 
-        {/* Type / source facets get their own line, above the query box: the
-            token chips below the box are full-width, so a facet chip beside it
-            would jump a line the moment a token appeared. */}
         {(types.length > 1 || sources.length > 1) && (
-        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2">
-          {types.length > 1 && (
-            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event types">
-              <span className="text-[11px] font-semibold text-(--text-dim)">Type:</span>
-              {types.map((t) => {
-                const isPressed = activeTypes.has(t.toLowerCase());
-                const count = typeCounts[t] ?? 0;
-                return (
-                  <button
-                    key={t}
-                    type="button"
-                    aria-pressed={isPressed}
-                    onClick={() => {
-                      const next = isPressed ? null : t;
-                      setFilter((cur) => toggleFacetInQuery(cur, "type", t));
-                      onSelectType(next);
-                    }}
-                    className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                      isPressed
-                        ? "bg-(--surface-3) text-(--text)"
-                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
-                    }`}
-                  >
-                    <span>{t}</span>
-                    <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {sources.length > 1 && (
-            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event sources">
-              <span className="text-[11px] font-semibold text-(--text-dim)">Source:</span>
-              {sources.map((s) => {
-                const isPressed = activeSources.has(s.toLowerCase());
-                const count = sourceCounts[s] ?? 0;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    aria-pressed={isPressed}
-                    onClick={() => {
-                      setFilter((cur) => toggleFacetInQuery(cur, "source", s));
-                    }}
-                    className={`rounded-md px-2 py-0.5 font-mono text-[11px] transition-colors ${
-                      isPressed
-                        ? "bg-(--surface-3) text-(--text)"
-                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
-                    }`}
-                  >
-                    <span>{s}</span>
-                    <span className="ml-1.5 font-sans tabular-nums text-(--text-faint)">{count}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+            {types.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event types">
+                <span className="text-[11px] font-medium text-(--text-dim)">Type:</span>
+                {types.map((t) => {
+                  const isPressed = activeTypes.has(t.toLowerCase());
+                  const count = typeCounts[t] ?? 0;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      aria-pressed={isPressed}
+                      onClick={() => {
+                        const next = isPressed ? null : t;
+                        setFilter((cur) => toggleFacetInQuery(cur, "type", t));
+                        onSelectType(next);
+                      }}
+                      className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+                        isPressed
+                          ? "bg-(--surface-3) text-(--text) font-medium"
+                          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                      }`}
+                    >
+                      <span>{t}</span>
+                      {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {sources.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event sources">
+                <span className="text-[11px] font-medium text-(--text-dim)">Source:</span>
+                {sources.map((s) => {
+                  const isPressed = activeSources.has(s.toLowerCase());
+                  const count = sourceCounts[s] ?? 0;
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      aria-pressed={isPressed}
+                      onClick={() => {
+                        setFilter((cur) => toggleFacetInQuery(cur, "source", s));
+                      }}
+                      className={`rounded-md px-2 py-0.5 mono text-[11px] transition-colors ${
+                        isPressed
+                          ? "bg-(--surface-3) text-(--text) font-medium"
+                          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                      }`}
+                    >
+                      <span>{s}</span>
+                      {count > 0 && <span className="ml-1.5 font-sans tabular-nums text-(--text-faint)">{count}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -657,28 +655,30 @@ export function Events({
                     aria-selected={isSelected}
                     className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${isSelected ? "row-selected" : ""}`}
                   >
-                    <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5" title={e.eventId}>
+                    <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={e.eventId}>
                       {shortId(e.eventId)}
                     </td>
                     {show.has("source") && (
-                      <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <td className="mono max-w-24 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.source}>
                         {e.source}
                       </td>
                     )}
                     {show.has("type") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{e.type}</td>
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)" title={e.type}>
+                        {e.type}
+                      </td>
                     )}
                     {show.has("subject") && (
-                      <td className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <td className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.subject ?? undefined}>
                         {e.subject ?? "-"}
                       </td>
                     )}
                     {show.has("status") && (
-                      <td className="max-w-56 border-b border-(--border) px-3 py-1.5">
-                        <div>
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5">
+                        <div className="flex items-center">
                           <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
                           {e.planFailures > 0 && (
-                            <span className="ml-2 whitespace-nowrap text-[11px]" style={{ color: "var(--hue-err)" }}>
+                            <span className="ml-2 whitespace-nowrap text-[11px] text-(--hue-err)">
                               {e.planFailures} plan failure{e.planFailures === 1 ? "" : "s"}
                             </span>
                           )}
@@ -698,7 +698,7 @@ export function Events({
                       </td>
                     )}
                     {show.has("admitted") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <td className="max-w-24 whitespace-nowrap border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
                         <Ago iso={e.admittedAt} now={now} />
                       </td>
                     )}
@@ -754,6 +754,7 @@ export function Events({
                     ? "No events."
                     : `No ${TAB_LABEL[tab].toLowerCase()} events.`
                 }
+                escHint={Boolean(filter.trim())}
                 action={
                   tab === "all" ? (
                     <Button onClick={onInject}>Inject event…</Button>
@@ -768,11 +769,69 @@ export function Events({
       {sel && (
         <DetailPane
           widthClass="w-[440px]"
-          title={<span title={sel.eventId}>{sel.eventId}</span>}
+          title={
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectEvent(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to events list"
+              >
+                Events
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
+              </span>
+              <span className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)" aria-current="page">
+                <StateBadge state={sel.status} hues={EVENT_STATUS_HUES} />
+                <span className="truncate mono" title={sel.eventId}>
+                  {shortId(sel.eventId)}
+                </span>
+              </span>
+            </nav>
+          }
           actions={
             <>
-              <Button onClick={() => copyText(sel.eventId, "event id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              {canRequeue && (
+                <Button
+                  variant="primary"
+                  disabled={!connected || requeue.isPending}
+                  onClick={() => requeue.mutate(sel)}
+                >
+                  Requeue <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">q</span>
+                </Button>
+              )}
+              <div className="flex items-center gap-1.5">
+                <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
+                  Replay…
+                </Button>
+                <Button
+                  disabled={!connected}
+                  onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
+                >
+                  Trigger again…
+                </Button>
+              </div>
+            </>
+          }
+          utility={
+            <>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.eventId, "event id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectEvent(null)}>Close</Button>}
@@ -791,8 +850,8 @@ export function Events({
               k="proposal"
               v={
                 sel.proposalId ? (
-                  <JumpLink onClick={() => onJumpProposal(sel.proposalId!)} title="Open proposal">
-                    {sel.proposalId}
+                  <JumpLink onClick={() => onJumpProposal(sel.proposalId!)} title={sel.proposalId}>
+                    {shortId(sel.proposalId)}
                   </JumpLink>
                 ) : null
               }
@@ -801,8 +860,8 @@ export function Events({
               k="run"
               v={
                 sel.runId ? (
-                  <JumpLink onClick={() => onJumpRun(sel.runId!)} title="Open run">
-                    {sel.runId}
+                  <JumpLink onClick={() => onJumpRun(sel.runId!)} title={sel.runId}>
+                    {shortId(sel.runId)}
                   </JumpLink>
                 ) : null
               }
@@ -839,31 +898,6 @@ export function Events({
             </Disclosure>
           </Section>
 
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
-              {canRequeue && (
-                <Button
-                  variant="primary"
-                  disabled={!connected || requeue.isPending}
-                  onClick={() => requeue.mutate(sel)}
-                >
-                  Requeue <span className="mono ml-1 opacity-70">q</span>
-                </Button>
-              )}
-              <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
-                Replay through intake…
-              </Button>
-              <Button
-                disabled={!connected}
-                onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
-              >
-                Trigger again…
-              </Button>
-            </div>
-            <div className="text-[11px] leading-relaxed text-(--text-faint)">
-              Requeue re-plans this event. Replay re-injects through intake. Trigger again opens inject.
-            </div>
-          </div>
           <VerbError error={requeue.error ?? replay.error} />
         </DetailPane>
       )}

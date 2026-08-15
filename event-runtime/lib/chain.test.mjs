@@ -34,9 +34,9 @@ function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-ws-"));
-  // Chain flow under test never spawns real processes: claude AND command
+  // Chain flow under test never spawns real processes: pi AND command
   // both back onto the contract-shaped fake.
-  const adapters = { claude: fake, command: fake };
+  const adapters = { pi: fake, command: fake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function runToCompletion(eventId) {
