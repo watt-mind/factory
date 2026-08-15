@@ -48,12 +48,19 @@ export function SegmentMeter({
 
   if (total === 0) {
     return (
-      <div className="h-1.5 w-full rounded-full bg-(--surface-2)" title="No active items in this stage" />
+      <div
+        aria-hidden="true"
+        className="h-1.5 w-full rounded-full border border-(--border) bg-(--surface-2)"
+        title="No active items in this stage"
+      />
     );
   }
 
   return (
-    <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-(--surface-2)">
+    <div
+      aria-hidden="true"
+      className="flex h-1.5 w-full overflow-hidden rounded-full border border-(--border) bg-(--surface-2)"
+    >
       {segments.map((s) => {
         if (s.value <= 0) return null;
         const pct = (s.value / total) * 100;
@@ -105,15 +112,16 @@ export function StatLegendItem({
       onClick={onClick}
       aria-label={`${fullLabel}: ${value}`}
       style={lit ? { color: hue } : undefined}
-      className={`group flex min-h-8 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] transition-colors
-        hover:bg-(--surface-2) ${isZero ? "opacity-45" : ""} ${lit ? "" : "text-(--text-dim)"}`}
+      className={`group flex min-h-7 cursor-pointer items-center gap-1.5 rounded-md border border-transparent px-2 py-0.5 text-left text-[12px] transition-all hover:border-(--border) hover:bg-(--surface-2) focus-visible:border-(--accent) focus-visible:outline-none ${
+        isZero ? "opacity-60 text-(--text-faint)" : "text-(--text-dim)"
+      }`}
     >
       <StateIcon state={token} />
-      <span className={lit ? "" : "group-hover:text-(--text)"}>
+      <span className={lit ? "" : "group-hover:text-(--text) group-hover:underline"}>
         {label.split(" · ").pop()}
       </span>
       <span
-        className="mono tabular-nums font-medium"
+        className="mono tabular-nums font-semibold"
         style={!lit && hue && !isZero ? { color: hue } : undefined}
       >
         {value}
@@ -389,7 +397,6 @@ function RecentOutcomesStrip({
         <span className="font-medium uppercase tracking-wide text-(--text-faint)">
           Recent Outcomes · last {outcomes.length}
         </span>
-        <span className="text-[11px] text-(--text-faint)">newest → oldest</span>
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
         {outcomes.map((o) => {
@@ -401,11 +408,13 @@ function RecentOutcomesStrip({
                 : o.to === "TIMED_OUT"
                   ? "var(--hue-warn)"
                   : "var(--text-faint)";
+          const label = `${o.runId} ${o.to}${o.reason ? ` (${o.reason})` : ""} ${ago(o.at, now)}`;
           return (
             <button
               key={o.seq}
               type="button"
               onClick={() => onJumpRun(o.runId)}
+              aria-label={label}
               className="h-4 w-2 cursor-pointer rounded-xs transition-all hover:scale-125 hover:opacity-100 opacity-80"
               style={{ backgroundColor: hue }}
               title={`${o.runId} · ${o.to}${o.reason ? ` (${o.reason})` : ""} · ${ago(o.at, now)}`}
@@ -695,7 +704,13 @@ export function Overview({
                   )}
                 </div>
                 <span className="flex flex-wrap items-center gap-1.5 sm:gap-2 sm:shrink-0">
-                  <Button onClick={() => copyText(a.text, "anomaly")}>Copy</Button>
+                  <button
+                    type="button"
+                    onClick={() => copyText(a.text, "anomaly")}
+                    className="cursor-pointer text-[11px] text-(--text-faint) hover:text-(--text) hover:underline"
+                  >
+                    copy
+                  </button>
                   {a.requeue && (
                     <Button
                       disabled={!connected || requeue.isPending}
@@ -729,8 +744,12 @@ export function Overview({
             <span className="size-2 rounded-full bg-(--hue-ok)" />
             <span className="font-medium text-(--text)">Doctor: All systems nominal</span>
           </div>
-          <div className="text-[11px] text-(--text-faint)">
-            {feedsUnscoped ? "scope: factory-wide" : "scope: all repos"}
+          <div className="flex items-center gap-2 text-[11px] text-(--text-faint)">
+            <span>
+              as of <Ago iso={new Date(status.dataUpdatedAt || now).toISOString()} now={now} />
+            </span>
+            <span>·</span>
+            <span>{feedsUnscoped ? "scope: factory-wide" : "scope: all repos"}</span>
           </div>
         </div>
       )}
@@ -745,12 +764,12 @@ export function Overview({
           {/* Card 1: Intake & Approval Gate */}
           <StageCard
             title="Intake & Approval Gate"
-            headline={intakeTotal + proposalTotal}
-            meta="total"
+            headline={intakeTotal}
+            meta="events"
           >
             {/* Sub-row 1: Event Intake */}
             <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
-              <span className="font-medium text-(--text-faint)">Event Intake</span>
+              <span className="font-semibold text-(--text)">Event Intake</span>
               <span className="mono text-(--text-dim)">
                 {intakeTotal > 0 ? `${intakeTotal} events` : "no events yet"}
               </span>
@@ -761,7 +780,7 @@ export function Overview({
                   segments={eventSegs}
                   onSegment={(k) => onJumpEvents({ status: k })}
                 />
-                <div className="mt-2 flex flex-wrap items-center gap-1">
+                <div className="mt-2 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                   {eventSegs.map((seg) => (
                     <StatLegendItem
                       key={seg.key}
@@ -782,7 +801,7 @@ export function Overview({
             {/* Sub-row 2: Approval Gate */}
             <div className="mt-3.5 border-t border-(--border) pt-2.5">
               <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
-                <span className="font-medium text-(--text-faint)">Approval Gate</span>
+                <span className="font-semibold text-(--text)">Approval Gate</span>
                 <span className="mono text-(--text-dim)">
                   {proposalTotal > 0
                     ? `${proposalExpired > 0 ? `${proposalExpired} expired · ` : ""}${proposalOpen} open`
@@ -795,7 +814,7 @@ export function Overview({
                     segments={proposalSegs}
                     onSegment={() => onNavigate("proposals")}
                   />
-                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                  <div className="mt-2 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                     <StatLegendItem
                       token="open"
                       label="proposals · open"
@@ -828,7 +847,7 @@ export function Overview({
           >
             {/* Sub-row 1: Active In-Flight Workloads */}
             <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
-              <span className="font-medium text-(--text-faint)">Active In-Flight Pipeline</span>
+              <span className="font-semibold text-(--text)">Active In-Flight Pipeline</span>
               <span className="mono text-(--text-dim)">
                 {inflightTotal > 0 ? `${inflightTotal} active` : "nothing in flight"}
               </span>
@@ -839,7 +858,7 @@ export function Overview({
                   segments={inflightSegs}
                   onSegment={(k) => onJumpRuns(k)}
                 />
-                <div className="mt-2 flex flex-wrap items-center gap-1">
+                <div className="mt-2 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                   {inflightSegs.map((seg) => (
                     <StatLegendItem
                       key={seg.key}
@@ -859,10 +878,10 @@ export function Overview({
             {/* Sub-row 2: Outcomes */}
             <div className="mt-3.5 border-t border-(--border) pt-2.5">
               <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
-                <span className="font-medium text-(--text-faint)">Terminal Outcomes</span>
+                <span className="font-semibold text-(--text)">Terminal Outcomes</span>
                 <span className="mono text-(--text-dim)">
                   {finishedTotal > 0
-                    ? `${Math.round((okTotal / finishedTotal) * 100)}% completed (${finishedTotal} total)`
+                    ? `${Math.round((okTotal / finishedTotal) * 100)}% completed (${finishedTotal} runs)`
                     : "no terminal runs"}
                 </span>
               </div>
@@ -872,7 +891,7 @@ export function Overview({
                     segments={terminalSegs}
                     onSegment={(k) => onJumpRuns(k)}
                   />
-                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                  <div className="mt-2 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                     {terminalSegs.map((seg) => (
                       <StatLegendItem
                         key={seg.key}
@@ -894,7 +913,7 @@ export function Overview({
             {/* Sub-row 3: Worker Fleet Capacity */}
             <div className="mt-3.5 border-t border-(--border) pt-2.5">
               <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
-                <span className="font-medium text-(--text-faint)">
+                <span className="font-semibold text-(--text)">
                   Worker Fleet Capacity{factoryWide ? " · factory-wide" : ""}
                 </span>
                 <span className="mono text-(--text-dim)">
@@ -909,7 +928,7 @@ export function Overview({
                 ]}
                 onSegment={() => onNavigate("workers")}
               />
-              <div className="mt-2 flex flex-wrap items-center gap-1">
+              <div className="mt-2 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                 <StatLegendItem
                   token="live"
                   label="workers · live"
