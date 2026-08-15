@@ -433,11 +433,14 @@ stdin, matching `runners/run-agent.sh`'s existing invocation) rather than
 directly (`openai-codex/gpt-5.6-terra`), no separate `--provider` flag. There
 is no `--max-budget-usd` equivalent and no per-tool settings/sandbox policy —
 those, and native capability enforcement derived from `spec.capabilities`, are
-deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls`:
-pi's own documented read-only pattern is omitting bash/edit/write from the
+deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls,write`:
+pi's own documented read-only pattern is omitting bash/edit from the
 tool allowlist entirely, never exposing them to the model, rather than
 intercepting a call to them at runtime the way claude's settings/sandbox
-policy does — see §14. (An earlier draft of this design read `-r` as pi's
+policy does — see §14. (`write` stays even on a read-only run: every
+agent-result contract requires the model to write `./result.json`, so a run
+without it fails `contract_violation:missing_result` before doing anything —
+the same reasoning that keeps Write/Edit in claude's `READ_ONLY_TOOLS`.) (An earlier draft of this design read `-r` as pi's
 read-only flag; the installed CLI's own `--help` says otherwise — `-r` is
 `--resume`, a session selector, unrelated to tool access. Verify adapter flags
 against the actual CLI before relying on ticket text.) `mutating: true` pi
@@ -455,6 +458,38 @@ message the way claude's `type: "result"` is one, so `usage` is accumulated
 across every assistant turn's own reported tokens/cost and emitted once at
 process close; fields pi never reported land as explicit `null`/`{}`, never a
 guessed value.
+
+**Both LLM adapters apply the same push-credential carve-out (WM-128,
+WM-223).** `safeChildEnvironment(env, def)` in either adapter hands a mutating
+run `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GITHUB_TOKEN` and `GH_TOKEN` on top of
+the base inherited set, and strips all four from a non-mutating one — after the
+caller's `env` is merged, so a read-only run cannot be handed a token through
+`env` either. `pi.mjs` imports `PUSH_CREDENTIAL_ENV` from `claude.mjs` rather
+than restating it: one list, no drift. Until WM-223 pi had no
+mutating/non-mutating distinction at all, which meant the runtime's only
+mutating LLM agent (`dispatch@1`, pi-routed since WM-215) reached its push step
+with no credential of any kind — surviving only because `gh` reads its own
+stored OAuth from `~/.config/gh/hosts.yml` through the inherited
+`HOME`/`XDG_CONFIG_HOME`, and git picks up the `gh` credential helper the same
+way. That gh-over-HTTPS route remains the paved road a dispatch run should
+push on (`agents/dispatch.md` step 5); the carve-out is what makes an SSH or
+token push a real fallback rather than a guaranteed failure. The optional
+`gh auth status` preflight refusal considered alongside this was deliberately
+not adopted: with the credentials restored, a mutating run can legitimately
+push without gh being authenticated, so gating the start of the run on it would
+refuse work that would have succeeded.
+
+**One wrinkle the carve-out leaves open: `SSH_AUTH_SOCK` is not only a push
+credential.** It is also how an agent reaches infrastructure over SSH, and a
+read-only infra agent — `disk-diagnose` declares `mutating: false` with
+`services: ["ssh:read:lab", "ssh:read:web"]` — may legitimately want the agent
+socket despite being non-mutating. Both adapters strip it from such a run
+today; `disk-diagnose` works because key-file authentication is reachable
+through the inherited `HOME`, not because the socket survives. The fix, if that
+ever becomes a real failure, is a capability-driven exception (a declared
+`ssh:read` service inheriting the socket), **not** widening the non-mutating
+default — the point of the strip is that a read-only run holds no authority it
+did not declare.
 
 **Live trace is an optional adapter capability (`factory.trace/v1`).** An
 adapter may stream what the agent is doing mid-run — via the `onTrace`
