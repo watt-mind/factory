@@ -1,8 +1,9 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { useState } from "react";
 import { modal } from "../hooks";
+import { goPrefix } from "../goSequence";
 import {
   buildSections,
   defaultDisplayState,
@@ -58,6 +59,7 @@ function Harness({
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  goPrefix.armedAt = 0;
 });
 
 describe("DisplayOptions panel", () => {
@@ -175,6 +177,45 @@ describe("DisplayOptions panel", () => {
     fireEvent.pointerDown(window, { target: document.body });
     expect(r.queryByRole("dialog", { name: "Display options" })).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  test("renders trailing subtle 'v' hint badge with aria-hidden", () => {
+    const r = render(<Harness />);
+    const trigger = r.getByRole("button", { name: /display/i });
+    const badge = trigger.querySelector("span[aria-hidden='true']");
+    expect(badge).toBeTruthy();
+    expect(badge?.textContent).toBe("v");
+  });
+
+  test("'v' hotkey opens the Display options popover when not typing", () => {
+    const r = render(<Harness />);
+    expect(r.queryByRole("dialog", { name: "Display options" })).toBeNull();
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "v", bubbles: true }));
+    });
+    expect(r.getByRole("dialog", { name: "Display options" })).toBeTruthy();
+  });
+
+  test("'v' hotkey is ignored when target is an input or typing target", () => {
+    const r = render(
+      <div>
+        <input data-testid="test-input" />
+        <Harness />
+      </div>,
+    );
+    const input = r.getByTestId("test-input");
+    input.focus();
+    fireEvent.keyDown(input, { key: "v" });
+    expect(r.queryByRole("dialog", { name: "Display options" })).toBeNull();
+  });
+
+  test("'v' hotkey is ignored when go prefix is armed", () => {
+    const r = render(<Harness />);
+    goPrefix.armedAt = Date.now();
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "v", bubbles: true }));
+    });
+    expect(r.queryByRole("dialog", { name: "Display options" })).toBeNull();
   });
 });
 

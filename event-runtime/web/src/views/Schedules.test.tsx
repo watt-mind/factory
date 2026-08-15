@@ -350,3 +350,27 @@ describe("Schedules copy chords and hints (WM-233)", () => {
     expect(written).toBe(window.location.href);
   });
 });
+
+describe("Schedules action shortcut badge (WM-236)", () => {
+  test("detail pane 'Run now…' button renders 'r' shortcut hint badge with aria-hidden", async () => {
+    const { container } = renderWithClient(
+      <StatefulSchedules connected={true} initialLoop="loop-enabled-running" />,
+    );
+
+    const detailPane = await waitFor(() => {
+      const el = container.querySelector("aside");
+      if (!el) throw new Error("detail pane not rendered");
+      return el;
+    });
+
+    const buttons = [...detailPane.querySelectorAll("button")];
+    const runBtn = buttons.find((b) => b.textContent?.includes("Run now…"));
+    expect(runBtn).toBeTruthy();
+
+    const badge = runBtn!.querySelector("span.mono");
+    expect(badge).toBeTruthy();
+    expect(badge!.textContent).toBe("r");
+    expect(badge!.getAttribute("aria-hidden")).toBe("true");
+  });
+});
+

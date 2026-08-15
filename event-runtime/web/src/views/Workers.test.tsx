@@ -2,9 +2,17 @@ import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Workers, defaultWorkerTab, fleetBanner, isLive, partitionWorkers } from "./Workers";
+import {
+  Workers,
+  capacityFromWorkers,
+  defaultWorkerTab,
+  fleetBanner,
+  isLive,
+  partitionWorkers,
+  workerDisplayState,
+} from "./Workers";
 import { api } from "../api";
-import type { Worker, WorkerState } from "../types";
+import type { Worker, WorkerCapacity, WorkerState } from "../types";
 
 afterEach(() => {
   cleanup();
@@ -43,9 +51,9 @@ function renderWorkers() {
   );
 }
 
-function withWorkers(workers: Worker[], fn: () => Promise<void>) {
+function withWorkers(workers: Worker[], fn: () => Promise<void>, capacity?: WorkerCapacity) {
   const orig = api.workers;
-  api.workers = async () => ({ workers });
+  api.workers = async () => ({ workers, capacity: capacity ?? capacityFromWorkers(workers) });
   return fn().finally(() => {
     api.workers = orig;
   });
@@ -85,6 +93,47 @@ describe("default worker tab (WM-98)", () => {
   test("opens on All when every worker is stopped, and when the registry is empty", () => {
     expect(defaultWorkerTab([stubWorker("w_stopped", "stopped")])).toBe("ALL");
     expect(defaultWorkerTab([])).toBe("ALL");
+  });
+});
+
+describe("worker capacity and draining state (WM-228)", () => {
+  test("draining is explicit unless stale overrides the supervisor request", () => {
+    expect(workerDisplayState({ ...stubWorker("w_drain", "idle"), draining: true })).toBe("draining");
+    expect(workerDisplayState({ ...stubWorker("w_stale", "busy", true), draining: true })).toBe("stale");
+  });
+
+  test("shows running/capacity, queue limiter, class caps, and an explicit draining row", async () => {
+    const worker = {
+      ...stubWorker("w_drain", "busy"),
+      draining: true,
+      currentRun: "run_capacity_123456",
+      labels: { class: "heavy", node: "lab" },
+    };
+    const capacity: WorkerCapacity = {
+      running: 1,
+      capacity: 2,
+      queued: 4,
+      live: 1,
+      idle: 0,
+      draining: 1,
+      target: 0,
+      min: 1,
+      max: 2,
+      supervisor: "active",
+      source: "worker-policy",
+      limitingFactor: "at worker max",
+      classes: [{ name: "heavy", running: 1, capacity: 2 }],
+    };
+    await withWorkers([worker], async () => {
+      const { getByText, getAllByText, getByTitle } = renderWorkers();
+      await waitFor(() => expect(getByText("1 running / 2 capacity")).toBeTruthy());
+      expect(getByText("4 queued runs")).toBeTruthy();
+      expect(getByText("at worker max")).toBeTruthy();
+      expect(getByText("heavy 1/2")).toBeTruthy();
+      expect(getAllByText("draining").length).toBeGreaterThan(0);
+      expect(getByTitle("Open run_capacity_123456")).toBeTruthy();
+      expect(getByTitle(new RegExp(`Started ${NOW}`))).toBeTruthy();
+    }, capacity);
   });
 });
 
@@ -210,3 +259,49 @@ describe("Workers copy chords and hints (WM-233)", () => {
     });
   });
 });
+
+describe("Workers Open run action shortcut badge (WM-236)", () => {
+  test("detail pane renders 'Open run' action button with 'o' shortcut badge when worker has currentRun", async () => {
+    const workerWithRun: Worker = {
+      ...stubWorker("w_busy_1", "busy"),
+      currentRun: "run_active_123",
+    };
+    await withWorkers([workerWithRun], async () => {
+      const { getByRole } = renderWithClient(
+        <Workers context={{ kind: "all" }} focusWorkerId="w_busy_1" onSelectWorker={noop} />,
+      );
+
+      await waitFor(() => {
+        expect(getByRole("button", { name: /^Open run/ })).toBeTruthy();
+      });
+
+      const openBtn = getByRole("button", { name: /^Open run/ });
+      const badge = openBtn.querySelector("span.mono");
+      expect(badge).toBeTruthy();
+      expect(badge!.textContent).toBe("o");
+      expect(badge!.getAttribute("aria-hidden")).toBe("true");
+
+      // Verify click updates window.location.hash
+      const origHash = window.location.hash;
+      openBtn.click();
+      expect(window.location.hash).toBe("#/runs/run_active_123");
+      window.location.hash = origHash;
+    });
+  });
+
+  test("detail pane does not render 'Open run' action button when worker has no currentRun", async () => {
+    const workerIdle: Worker = stubWorker("w_idle_1", "idle");
+    await withWorkers([workerIdle], async () => {
+      const { queryByRole, container } = renderWithClient(
+        <Workers context={{ kind: "all" }} focusWorkerId="w_idle_1" onSelectWorker={noop} />,
+      );
+
+      await waitFor(() => {
+        expect(container.querySelector("aside")).toBeTruthy();
+      });
+
+      expect(queryByRole("button", { name: /^Open run/ })).toBeNull();
+    });
+  });
+});
+

@@ -9,7 +9,15 @@
  */
 import { expect, test } from "bun:test";
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -70,10 +78,11 @@ if (process.env.FAKE_WORKER_MODE === "wait-term") {
 }
 `;
 
-function makeFixture({ withWebDeps = true, policy = null } = {}) {
+function makeFixture({ withWebDeps = true, policy = null, bundle = "fresh" } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "live-stack-"));
+  const webDir = path.join(root, "event-runtime", "web");
   mkdirSync(path.join(root, "bin"), { recursive: true });
-  mkdirSync(path.join(root, "event-runtime", "web"), { recursive: true });
+  mkdirSync(path.join(webDir, "src"), { recursive: true });
   mkdirSync(path.join(root, "stubs"), { recursive: true });
   if (policy !== null) {
     mkdirSync(path.join(root, "config"), { recursive: true });
@@ -82,18 +91,51 @@ function makeFixture({ withWebDeps = true, policy = null } = {}) {
   copyFileSync(LIVE_STACK, path.join(root, "bin", "live-stack.sh"));
   writeFileSync(path.join(root, "bin", "worktree-common.sh"), COMMON_STUB, "utf8");
   writeFileSync(path.join(root, "event-runtime", "cli.mjs"), FAKE_CLI, "utf8");
-  writeFileSync(path.join(root, "event-runtime", "web", "serve.mjs"), "", "utf8");
-  if (withWebDeps) mkdirSync(path.join(root, "event-runtime", "web", "node_modules"), { recursive: true });
+  writeFileSync(path.join(webDir, "serve.mjs"), "", "utf8");
+  for (const relative of ["src/App.tsx", "index.html", "vite.config.ts", "package.json"]) {
+    writeFileSync(path.join(webDir, relative), `${relative}\n`, "utf8");
+  }
+  if (bundle !== "missing") {
+    mkdirSync(path.join(webDir, "dist"), { recursive: true });
+    writeFileSync(path.join(webDir, "dist", "index.html"), "built\n", "utf8");
+    const sourceTime = new Date("2026-01-01T00:00:00Z");
+    const distTime = new Date("2027-01-01T00:00:00Z");
+    for (const relative of ["src/App.tsx", "index.html", "vite.config.ts", "package.json"]) {
+      utimesSync(path.join(webDir, relative), sourceTime, sourceTime);
+    }
+    utimesSync(path.join(webDir, "dist", "index.html"), distTime, distTime);
+    if (bundle === "stale") {
+      const staleTime = new Date("2028-01-01T00:00:00Z");
+      utimesSync(path.join(webDir, "src", "App.tsx"), staleTime, staleTime);
+    }
+  }
+  if (withWebDeps) mkdirSync(path.join(webDir, "node_modules"), { recursive: true });
 
   // The health polls must not gate a test on a server nobody started.
   const curl = path.join(root, "stubs", "curl");
   writeFileSync(curl, "#!/bin/sh\nexit 0\n", "utf8");
   chmodSync(curl, 0o755);
 
+  // Non-dev web builds are recorded and materialize the one artifact the
+  // script checks. Other bun commands are only arguments to spawn_daemon.
+  const bun = path.join(root, "stubs", "bun");
+  writeFileSync(bun, `#!/bin/sh
+if [ "$1 $2" = "run build" ]; then
+  printf 'BUILD cwd=%s cmd=%s\\n' "$PWD" "$*" >>"$BUILD_LOG"
+  mkdir -p "$FAKE_REPO/event-runtime/web/dist"
+  : >"$FAKE_REPO/event-runtime/web/dist/index.html"
+  exit 0
+fi
+printf 'unexpected bun invocation: %s\\n' "$*" >&2
+exit 99
+`, "utf8");
+  chmodSync(bun, 0o755);
+
   return {
     root,
     runDir: path.join(root, "run"),
     spawnLog: path.join(root, "spawns.log"),
+    buildLog: path.join(root, "builds.log"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -108,6 +150,7 @@ function runStack(fixture, args, extraEnv = {}) {
       PATH: `${path.join(fixture.root, "stubs")}:${process.env.PATH}`,
       FAKE_REPO: fixture.root,
       SPAWN_LOG: fixture.spawnLog,
+      BUILD_LOG: fixture.buildLog,
       FACTORY_RUN_DIR: path.join(fixture.root, "run"),
       FACTORY_EVENT_HOME: path.join(fixture.root, "home"),
       ...extraEnv,
@@ -118,6 +161,7 @@ function runStack(fixture, args, extraEnv = {}) {
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
     spawns: existsSync(fixture.spawnLog) ? readFileSync(fixture.spawnLog, "utf8").trim().split("\n") : [],
+    builds: existsSync(fixture.buildLog) ? readFileSync(fixture.buildLog, "utf8").trim().split("\n") : [],
   };
 }
 
@@ -147,6 +191,72 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
   }
 });
 
+test("plain `up` rebuilds a stale web bundle and reports the elapsed time", () => {
+  const f = makeFixture({ bundle: "stale" });
+  try {
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    expect(r.builds).toHaveLength(1);
+    expect(r.builds[0]).toContain("cmd=run build");
+    expect(r.builds[0]).toContain(`cwd=${path.join(f.root, "event-runtime", "web")}`);
+    expect(r.stdout).toMatch(/web bundle stale — rebuilt in \d+s/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("plain `up` skips the build when dist is newer than the web sources", () => {
+  const f = makeFixture({ bundle: "fresh" });
+  try {
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    expect(r.builds).toEqual([]);
+    expect(r.stdout).not.toContain("web bundle stale");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("each top-level web build input participates in the stale check", () => {
+  for (const relative of ["index.html", "vite.config.ts", "package.json"]) {
+    const f = makeFixture({ bundle: "fresh" });
+    try {
+      const staleTime = new Date("2028-01-01T00:00:00Z");
+      utimesSync(path.join(f.root, "event-runtime", "web", relative), staleTime, staleTime);
+      const r = runStack(f, ["up"]);
+      expect(r.status).toBe(0);
+      expect(r.builds).toHaveLength(1);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test("plain `up` builds when the web bundle is missing", () => {
+  const f = makeFixture({ bundle: "missing" });
+  try {
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    expect(r.builds).toHaveLength(1);
+    expect(existsSync(path.join(f.root, "event-runtime", "web", "dist", "index.html"))).toBe(true);
+    expect(r.stdout).toMatch(/web bundle missing — rebuilt in \d+s/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`up --no-build` skips a stale bundle check and warns explicitly", () => {
+  const f = makeFixture({ bundle: "stale" });
+  try {
+    const r = runStack(f, ["up", "--no-build"]);
+    expect(r.status).toBe(0);
+    expect(r.builds).toEqual([]);
+    expect(r.stderr).toContain("--no-build: served web bundle may be stale");
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("`up --fake` still passes the adapter override through", () => {
   const f = makeFixture();
   try {
@@ -158,8 +268,8 @@ test("`up --fake` still passes the adapter override through", () => {
   }
 });
 
-test("`up --dev` wires all three: serve --watch, vite HMR web, supervised worker", () => {
-  const f = makeFixture();
+test("`up --dev` wires all three without checking or building a stale dist", () => {
+  const f = makeFixture({ bundle: "stale" });
   try {
     const r = runStack(f, ["up", "--dev"]);
     expect(r.status).toBe(0);
@@ -175,6 +285,8 @@ test("`up --dev` wires all three: serve --watch, vite HMR web, supervised worker
 
     expect(r.stdout).toContain("ready — live factory stack (dev, live reload)");
     expect(r.stdout).toContain("worker: on exit 75 when idle");
+    expect(r.stdout).not.toContain("web bundle stale");
+    expect(r.builds).toEqual([]);
   } finally {
     f.cleanup();
   }

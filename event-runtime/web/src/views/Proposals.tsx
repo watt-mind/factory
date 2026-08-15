@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
@@ -50,6 +51,11 @@ import {
 } from "../components/ui";
 
 const PROPOSAL_TABS = ["open", "history"] as const;
+type ProposalTab = (typeof PROPOSAL_TABS)[number];
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
 
 const ttlExpiry = (p: Proposal) => new Date(p.created_at).getTime() + p.ttl_seconds * 1000;
 
@@ -142,7 +148,7 @@ export function Proposals({
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<"open" | "history">("open");
+  const [tab, setTab] = useState<ProposalTab>("open");
   const query = useQuery({
     queryKey: ["proposals"],
     queryFn: () => api.proposals(),
@@ -564,13 +570,28 @@ export function Proposals({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel?.id, canApprove, isOpen, connected]);
 
-  const selectTab = (t: (typeof PROPOSAL_TABS)[number]) => {
+  const selectTab = (t: ProposalTab) => {
     setTab(t);
     setExpiredOnly(false);
     onSelectProposal(null);
     setSelectedIds(new Set());
   };
   useTabKeys(PROPOSAL_TABS, tab, selectTab);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= PROPOSAL_TABS.length) {
+        e.preventDefault();
+        selectTab(PROPOSAL_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="flex h-full min-w-0">
@@ -587,7 +608,7 @@ export function Proposals({
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <div className="flex gap-1" role="tablist" aria-label="Proposal status">
-            {PROPOSAL_TABS.map((t) => {
+            {PROPOSAL_TABS.map((t, idx) => {
               const count = t === "open"
                 ? (context.kind === "repo" ? (query.data?.proposals ?? []).filter((p) => matchesRepo(p.repos, context)).length : (statusQ.data?.proposals.open ?? 0))
                 : (history.data?.proposals ?? []).filter((p) => p.status !== "open" && matchesRepo(p.repos, context)).length;
@@ -603,6 +624,9 @@ export function Proposals({
                 >
                   {t === "open" ? "Open" : "History"}
                   {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                    {idx + 1}
+                  </span>
                 </button>
               );
             })}
@@ -1081,7 +1105,15 @@ export function Proposals({
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && reason.trim()) reject.mutate({ id: sel.id, why: reason.trim() });
+                    if (
+                      (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) &&
+                      reason.trim() &&
+                      !reject.isPending &&
+                      connected
+                    ) {
+                      e.preventDefault();
+                      reject.mutate({ id: sel.id, why: reason.trim() });
+                    }
                     if (e.key === "Escape") setRejecting(false);
                   }}
                   placeholder="Reason (required — rejections are audit records)"
@@ -1089,7 +1121,7 @@ export function Proposals({
                 />
                 <Button
                   variant="danger"
-                  disabled={!reason.trim() || reject.isPending}
+                  disabled={!reason.trim() || reject.isPending || !connected}
                   onClick={() => reject.mutate({ id: sel.id, why: reason.trim() })}
                 >
                   Confirm
@@ -1255,7 +1287,12 @@ export function Proposals({
             value={bulkReason}
             onChange={(e) => setBulkReason(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && bulkReason.trim() && !bulkRejecting) {
+              if (
+                (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) &&
+                bulkReason.trim() &&
+                !bulkRejecting &&
+                connected
+              ) {
                 e.preventDefault();
                 handleBulkReject();
               }
