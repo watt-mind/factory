@@ -250,7 +250,7 @@ returns the existing admission record and never spawns a second run.
     "type": "ephemeral",
     "retainOnFailure": true
   },
-  "adapter": "claude",
+  "adapter": "pi",
   "promptVersion": "git:7d91d88",
   "policyVersion": "git:7d91d88",
   "outputContract": "factory.status-report/v1",
@@ -378,9 +378,9 @@ is readable in `GET /registry`.
 optional `"model_tier": "strong" | "standard" | "light"` — a statement of
 intent, never a concrete model id. What each tier means is operator policy:
 the `models:` block in `config/policy.yaml`, keyed per adapter
-(`models.claude.standard: sonnet`), so retiering the fleet is a one-line
-policy PR instead of an edit fanned across definitions. The literal value
-`default` is a sentinel meaning "pass no model flag — ride the CLI's own
+(`models.pi.standard: openai-codex/gpt-5.6-terra`), so retiering the fleet is
+a one-line policy PR instead of an edit fanned across definitions. The literal
+value `default` is a sentinel meaning "pass no model flag — ride the CLI's own
 default"; any other value is passed verbatim as `--model`. The **planner
 resolves tier → model at plan time and pins the result into the RunSpec**
 (`modelTier` + `model`, the same pattern as `repoPin`), so the proposal the
@@ -391,23 +391,40 @@ per-route resolved value. Resolution order: per-definition `"model"` override
 wins) > tier map > adapter default (absent fields = no spec fields = today's
 behavior). A declared tier with no mapping for a routed model-consuming
 adapter is a **load error, fail closed** — never a silent fall-through to the
-adapter default. Only the `claude` adapter consumes models; on
+adapter default. Only the LLM adapters (`claude`, `pi`) consume models; on
 `command`/`actions`/`fake` routes a declared tier is recorded as not
-applicable (`model: null`), never an error. Tier assignments are intent the
-runtime cannot yet audit: per-run usage observability (WM-66) is what will
+applicable (`model: null`), never an error. Since WM-215 every committed LLM
+route is `pi`, so `models.pi` is the map that has to cover every tier the
+registry declares (`strong`/`standard`/`light` → sol/terra/luna);
+`models.claude` stays populated for the per-route exception and for
+`--adapter-override claude`. Tier assignments are intent the runtime cannot
+yet audit: per-run usage observability (WM-66) is what will
 show whether a tier is over- or under-provisioned and inform re-mapping.
 
-**Adapters are a registry, not a flag.** `"adapter": "claude"` in the run spec
+**Adapters are a registry, not a flag.** `"adapter": "pi"` in the run spec
 names an entry in a small adapter registry, one per harness the runtime has
 actually tested. The emit pipeline targets several harnesses (Claude Code,
 Codex, Gemini, Cursor, Pi); the event runtime admits only adapters with a
 passing conformance test covering structured output, timeout and shutdown
-behavior, and workspace confinement. The registry has entries for `claude`
-(the primary LLM harness), `pi` (OPS-296, a second LLM harness on the Codex
-subscription window), `command` (a closed argv template), `actions` (an
-approved action list resolved against a closed registry, remote-SSH or
-local-argv), and `fake` (tests and demo environments). It does not inherit the
-current runner's entire adapter surface.
+behavior, and workspace confinement. The registry has entries for `pi`
+(OPS-296, the default LLM harness on the Codex subscription window, WM-215),
+`claude` (Claude Code, still fully supported), `command` (a closed argv
+template), `actions` (an approved action list resolved against a closed
+registry, remote-SSH or local-argv), and `fake` (tests and demo
+environments). It does not inherit the current runner's entire adapter
+surface.
+
+**pi is the default harness, per route, not per mode (WM-215).** Every
+LLM-routed event type in `event-runtime/event-types.json` declares
+`"adapter": "pi"`; `command`/`actions` routes are untouched. The choice lives
+in one field per route, so routing a single event type back to Claude Code is
+a one-line edit of that route — there is no global harness mode to flip, and
+no route inherits a default. `claude` remains a first-class adapter: it is
+what the per-route exception selects, and `--adapter-override claude`
+(`cli.mjs serve`/`work`) forces runs onto it without touching the
+registry. Note that an adapter override changes execution only — the model
+still resolves against the **registered** route's adapter (§6, WM-135), so an
+overridden run carries the pinned `models.pi` value.
 
 **The `pi` adapter (`lib/adapters/pi.mjs`, OPS-296) mirrors `claude.mjs`,
 adapted to a different CLI shape.** `pi -p --mode json` (prompt piped to

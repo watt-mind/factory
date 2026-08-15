@@ -19,6 +19,21 @@ function tempRegistry() {
   return root;
 }
 
+/**
+ * A tier map that satisfies the committed registry: since WM-215 every LLM
+ * route is the pi adapter, so the pi map must cover every tier a routed
+ * definition declares. The claude map stays as the per-route exception's
+ * mapping — no committed route consumes it today.
+ */
+const PI_TIERS = {
+  claude: { strong: "default", standard: "sonnet", light: "haiku" },
+  pi: {
+    strong: "openai-codex/gpt-5.6-sol",
+    standard: "openai-codex/gpt-5.6-terra",
+    light: "openai-codex/gpt-5.6-luna",
+  },
+};
+
 describe("registry", () => {
   test("loads the committed registry (pins verified)", () => {
     const registry = loadRegistry();
@@ -104,12 +119,10 @@ describe("registry", () => {
     const defFile = path.join(root, "agents", "factory-status-report.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "standard" }));
-    // Also covers pi-smoke@1's own event-type-declared tier (OPS-517, adapter
-    // "pi") — event types outside this test's own agent are validated too.
-    const registry = loadRegistry({
-      root,
-      modelTiers: { claude: { strong: "default", standard: "sonnet" }, pi: { light: "openai-codex/gpt-5.6-luna" } },
-    });
+    // Every LLM route is "pi" since WM-215, so the pi map must cover every
+    // tier any routed definition declares — event types outside this test's
+    // own agent are validated too.
+    const registry = loadRegistry({ root, modelTiers: PI_TIERS });
     expect(getAgent(registry, "factory-status-report@1").model_tier).toBe("standard");
     // A definition that declares nothing is untouched — adapter default.
     expect(getAgent(registry, "reconcile@1").model_tier).toBeUndefined();
@@ -133,11 +146,16 @@ describe("registry", () => {
     const defFile = path.join(root, "agents", "factory-status-report.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "light" }));
-    // No claude tier map at all, and a map missing this one tier: both refuse.
-    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/no mapping for adapter "claude"/);
-    expect(() => loadRegistry({ root, modelTiers: { claude: { strong: "default" } } })).toThrow(
-      /model_tier "light" has no mapping/,
-    );
+    // No pi tier map at all, and a map missing this one tier: both refuse.
+    // (factory-status-report is the first routed event type in the file, so
+    // its unmapped "light" is what the load trips on in both cases.)
+    expect(() => loadRegistry({ root, modelTiers: {} })).toThrow(/no mapping for adapter "pi"/);
+    expect(() =>
+      loadRegistry({
+        root,
+        modelTiers: { pi: { strong: "openai-codex/gpt-5.6-sol", standard: "openai-codex/gpt-5.6-terra" } },
+      }),
+    ).toThrow(/model_tier "light" has no mapping/);
   });
 
   test("a tier on a command/actions-routed agent is not applicable, never an error (WM-135)", () => {
@@ -145,12 +163,9 @@ describe("registry", () => {
     const defFile = path.join(root, "agents", "reconcile.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...def, model_tier: "light" }));
-    // reconcile routes via the command adapter — "light" needs no mapping
-    // there, even though the map below deliberately lacks it.
-    const registry = loadRegistry({
-      root,
-      modelTiers: { claude: { strong: "default", standard: "sonnet" }, pi: { light: "openai-codex/gpt-5.6-luna" } },
-    });
+    // reconcile routes via the command adapter — "light" is resolved for no
+    // adapter there, so the command route stays applicable either way.
+    const registry = loadRegistry({ root, modelTiers: PI_TIERS });
     expect(resolveModel(getAgent(registry, "reconcile@1"), "command", registry.modelTiers)).toBeNull();
   });
 
@@ -158,7 +173,7 @@ describe("registry", () => {
     const root = tempRegistry();
     const defFile = path.join(root, "agents", "factory-status-report.json");
     const def = JSON.parse(readFileSync(defFile, "utf8"));
-    const tiers = { claude: { strong: "default", standard: "sonnet" }, pi: { light: "openai-codex/gpt-5.6-luna" } };
+    const tiers = PI_TIERS;
     writeFileSync(defFile, JSON.stringify({ ...def, model: "" }));
     expect(() => loadRegistry({ root, modelTiers: tiers })).toThrow(/"model"/);
     writeFileSync(defFile, JSON.stringify({ ...def, model: 42 }));

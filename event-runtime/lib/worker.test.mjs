@@ -111,11 +111,11 @@ describe("worker", () => {
     expect(repositoryStatus(repo)).not.toBe(baseline);
   });
 
-  test("e2e (WM-135): tiered claude route plans a spec with the model pinned; the fake adapter executes it, ignoring the model", async () => {
+  test("e2e (WM-135): tiered pi route plans a spec with the model pinned; the fake adapter executes it, ignoring the model", async () => {
     const db = openDb(":memory:");
     // The real status-report definition with a declared tier, on a registry
-    // whose policy map says standard → sonnet.
-    const synthetic = { ...registry, agents: new Map(registry.agents), modelTiers: { claude: { standard: "sonnet" } } };
+    // whose policy map says standard → the pi standard model.
+    const synthetic = { ...registry, agents: new Map(registry.agents), modelTiers: { pi: { standard: "openai-codex/gpt-5.6-terra" } } };
     synthetic.agents.set("factory-status-report@1", { ...getAgent(registry, "factory-status-report@1"), model_tier: "standard" });
 
     const envelope = {
@@ -140,9 +140,9 @@ describe("worker", () => {
     );
     expect(outcome.decision).toBe("run");
     // The pinned resolution is what the operator would approve: the
-    // registered claude route's model, even though execution is the fake.
+    // registered pi route's model, even though execution is the fake.
     const spec = JSON.parse(outcome.proposal.spec_json);
-    expect(spec.model).toBe("sonnet");
+    expect(spec.model).toBe("openai-codex/gpt-5.6-terra");
     expect(spec.modelTier).toBe("standard");
     expect(spec.adapter).toBe("fake");
 
@@ -153,7 +153,7 @@ describe("worker", () => {
     expect(summary.terminalState).toBe("COMPLETED");
     // The run's stored spec — what inspect/receipts read — carries the pin.
     const stored = JSON.parse(db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(outcome.runId).spec_json);
-    expect(stored.model).toBe("sonnet");
+    expect(stored.model).toBe("openai-codex/gpt-5.6-terra");
     expect(stored.modelTier).toBe("standard");
   });
 

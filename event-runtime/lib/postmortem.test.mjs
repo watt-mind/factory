@@ -23,7 +23,7 @@ function harness() {
     owner: "w",
     policyVersion: PV,
   };
-  const adapters = { claude: fake, command: fake };
+  const adapters = { pi: fake, command: fake };
 
   async function runOne(envelope, agentRef) {
     expect(admitEvent(db, registry, envelope).admitted).toBe(true);

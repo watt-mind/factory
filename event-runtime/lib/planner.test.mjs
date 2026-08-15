@@ -87,15 +87,16 @@ describe("planEvent", () => {
       input: payload,
       inputHash: hashJson(payload),
       workspace: { type: "ephemeral", retainOnFailure: true },
-      adapter: "claude",
+      adapter: "pi",
       promptVersion: "git:test",
       policyVersion: "git:test",
       outputContract: "factory.status-report/v1",
       capabilities: ["linear:read"],
       // Model-tier routing (WM-135): the committed definition declares
-      // standard, policy maps it to sonnet, the planner pins the resolution.
+      // standard, policy maps it to models.pi.standard (WM-215 made pi the
+      // default harness), and the planner pins the resolution.
       modelTier: "standard",
-      model: "sonnet",
+      model: "openai-codex/gpt-5.6-terra",
       timeoutSeconds: 600,
       maxAttempts: 1,
       idempotencyKey: `factory-status-report@1:factory.status-report/v1:workflow-01:${hashJson(payload)}`,

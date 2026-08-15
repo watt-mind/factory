@@ -69,7 +69,7 @@ function harness() {
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-sweep-ws-"));
   fixtures.push(workspaces);
-  const adapters = { claude: fake, actions: fake };
+  const adapters = { pi: fake, actions: fake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function approveNext(agentRef) {

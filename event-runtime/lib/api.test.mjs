@@ -242,9 +242,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
   let flowProposalId;
   let flowRunId;
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-api-ws-"));
-  // event-types.json maps to the "claude" adapter; back it with the fake so
-  // no real claude process ever spawns in tests.
-  const adapters = { claude: fake };
+  // event-types.json maps to the "pi" adapter (WM-215); back it with the fake so
+  // no real pi process ever spawns in tests.
+  const adapters = { pi: fake };
   const workerOpts = () => ({ workspacesRoot: workspaces, owner: "w-test", policyVersion: PV });
 
   /** Replay + plan one envelope, then return its open proposal via the API. */
@@ -281,7 +281,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(prop.expired).toBe(false);
     expect(prop.agent).toBe("factory-status-report@1");
     expect(prop.repos).toEqual(["ok"]);
-    expect(prop.spec.adapter).toBe("claude");
+    expect(prop.spec.adapter).toBe("pi");
     expect(prop.ttl_seconds).toBe(1800);
     flowProposalId = prop.id;
 
@@ -420,7 +420,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     const prop = await planned("retry-1");
     const { runId } = await s.client.approve(prop.id);
     // Deterministic terminal FAILED: run with an empty adapters map so the
-    // spec's "claude" adapter is unknown (no requeue, attempts consumed).
+    // spec's "pi" adapter is unknown (no requeue, attempts consumed).
     const summary = await runOnce(s.db, registry, {}, workerOpts());
     expect(summary.runId).toBe(runId);
     expect(summary.terminalState).toBe("FAILED");
@@ -454,7 +454,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       expect(proposals[0].eventSource).toBe("test");
 
       await client.approve(proposals[0].id);
-      await runOnce(db, registry, { claude: fake, fake }, {
+      await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
         owner: "test-worker", policyVersion: PV,
       });
@@ -488,7 +488,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       const { proposals } = await client.proposals();
       await client.approve(proposals[0].id);
-      await runOnce(db, registry, { claude: fake, fake }, {
+      await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
         owner: "test-worker", policyVersion: PV,
       });
@@ -580,7 +580,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       const { proposals } = await client.proposals();
       await client.approve(proposals[0].id);
-      const summary = await runOnce(db, registry, { claude: fake, fake }, {
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: path.join(home, "workspaces"),
         artifactStore: path.join(home, "artifacts"),
         owner: "test-worker", policyVersion: PV,
@@ -614,7 +614,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       await client.replay(envelope({ eventId: "art-2", payload: { repos: ["with-artifact"] } }));
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       await client.approve((await client.proposals()).proposals[0].id);
-      const summary = await runOnce(db, registry, { claude: fake, fake }, {
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: path.join(home, "workspaces"),
         artifactStore: path.join(home, "artifacts"),
         owner: "test-worker", policyVersion: PV,
@@ -656,7 +656,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       await client.replay(envelope({ eventId: "trace-1", payload: { repos: ["ok"] } }));
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       await client.approve((await client.proposals()).proposals[0].id);
-      const summary = await runOnce(db, registry, { claude: fake, fake }, {
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
         owner: "test-worker", policyVersion: PV,
       });
@@ -709,7 +709,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       // resolved value, straight off the committed registry + policy map.
       expect(def.modelTier).toBe("standard");
       expect(def.model).toBeNull();
-      expect(def.eventTypes[0].resolvedModel).toBe("sonnet");
+      expect(def.eventTypes[0].resolvedModel).toBe("openai-codex/gpt-5.6-terra");
       const commandDef = defs.find((d) => d.ref === "reconcile@1");
       expect(commandDef.modelTier).toBeNull();
       expect(commandDef.eventTypes[0].resolvedModel).toBeNull();

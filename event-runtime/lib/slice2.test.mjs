@@ -39,7 +39,7 @@ function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-s2-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-s2-ws-"));
-  const adapters = { claude: fake, actions: fake };
+  const adapters = { pi: fake, actions: fake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function approveNext(agentRef) {
