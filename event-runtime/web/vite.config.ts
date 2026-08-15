@@ -42,7 +42,8 @@ function vendorChunk(id: string): string | undefined {
   if (at === -1) return undefined;
   const rest = id.slice(at + marker.length);
   for (const [chunk, packages] of VENDOR_CHUNKS) {
-    if (packages.some((pkg) => rest === pkg || rest.startsWith(`${pkg}/`))) return chunk;
+    if (packages.some((pkg) => rest === pkg || rest.startsWith(`${pkg}/`)))
+      return chunk;
   }
   return undefined;
 }
@@ -61,11 +62,26 @@ function vendorChunk(id: string): string | undefined {
 // load on demand. Moving one of those surfaces back into the entry is therefore
 // a first-paint tradeoff, not routine feature growth.
 //
-// WM-257 measured the entry at 472.95 kB locally after restoring those splits;
-// 480 kB leaves about 7 kB of slack while keeping the previous 540 kB ratchet
-// from returning. Keep the xyflow and lazy-route chunks visible in build output
+// WM-257 measured the entry at 472.95 kB locally after restoring those splits
+// and set 480 kB, about 7 kB of slack, to keep the previous 540 kB ratchet from
+// returning. Keep the xyflow and lazy-route chunks visible in build output
 // before considering any future re-baseline.
-const ENTRY_CHUNK_BUDGET_BYTES = 480 * 1000;
+//
+// WM-332 re-baselined to 500 kB on 2026-08-15. Four web features landed in one
+// evening (#290 keyboard navigation and copy chords, #324 artifact preview,
+// #326 view announcements, #333 grouped column picker) and took the entry from
+// 472.95 kB to 480.23 kB, past the limit. The vendor split was verified healthy
+// first — the xyflow chunk measured an identical 197.04 kB either side — so
+// this is real feature growth, not a dep escaping VENDOR_CHUNKS.
+//
+// The slack is 20 kB rather than 7 kB deliberately. At 7 kB the guard had drifted
+// to 0.1% of the limit, where it stops measuring app growth and starts firing on
+// build nondeterminism: the same source produced 479.51 kB in the operator's
+// checkout and 480.23 kB in a fresh worktree, so develop went red on the variance
+// rather than on a change. A ratchet that trips on noise sends whoever hits it
+// hunting a bug they did not introduce. If a future raise buys less headroom than
+// this, split the entry instead of moving the number again.
+const ENTRY_CHUNK_BUDGET_BYTES = 500 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {
@@ -77,7 +93,9 @@ function entryChunkBudget(): Plugin {
         if (output.type !== "chunk" || !output.isEntry) continue;
         const bytes = Buffer.byteLength(output.code, "utf8");
         if (bytes > ENTRY_CHUNK_BUDGET_BYTES) {
-          oversized.push(`${output.fileName} is ${(bytes / 1000).toFixed(2)} kB`);
+          oversized.push(
+            `${output.fileName} is ${(bytes / 1000).toFixed(2)} kB`,
+          );
         }
       }
       if (oversized.length === 0) return;
