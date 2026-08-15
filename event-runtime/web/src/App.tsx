@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState, lazy, Suspense } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { api } from "./api";
 import { ContextTabs } from "./components/ContextTabs";
 import {
@@ -109,6 +109,9 @@ export function App() {
   const [focusExpired, setFocusExpired] = useState(false);
   const [ephemeralEvent, setEphemeralEvent] = useState<EventFocus | null>(null);
   const [filterFocus, setFilterFocus] = useState(false);
+  const [viewAnnouncement, setViewAnnouncement] = useState("");
+  const mainRef = useRef<HTMLElement>(null);
+  const previousViewRef = useRef(view);
 
   const focusRunId = view === "runs" ? (route[1] ?? null) : null;
   // `#/run/:id` is the full-page run view — a distinct first segment, so
@@ -284,14 +287,14 @@ export function App() {
     }, [navigate, selectContext, openRepos]),
   );
 
+  const viewLabel = NAV.find((n) => n.key === view)?.label ?? (view === "run" ? "Run" : "Overview");
+
   useEffect(() => {
-    const nav = NAV.find((n) => n.key === view);
-    const label = nav?.label ?? (view === "run" ? "Run" : "Overview");
     const id = route.length > 1 ? route[route.length - 1] : null;
     const typeQ = hashSearch(window.location.hash).get("type");
     const detail = id ?? typeQ;
-    document.title = detail ? `factory · ${label} · ${detail}` : `factory · ${label}`;
-  }, [route, view]);
+    document.title = detail ? `factory · ${viewLabel} · ${detail}` : `factory · ${viewLabel}`;
+  }, [route, viewLabel]);
 
   useEffect(() => {
     if (!filterFocus) return;
@@ -300,6 +303,15 @@ export function App() {
     el.focus();
     setFilterFocus(false);
   }, [filterFocus, view]);
+
+  useEffect(() => {
+    if (previousViewRef.current === view) return;
+    previousViewRef.current = view;
+    setViewAnnouncement(`${viewLabel} view`);
+    // `/` intentionally sends focus to the destination view's filter instead.
+    // Fall back to main when a lazy destination has not mounted its filter yet.
+    if (!document.activeElement?.matches("[data-view-filter]")) mainRef.current?.focus();
+  }, [view, viewLabel]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -473,7 +485,14 @@ export function App() {
         </div>
       </nav>
 
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main
+        ref={mainRef}
+        tabIndex={-1}
+        className="flex min-w-0 flex-1 flex-col focus:outline-none focus:ring-2 focus:ring-inset focus:ring-(--focus-ring)"
+      >
+        <div aria-live="polite" aria-atomic="true" className="sr-only">
+          {viewAnnouncement}
+        </div>
         {healthFailed && (
           <div
             role="status"
