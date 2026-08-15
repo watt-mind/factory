@@ -152,6 +152,64 @@ export function referencedHashes(db) {
 }
 
 /**
+ * Catalogue every stored artifact and attach the accepted results that refer
+ * to it. The store remains the source of truth for which bytes exist; stale
+ * result references to missing files therefore do not produce phantom rows.
+ */
+export function listArtifacts(db, storeRoot, { orphan, kind, search, limit } = {}) {
+  if (!existsSync(storeRoot)) return [];
+
+  const references = new Map();
+  const rows = db.query(
+    `SELECT results.run_id, results.result_json, runs.spec_json, runs.state, runs.created_at
+     FROM results
+     LEFT JOIN runs ON runs.run_id = results.run_id`,
+  ).all();
+  for (const row of rows) {
+    let agent = null;
+    try {
+      agent = row.spec_json ? JSON.parse(row.spec_json).agent ?? null : null;
+    } catch {
+      // A catalogue read should still expose the bytes if an old spec is bad.
+    }
+    for (const entry of JSON.parse(row.result_json).artifacts ?? []) {
+      if (!HEX64.test(entry.sha256 ?? "")) continue;
+      const refs = references.get(entry.sha256) ?? [];
+      refs.push({
+        runId: row.run_id,
+        kind: entry.kind ?? null,
+        agent,
+        state: row.state ?? null,
+        createdAt: row.created_at ?? null,
+      });
+      references.set(entry.sha256, refs);
+    }
+  }
+
+  const term = typeof search === "string" ? search.toLowerCase() : null;
+  const inventory = [];
+  for (const sha256 of readdirSync(storeRoot).filter((name) => HEX64.test(name)).sort()) {
+    const stat = statSync(path.join(storeRoot, sha256));
+    if (!stat.isFile()) continue;
+    const refs = references.get(sha256) ?? [];
+    const referenced = refs.length > 0;
+    if (orphan !== undefined && orphan === referenced) continue;
+    if (kind !== undefined && !refs.some((ref) => ref.kind === kind)) continue;
+    if (term && ![sha256, ...refs.flatMap((ref) => [ref.runId, ref.kind, ref.agent, ref.state])]
+      .some((value) => String(value ?? "").toLowerCase().includes(term))) continue;
+    inventory.push({
+      sha256,
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+      referenced,
+      references: refs,
+    });
+    if (limit !== undefined && inventory.length >= limit) break;
+  }
+  return inventory;
+}
+
+/**
  * Store inventory: total bytes, and the orphans — files no accepted result
  * references. Orphans are normal (a failed attempt stores nothing, but a
  * superseded one can leave bytes behind); they are only a problem unattended.
@@ -181,21 +239,34 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
  * never touched: a receipt that points at a deleted file is worse than a full
  * disk, because it turns the audit trail into a lie.
  */
-export function pruneArtifacts(db, storeRoot, { olderThanMs = 7 * 24 * 60 * 60 * 1000, now = Date.now() } = {}) {
-  if (!existsSync(storeRoot)) return { deleted: 0, freedBytes: 0 };
+export function pruneArtifacts(
+  db,
+  storeRoot,
+  { olderThanMs = 7 * 24 * 60 * 60 * 1000, now = Date.now(), dryRun = false } = {},
+) {
+  if (!existsSync(storeRoot)) return { deleted: 0, freedBytes: 0, remainingOrphans: 0 };
   const referenced = referencedHashes(db);
   let deleted = 0;
   let freedBytes = 0;
+  let remainingOrphans = 0;
   for (const name of readdirSync(storeRoot)) {
     if (!HEX64.test(name) || referenced.has(name)) continue;
     const file = path.join(storeRoot, name);
     const stat = statSync(file);
-    if (now - stat.mtimeMs < olderThanMs) continue;
+    if (!stat.isFile()) continue;
+    if (now - stat.mtimeMs < olderThanMs) {
+      remainingOrphans += 1;
+      continue;
+    }
     freedBytes += stat.size;
-    rmSync(file, { force: true });
     deleted += 1;
+    if (dryRun) {
+      remainingOrphans += 1;
+    } else {
+      rmSync(file, { force: true });
+    }
   }
-  return { deleted, freedBytes };
+  return { deleted, freedBytes, remainingOrphans };
 }
 
 /**

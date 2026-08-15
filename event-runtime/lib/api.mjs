@@ -14,7 +14,7 @@ import { closeSync, createReadStream, openSync, readFileSync, readSync, readdirS
 import http from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
-import { findArtifact } from "./artifacts.mjs";
+import { findArtifact, listArtifacts, pruneArtifacts, storeStats } from "./artifacts.mjs";
 import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, webhookSecret } from "./config.mjs";
 import { runUsage, usageSpend } from "./db.mjs";
 import { admitEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
@@ -26,7 +26,6 @@ import { resolveModel } from "./registry.mjs";
 import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
-import { storeStats } from "./artifacts.mjs";
 import { parseCadence, proposalsPilingUp, scheduleView } from "./schedules.mjs";
 import { listWorkers, loadWorkerPolicy, stalledWorkers } from "./workers.mjs";
 
@@ -962,6 +961,54 @@ export function createApi({
           if (status === 500) return send(res, 500, { error: "internal_error" });
           return send(res, status, { error: err.message });
         }
+      }
+
+      if (route === "GET /artifacts") {
+        const orphanParam = url.searchParams.get("orphan");
+        if (orphanParam !== null && orphanParam !== "true" && orphanParam !== "false") {
+          return send(res, 422, { error: "orphan must be true or false" });
+        }
+        const limitParam = url.searchParams.get("limit");
+        const limit = limitParam === null ? undefined : Number(limitParam);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 500)) {
+          return send(res, 422, { error: "limit must be an integer between 1 and 500" });
+        }
+        const artifacts = listArtifacts(db, artifactsRoot(env.home), {
+          orphan: orphanParam === null ? undefined : orphanParam === "true",
+          kind: url.searchParams.has("kind") ? url.searchParams.get("kind") : undefined,
+          search: url.searchParams.has("search") ? url.searchParams.get("search") : undefined,
+          limit,
+        });
+        return send(res, 200, { artifacts });
+      }
+
+      if (route === "POST /artifacts/prune") {
+        const raw = await readBody(req);
+        const parsed = raw.length === 0 ? { value: {} } : parseJson(raw);
+        if (parsed.error) return send(res, 422, { error: parsed.error });
+        const body = parsed.value ?? {};
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return send(res, 422, { error: "body must be an object" });
+        }
+        if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+          return send(res, 422, { error: "dryRun must be a boolean" });
+        }
+        if (body.apply !== undefined && typeof body.apply !== "boolean") {
+          return send(res, 422, { error: "apply must be a boolean" });
+        }
+        if (body.apply === true && body.dryRun === true) {
+          return send(res, 422, { error: "apply and dryRun cannot both be true" });
+        }
+        const apply = body.apply === true;
+        const result = pruneArtifacts(db, artifactsRoot(env.home), {
+          now: nowMs,
+          dryRun: !apply,
+        });
+        if (apply) {
+          cachedStoreStats = null;
+          cachedStoreStatsAt = 0;
+        }
+        return send(res, 200, result);
       }
 
       const artifactGet = url.pathname.match(/^\/artifacts\/([0-9a-f]{64})$/);

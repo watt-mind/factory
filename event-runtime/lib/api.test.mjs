@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -578,6 +578,89 @@ describe("environment identity (webui chip)", () => {
 });
 
 describe("artifact store and agent registry surfacing (OPS-212)", () => {
+  test("GET /artifacts catalogues and filters metadata; POST /artifacts/prune dry-runs and applies", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-artifacts-api-"));
+    const store = path.join(home, "artifacts");
+    mkdirSync(store, { recursive: true });
+    const reportHash = "a".repeat(64);
+    const transcriptHash = "b".repeat(64);
+    const orphanHash = "c".repeat(64);
+    writeFileSync(path.join(store, reportHash), "report", "utf8");
+    writeFileSync(path.join(store, transcriptHash), "transcript", "utf8");
+    writeFileSync(path.join(store, orphanHash), "orphan", "utf8");
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    for (const hash of [reportHash, transcriptHash, orphanHash]) {
+      utimesSync(path.join(store, hash), old, old);
+    }
+
+    const db = openDb(path.join(home, "runtime.db"));
+    const createdAt = "2026-01-02T03:04:05.000Z";
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?)`,
+    ).run("run_catalogue", "idem_catalogue", JSON.stringify({ agent: "catalogue-agent@1" }), "spec-hash", createdAt, createdAt);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:result', '{}', '{}', ?)`,
+    ).run("run_catalogue", JSON.stringify({ artifacts: [
+      { kind: "report", sha256: reportHash },
+      { kind: "transcript", sha256: transcriptHash },
+    ] }), createdAt);
+
+    const server = startApi({
+      db, registry, secret: SECRET, policyVersion: PV, port: 0,
+      env: { name: "test", home, adapter: "fake" },
+    });
+    await new Promise((resolve) => server.on("listening", resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const all = await (await fetch(`${base}/artifacts`)).json();
+      expect(all.artifacts).toHaveLength(3);
+      expect(all.artifacts.find((artifact) => artifact.sha256 === reportHash)).toEqual({
+        sha256: reportHash,
+        sizeBytes: 6,
+        mtime: old.toISOString(),
+        referenced: true,
+        references: [{
+          runId: "run_catalogue",
+          kind: "report",
+          agent: "catalogue-agent@1",
+          state: "COMPLETED",
+          createdAt,
+        }],
+      });
+      expect((await (await fetch(`${base}/artifacts?orphan=true`)).json()).artifacts.map((a) => a.sha256)).toEqual([orphanHash]);
+      expect((await (await fetch(`${base}/artifacts?orphan=false`)).json()).artifacts).toHaveLength(2);
+      expect((await (await fetch(`${base}/artifacts?kind=report`)).json()).artifacts.map((a) => a.sha256)).toEqual([reportHash]);
+      expect((await (await fetch(`${base}/artifacts?search=CATALOGUE-AGENT`)).json()).artifacts).toHaveLength(2);
+      expect((await (await fetch(`${base}/artifacts?limit=1`)).json()).artifacts).toHaveLength(1);
+      expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
+      expect((await fetch(`${base}/artifacts?limit=0`)).status).toBe(422);
+
+      const dry = await fetch(`${base}/artifacts/prune`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dryRun: true }),
+      });
+      expect(dry.status).toBe(200);
+      expect(await dry.json()).toEqual({ deleted: 1, freedBytes: 6, remainingOrphans: 1 });
+      expect(existsSync(path.join(store, orphanHash))).toBe(true);
+
+      const apply = await fetch(`${base}/artifacts/prune`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ apply: true }),
+      });
+      expect(apply.status).toBe(200);
+      expect(await apply.json()).toEqual({ deleted: 1, freedBytes: 6, remainingOrphans: 0 });
+      expect(existsSync(path.join(store, orphanHash))).toBe(false);
+      expect(existsSync(path.join(store, reportHash))).toBe(true);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
   test("declared artifacts and the transcript survive the workspace and stream from the API", async () => {
     const { db, server, port } = await makeServer();
     const client = apiClient({ port });
