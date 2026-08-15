@@ -254,7 +254,11 @@ export function Schedules({
         chrome={
           <>
             <h1 className="display mb-4 text-lg font-semibold">Schedules</h1>
-            <ScopeCaption context={context} surface="registry" />
+            <ScopeCaption
+              context={context}
+              surface="registry"
+              subject={{ label: "Schedules", plural: true }}
+            />
             <div className="mb-3">
               <FilterInput
                 value={filter}

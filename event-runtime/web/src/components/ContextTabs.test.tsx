@@ -452,17 +452,14 @@ describe("ScopeCaption", () => {
     expect(r.container.textContent).toBe("");
   });
 
-  test("Workers/Agents/Schedules/Overview/Graph use view names, not fleet or registry", () => {
-    const cases: Array<{ hash: string; surface: "fleet" | "registry" | "graph" | "overview"; expect: string }> = [
-      { hash: "#/workers", surface: "fleet", expect: "Workers are not scoped to factory" },
-      { hash: "#/agents", surface: "registry", expect: "Agents are not scoped to factory" },
-      { hash: "#/schedules", surface: "registry", expect: "Schedules are not scoped to factory" },
-      { hash: "#/overview", surface: "overview", expect: "Overview counts are not scoped to factory" },
-      { hash: "#/graph", surface: "graph", expect: "Graph is not scoped to factory" },
+  test("fixed surfaces use view names, not internal surface names", () => {
+    const cases = [
+      { surface: "fleet" as const, expect: "Workers are not scoped to factory" },
+      { surface: "overview" as const, expect: "Overview counts are not scoped to factory" },
+      { surface: "graph" as const, expect: "Graph is not scoped to factory" },
     ];
 
     for (const c of cases) {
-      window.location.hash = c.hash;
       const r = render(<ScopeCaption context={repoCtx} surface={c.surface} />);
       const text = r.container.textContent ?? "";
       expect(text).toContain(c.expect);
@@ -472,23 +469,32 @@ describe("ScopeCaption", () => {
     }
   });
 
-  test("surface fallback still avoids jargon when hash is empty", () => {
-    window.location.hash = "";
-    const fleet = render(<ScopeCaption context={repoCtx} surface="fleet" />);
-    expect(fleet.container.textContent).toContain("Workers are not scoped to factory");
-    expect(fleet.container.textContent?.toLowerCase()).not.toContain("fleet");
-    cleanup();
+  test("registry captions use their explicit subject instead of the current hash", () => {
+    const cases = [
+      {
+        hash: "#/schedules",
+        subject: { label: "Agents", plural: true },
+        expect: "Agents are not scoped to factory",
+      },
+      {
+        hash: "#/projects",
+        subject: { label: "Schedules", plural: true },
+        expect: "Schedules are not scoped to factory",
+      },
+      {
+        hash: "#/agents",
+        subject: { label: "registry", plural: false },
+        expect: "registry is not scoped to factory",
+      },
+    ];
 
-    // Empty hash is not Agents/Schedules — keep the factory-wide registry copy (WM-157 Projects).
-    const registry = render(<ScopeCaption context={repoCtx} surface="registry" />);
-    expect(registry.container.textContent).toContain("registry is not scoped to factory");
-    expect(registry.container.textContent).not.toContain("Agents");
-  });
-
-  test("Projects hash keeps factory-wide registry copy, not Agents", () => {
-    window.location.hash = "#/projects";
-    const r = render(<ScopeCaption context={repoCtx} surface="registry" />);
-    expect(r.container.textContent).toContain("registry is not scoped to factory");
-    expect(r.container.textContent).not.toContain("Agents");
+    for (const c of cases) {
+      window.location.hash = c.hash;
+      const r = render(
+        <ScopeCaption context={repoCtx} surface="registry" subject={c.subject} />,
+      );
+      expect(r.container.textContent).toContain(c.expect);
+      cleanup();
+    }
   });
 });

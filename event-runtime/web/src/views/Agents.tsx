@@ -258,7 +258,11 @@ export function Agents({
         chrome={
           <>
         <h1 className="display mb-4 text-lg font-semibold">Agents</h1>
-        <ScopeCaption context={context} surface="registry" />
+        <ScopeCaption
+          context={context}
+          surface="registry"
+          subject={{ label: "Agents", plural: true }}
+        />
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="ml-auto">
             <DisplayOptions

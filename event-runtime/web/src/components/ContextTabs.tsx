@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OperatorContext } from "../context";
 import { INFLIGHT, toggleInflight } from "../context";
-import { hashView } from "../hash";
 import { CONTEXT_TABS_ATTR } from "../hooks";
 import type { RepoItem } from "../types";
 
@@ -30,36 +29,21 @@ const getHashRunId = () => {
 };
 
 type CaptionSurface = "fleet" | "registry" | "graph" | "overview";
+type FixedCaptionSurface = Exclude<CaptionSurface, "registry">;
+type CaptionSubject = { label: string; plural: boolean };
+type ScopeCaptionProps = { context: OperatorContext } & (
+  | { surface: "registry"; subject: CaptionSubject }
+  | { surface: FixedCaptionSurface; subject?: never }
+);
 
-const SURFACE_SUBJECT: Record<CaptionSurface, { subject: string; plural: boolean }> = {
-  fleet: { subject: "Workers", plural: true },
-  // Projects also passes surface="registry"; only agents/schedules hashes map to view names below.
-  registry: { subject: "registry", plural: false },
-  graph: { subject: "Graph", plural: false },
-  overview: { subject: "Overview counts", plural: true },
+const SURFACE_SUBJECT: Record<FixedCaptionSurface, CaptionSubject> = {
+  fleet: { label: "Workers", plural: true },
+  graph: { label: "Graph", plural: false },
+  overview: { label: "Overview counts", plural: true },
 };
 
-/** Agents and Schedules both pass surface="registry"; hash is the only discriminator without editing views. */
-const REGISTRY_VIEW_SUBJECT: Record<string, { subject: string; plural: boolean }> = {
-  agents: { subject: "Agents", plural: true },
-  schedules: { subject: "Schedules", plural: true },
-};
-
-function captionSubject(surface: CaptionSurface) {
-  if (surface === "registry" && typeof window !== "undefined") {
-    const fromHash = REGISTRY_VIEW_SUBJECT[hashView(window.location.hash)];
-    if (fromHash) return fromHash;
-  }
-  return SURFACE_SUBJECT[surface];
-}
-
-export function ScopeCaption({
-  context,
-  surface,
-}: {
-  context: OperatorContext;
-  surface: CaptionSurface;
-}) {
+export function ScopeCaption(props: ScopeCaptionProps) {
+  const { context, surface } = props;
   if (context.kind === "all") return null;
   const n = context.kind === "inflight" ? "In flight" : context.name;
   if (context.kind === "inflight") {
@@ -71,10 +55,11 @@ export function ScopeCaption({
       </p>
     );
   }
-  const { subject, plural } = captionSubject(surface);
+  const { label, plural } =
+    surface === "registry" ? props.subject : SURFACE_SUBJECT[surface];
   return (
     <p className="mb-3 text-[11px] text-(--text-faint)">
-      {`${subject} ${plural ? "are" : "is"} not scoped to ${n}.`}
+      {`${label} ${plural ? "are" : "is"} not scoped to ${n}.`}
     </p>
   );
 }

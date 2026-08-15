@@ -324,7 +324,11 @@ export function Projects({
         chrome={
           <>
             <h1 className="display mb-4 text-lg font-semibold">Projects</h1>
-            <ScopeCaption context={context} surface="registry" />
+            <ScopeCaption
+              context={context}
+              surface="registry"
+              subject={{ label: "registry", plural: false }}
+            />
             <div className="mb-3">
               <FilterInput
                 value={filter}
