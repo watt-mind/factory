@@ -623,11 +623,23 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
   test("bulk approve does not call api.approve until confirm", async () => {
     const p1 = stubProposal("prop_1", "open", {
       agent: "triage-scan",
-      spec: createRunSpecFixture("run_prop_1", { agent: "triage-scan", capabilities: ["read"], timeoutSeconds: 600 }),
+      spec: createRunSpecFixture("run_prop_1", {
+        agent: "triage-scan",
+        adapter: "claude",
+        capabilities: ["read"],
+        timeoutSeconds: 600,
+        maxAttempts: 4,
+      }),
     });
     const p2 = stubProposal("prop_2", "open", {
       agent: "security-scan",
-      spec: createRunSpecFixture("run_prop_2", { agent: "security-scan", capabilities: ["net"], timeoutSeconds: 120 }),
+      spec: createRunSpecFixture("run_prop_2", {
+        agent: "security-scan",
+        adapter: "codex",
+        capabilities: ["net"],
+        timeoutSeconds: 120,
+        maxAttempts: 2,
+      }),
     });
     const stale = stubProposal("prop_stale", "open", {
       decision: "run",
@@ -660,6 +672,9 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     expect(dialog.textContent).toMatch(/net/);
     expect(dialog.textContent).toMatch(/600s/);
     expect(dialog.textContent).toMatch(/120s/);
+    expect(dialog.querySelectorAll('span[title="adapter"]')).toHaveLength(2);
+    expect(dialog.querySelectorAll('span[title="attempts"]')).toHaveLength(2);
+    expect(dialog.querySelectorAll('span[title="ttl"]')).toHaveLength(2);
     expect(dialog.textContent).toContain("timeoutSeconds");
     expect(dialog.textContent).not.toMatch(/stale-agent/);
 

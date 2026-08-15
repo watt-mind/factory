@@ -1256,8 +1256,11 @@ export function Proposals({
               <div key={p.id} className="rounded-md border border-(--border) bg-(--surface-0) p-2.5">
                 <div className="mb-2 font-medium text-[12px]">{p.agent ?? p.id}</div>
                 <KV k="agent" v={p.spec?.agent} />
+                <KV k="adapter" v={p.spec?.adapter} />
                 <KV k="capabilities" v={p.spec?.capabilities.join(", ") || "none"} />
                 <KV k="timeout" v={`${p.spec?.timeoutSeconds}s`} />
+                <KV k="attempts" v={String(p.spec?.maxAttempts)} />
+                <KV k="ttl" v={<Countdown createdAt={p.created_at} ttlSeconds={p.ttl_seconds} />} />
                 {p.spec && <JsonBlock value={p.spec} />}
               </div>
             ))}
