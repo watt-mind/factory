@@ -691,7 +691,8 @@ export function Workers({
               <ListEmpty
                 colSpan={cols.length}
                 query={query}
-                filtered={rows.length > 0}
+                filtered={byTab.length > 0}
+                onClear={filter.trim() ? () => setFilter("") : undefined}
                 noun="workers"
                 empty="No workers have registered — start one with bun event-runtime/cli.mjs work"
               />

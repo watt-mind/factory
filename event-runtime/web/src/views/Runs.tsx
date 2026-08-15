@@ -744,7 +744,8 @@ export function Runs({
               <ListEmpty
                 colSpan={cols.length}
                 query={list}
-                filtered={scoped.length > 0}
+                filtered={byTab.length > 0}
+                onClear={filter.trim() ? () => setFilter("") : undefined}
                 noun="runs"
                 empty={
                   context.kind === "inflight"

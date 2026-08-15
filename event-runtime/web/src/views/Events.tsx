@@ -779,7 +779,15 @@ export function Events({
               <ListEmpty
                 colSpan={cols.length}
                 query={list}
-                filtered={scoped.length > 0}
+                filtered={tabScoped.length > 0}
+                onClear={
+                  filter.trim()
+                    ? () => {
+                        setFilter("");
+                        onSelectType(null);
+                      }
+                    : undefined
+                }
                 noun="events"
                 empty={
                   context.kind === "repo"

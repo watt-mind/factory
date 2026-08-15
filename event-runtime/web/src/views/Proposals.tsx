@@ -851,6 +851,14 @@ export function Proposals({
                 colSpan={cols.length + (tab === "open" ? 1 : 0)}
                 query={tab === "open" ? query : history}
                 filtered={unfilteredCount > 0}
+                onClear={
+                  escClearsFilter
+                    ? () => {
+                        setFilter("");
+                        setExpiredOnly(false);
+                      }
+                    : undefined
+                }
                 noun="proposals"
                 empty={
                   expiredFilter

@@ -473,6 +473,7 @@ export function ListEmpty({
   noun,
   empty,
   action,
+  onClear,
   escHint,
 }: {
   colSpan: number;
@@ -481,6 +482,7 @@ export function ListEmpty({
   noun: string;
   empty: string;
   action?: ReactNode;
+  onClear?: () => void;
   escHint?: boolean;
 }) {
   let msg = empty;
@@ -495,6 +497,11 @@ export function ListEmpty({
         <div>{msg}</div>
         {showEscHint && (
           <div className="mt-2 text-[11px]">{ESC_CLEARS_FILTER}</div>
+        )}
+        {onClear && filtered && !query.isPending && !query.isError && (
+          <div className="mt-3">
+            <Button onClick={onClear}>Clear filter</Button>
+          </div>
         )}
         {action && !query.isPending && !query.isError && !filtered && <div className="mt-3">{action}</div>}
       </td>
