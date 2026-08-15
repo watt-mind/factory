@@ -60,7 +60,10 @@ function vendorChunk(id: string): string | undefined {
 // trip it; that is the trade, and re-baselining is a normal move.
 // Re-baselined for OPS-513 (after landing 17+ UI feature wave including autocomplete,
 // bulk actions, breadcrumbs, and live graph overlays): 499.82 kB measured on CI Linux.
-const ENTRY_CHUNK_BUDGET_BYTES = 520 * 1000;
+// Re-baselined again for WM-214: the custom-column machinery (payload-path columns,
+// CustomCell, the column picker) landing on top of the WM-134/WM-205 Overview
+// overhaul measured 523.44 kB — genuine app growth, with the vendor split intact.
+const ENTRY_CHUNK_BUDGET_BYTES = 530 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {
