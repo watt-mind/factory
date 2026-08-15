@@ -431,9 +431,11 @@ export function Graph({
             onNodeClick={(_, node) => onSelectNode(node.id)}
             onPaneClick={() => onSelectNode(null)}
             onNodesChange={(changes: NodeChange[]) => {
+              const kept = changes.filter((c) => c.type === "position" || c.type === "dimensions");
+              if (kept.length === 0) return;
               setPositioned((prev) => {
                 if (!prev) return prev;
-                return { ...prev, nodes: applyNodeChanges(changes, prev.nodes) };
+                return { ...prev, nodes: applyNodeChanges(kept, prev.nodes) };
               });
             }}
             onInit={(inst) => {
@@ -441,6 +443,7 @@ export function Graph({
               setFlowReady((n) => n + 1);
             }}
             nodesFocusable
+            deleteKeyCode={null}
             proOptions={{ hideAttribution: true }}
             minZoom={0.2}
           >
