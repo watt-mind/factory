@@ -398,7 +398,7 @@ export function InjectDialog({
   function schemaFor(type: string): Record<string, unknown> | null {
     const route = registryView?.eventTypes.find((r) => r.type === type);
     if (!route) return null;
-    const agent = registryView.agents.find((a) => a.ref === route.agent);
+    const agent = registryView?.agents.find((a) => a.ref === route.agent);
     const s = agent?.inputSchema;
     return isPlainObject(s) ? s : null;
   }
