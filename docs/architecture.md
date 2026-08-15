@@ -183,6 +183,7 @@ The plugin is a convenience layer, not the safety floor. It reaches Claude Code 
 ## 5. Related
 
 - [`event-runtime.md`](event-runtime.md) — the isolated, event-driven runtime for structured one-off agents on generic workspaces; implemented and watched, with [`event-runtime-workers.md`](event-runtime-workers.md), [`event-runtime-schedules.md`](event-runtime-schedules.md) and [`event-runtime-webui.md`](event-runtime-webui.md) covering placement, clock events and the web control plane
+- [`event-runtime-repos.md`](event-runtime-repos.md) — node-local repository provisioning, readiness advertisement, toolchain preflight, and disk-pressure cache eviction for remote workers
 - [`README.md`](../README.md) — how to run it
 - [`SETUP.md`](../SETUP.md) — first-time setup and known gaps
 - [linear.md](file:///Users/hdkiller/Develop/hdkiller/docs/orgs/linear.md) — the execution protocol (source of truth)
