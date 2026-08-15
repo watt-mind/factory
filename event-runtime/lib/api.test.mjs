@@ -1751,9 +1751,11 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
         expect(typeof item.count).toBe("number");
       }
 
-      // noWorkers is boolean false because live workers exist
+      // noWorkers is boolean false because live workers exist; the queued run
+      // has no placement requirements, so it is not a placement anomaly.
       expect(typeof status.anomalies.noWorkers).toBe("boolean");
       expect(status.anomalies.noWorkers).toBe(false);
+      expect(status.anomalies.unmatchedPlacementRuns).toEqual([]);
 
       // StoppedSchedule keys match if present
       const stoppedSchedBlock = extractInterfaceBlock(typesSrc, "StoppedSchedule");
@@ -1894,6 +1896,49 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const status2 = await s.client.status();
       expect(status2.workers.live).toBe(1);
       expect(status2.anomalies.noWorkers).toBe(false);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("GET /status identifies queued runs whose placement matches no active, non-stale worker", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-unmatched-placement-contract-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+    const nowMs = 100000000;
+    const atIso = new Date(nowMs).toISOString();
+    const queue = (runId, placement) => {
+      db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_hash, spec_json, state, attempts, created_at, updated_at)
+         VALUES (?, ?, "dummy", ?, "QUEUED", 1, ?, ?)`,
+      ).run(runId, `idem-${runId}`, JSON.stringify({ placement }), atIso, atIso);
+    };
+
+    queue("run-matched", { node: "lab" });
+    queue("run-unmatched", { node: "gpu", class: "heavy" });
+    queue("run-unconstrained", undefined);
+
+    registerWorker(db, { workerId: "w-live-lab", labels: { node: "lab" }, adapters: ["claude"], now: nowMs });
+    registerWorker(db, { workerId: "w-stale-gpu", labels: { node: "gpu", class: "heavy" }, adapters: ["claude"], now: nowMs - 120000 });
+    registerWorker(db, { workerId: "w-stopped-gpu", labels: { node: "gpu", class: "heavy" }, adapters: ["claude"], now: nowMs });
+    deregisterWorker(db, "w-stopped-gpu", { now: nowMs });
+
+    const s = await makeServer({ db, secret: "sec", now: () => nowMs });
+    try {
+      const status1 = await s.client.status();
+      expect(status1.workers.live).toBe(1);
+      expect(status1.anomalies.noWorkers).toBe(false);
+      expect(status1.anomalies.unmatchedPlacementRuns).toEqual([
+        { runId: "run-unmatched", placement: { node: "gpu", class: "heavy" } },
+      ]);
+
+      registerWorker(db, {
+        workerId: "w-live-gpu",
+        labels: { node: "gpu", class: "heavy" },
+        adapters: ["claude"],
+        now: nowMs,
+      });
+      const status2 = await s.client.status();
+      expect(status2.anomalies.unmatchedPlacementRuns).toEqual([]);
     } finally {
       s.close();
     }

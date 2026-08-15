@@ -390,6 +390,12 @@ export interface ProposalPilingUp {
   threshold: number;
 }
 
+/** A queued run whose placement requirements match no live worker. */
+export interface UnmatchedPlacementRun {
+  runId: string;
+  placement: Record<string, unknown>;
+}
+
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
@@ -409,6 +415,8 @@ export interface StatusView {
     deadLettered: { source: string; eventId: string; lastError: string | null }[];
     stalledWorkers: StalledWorker[];
     stoppedSchedules?: StoppedSchedule[];
+    /** Placement-constrained queued runs that no active, non-stale worker can claim. */
+    unmatchedPlacementRuns?: UnmatchedPlacementRun[];
     /** Queued runs with no live worker to claim them. */
     noWorkers: boolean;
     ambiguousOpenProposals: { runId: string; count: number }[];

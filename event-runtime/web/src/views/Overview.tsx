@@ -328,6 +328,16 @@ export function buildAnomalyRows(
       ],
     });
   }
+  for (const run of anomalies.unmatchedPlacementRuns ?? []) {
+    rows.push({
+      kind: "capacity",
+      text: `queued run ${run.runId} requires placement ${JSON.stringify(run.placement)}, but no live worker matches`,
+      links: [
+        { label: "View run", go: () => callbacks.onJumpRun(run.runId) },
+        { label: "View workers", go: () => callbacks.onNavigate("workers") },
+      ],
+    });
+  }
   if (anomalies.noWorkers && (s?.runs.byState?.QUEUED ?? 0) > 0) {
     rows.push({
       kind: "capacity",
