@@ -2,7 +2,7 @@ import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Overview, groupJournalEntries } from "./Overview";
+import { Overview, groupJournalEntries, buildAnomalyRows } from "./Overview";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
@@ -556,3 +556,134 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
     }
   });
 });
+
+describe("buildAnomalyRows (WM-205)", () => {
+  const callbacks = {
+    onJumpProposal: noop,
+    onJumpRuns: noop,
+    onJumpEvents: noop,
+    onJumpRun: noop,
+    onNavigate: noop,
+  };
+
+  test("correctly categorizes and maps all anomaly kinds", () => {
+    const proposalsMap = new Map([["prop_1", stubProposal]]);
+    const anomalies: StatusView["anomalies"] = {
+      expiredOpenProposals: ["prop_1"],
+      staleLeases: 2,
+      unpublishedOutbox: 1,
+      deadLettered: [{ source: "github", eventId: "e99", lastError: "timeout" }],
+      stalledWorkers: [{ workerId: "w1", runId: "r1", host: "srv1", lastSeen: new Date().toISOString() }],
+      ambiguousOpenProposals: [{ runId: "r2", count: 3 }],
+      noWorkers: true,
+    };
+    const s: StatusView = {
+      ...baseStatus(),
+      runs: { byState: { QUEUED: 4 } },
+    };
+
+    const rows = buildAnomalyRows(anomalies, proposalsMap, callbacks, s);
+    expect(rows.length).toBe(7);
+    expect(rows.map((r) => r.kind)).toEqual([
+      "proposal",
+      "lease",
+      "outbox",
+      "dead_letter",
+      "worker",
+      "ambiguous",
+      "capacity",
+    ]);
+    expect(rows[0]!.proposalId).toBe("prop_1");
+    expect(rows[0]!.proposal?.agent).toBe("triage-scan");
+    expect(rows[1]!.text).toMatch(/stale leases: 2/);
+    expect(rows[2]!.text).toMatch(/unpublished outbox rows: 1/);
+    expect(rows[3]!.requeue).toEqual({ source: "github", eventId: "e99" });
+    expect(rows[4]!.text).toMatch(/stalled worker w1 still holds run r1/);
+    expect(rows[5]!.text).toMatch(/ambiguous open proposals: 3/);
+    expect(rows[6]!.text).toMatch(/4 queued runs and no live worker/);
+  });
+
+  test("returns empty array for undefined anomalies", () => {
+    expect(buildAnomalyRows(undefined, new Map(), callbacks)).toEqual([]);
+  });
+});
+
+describe("Overview 4-Band layout & telemetry (WM-205)", () => {
+  test("renders nominal status banner when no anomalies are present", async () => {
+    const origStatus = api.status;
+    const origProposals = api.proposals;
+    const origOutbox = api.outbox;
+    const origJournal = api.journal;
+    api.status = async () => baseStatus();
+    api.proposals = async () => ({ proposals: [] });
+    api.outbox = async () => ({ outbox: [] });
+    api.journal = async () => ({ entries: [], head: 0 });
+
+    try {
+      const { getByText } = renderOverview();
+      await waitFor(() => getByText(/Doctor: All systems nominal/));
+      expect(getByText(/No active anomalies detected/)).toBeTruthy();
+    } finally {
+      api.status = origStatus;
+      api.proposals = origProposals;
+      api.outbox = origOutbox;
+      api.journal = origJournal;
+    }
+  });
+
+  test("renders Fleet Capacity meter and Recent Outcomes strip", async () => {
+    const origStatus = api.status;
+    const origProposals = api.proposals;
+    const origOutbox = api.outbox;
+    const origJournal = api.journal;
+    api.status = async () => ({
+      ...baseStatus(),
+      workers: { live: 3, busy: 1, stale: 0 },
+    });
+    api.proposals = async () => ({ proposals: [] });
+    api.outbox = async () => ({
+      outbox: [
+        {
+          seq: 1,
+          created_at: new Date().toISOString(),
+          published_at: new Date().toISOString(),
+          event: {
+            type: "factory.run.finished",
+            source: "factory",
+            eventId: "evt-out-1",
+            payload: { outcome: "PR_OPEN #42" },
+          },
+        },
+      ],
+    });
+    api.journal = async () => ({
+      head: 3,
+      entries: [
+        entry({ seq: 3, runId: "run_term_1", from: "RUNNING", to: "COMPLETED" }),
+        entry({ seq: 2, runId: "run_term_2", from: "RUNNING", to: "FAILED" }),
+        entry({ seq: 1, runId: "run_term_3", from: "LEASED", to: "RUNNING" }),
+      ],
+    });
+
+    try {
+      const { getByText, getByTitle } = renderOverview();
+
+      await waitFor(() => getByText(/Worker Fleet Capacity/));
+      expect(getByText(/3 live · 1 busy · 2 idle/)).toBeTruthy();
+
+      // Recent outcomes strip displays completed & failed terminal entries (2 total)
+      expect(getByText(/Recent Outcomes \(2\)/)).toBeTruthy();
+      expect(getByTitle(/run_term_1 · COMPLETED/)).toBeTruthy();
+      expect(getByTitle(/run_term_2 · FAILED/)).toBeTruthy();
+
+      // Outbox summary preview
+      expect(getByText("[PR_OPEN #42]")).toBeTruthy();
+    } finally {
+      api.status = origStatus;
+      api.proposals = origProposals;
+      api.outbox = origOutbox;
+      api.journal = origJournal;
+    }
+  });
+});
+

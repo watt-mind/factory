@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { hashPath } from "../hash";
 import { useNow, useRequeuePoll } from "../hooks";
-import type { JournalEntry, EventFocus, Proposal, RunState } from "../types";
+import type { JournalEntry, EventFocus, Proposal, RunState, StatusView } from "../types";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import {
@@ -79,6 +79,139 @@ export function groupJournalEntries(entries: JournalEntry[]): ActivityGroup[] {
   return groups;
 }
 
+export type AnomalyKind =
+  | "proposal"
+  | "dead_letter"
+  | "worker"
+  | "lease"
+  | "outbox"
+  | "capacity"
+  | "ambiguous";
+
+export interface AnomalyRow {
+  kind: AnomalyKind;
+  text: string;
+  links: { label: string; go: () => void }[];
+  requeue?: { source: string; eventId: string };
+  dismissProposalId?: string;
+  proposalId?: string;
+  proposal?: Proposal;
+}
+
+/**
+ * Pure function to construct anomaly rows from doctor status data (WM-95, WM-205).
+ */
+export function buildAnomalyRows(
+  anomalies: StatusView["anomalies"] | undefined,
+  proposalsById: Map<string, Proposal>,
+  callbacks: {
+    onJumpProposal: (id: string) => void;
+    onJumpRuns: (state?: string) => void;
+    onJumpEvents: (focus: EventFocus) => void;
+    onJumpRun: (runId: string) => void;
+    onNavigate: (path: string) => void;
+  },
+  s?: StatusView,
+  now?: number,
+): AnomalyRow[] {
+  const rows: AnomalyRow[] = [];
+  if (!anomalies) return rows;
+
+  for (const id of anomalies.expiredOpenProposals) {
+    rows.push({
+      kind: "proposal",
+      text: `expired open proposal ${id}`,
+      proposalId: id,
+      proposal: proposalsById.get(id),
+      links: [{ label: "View proposal", go: () => callbacks.onJumpProposal(id) }],
+      dismissProposalId: id,
+    });
+  }
+  if (anomalies.staleLeases > 0) {
+    rows.push({
+      kind: "lease",
+      text: `stale leases: ${anomalies.staleLeases}`,
+      links: [{ label: "View leased runs", go: () => callbacks.onJumpRuns("LEASED") }],
+    });
+  }
+  if (anomalies.unpublishedOutbox > 0) {
+    rows.push({
+      kind: "outbox",
+      text: `unpublished outbox rows: ${anomalies.unpublishedOutbox}`,
+      links: [
+        {
+          label: "View outbox",
+          go: () => document.getElementById("outbox")?.scrollIntoView({ block: "start" }),
+        },
+      ],
+    });
+  }
+  for (const d of anomalies.deadLettered) {
+    rows.push({
+      kind: "dead_letter",
+      text: `dead-lettered (${d.source}, ${d.eventId}): ${d.lastError ?? "unknown error"}`,
+      links: [
+        {
+          label: "View event",
+          go: () => callbacks.onJumpEvents({ status: "dead_lettered", source: d.source, eventId: d.eventId }),
+        },
+      ],
+      requeue: { source: d.source, eventId: d.eventId },
+    });
+  }
+  for (const w of anomalies.stalledWorkers) {
+    const ageStr = now ? ago(w.lastSeen, now) : "stalled";
+    rows.push({
+      kind: "worker",
+      text: `stalled worker ${w.workerId} still holds run ${w.runId} — last heartbeat ${ageStr} on ${w.host}`,
+      links: [
+        { label: "View worker", go: () => callbacks.onNavigate(hashPath("workers", w.workerId)) },
+        { label: "View run", go: () => callbacks.onJumpRun(w.runId) },
+      ],
+    });
+  }
+  for (const amb of anomalies.ambiguousOpenProposals ?? []) {
+    rows.push({
+      kind: "ambiguous",
+      text: `ambiguous open proposals: ${amb.count} open proposals exist for run ${amb.runId}`,
+      links: [
+        { label: "View run", go: () => callbacks.onJumpRun(amb.runId) },
+        { label: "View proposals", go: () => callbacks.onNavigate("proposals") },
+      ],
+    });
+  }
+  if (anomalies.noWorkers) {
+    const queued = s?.runs.byState.QUEUED ?? 0;
+    rows.push({
+      kind: "capacity",
+      text: `${queued} queued run${queued === 1 ? "" : "s"} and no live worker to claim ${queued === 1 ? "it" : "them"} — nothing will start until one registers`,
+      links: [
+        { label: "View workers", go: () => callbacks.onNavigate("workers") },
+        { label: "View queued runs", go: () => callbacks.onJumpRuns("QUEUED") },
+      ],
+    });
+  }
+
+  return rows;
+}
+
+function CategoryPill({ kind }: { kind: AnomalyKind }) {
+  const labels: Record<AnomalyKind, string> = {
+    proposal: "PROPOSAL",
+    dead_letter: "DEAD-LETTER",
+    lease: "STALLED LEASE",
+    worker: "WORKER LEASE",
+    outbox: "OUTBOX",
+    capacity: "CAPACITY",
+    ambiguous: "AMBIGUOUS",
+  };
+  return (
+    <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wider bg-(--surface-2) text-(--hue-warn) border border-(--hue-warn)/20">
+      {labels[kind]}
+    </span>
+  );
+}
+
 function OverviewTile({
   label,
   value,
@@ -119,6 +252,116 @@ function OverviewScopeNotice({ context }: { context: OperatorContext }) {
 }
 
 /**
+ * Fleet Capacity Utilization Bar (WM-205)
+ */
+function FleetCapacityMeter({
+  live,
+  busy,
+  stale,
+  onClick,
+}: {
+  live: number;
+  busy: number;
+  stale: number;
+  onClick: () => void;
+}) {
+  const idle = Math.max(0, live - busy);
+  const total = live + stale;
+  const busyPct = total > 0 ? (busy / total) * 100 : 0;
+  const idlePct = total > 0 ? (idle / total) * 100 : 0;
+  const stalePct = total > 0 ? (stale / total) * 100 : 0;
+
+  return (
+    <div
+      onClick={onClick}
+      className="cursor-pointer rounded-lg border border-(--border) bg-(--surface-1) p-3 transition hover:border-(--border-focus,var(--accent))"
+      title="Click to view workers"
+    >
+      <div className="mb-2 flex items-baseline justify-between text-[11px]">
+        <span className="font-medium uppercase tracking-wide text-(--text-faint)">Worker Fleet Capacity</span>
+        <span className="mono text-(--text-dim)">
+          {live} live · {busy} busy · {idle} idle{stale > 0 ? ` · ${stale} stale` : ""}
+        </span>
+      </div>
+      <div className="flex h-2 w-full overflow-hidden rounded bg-(--surface-2)">
+        {busyPct > 0 && (
+          <div
+            style={{ width: `${busyPct}%` }}
+            className="bg-(--hue-info) transition-all"
+            title={`Busy: ${busy}`}
+          />
+        )}
+        {idlePct > 0 && (
+          <div
+            style={{ width: `${idlePct}%` }}
+            className="bg-(--hue-ok) transition-all"
+            title={`Idle: ${idle}`}
+          />
+        )}
+        {stalePct > 0 && (
+          <div
+            style={{ width: `${stalePct}%` }}
+            className="bg-(--hue-warn) transition-all"
+            title={`Stale: ${stale}`}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Recent Outcomes Tick Strip (WM-205) — derived from journal feed
+ */
+function RecentOutcomesStrip({
+  entries,
+  now,
+  onJumpRun,
+}: {
+  entries: JournalEntry[];
+  now: number;
+  onJumpRun: (runId: string) => void;
+}) {
+  const terminalStates = new Set(["COMPLETED", "FAILED", "REFUSED", "TIMED_OUT", "CANCELLED"]);
+  const outcomes = entries.filter((e) => terminalStates.has(e.to)).slice(0, 36);
+
+  if (outcomes.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-(--border) bg-(--surface-1) p-3">
+      <div className="mb-2 flex items-baseline justify-between text-[11px]">
+        <span className="font-medium uppercase tracking-wide text-(--text-faint)">
+          Recent Outcomes ({outcomes.length})
+        </span>
+        <span className="text-[11px] text-(--text-faint)">newest → oldest</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {outcomes.map((o) => {
+          const hue =
+            o.to === "COMPLETED"
+              ? "var(--hue-ok)"
+              : o.to === "FAILED"
+                ? "var(--hue-err)"
+                : o.to === "TIMED_OUT"
+                  ? "var(--hue-warn)"
+                  : "var(--text-faint)";
+          return (
+            <button
+              key={o.seq}
+              type="button"
+              onClick={() => onJumpRun(o.runId)}
+              className="h-4 w-2 rounded-xs transition-opacity hover:opacity-100 opacity-80"
+              style={{ backgroundColor: hue }}
+              title={`${o.runId} · ${o.to}${o.reason ? ` (${o.reason})` : ""} · ${ago(o.at, now)}`}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Live activity feed off GET /journal: first fetch seeds the latest entries,
  * then each 2 s poll asks only for `since=<last head>` and prepends what is
  * new — an append-only log consumed incrementally, capped at FEED_CAP shown.
@@ -150,9 +393,11 @@ function useJournalFeed(): { entries: JournalEntry[]; isPending: boolean; isErro
 }
 
 /**
- * Overview (webui spec §4.1 + doc §10.4, pipeline OPS-360) — the dashboard:
- * promoted doctor anomaly deck, 3-stage pipeline layout (Intake -> Watched Gate -> Execution),
- * live journal feed, and outbox results.
+ * Overview (webui spec §4.1 + doc §10.4, pipeline OPS-360, WM-205) — the 4-band dashboard:
+ * Band A: Promoted Doctor Anomaly Deck / Nominal status
+ * Band B: 4-Stage Workload Pipeline & Capacity Funnel
+ * Band C: Fleet Capacity & Recent Outcomes Telemetry
+ * Band D: Housekeeping & Live Operations Feeds
  */
 export function Overview({
   connected,
@@ -162,7 +407,7 @@ export function Overview({
   onJumpEvents,
   onJumpRuns,
   onNavigate,
-  onJumpExpired,
+  onJumpExpired: _onJumpExpired,
   onJumpGraph,
   onInject,
 }: {
@@ -232,85 +477,27 @@ export function Overview({
 
   const s = status.data;
   const anomalies = s?.anomalies;
-  const proposalsById = new Map<string, Proposal>(
-    (proposalsForDeck.data?.proposals ?? []).map((p) => [p.id, p]),
-  );
-  const anomalyRows: {
-    text: string;
-    links: { label: string; go: () => void }[];
-    requeue?: { source: string; eventId: string };
-    dismissProposalId?: string;
-    proposalId?: string;
-    proposal?: Proposal;
-  }[] = [];
-  if (anomalies) {
-    for (const id of anomalies.expiredOpenProposals) {
-      anomalyRows.push({
-        text: `expired open proposal ${id}`,
-        proposalId: id,
-        proposal: proposalsById.get(id),
-        links: [{ label: "View proposal", go: () => onJumpProposal(id) }],
-        dismissProposalId: id,
-      });
-    }
-    if (anomalies.staleLeases > 0) {
-      anomalyRows.push({
-        text: `stale leases: ${anomalies.staleLeases}`,
-        links: [{ label: "View leased runs", go: () => onJumpRuns("LEASED") }],
-      });
-    }
-    if (anomalies.unpublishedOutbox > 0) {
-      anomalyRows.push({
-        text: `unpublished outbox rows: ${anomalies.unpublishedOutbox}`,
-        links: [
-          {
-            label: "View outbox",
-            go: () => document.getElementById("outbox")?.scrollIntoView({ block: "start" }),
-          },
-        ],
-      });
-    }
-    for (const d of anomalies.deadLettered) {
-      anomalyRows.push({
-        text: `dead-lettered (${d.source}, ${d.eventId}): ${d.lastError ?? "unknown error"}`,
-        links: [
-          {
-            label: "View event",
-            go: () => onJumpEvents({ status: "dead_lettered", source: d.source, eventId: d.eventId }),
-          },
-        ],
-        requeue: { source: d.source, eventId: d.eventId },
-      });
-    }
-    for (const w of anomalies.stalledWorkers) {
-      anomalyRows.push({
-        text: `stalled worker ${w.workerId} still holds run ${w.runId} — last heartbeat ${ago(w.lastSeen, now)} on ${w.host}`,
-        links: [
-          { label: "View worker", go: () => onNavigate(hashPath("workers", w.workerId)) },
-          { label: "View run", go: () => onJumpRun(w.runId) },
-        ],
-      });
-    }
-    for (const amb of anomalies.ambiguousOpenProposals ?? []) {
-      anomalyRows.push({
-        text: `ambiguous open proposals: ${amb.count} open proposals exist for run ${amb.runId}`,
-        links: [
-          { label: "View run", go: () => onJumpRun(amb.runId) },
-          { label: "View proposals", go: () => onNavigate("proposals") },
-        ],
-      });
-    }
-    if (anomalies.noWorkers) {
-      const queued = s?.runs.byState.QUEUED ?? 0;
-      anomalyRows.push({
-        text: `${queued} queued run${queued === 1 ? "" : "s"} and no live worker to claim ${queued === 1 ? "it" : "them"} — nothing will start until one registers`,
-        links: [
-          { label: "View workers", go: () => onNavigate("workers") },
-          { label: "View queued runs", go: () => onJumpRuns("QUEUED") },
-        ],
-      });
-    }
-  }
+  const proposalsById = useMemo(() => {
+    return new Map<string, Proposal>(
+      (proposalsForDeck.data?.proposals ?? []).map((p) => [p.id, p]),
+    );
+  }, [proposalsForDeck.data?.proposals]);
+
+  const anomalyRows = useMemo(() => {
+    return buildAnomalyRows(
+      anomalies,
+      proposalsById,
+      {
+        onJumpProposal,
+        onJumpRuns,
+        onJumpEvents,
+        onJumpRun,
+        onNavigate,
+      },
+      s,
+      now,
+    );
+  }, [anomalies, proposalsById, onJumpProposal, onJumpRuns, onJumpEvents, onJumpRun, onNavigate, s, now]);
 
   const hasAnomalies = anomalyRows.length > 0;
 
@@ -348,6 +535,8 @@ export function Overview({
   const eventValue = (k: string, factory: number) => (eventTally ? (eventTally[k] ?? 0) : factory);
   const runValue = (k: RunState) => (runTally ? (runTally[k] ?? 0) : (s?.runs.byState[k] ?? 0));
 
+  const groupedFeed = useMemo(() => groupJournalEntries(feed.entries), [feed.entries]);
+
   return (
     <div className="h-full min-w-0 overflow-auto p-5">
       <div className="mb-4 flex items-baseline justify-between gap-3">
@@ -363,8 +552,8 @@ export function Overview({
       </div>
       <OverviewScopeNotice context={context} />
 
-      {/* Promoted Doctor Deck when anomalies exist */}
-      {hasAnomalies && (
+      {/* Band A: Promoted Doctor Deck or Nominal Status (WM-205) */}
+      {hasAnomalies ? (
         <div className="mb-5 rounded-lg border border-(--hue-warn) bg-[color-mix(in_oklch,var(--hue-warn)_8%,var(--surface-1))] p-3">
           <div className="mb-2 flex items-center justify-between">
             <div className="flex items-center gap-2 text-[12px] font-semibold text-(--hue-warn) uppercase tracking-wide">
@@ -379,45 +568,48 @@ export function Overview({
                 key={i}
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0"
               >
-                {a.proposalId ? (
-                  <span className="min-w-0 flex flex-col gap-0.5 text-[12px] text-(--hue-warn)">
-                    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words">
-                      <span>expired open proposal</span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span>agent: {a.proposal?.agent ?? "—"}</span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span>
-                        {a.proposal?.decision ?? "—"}
-                        {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
+                <div className="min-w-0 flex items-start sm:items-center gap-2">
+                  <CategoryPill kind={a.kind} />
+                  {a.proposalId ? (
+                    <span className="min-w-0 flex flex-col gap-0.5 text-[12px] text-(--hue-warn)">
+                      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words">
+                        <span>expired open proposal</span>
+                        <span className="text-(--text-faint)">·</span>
+                        <span>agent: {a.proposal?.agent ?? "—"}</span>
+                        <span className="text-(--text-faint)">·</span>
+                        <span>
+                          {a.proposal?.decision ?? "—"}
+                          {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
+                        </span>
+                        <span className="text-(--text-faint)">·</span>
+                        <span className="text-(--text-faint)">
+                          origin {a.proposal?.eventSource ?? "—"}/{a.proposal?.eventId ?? "—"}
+                        </span>
+                        <span className="text-(--text-faint)">·</span>
+                        {a.proposal?.created_at ? (
+                          <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
+                        ) : (
+                          <span className="text-(--text-faint)">age —</span>
+                        )}
                       </span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span className="text-(--text-faint)">
-                        origin {a.proposal?.eventSource ?? "—"}/{a.proposal?.eventId ?? "—"}
+                      <span
+                        className="mono truncate text-[11px] text-(--text-faint) cursor-pointer"
+                        title={`${a.proposalId} — click to copy`}
+                        onClick={() => copyText(a.proposalId!, "proposal id")}
+                      >
+                        {a.proposalId}
                       </span>
-                      <span className="text-(--text-faint)">·</span>
-                      {a.proposal?.created_at ? (
-                        <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
-                      ) : (
-                        <span className="text-(--text-faint)">age —</span>
-                      )}
                     </span>
+                  ) : (
                     <span
-                      className="mono truncate text-[11px] text-(--text-faint) cursor-pointer"
-                      title={`${a.proposalId} — click to copy`}
-                      onClick={() => copyText(a.proposalId!, "proposal id")}
+                      className="min-w-0 break-words sm:truncate text-[12px]"
+                      title={a.text}
+                      style={{ color: "var(--hue-warn)" }}
                     >
-                      {a.proposalId}
+                      {a.text}
                     </span>
-                  </span>
-                ) : (
-                  <span
-                    className="min-w-0 break-words sm:truncate text-[12px]"
-                    title={a.text}
-                    style={{ color: "var(--hue-warn)" }}
-                  >
-                    {a.text}
-                  </span>
-                )}
+                  )}
+                </div>
                 <span className="flex flex-wrap items-center gap-1.5 sm:gap-2 sm:shrink-0">
                   <Button onClick={() => copyText(a.text, "anomaly")}>Copy</Button>
                   {a.requeue && (
@@ -447,19 +639,30 @@ export function Overview({
           </div>
           <VerbError error={requeue.error} />
         </div>
+      ) : (
+        <div className="mb-5 flex items-center justify-between rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-2.5 text-[12px] text-(--text-dim)">
+          <div className="flex items-center gap-2">
+            <span className="size-2 rounded-full bg-(--hue-ok)" />
+            <span className="font-medium text-(--text)">Doctor: All systems nominal</span>
+            <span className="text-(--text-faint)">·</span>
+            <span className="text-(--text-faint)">No active anomalies detected</span>
+          </div>
+          <div className="text-[11px] text-(--text-faint)">
+            {feedsUnscoped ? "factory-wide" : "in scope"}
+          </div>
+        </div>
       )}
 
-      {status.isPending && !s && <div className="mb-5 text-(--text-faint)">Loading status…</div>}
-      {status.isError && !s && (
-        <div className="mb-5 text-(--text-faint)">Cannot reach the control API — tiles will appear when it is up.</div>
-      )}
-
-      {/* 3-Stage Pipeline Overview */}
-      {s && (
-        <div className="mb-6 space-y-4">
-          {/* Stage 1: Intake & Gate */}
-          <div className="grid gap-3 lg:grid-cols-12">
-            <div className="lg:col-span-7">
+      {/* Band B: Workload Pipeline & Capacity Funnel (WM-205) */}
+      {!s ? (
+        <div className="mb-6 text-(--text-faint)">
+          {status.isError ? "Cannot reach the control API." : "Loading overview…"}
+        </div>
+      ) : (
+        <div className="mb-6 flex flex-col gap-4">
+          {/* Stage 1: Event Intake & Watched Approval Gate */}
+          <div className="grid gap-4 lg:grid-cols-3">
+            <div className="lg:col-span-2">
               <div className="mb-1.5 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
                 1. Event Intake & Triage
               </div>
@@ -479,7 +682,7 @@ export function Overview({
               </div>
             </div>
 
-            <div className="lg:col-span-5">
+            <div>
               <div className="mb-1.5 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
                 2. Watched Approval Gate
               </div>
@@ -494,13 +697,13 @@ export function Overview({
                   label="proposals · expired"
                   value={proposalExpired}
                   hue={proposalExpired > 0 ? "var(--hue-warn)" : undefined}
-                  onClick={onJumpExpired}
+                  onClick={() => onNavigate("proposals")}
                 />
               </div>
             </div>
           </div>
 
-          {/* Stage 2: Execution Fleet & Workers */}
+          {/* Stage 2: Execution Fleet & Capacity (Fixed Hue Budget) */}
           <div>
             <div className="mb-1.5 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
               3. Execution Fleet & Capacity
@@ -508,24 +711,43 @@ export function Overview({
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
               {activeRunStates.map((k) => {
                 const value = runValue(k);
+                // Fix hue budget (WM-205): normal running runs are not warnings!
+                const activeHue =
+                  value > 0
+                    ? k === "RUNNING" || k === "LEASED"
+                      ? "var(--hue-info)"
+                      : k === "VERIFYING"
+                        ? "var(--hue-verify)"
+                        : undefined
+                    : undefined;
                 return (
                   <OverviewTile
                     key={k}
                     label={`active · ${k.toLowerCase()}`}
                     value={value}
-                    hue={value > 0 ? "var(--hue-warn)" : undefined}
+                    hue={activeHue}
                     onClick={() => onJumpRuns(k)}
                   />
                 );
               })}
               {terminalRunStates.map((k) => {
                 const value = runValue(k);
+                const terminalHue =
+                  value > 0
+                    ? k === "COMPLETED"
+                      ? "var(--hue-ok)"
+                      : k === "FAILED"
+                        ? "var(--hue-err)"
+                        : k === "TIMED_OUT"
+                          ? "var(--hue-warn)"
+                          : undefined
+                    : undefined;
                 return (
                   <OverviewTile
                     key={k}
                     label={`runs · ${k.toLowerCase()}`}
                     value={value}
-                    hue={k === "FAILED" && value > 0 ? "var(--hue-err)" : undefined}
+                    hue={terminalHue}
                     onClick={() => onJumpRuns(k)}
                   />
                 );
@@ -554,7 +776,22 @@ export function Overview({
             </div>
           </div>
 
-          {/* Stage 3: Artifact store health */}
+          {/* Band C: Fleet Capacity Utilization & Recent Outcomes Strip (WM-205) */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <FleetCapacityMeter
+              live={s.workers.live}
+              busy={s.workers.busy}
+              stale={s.workers.stale}
+              onClick={() => onNavigate("workers")}
+            />
+            <RecentOutcomesStrip
+              entries={feed.entries}
+              now={now}
+              onJumpRun={onJumpRun}
+            />
+          </div>
+
+          {/* Band D: Artifact Store Housekeeping */}
           <div>
             <div className="mb-1.5 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
               4. Artifact Store
@@ -573,18 +810,7 @@ export function Overview({
         </div>
       )}
 
-      {!hasAnomalies && (
-        <Section title="Doctor">
-          {!s ? (
-            <div className="text-(--text-faint)">
-              {status.isError ? "Cannot reach the control API." : "Loading anomalies…"}
-            </div>
-          ) : (
-            <div className="text-(--text-faint)">No anomalies.</div>
-          )}
-        </Section>
-      )}
-
+      {/* Band D Feeds: Real-time Activity Stream & Outbox Results */}
       <div className="grid gap-x-5 xl:grid-cols-2">
         <Section
           title={
@@ -607,7 +833,7 @@ export function Overview({
               className="max-h-[420px] overflow-y-auto rounded-md border border-(--border) px-3 py-1"
               aria-live="off"
             >
-              {groupJournalEntries(feed.entries).map((g) => (
+              {groupedFeed.map((g) => (
                 <div key={g.seq} className="flex items-baseline gap-2 border-b border-(--border) py-1.5 last:border-0">
                   <Ago iso={g.at} now={now} className="mono w-[52px] shrink-0 text-(--text-faint)" />
                   <JumpLink
@@ -618,7 +844,8 @@ export function Overview({
                     {shortId(g.runId)}
                   </JumpLink>
                   <span className="shrink-0">
-                    {g.from ?? "·"} → {g.count > 1 ? "… → " : ""}
+                    {g.from ? `${g.from} → ` : "START → "}
+                    {g.count > 1 ? "… → " : ""}
                     <StateBadge state={g.to} />
                   </span>
                   <span
@@ -640,52 +867,69 @@ export function Overview({
           card={false}
         >
           <div id="outbox">
-          {(outbox.data?.outbox ?? []).length === 0 ? (
-            <div className="text-(--text-faint)">
-              {outbox.isPending && !outbox.data
-                ? "Loading outbox…"
-                : outbox.isError && !outbox.data
-                  ? "Cannot reach the control API."
-                  : "Nothing published yet."}
-            </div>
-          ) : (
-            <div className="rounded-md border border-(--border) px-3 py-1" aria-live="off">
-              {(outbox.data?.outbox ?? []).map((o) => (
-                <div key={o.seq} className="border-b border-(--border) py-1.5 last:border-0">
-                  <div className="flex items-baseline justify-between gap-3">
-                    {(() => {
-                      const type = String(o.event.type ?? "unknown event");
-                      const source = typeof o.event.source === "string" ? o.event.source : null;
-                      const eventId = typeof o.event.eventId === "string" ? o.event.eventId : null;
-                      return source && eventId ? (
-                        <JumpLink
-                          onClick={() => onJumpEvents({ source, eventId })}
-                          title={`Open origin event — ${type}`}
-                          className="max-w-[70%] truncate"
-                        >
-                          {type}
-                        </JumpLink>
-                      ) : (
-                        <span className="truncate text-(--text-dim)" title={type}>
-                          {type}
-                        </span>
-                      );
-                    })()}
-                    {o.published_at ? (
-                      <Ago iso={o.published_at} now={now} className="mono shrink-0 text-(--text-faint)" />
-                    ) : (
-                      <span className="shrink-0 text-[11px] text-(--hue-warn)">
-                        unpublished
-                      </span>
-                    )}
-                  </div>
-                  <Disclosure label="event JSON">
-                    <JsonBlock value={o.event} />
-                  </Disclosure>
-                </div>
-              ))}
-            </div>
-          )}
+            {(outbox.data?.outbox ?? []).length === 0 ? (
+              <div className="text-(--text-faint)">
+                {outbox.isPending && !outbox.data
+                  ? "Loading outbox…"
+                  : outbox.isError && !outbox.data
+                    ? "Cannot reach the control API."
+                    : "Nothing published yet."}
+              </div>
+            ) : (
+              <div className="rounded-md border border-(--border) px-3 py-1" aria-live="off">
+                {(outbox.data?.outbox ?? []).map((o) => {
+                  const type = String(o.event.type ?? "unknown event");
+                  const source = typeof o.event.source === "string" ? o.event.source : null;
+                  const eventId = typeof o.event.eventId === "string" ? o.event.eventId : null;
+                  const payload = (o.event.payload ?? {}) as Record<string, unknown>;
+                  const summary =
+                    typeof payload.outcome === "string"
+                      ? payload.outcome
+                      : typeof payload.recommendation === "string"
+                        ? payload.recommendation
+                        : typeof payload.verdict === "string"
+                          ? payload.verdict
+                          : null;
+
+                  return (
+                    <div key={o.seq} className="border-b border-(--border) py-1.5 last:border-0">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <div className="flex items-baseline gap-2 min-w-0 max-w-[75%]">
+                          {source && eventId ? (
+                            <JumpLink
+                              onClick={() => onJumpEvents({ source, eventId })}
+                              title={`Open origin event — ${type}`}
+                              className="truncate font-medium"
+                            >
+                              {type}
+                            </JumpLink>
+                          ) : (
+                            <span className="truncate text-(--text-dim) font-medium" title={type}>
+                              {type}
+                            </span>
+                          )}
+                          {summary && (
+                            <span className="mono truncate text-[11px] text-(--text-faint)">
+                              [{summary}]
+                            </span>
+                          )}
+                        </div>
+                        {o.published_at ? (
+                          <Ago iso={o.published_at} now={now} className="mono shrink-0 text-(--text-faint)" />
+                        ) : (
+                          <span className="shrink-0 text-[11px] text-(--hue-warn)">
+                            unpublished
+                          </span>
+                        )}
+                      </div>
+                      <Disclosure label="event JSON">
+                        <JsonBlock value={o.event} />
+                      </Disclosure>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </Section>
       </div>
