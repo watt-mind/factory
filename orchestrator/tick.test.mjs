@@ -22,7 +22,9 @@ function withLock(content, run) {
 describe("observeChildTermination", () => {
   test("handles an asynchronous spawn error and settles only once", async () => {
     const child = new EventEmitter();
-    const spawnError = Object.assign(new Error("spawn agent ENOENT"), { code: "ENOENT" });
+    const spawnError = Object.assign(new Error("spawn agent ENOENT"), {
+      code: "ENOENT",
+    });
     const outcomes = [];
 
     observeChildTermination(child, async (outcome) => {
