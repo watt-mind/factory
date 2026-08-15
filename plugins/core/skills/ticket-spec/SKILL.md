@@ -27,6 +27,10 @@ It is fine for the verification command to _fail_ — that's the bug. It must no
 
 Include the test files and the docs the change will touch. A path the agent needs but doesn't own means it stops and blocks.
 
+**Generated outputs must be owned with their source.** When a source path has generated copies, every ticket that may edit that source must include those generated outputs in `Owned Paths`; otherwise verification can require changes the implementing agent is forbidden to make. In this repo, owning any path under `shared/` therefore also requires owning `dist/**` and `plugins/core/**`, because `bun build/emit.mjs --check` verifies both generated trees. Apply the same rule to any other source-to-generated-output relationship you discover while specifying a ticket.
+
+WM-289 is the worked failure: its spec owned `shared/` but omitted `dist/AGENTS.floor.md`. The agent correctly edited the source, then had to block because regenerating the stale emitted copy would have exceeded its Owned Paths. The correct spec would have included the relevant `shared/**` source plus `dist/**` and `plugins/core/**`, allowing `bun build/emit.mjs` and the declared verification to complete in scope.
+
 **Owned Paths orders nothing — `blocked by` relations do.** Disjoint paths only mean two tickets can run _simultaneously_; if one consumes the other's output (a helper it adds, a migration it lands), they must not, and the dispatcher can't see that from globs. Set the Linear `blocked by` relation when you spec a ticket that builds on an open one — dispatch holds it until the blocker is `Done`/`Canceled` and releases it automatically. A spec whose hidden prerequisite is only mentioned in prose will dispatch anyway and burn the run.
 
 **Never promote what you couldn't verify against the actual codebase.** If exploration didn't find the code, that's a hold, not a guess.

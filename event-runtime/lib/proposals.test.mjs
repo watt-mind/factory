@@ -179,9 +179,10 @@ describe("approveProposal after TTL expiry (§12)", () => {
   test("changed conditions: stale proposal superseded, new open proposal, run stays PROPOSED with fresh spec", () => {
     const { db, proposal, runId } = planned();
     const later = NOW + TTL_MS + 1;
-    // adapterOverride forces the re-planned spec to differ from the stale one.
+    // adapterOverride forces the re-planned spec to differ from the stale one
+    // (the registered route is pi since WM-215, so claude is the off-route value).
     const result = approveProposal(db, registry, proposal.id, {
-      actor: "operator", now: later, policyVersion: "git:test", adapterOverride: "pi",
+      actor: "operator", now: later, policyVersion: "git:test", adapterOverride: "claude",
     });
 
     expect(result.approved).toBe(false);
@@ -189,7 +190,7 @@ describe("approveProposal after TTL expiry (§12)", () => {
     expect(result.proposal.id).not.toBe(proposal.id);
     expect(result.proposal.status).toBe("open");
     expect(result.proposal.run_id).toBe(runId);
-    expect(result.proposal.spec.adapter).toBe("pi");
+    expect(result.proposal.spec.adapter).toBe("claude");
     expect(result.proposal.created_at).toBe(new Date(later).toISOString());
 
     // The stale proposal was never executed.
@@ -198,7 +199,7 @@ describe("approveProposal after TTL expiry (§12)", () => {
 
     // The still-PROPOSED run carries the fresh spec, atomically with the swap.
     const run = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
-    expect(JSON.parse(run.spec_json).adapter).toBe("pi");
+    expect(JSON.parse(run.spec_json).adapter).toBe("claude");
     expect(run.spec_hash).toBe(result.proposal.spec_hash);
     expect(run.updated_at).toBe(new Date(later).toISOString());
 
@@ -210,7 +211,7 @@ describe("approveProposal after TTL expiry (§12)", () => {
 
     // Approving the fresh proposal (same override, so specs match) queues the run.
     const approved = approveProposal(db, registry, result.proposal.id, {
-      actor: "operator", now: later + 1000, policyVersion: "git:test", adapterOverride: "pi",
+      actor: "operator", now: later + 1000, policyVersion: "git:test", adapterOverride: "claude",
     });
     expect(approved).toEqual({ approved: true, runId });
     expect(runState(db, runId)).toBe("QUEUED");

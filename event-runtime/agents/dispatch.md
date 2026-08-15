@@ -47,6 +47,17 @@ steal a claim, never queue behind the holder.
    touched, risks), then move it to `In Review` + `ai:needs-review`, removing
    `ai:in-progress`.
 
+**The paved road for pushing is `gh` over HTTPS.** Authenticate through the
+`gh` CLI's own stored credentials and let git use its credential helper —
+`gh auth status` tells you whether you already have it, and
+`git push -u origin HEAD` then works without any further setup. Do **not**
+reach for an SSH agent: no adapter guarantees `SSH_AUTH_SOCK` inside the run,
+so an SSH remote is the one failure mode with no recovery from in here. If a
+push is rejected for authentication, re-check `gh auth status` and push again
+over HTTPS (`gh repo set-default` / an `https://github.com/...` remote URL) —
+do not treat the first SSH failure as a blocker; it is a wrong-transport
+error, not a missing credential.
+
 **Never merge.** The merge stage reviews and lands PRs; a ticket agent that
 merges its own work bypasses the review gate entirely.
 

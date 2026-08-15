@@ -14,7 +14,12 @@ import {
   copyText,
   notify,
 } from "../components/ui";
-import { RunDetailBlocks, RunFailureBanner, isCancellable } from "../components/RunDetailBlocks";
+import {
+  RunDetailBlocks,
+  RunFailureBanner,
+  isCancellable,
+} from "../components/RunDetailBlocks";
+import { handleRunArtifactClick } from "./Runs";
 
 /**
  * Full-page run view (`#/run/:id`, webui doc §10.11) — the trace at a
@@ -49,20 +54,28 @@ export function RunFull({
   });
   // Origin event comes from the list view's join, not GET /runs/:id — the
   // cache key is shared with the Runs list, so this is usually a cache hit.
-  const listQ = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), refetchInterval: 2000 });
+  const listQ = useQuery({
+    queryKey: ["runs", "ALL"],
+    queryFn: () => api.runs(),
+    refetchInterval: 2000,
+  });
   const listRow = useMemo(
     () => (listQ.data?.runs ?? []).find((r) => r.runId === runId) ?? null,
     [listQ.data, runId],
   );
 
   const d = detail.data;
-  const attemptsExhausted = d ? d.run.attempts >= d.run.spec.maxAttempts : false;
-  const unknownRun = detail.isError && (detail.error as ApiError).status === 404;
+  const attemptsExhausted = d
+    ? d.run.attempts >= d.run.spec.maxAttempts
+    : false;
+  const unknownRun =
+    detail.isError && (detail.error as ApiError).status === 404;
 
   const invalidate = () => queryClient.invalidateQueries();
 
   const cancel = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason?: string }) => api.cancel(id, reason),
+    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
+      api.cancel(id, reason),
     onSuccess: (_, { id }) => {
       invalidate();
       notify(`Cancelled run ${id}`, "info");
@@ -73,7 +86,8 @@ export function RunFull({
   });
 
   const retry = useMutation({
-    mutationFn: ({ id, force }: { id: string; force: boolean }) => api.retry(id, force),
+    mutationFn: ({ id, force }: { id: string; force: boolean }) =>
+      api.retry(id, force),
     onSuccess: (_, { id, force }) => {
       invalidate();
       notify(`${force ? "Force retried" : "Retried"} run ${id}`, "ok");
@@ -82,7 +96,8 @@ export function RunFull({
     onError: (err) => {
       invalidate();
       // attempts_exhausted → offer the explicit, recorded override (spec §4.3)
-      if (err instanceof ApiError && err.message === "attempts_exhausted") setConfirm("force-retry");
+      if (err instanceof ApiError && err.message === "attempts_exhausted")
+        setConfirm("force-retry");
     },
   });
 
@@ -105,7 +120,10 @@ export function RunFull({
         if (e.key === "i" || e.key === "c") {
           e.preventDefault();
           pendingC = 0;
-          copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command");
+          copyText(
+            `bun event-runtime/cli.mjs inspect ${runId}`,
+            "CLI inspect command",
+          );
           return;
         }
         if (e.key === "l") {
@@ -131,11 +149,19 @@ export function RunFull({
   useEffect(() => {
     const copy = [
       { label: "Back to Runs", hint: "Esc", run: onBack },
-      { label: `Copy ${runId}`, hint: "c", run: () => copyText(runId, "run id") },
+      {
+        label: `Copy ${runId}`,
+        hint: "c",
+        run: () => copyText(runId, "run id"),
+      },
       {
         label: "Copy CLI inspect command",
         hint: "c i",
-        run: () => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command"),
+        run: () =>
+          copyText(
+            `bun event-runtime/cli.mjs inspect ${runId}`,
+            "CLI inspect command",
+          ),
       },
       { label: "Copy link to this run", hint: "c l", run: copyLink },
     ];
@@ -144,13 +170,25 @@ export function RunFull({
     } else {
       setContextActions([
         ...(isCancellable(d.run.state)
-          ? [{ label: `Cancel ${d.run.runId}…`, hint: "x", run: () => setConfirm("cancel") }]
+          ? [
+              {
+                label: `Cancel ${d.run.runId}…`,
+                hint: "x",
+                run: () => setConfirm("cancel"),
+              },
+            ]
           : []),
         ...(d.run.state === "FAILED"
           ? [
               attemptsExhausted
-                ? { label: `Force retry ${d.run.runId}…`, run: () => setConfirm("force-retry") }
-                : { label: `Retry ${d.run.runId}`, run: () => retry.mutate({ id: d.run.runId, force: false }) },
+                ? {
+                    label: `Force retry ${d.run.runId}…`,
+                    run: () => setConfirm("force-retry"),
+                  }
+                : {
+                    label: `Retry ${d.run.runId}`,
+                    run: () => retry.mutate({ id: d.run.runId, force: false }),
+                  },
             ]
           : []),
         ...copy,
@@ -169,7 +207,10 @@ export function RunFull({
               <li className="shrink-0">
                 <Button onClick={onBack}>
                   <span>← Runs</span>
-                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+                  <span
+                    aria-hidden="true"
+                    className="mono ml-1 text-(--text-faint) text-[10px]"
+                  >
                     Esc
                   </span>
                 </Button>
@@ -177,11 +218,17 @@ export function RunFull({
               <li aria-hidden="true" className="text-(--text-faint) shrink-0">
                 /
               </li>
-              <li className="flex min-w-0 items-center gap-2" aria-current="page">
+              <li
+                className="flex min-w-0 items-center gap-2"
+                aria-current="page"
+              >
                 {(d?.run.state || listRow?.state) && (
                   <StateBadge state={d?.run.state ?? listRow!.state} />
                 )}
-                <span className="display mono min-w-0 truncate text-[15px] font-semibold text-(--text)" title={runId}>
+                <span
+                  className="display mono min-w-0 truncate text-[15px] font-semibold text-(--text)"
+                  title={runId}
+                >
                   {runId}
                 </span>
               </li>
@@ -195,35 +242,90 @@ export function RunFull({
               >
                 {d.run.spec.agent}
               </JumpLink>{" "}
-              · {d.run.spec.adapter} · {d.run.attempts}/{d.run.spec.maxAttempts} attempts
+              · {d.run.spec.adapter} · {d.run.attempts}/{d.run.spec.maxAttempts}{" "}
+              attempts
             </span>
           )}
         </div>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        <div className="ml-auto flex shrink-0 items-center gap-3">
+          {d && (
+            <div className="flex items-center gap-1.5">
+              {isCancellable(d.run.state) && (
+                <Button
+                  variant="danger"
+                  disabled={!connected || cancel.isPending}
+                  onClick={() => setConfirm("cancel")}
+                >
+                  Cancel{" "}
+                  <span
+                    className="mono ml-1 text-(--text-faint)"
+                    aria-hidden="true"
+                  >
+                    x
+                  </span>
+                </Button>
+              )}
+              {d.run.state === "FAILED" &&
+                (attemptsExhausted ? (
+                  <Button
+                    disabled={!connected}
+                    onClick={() => setConfirm("force-retry")}
+                  >
+                    Force retry…
+                  </Button>
+                ) : (
+                  <Button
+                    disabled={!connected || retry.isPending}
+                    onClick={() =>
+                      retry.mutate({ id: d.run.runId, force: false })
+                    }
+                  >
+                    Retry
+                  </Button>
+                ))}
+            </div>
+          )}
           <Button onClick={() => copyText(runId, "run id")}>
             <span>Copy id</span>
-            <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+            <span
+              aria-hidden="true"
+              className="mono ml-1 text-(--text-faint) text-[10px]"
+            >
               c
             </span>
           </Button>
-          <Button onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command")}>
+          <Button
+            onClick={() =>
+              copyText(
+                `bun event-runtime/cli.mjs inspect ${runId}`,
+                "CLI inspect command",
+              )
+            }
+          >
             <span>Copy CLI</span>
-            <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+            <span
+              aria-hidden="true"
+              className="mono ml-1 text-(--text-faint) text-[10px]"
+            >
               c i
             </span>
           </Button>
           <Button onClick={copyLink}>
             <span>Copy link</span>
-            <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px]">
+            <span
+              aria-hidden="true"
+              className="mono ml-1 text-(--text-faint) text-[10px]"
+            >
               c l
             </span>
           </Button>
-        </span>
+        </div>
       </header>
 
       {unknownRun ? (
         <div className="min-h-0 flex-1 overflow-auto p-6 text-(--text-faint)">
-          Unknown run <span className="mono">{runId}</span> — it may not exist on this runtime.
+          Unknown run <span className="mono">{runId}</span> — it may not exist
+          on this runtime.
         </div>
       ) : !d ? (
         <div className="min-h-0 flex-1 overflow-auto p-6 text-(--text-faint)">
@@ -234,10 +336,19 @@ export function RunFull({
           {/* Main column: the trace, at a readable measure — the point of the
               page — scrolling on its own so the sidebar never moves with it. */}
           <main className="min-w-0 flex-1 overflow-y-auto">
-            <div className="p-6 xl:max-w-[900px]">
+            <div className="p-6 xl:mx-auto xl:max-w-[900px]">
               {/* The failure first (WM-93) — renders nothing for other states. */}
-              <RunFailureBanner state={d.run.state} lifecycle={d.lifecycle} className="mb-6" />
-              <RunTrace key={runId} runId={runId} state={d.run.state} variant="full" />
+              <RunFailureBanner
+                state={d.run.state}
+                lifecycle={d.lifecycle}
+                className="mb-6"
+              />
+              <RunTrace
+                key={runId}
+                runId={runId}
+                state={d.run.state}
+                variant="full"
+              />
             </div>
           </main>
 
@@ -248,25 +359,33 @@ export function RunFull({
               width below the trace under xl, where there is no room for two
               columns. */}
           <aside className="w-full shrink-0 overflow-y-auto border-(--border) bg-(--surface-1) p-4 xl:w-[460px] xl:border-l">
-            <RunDetailBlocks
-              d={d}
-              now={now}
-              connected={connected}
-              origin={listRow}
-              onJumpAgent={onJumpAgent}
-              onJumpEvent={onJumpEvent}
-              onCancel={() => setConfirm("cancel")}
-              onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
-              onForceRetry={() => setConfirm("force-retry")}
-              retryPending={retry.isPending}
-              verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
-            />
+            <div onClickCapture={handleRunArtifactClick}>
+              <RunDetailBlocks
+                d={d}
+                now={now}
+                connected={connected}
+                origin={listRow}
+                onJumpAgent={onJumpAgent}
+                onJumpEvent={onJumpEvent}
+                onCancel={() => setConfirm("cancel")}
+                onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
+                onForceRetry={() => setConfirm("force-retry")}
+                retryPending={retry.isPending}
+                verbError={
+                  cancel.error ??
+                  (confirm === "force-retry" ? null : retry.error)
+                }
+              />
+            </div>
           </aside>
         </div>
       )}
 
       {confirm === "cancel" && d && (
-        <Dialog title={`Cancel ${d.run.runId}?`} onClose={() => setConfirm(null)}>
+        <Dialog
+          title={`Cancel ${d.run.runId}?`}
+          onClose={() => setConfirm(null)}
+        >
           <div className="mb-3 text-[12px] text-(--text-dim)">
             {d.run.state === "RUNNING"
               ? "The running attempt is stopped with TERM, then KILL, and terminates as cancelled."
@@ -284,7 +403,12 @@ export function RunFull({
             <Button
               variant="danger"
               disabled={cancel.isPending}
-              onClick={() => cancel.mutate({ id: d.run.runId, reason: cancelReason.trim() || undefined })}
+              onClick={() =>
+                cancel.mutate({
+                  id: d.run.runId,
+                  reason: cancelReason.trim() || undefined,
+                })
+              }
             >
               Cancel run
             </Button>
@@ -293,11 +417,14 @@ export function RunFull({
       )}
 
       {confirm === "force-retry" && d && (
-        <Dialog title="Retry past the attempt budget?" onClose={() => setConfirm(null)}>
+        <Dialog
+          title="Retry past the attempt budget?"
+          onClose={() => setConfirm(null)}
+        >
           <div className="mb-3 text-[12px] text-(--text-dim)">
-            This run has used {d.run.attempts}/{d.run.spec.maxAttempts} attempts. Forcing a retry
-            overrides the declared budget and is recorded in the audit trail as an explicit operator
-            override.
+            This run has used {d.run.attempts}/{d.run.spec.maxAttempts}{" "}
+            attempts. Forcing a retry overrides the declared budget and is
+            recorded in the audit trail as an explicit operator override.
           </div>
           <VerbError error={retry.error} />
           <div className="mt-3 flex justify-end gap-2">

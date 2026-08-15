@@ -41,24 +41,34 @@ import { spawn } from "node:child_process";
 import { createWriteStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { PROMPT_SUFFIX } from "./claude.mjs";
+import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
 
-export { PROMPT_SUFFIX };
+// PUSH_CREDENTIAL_ENV is imported, not redeclared: the WM-128 carve-out is one
+// list shared by both LLM adapters (WM-223), so it cannot drift between them.
+export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
 
 export const KILL_GRACE_MS = 30_000;
 
 /** Trace events preview text; the recorder's byte bound is the real limit. */
 const TEXT_PREVIEW_CHARS = 4000;
 
-// pi's documented read-only pattern omits bash/edit from the tool allowlist
-// rather than intercepting calls at runtime — but `write` must stay: every
-// agent-result contract requires the model to write ./result.json, and a run
-// that cannot write it fails contract_violation:missing_result before doing
-// anything (OPS-518; same reasoning as claude.mjs's READ_ONLY_TOOLS keeping
-// Write/Edit). Containment for mutating: false is therefore bash/edit omission
-// plus the workspace-cwd boundary — audited, not enforced, per §14 until
-// stage 2's native capability enforcement (OPS-515).
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write"];
+// Read-only here means "cannot edit the repository", NOT "cannot act". Every
+// tool below is load-bearing for a mutating: false agent, and removing one
+// breaks the run rather than tightening it — this list has been wrong twice:
+//   write  every agent-result contract requires ./result.json; without it a run
+//          fails contract_violation:missing_result before doing anything (OPS-518)
+//   bash   the entire scan fleet works by shelling out — work/triage/sweep/
+//          unblock scans call tools/linear.mjs, merge/ship scans call gh and
+//          git, ci-doctor and disk-diagnose call gh/ssh. Without a shell they
+//          refuse with "reads could not be performed with the available tools"
+//          (WM-301, run_e881a392)
+// `edit` stays out: that is the actual repository-mutation boundary. Same
+// reasoning as claude.mjs, which likewise keeps Bash/Write/Edit for read-only
+// agents and enforces the boundary through workspace confinement instead of
+// tool removal. Containment for mutating: false is therefore the ephemeral or
+// pinned workspace as cwd — audited, not enforced, per §14 until stage 2's
+// native capability enforcement (OPS-515).
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write", "bash"];
 
 export class CliNotFoundError extends Error {
   constructor(message) {
@@ -96,9 +106,34 @@ export function buildPiArgv({ def, model }) {
   return args;
 }
 
-/** Keep untrusted model subprocesses from inheriting the worker's authority. */
-export function safeChildEnvironment(env = {}) {
-  const inherited = ["HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"];
+export const BASE_INHERITED_ENV = [
+  "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TERM",
+  "TMPDIR", "USER", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+];
+
+/**
+ * Keep untrusted model subprocesses from inheriting the worker's authority.
+ *
+ * Mutating runs additionally inherit `PUSH_CREDENTIAL_ENV` (SSH_AUTH_SOCK,
+ * SSH_AGENT_PID, GITHUB_TOKEN, GH_TOKEN) so a dispatch ticket can actually
+ * push its branch; non-mutating runs have those stripped — the WM-128 carve-out
+ * claude.mjs has always had, brought to pi in WM-223. Before this, a pi-routed
+ * dispatch run had *no* push credentials of any kind and survived only on `gh`'s
+ * own stored OAuth reachable through the inherited HOME/XDG_CONFIG_HOME. That
+ * gh-HTTPS route stays the paved road for pushing (agents/dispatch.md step 5);
+ * this restores the credentials it was never supposed to be doing without.
+ *
+ * The strip runs *after* the caller's `env` is merged in, so a read-only run
+ * cannot be handed a token through `env` either.
+ *
+ * Deliberate divergence from claude.mjs: only an explicit `mutating: true` (or a
+ * boolean argument) counts as mutating here, where claude.mjs also treats any
+ * other non-`undefined` value as mutating. Identical for every real agent
+ * definition — `mutating` is a JSON boolean — but this direction fails closed.
+ */
+export function safeChildEnvironment(env = {}, defOrOpts = {}) {
+  const isMutating = typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
+  const inherited = isMutating ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV] : BASE_INHERITED_ENV;
   const childEnv = Object.fromEntries(inherited.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]));
   Object.assign(childEnv, env);
   // Subscription auth (Codex/ChatGPT OAuth) is the point of routing through
@@ -110,6 +145,11 @@ export function safeChildEnvironment(env = {}) {
     "GOOGLE_GENAI_API_KEY", "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
   ]) {
     delete childEnv[key];
+  }
+  if (!isMutating) {
+    for (const key of PUSH_CREDENTIAL_ENV) {
+      delete childEnv[key];
+    }
   }
   return childEnv;
 }
@@ -216,7 +256,7 @@ export async function execute({
   signal,
 }) {
   const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
-  const childEnv = safeChildEnvironment(env);
+  const childEnv = safeChildEnvironment(env, def);
 
   const resolved = resolvePiCommand({ which: (name) => Bun.which(name, { PATH: childEnv.PATH ?? "" }) });
   if (!resolved) {

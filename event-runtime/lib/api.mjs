@@ -10,23 +10,25 @@
  * no signature. Operator verbs record "operator" as actor — authenticated
  * actor identity is the web-app step, not this one.
  */
-import { createReadStream, readFileSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readFileSync, readSync, readdirSync } from "node:fs";
 import http from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
-import { findArtifact } from "./artifacts.mjs";
+import { findArtifact, listArtifacts, pruneArtifacts, storeStats } from "./artifacts.mjs";
 import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, webhookSecret } from "./config.mjs";
+import { runUsage, usageSpend } from "./db.mjs";
 import { admitEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
+import { MetricsQueryError, metricsBreakdownView, metricsView } from "./metrics.mjs";
 import { planEvent, requeueEvent } from "./planner.mjs";
 import { ambiguousOpenProposalRuns, approveProposal, openProposals, rejectProposal } from "./proposals.mjs";
 import { resolveModel } from "./registry.mjs";
 import { loadRepos, RepoError, reposRoot, reposView } from "./repos.mjs";
 import { traceOf } from "./trace.mjs";
 import { cancelRun, retryRun } from "./worker.mjs";
-import { storeStats } from "./artifacts.mjs";
 import { parseCadence, proposalsPilingUp, scheduleView } from "./schedules.mjs";
-import { listWorkers, stalledWorkers } from "./workers.mjs";
+import { listWorkers, loadWorkerPolicy, satisfiesPlacement, stalledWorkers } from "./workers.mjs";
 
 /**
  * Repo names a run or event actually names — optional spec input, not a
@@ -129,8 +131,112 @@ function runCounts(db) {
   return { byState };
 }
 
+/** Node-local pool state: pidfile liveness and workers carrying drain requests. */
+function runtimePoolState(runDir) {
+  const drainingIds = new Set();
+  let names = [];
+  try {
+    names = readdirSync(runDir);
+  } catch {
+    return { drainingIds, supervisor: "absent" };
+  }
+  for (const name of names) {
+    const match = /^(worker-\d+)\.drain$/.exec(name);
+    if (!match) continue;
+    try {
+      const workerId = readFileSync(path.join(runDir, `${match[1]}.id`), "utf8").trim();
+      if (workerId) drainingIds.add(workerId);
+    } catch {
+      // A slot can disappear between directory read and id read; next poll heals it.
+    }
+  }
+  let supervisor = "absent";
+  try {
+    const pid = Number(readFileSync(path.join(runDir, "supervisor.pid"), "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        supervisor = "active";
+      } catch (err) {
+        // EPERM still proves the process exists; only ESRCH means a stale pid.
+        supervisor = err?.code === "EPERM" ? "active" : "stopped";
+      }
+    }
+  } catch {
+    // No pidfile means the fixed-worker fallback, not an error.
+  }
+  return { drainingIds, supervisor };
+}
+
+/**
+ * One projection powers both API surfaces so Overview and Workers cannot show
+ * contradictory numbers. Policy max is the concurrency ceiling after WM-226;
+ * without pool policy the live registry remains the honest capacity fallback.
+ */
+export function workerCapacityView(db, nowMs, { workerPolicy = () => loadWorkerPolicy(), runDir } = {}) {
+  const pool = runtimePoolState(runDir ?? process.env.FACTORY_RUN_DIR ?? path.join(homedir(), ".factory", "run"));
+  const workers = listWorkers(db, { now: nowMs }).map((worker) => ({
+    ...worker,
+    draining: !worker.stale && worker.state !== "stopped" && pool.drainingIds.has(worker.workerId),
+  }));
+  const liveWorkers = workers.filter((worker) => worker.state !== "stopped" && !worker.stale);
+  const running = liveWorkers.filter((worker) => worker.state === "busy").length;
+  const draining = liveWorkers.filter((worker) => worker.draining).length;
+  const idle = liveWorkers.filter((worker) => worker.state !== "busy" && !worker.draining).length;
+  const queued = db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'QUEUED'`).get().n;
+
+  let policy = null;
+  let policyError = null;
+  try {
+    policy = workerPolicy?.() ?? null;
+  } catch (err) {
+    policyError = `worker policy unavailable: ${err.message}`;
+  }
+  const hasPolicy = Number.isInteger(policy?.max) && policy.max > 0;
+  const supervised = pool.supervisor === "active" && hasPolicy;
+  const capacity = supervised ? policy.max : liveWorkers.length;
+  const target = Math.max(0, liveWorkers.length - draining);
+  let limitingFactor = null;
+  if (queued > 0 && idle === 0) {
+    limitingFactor = supervised && liveWorkers.length >= capacity ? "at worker max" : "no idle worker";
+  }
+
+  const classes = [];
+  if (policy?.classes && typeof policy.classes === "object" && !Array.isArray(policy.classes)) {
+    for (const [name, config] of Object.entries(policy.classes)) {
+      const classCapacity = Number.isInteger(config) ? config : config?.max;
+      if (!Number.isInteger(classCapacity) || classCapacity < 0) continue;
+      classes.push({
+        name,
+        capacity: classCapacity,
+        running: liveWorkers.filter((worker) => worker.state === "busy" && worker.labels?.class === name).length,
+      });
+    }
+  }
+
+  return {
+    workers,
+    policyError,
+    capacity: {
+      running,
+      capacity,
+      queued,
+      live: liveWorkers.length,
+      idle,
+      draining,
+      target,
+      min: hasPolicy && Number.isInteger(policy.min) ? policy.min : null,
+      max: hasPolicy ? policy.max : null,
+      supervisor: pool.supervisor,
+      source: supervised ? "worker-policy" : "live-workers",
+      limitingFactor,
+      classes,
+    },
+  };
+}
+
 /** §13 status + doctor view: aggregates plus anomalies, all read-only SQL. */
-function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats } = {}) {
+function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats, workerPolicy, workerRunDir } = {}) {
   const open = openProposals(db, { now: nowMs });
   const expiredOpen = open.filter((p) => p.expired);
   const staleLeases = db
@@ -148,13 +254,26 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
     .all()
     .map((row) => ({ source: row.source, eventId: row.event_id, lastError: row.last_plan_error }));
 
-  const workers = listWorkers(db, { now: nowMs });
+  const fleet = workerCapacityView(db, nowMs, { workerPolicy, runDir: workerRunDir });
+  const workers = fleet.workers;
+  const liveWorkers = workers.filter((worker) => worker.state !== "stopped" && !worker.stale);
+  const unmatchedPlacementRuns = db
+    .query(`SELECT run_id, spec_json FROM runs WHERE state = 'QUEUED' ORDER BY created_at, rowid`)
+    .all()
+    .flatMap((row) => {
+      const placement = JSON.parse(row.spec_json).placement;
+      // Unconstrained runs are covered by noWorkers; this anomaly explains why
+      // an apparently healthy fleet still cannot claim a constrained run.
+      if (!placement || Object.keys(placement).length === 0) return [];
+      if (liveWorkers.some((worker) => satisfiesPlacement(worker.labels, placement))) return [];
+      return [{ runId: row.run_id, placement }];
+    });
   const schedules = scheduleView(db, registry, { now: nowMs });
   const store = getStoreStats
     ? getStoreStats(nowMs)
     : storeStats(db, artifactsRoot(env?.home), { now: nowMs });
   const stalled = stalledWorkers(db, { now: nowMs });
-  const runs = runCounts(db);
+  const runs = { ...runCounts(db), spend: usageSpend(db, { now: nowMs }) };
 
   const configAnomalies = [];
   if (!secret) {
@@ -166,16 +285,18 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
   if (policyVersion === "unknown") {
     configAnomalies.push("policyVersion is unknown");
   }
+  if (fleet.policyError) configAnomalies.push(fleet.policyError);
 
   return {
     events: eventCounts(db),
     proposals: { open: open.length, expired: expiredOpen.length },
     runs,
     workers: {
-      live: workers.filter((w) => w.state !== "stopped" && !w.stale).length,
-      busy: workers.filter((w) => w.state === "busy" && !w.stale).length,
+      live: fleet.capacity.live,
+      busy: fleet.capacity.running,
       stale: workers.filter((w) => w.stale).length,
     },
+    capacity: fleet.capacity,
     artifacts: {
       files: store.files,
       bytes: store.bytes,
@@ -197,7 +318,8 @@ function statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, 
       stoppedSchedules: schedules
         .filter((s) => s.stopped || s.error)
         .map((s) => ({ loop: s.loop, every: s.every, lastSlot: s.lastSlot, intervalsLate: s.intervalsLate, error: s.error })),
-      noWorkers: workers.filter((w) => w.state !== "stopped" && !w.stale).length === 0 && (runs.byState.QUEUED ?? 0) > 0,
+      unmatchedPlacementRuns,
+      noWorkers: liveWorkers.length === 0 && (runs.byState.QUEUED ?? 0) > 0,
       // Two or more open proposals on one run: cancel fail-closes and leaves
       // them open (OPS-245). Unreachable on the TTL replan path.
       ambiguousOpenProposals: ambiguousOpenProposalRuns(db),
@@ -279,6 +401,11 @@ function runsView(db, state) {
       eventSource: row.event_source ?? null,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      // What the planner pinned (WM-135), so the list can carry a Model column
+      // beside Adapter (WM-221). Absent on a spec whose definition declared no
+      // intent — `null`, never omitted, so the column never renders a hole.
+      modelTier: spec.modelTier ?? null,
+      model: spec.model ?? null,
       repos: repoNamesFromInput(spec.input),
     };
   });
@@ -391,15 +518,92 @@ function looksLikeText(file) {
   return !head.includes(0);
 }
 
-function runView(db, runId) {
+/**
+ * How much of a transcript to read looking for the model id (WM-221).
+ *
+ * Both harnesses name the model in their opening handshake — claude in the
+ * `system`/`init` line, pi on its first assistant message — so the answer is
+ * always in the first few KB of a file that routinely runs to megabytes.
+ * Reading a bounded head keeps `GET /runs/:id` a constant-cost read.
+ */
+export const TRANSCRIPT_MODEL_SCAN_BYTES = 64 * 1024;
+
+/**
+ * The model the CLI actually ran on, read out of the stored transcript
+ * (WM-221). The spec's pinned value cannot answer this: `default` means
+ * "whatever the CLI picks", and only the harness's own handshake says what
+ * that was on the day.
+ *
+ * Neither adapter puts the id in the trace — `mapStreamEvent` maps text, tool
+ * calls, and token usage, and nothing else — so the transcript artifact is
+ * where it is stored, in two shapes:
+ *
+ * - claude: `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}`
+ * - pi:     `{"type":"message_start","message":{"provider":"openai-codex","model":"gpt-5.6-terra"}}`
+ *
+ * pi splits what the spec pins as one string (`openai-codex/gpt-5.6-terra`),
+ * so the provider is joined back on — an observed model an operator cannot
+ * compare to the pinned one answers nothing. Returns null rather than a guess
+ * for anything unrecognized, truncated, or unparseable.
+ *
+ * @param {string} head - the first bytes of a `.transcript.json` NDJSON stream
+ * @returns {string | null}
+ */
+export function observedModelFromTranscript(head) {
+  if (typeof head !== "string" || head === "") return null;
+  const lines = head.split("\n");
+  // The last line of a bounded read is almost always a partial JSON object.
+  lines.pop();
+  for (const line of lines) {
+    if (!line.includes(`"model"`)) continue;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue; // a line longer than the scan window, or not JSON at all
+    }
+    if (!msg || typeof msg !== "object") continue;
+    if (msg.type === "system" && msg.subtype === "init" && typeof msg.model === "string" && msg.model !== "") {
+      return msg.model;
+    }
+    const message = msg.message;
+    if (message && typeof message === "object" && typeof message.model === "string" && message.model !== "") {
+      const provider = typeof message.provider === "string" ? message.provider : "";
+      return provider && !message.model.includes("/") ? `${provider}/${message.model}` : message.model;
+    }
+  }
+  return null;
+}
+
+/** Bounded head of a stored artifact; null when it is missing or unreadable. */
+function artifactHead(artifactsDir, sha256, bytes = TRANSCRIPT_MODEL_SCAN_BYTES) {
+  const found = findArtifact(artifactsDir, sha256);
+  if (!found) return null;
+  let fd;
+  try {
+    fd = openSync(found.file, "r");
+    const buf = Buffer.alloc(Math.min(bytes, found.sizeBytes));
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, read).toString("utf8");
+  } catch {
+    // A pruned or half-written artifact is a missing observation, not a 500.
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function runView(db, runId, { artifactsDir } = {}) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
   if (!row) return null;
   const attempts = db
     .query(`SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt`)
     .all(runId);
-  const result = db
+  const resultRow = db
     .query(`SELECT * FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`)
     .get(runId);
+  const result = resultRow ? JSON.parse(resultRow.result_json) : null;
+  const transcript = (result?.artifacts ?? []).find((a) => a.kind === "transcript");
   const latest = attempts[attempts.length - 1];
   return {
     run: {
@@ -414,9 +618,17 @@ function runView(db, runId) {
     },
     lifecycle: lifecycleOf(db, runId),
     attempts,
-    result: result ? JSON.parse(result.result_json) : null,
-    receipt: result ? JSON.parse(result.receipt_json) : null,
+    result,
+    receipt: resultRow ? JSON.parse(resultRow.receipt_json) : null,
     workspace: latest?.workspace_path ?? null,
+    // Not part of the immutable spec — an observation about the attempt that
+    // ran, alongside `workspace` (WM-221). Null for a run with no transcript
+    // yet, a non-model adapter, or a harness that named no model.
+    observedModel:
+      artifactsDir && transcript?.sha256
+        ? observedModelFromTranscript(artifactHead(artifactsDir, transcript.sha256))
+        : null,
+    usage: runUsage(db, runId),
   };
 }
 
@@ -508,6 +720,8 @@ export function createApi({
   // until someone restarted serve. Injectable so tests can point at a fixture
   // instead of whichever repos exist on the machine.
   repos = () => loadRepos(),
+  workerPolicy = () => loadWorkerPolicy(),
+  workerRunDir = process.env.FACTORY_RUN_DIR ?? path.join(homedir(), ".factory", "run"),
   // Host-side janitor spawn (OPS-301). Tests inject a fake; production
   // shells out to orchestrator/janitor.mjs --json, never --force.
   janitor = spawnFactoryJanitor,
@@ -621,8 +835,39 @@ export function createApi({
       if (route === "GET /status") {
         return send(res, 200, {
           env,
-          ...statusView(db, registry, nowMs, { secret, githubSecret, policyVersion, env, getStoreStats }),
+          ...statusView(db, registry, nowMs, {
+            secret, githubSecret, policyVersion, env, getStoreStats, workerPolicy, workerRunDir,
+          }),
         });
+      }
+
+      if (route === "GET /metrics") {
+        try {
+          return send(res, 200, metricsView(db, {
+            now: nowMs,
+            window: url.searchParams.get("window") ?? "24h",
+            bucket: url.searchParams.get("bucket") ?? "1h",
+            series: url.searchParams.get("series"),
+          }));
+        } catch (err) {
+          if (err instanceof MetricsQueryError) return send(res, 422, err.body);
+          throw err;
+        }
+      }
+
+      if (route === "GET /metrics/breakdown") {
+        try {
+          return send(res, 200, metricsBreakdownView(db, {
+            now: nowMs,
+            window: url.searchParams.get("window") ?? "24h",
+            by: url.searchParams.get("by"),
+            metric: url.searchParams.get("metric"),
+            limit: url.searchParams.get("limit"),
+          }));
+        } catch (err) {
+          if (err instanceof MetricsQueryError) return send(res, 422, err.body);
+          throw err;
+        }
       }
 
       if (route === "GET /events") {
@@ -705,7 +950,8 @@ export function createApi({
       }
 
       if (route === "GET /workers") {
-        return send(res, 200, { workers: listWorkers(db, { now: nowMs }) });
+        const fleet = workerCapacityView(db, nowMs, { workerPolicy, runDir: workerRunDir });
+        return send(res, 200, { workers: fleet.workers, capacity: fleet.capacity });
       }
 
       if (route === "GET /agents") {
@@ -758,6 +1004,54 @@ export function createApi({
           if (status === 500) return send(res, 500, { error: "internal_error" });
           return send(res, status, { error: err.message });
         }
+      }
+
+      if (route === "GET /artifacts") {
+        const orphanParam = url.searchParams.get("orphan");
+        if (orphanParam !== null && orphanParam !== "true" && orphanParam !== "false") {
+          return send(res, 422, { error: "orphan must be true or false" });
+        }
+        const limitParam = url.searchParams.get("limit");
+        const limit = limitParam === null ? undefined : Number(limitParam);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 500)) {
+          return send(res, 422, { error: "limit must be an integer between 1 and 500" });
+        }
+        const artifacts = listArtifacts(db, artifactsRoot(env.home), {
+          orphan: orphanParam === null ? undefined : orphanParam === "true",
+          kind: url.searchParams.has("kind") ? url.searchParams.get("kind") : undefined,
+          search: url.searchParams.has("search") ? url.searchParams.get("search") : undefined,
+          limit,
+        });
+        return send(res, 200, { artifacts });
+      }
+
+      if (route === "POST /artifacts/prune") {
+        const raw = await readBody(req);
+        const parsed = raw.length === 0 ? { value: {} } : parseJson(raw);
+        if (parsed.error) return send(res, 422, { error: parsed.error });
+        const body = parsed.value ?? {};
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return send(res, 422, { error: "body must be an object" });
+        }
+        if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+          return send(res, 422, { error: "dryRun must be a boolean" });
+        }
+        if (body.apply !== undefined && typeof body.apply !== "boolean") {
+          return send(res, 422, { error: "apply must be a boolean" });
+        }
+        if (body.apply === true && body.dryRun === true) {
+          return send(res, 422, { error: "apply and dryRun cannot both be true" });
+        }
+        const apply = body.apply === true;
+        const result = pruneArtifacts(db, artifactsRoot(env.home), {
+          now: nowMs,
+          dryRun: !apply,
+        });
+        if (apply) {
+          cachedStoreStats = null;
+          cachedStoreStatsAt = 0;
+        }
+        return send(res, 200, result);
       }
 
       const artifactGet = url.pathname.match(/^\/artifacts\/([0-9a-f]{64})$/);
@@ -871,7 +1165,7 @@ export function createApi({
 
       const runGet = url.pathname.match(/^\/runs\/([^/]+)$/);
       if (req.method === "GET" && runGet) {
-        const view = runView(db, runGet[1]);
+        const view = runView(db, runGet[1], { artifactsDir: artifactsRoot(env?.home) });
         if (!view) return send(res, 404, { error: `unknown run ${runGet[1]}` });
         return send(res, 200, view);
       }

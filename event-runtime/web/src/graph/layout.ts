@@ -20,6 +20,38 @@ const OPTIONS = {
   "elk.edgeRouting": "SPLINES",
 };
 
+/**
+ * Topology fingerprint: node ids and edge id/source/target. Overlay fields
+ * (counts, badges, invocation labels) are ignored so live polls do not
+ * re-run ELK.
+ */
+export function graphIdentity(graph: CapabilityGraph): string {
+  const nodes = graph.nodes.map((n) => n.id).sort();
+  const edges = graph.edges.map((e) => `${e.id}\t${e.source}\t${e.target}`).sort();
+  return `${nodes.join("\n")}\n--\n${edges.join("\n")}`;
+}
+
+export type LayoutFn = (
+  graph: CapabilityGraph,
+  timeoutMs?: number,
+) => Promise<Map<string, { x: number; y: number }>>;
+
+/**
+ * Run `layout` only when node/edge identity changed (or `prevIdentity` is
+ * null). Overlay-only updates return `positions: null`.
+ */
+export async function layoutGraphIfIdentityChanged(
+  graph: CapabilityGraph,
+  prevIdentity: string | null,
+  layout: LayoutFn = layoutGraph,
+): Promise<{ identity: string; positions: Map<string, { x: number; y: number }> | null }> {
+  const identity = graphIdentity(graph);
+  if (prevIdentity !== null && identity === prevIdentity) {
+    return { identity, positions: null };
+  }
+  return { identity, positions: await layout(graph) };
+}
+
 export async function layoutGraph(
   graph: CapabilityGraph,
   timeoutMs: number = LAYOUT_TIMEOUT_MS,

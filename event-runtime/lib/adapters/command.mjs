@@ -11,11 +11,20 @@
  * Exit 0 → writes result.json (factory.agent-result/v1) with the resolved
  * command and captured output as the artifact. Nonzero/timeout → no result;
  * the worker records FAILED with `agent_exit_<code>` as usual.
+ *
+ * A definition may add a `sandbox` block (WM-185), which moves execution off
+ * the host and into a Gondolin microVM: the workspace is mounted read-write
+ * inside the guest, network egress is default-deny, and declared secrets
+ * reach the guest only as placeholders. The result contract is identical
+ * either way — the same result.json, the same captured artifact, the same
+ * exit-code semantics — so downstream verification cannot tell the two apart.
+ * Without the block, this adapter behaves exactly as it always has.
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
+import { runInSandbox } from "../sandbox/gondolin.mjs";
 
 const KILL_GRACE_MS = 10_000;
 const OUTPUT_TAIL_CHARS = 2_000;
@@ -59,6 +68,78 @@ function killProcessGroup(child, signal = "SIGTERM") {
 }
 
 /**
+ * The success half of the result contract, shared by the host and sandboxed
+ * paths so the two can never drift into producing different artifacts.
+ */
+function writeResultJson({ workspaceDir, def, argv, output }) {
+  const captured = def.captureStdout ? [{ kind: def.captureKind ?? "output", path: def.captureStdout }] : [];
+  writeFileSync(
+    path.join(workspaceDir, "result.json"),
+    `${JSON.stringify(
+      {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        reasonCode: "ok",
+        artifact: {
+          command: argv,
+          exitCode: 0,
+          outputTail: output,
+          ...(def.captureStdout ? { captured: def.captureStdout } : {}),
+        },
+        evidence: { command: argv, outputTail: output },
+        ...(captured.length ? { artifacts: captured } : {}),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+/**
+ * Sandboxed execution path (WM-185). The guest gets the workspace at the
+ * policy's mount point and nothing else; argv runs with no shell, exactly as
+ * on the host path.
+ *
+ * @returns {Promise<{ exitCode: number | null, timedOut: boolean }>}
+ */
+async function executeSandboxed({ def, argv, workspaceDir, timeoutMs, abortSignal }) {
+  // Array-form exec does not search $PATH inside the guest, and a host path
+  // like /opt/homebrew/bin/bun does not exist there. Failing here with the
+  // real reason beats a bare "no such file" from inside a VM.
+  if (!argv[0].startsWith("/")) {
+    throw new Error(
+      `definition ${def.ref} is sandboxed, so its command must start with an absolute guest path (got ${JSON.stringify(argv[0])})`,
+    );
+  }
+
+  let output = "";
+  const collect = (chunk) => {
+    output = (output + chunk).slice(-OUTPUT_TAIL_CHARS);
+  };
+  const capture = def.captureStdout ? createWriteStream(path.join(workspaceDir, def.captureStdout)) : null;
+
+  const { exitCode, timedOut } = await runInSandbox({
+    policy: def.sandbox,
+    command: argv,
+    workspaceDir,
+    timeoutMs,
+    abortSignal,
+    onStdout: (chunk) => {
+      capture?.write(chunk);
+      collect(chunk);
+    },
+    onStderr: collect,
+  });
+
+  if (capture) await new Promise((done) => capture.end(done));
+  if (exitCode === 0 && !timedOut) {
+    writeResultJson({ workspaceDir, def, argv, output });
+  }
+  return { exitCode, timedOut };
+}
+
+/**
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean }>}
  */
 export async function execute({ spec, def, workspaceDir, timeoutMs, abortSignal, signal }) {
@@ -66,6 +147,10 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, abortSignal,
     throw new Error(`definition ${def.ref} has no command template — not a command-adapter agent`);
   }
   const argv = resolveTemplate(def.command, spec.input);
+
+  if (def.sandbox) {
+    return executeSandboxed({ def, argv, workspaceDir, timeoutMs, abortSignal: abortSignal ?? signal });
+  }
 
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
@@ -126,30 +211,7 @@ export async function execute({ spec, def, workspaceDir, timeoutMs, abortSignal,
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       if (exitCode === 0 && !timedOut) {
         const write = () => {
-          const captured = def.captureStdout
-            ? [{ kind: def.captureKind ?? "output", path: def.captureStdout }]
-            : [];
-          writeFileSync(
-            path.join(workspaceDir, "result.json"),
-            `${JSON.stringify(
-              {
-                schemaVersion: "factory.agent-result/v1",
-                terminalState: "completed",
-                reasonCode: "ok",
-                artifact: {
-                  command: argv,
-                  exitCode: 0,
-                  outputTail: output,
-                  ...(def.captureStdout ? { captured: def.captureStdout } : {}),
-                },
-                evidence: { command: argv, outputTail: output },
-                ...(captured.length ? { artifacts: captured } : {}),
-              },
-              null,
-              2,
-            )}\n`,
-            "utf8",
-          );
+          writeResultJson({ workspaceDir, def, argv, output });
           resolve({ exitCode, timedOut });
         };
         // The capture stream must be flushed before the verifier hashes it.

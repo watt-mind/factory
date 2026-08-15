@@ -404,10 +404,10 @@ describe("Section cards and collapse persistence (WM-136)", () => {
 describe("StateBadge dot suppression (WM-136)", () => {
   test("renders its own dot by default and omits it when dot={false}", () => {
     const withDot = render(<StateBadge state="RUNNING" />);
-    expect(withDot.container.querySelector(".rounded-full")).toBeTruthy();
+    expect(withDot.container.querySelector("svg")).toBeTruthy();
     cleanup();
     const bare = render(<StateBadge state="RUNNING" dot={false} />);
-    expect(bare.container.querySelector(".rounded-full")).toBeNull();
+    expect(bare.container.querySelector("svg")).toBeNull();
     expect(bare.getByText("RUNNING")).toBeTruthy();
   });
 });
@@ -615,10 +615,29 @@ describe("SuggestInput popover (WM-79)", () => {
     const input = r.getByRole("combobox", { name: "repo" }) as HTMLInputElement;
     fireEvent.focus(input);
     const options = r.getAllByRole("option");
-    expect(options[0].getAttribute("aria-selected")).toBe("true");
+    const expectSelected = (selectedIndex: number) => {
+      options.forEach((option, index) => {
+        expect(option.getAttribute("aria-selected")).toBe(
+          index === selectedIndex ? "true" : "false",
+        );
+      });
+    };
+    expectSelected(0);
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(options[1].getAttribute("aria-selected")).toBe("true");
+    expectSelected(1);
+
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expectSelected(0);
+
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expectSelected(options.length - 1);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expectSelected(0);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expectSelected(1);
 
     fireEvent.keyDown(input, { key: "Enter" });
     expect(input.value).toBe("factory");

@@ -124,8 +124,10 @@ export function evaluateTicketDrift(issue, repoGithub, prStates, { quietMin = 25
     };
   }
 
-  // Active ticket
+  // Only worked tickets can be reconciled from a merged PR. Unstarted and
+  // held tickets may link historical PRs as context without being complete.
   if (!open.length) {
+    if (!["In Review", "In Progress"].includes(issue.state?.name)) return null;
     const merged = prStates.filter((pr) => pr.state === "MERGED").map((pr) => pr.number);
     if (!merged.length) return null;
     return {

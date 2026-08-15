@@ -1,8 +1,16 @@
 import "./test-dom";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { App } from "./App";
+import { goPrefix } from "./goSequence";
 import { NAV } from "./nav";
 import type { StatusView } from "./types";
 
@@ -74,10 +82,12 @@ beforeEach(() => {
     // Views poll their own endpoints; an empty list keeps them quiet.
     return jsonResponse([]);
   }) as typeof fetch;
-  window.location.hash = "";
+  goPrefix.armedAt = 0;
+  window.location.href = "http://localhost/";
 });
 
 afterEach(() => {
+  goPrefix.armedAt = 0;
   cleanup();
   globalThis.fetch = realFetch;
 });
@@ -88,7 +98,9 @@ describe("sidebar navigation accessibility", () => {
     // Wait for the status fixture to land so badge-carrying entries (Events 6,
     // Proposals 9, Runs 3) are tested with their badges actually rendered.
     await waitFor(() => {
-      expect(sidebar.getByRole("button", { name: "Proposals" }).textContent).toContain("9");
+      expect(
+        sidebar.getByRole("button", { name: "Proposals" }).textContent,
+      ).toContain("9");
     });
     for (const n of NAV) {
       // Exact match: a badge that leaks into the name ("Events 6") fails here.
@@ -100,7 +112,9 @@ describe("sidebar navigation accessibility", () => {
   test("count badges are exposed as the button's accessible description", async () => {
     const { sidebar } = renderApp();
     await waitFor(() => {
-      expect(sidebar.getByRole("button", { name: "Events" }).textContent).toContain("6");
+      expect(
+        sidebar.getByRole("button", { name: "Events" }).textContent,
+      ).toContain("6");
     });
     for (const [label, expected] of [
       ["Events", "6"],
@@ -118,18 +132,28 @@ describe("sidebar navigation accessibility", () => {
       expect(within(button).getByText(expected)).toBeTruthy();
     }
     // Badge-less entries carry no dangling describedby reference.
-    expect(sidebar.getByRole("button", { name: "Overview" }).hasAttribute("aria-describedby")).toBe(false);
+    expect(
+      sidebar
+        .getByRole("button", { name: "Overview" })
+        .hasAttribute("aria-describedby"),
+    ).toBe(false);
   });
 
   test("the active entry — and only it — exposes aria-current=page", async () => {
     window.location.hash = "#/events";
     const { sidebar } = renderApp();
     await waitFor(() => {
-      expect(sidebar.getByRole("button", { name: "Events" }).getAttribute("aria-current")).toBe("page");
+      expect(
+        sidebar
+          .getByRole("button", { name: "Events" })
+          .getAttribute("aria-current"),
+      ).toBe("page");
     });
     for (const n of NAV) {
       const button = sidebar.getByRole("button", { name: n.label });
-      expect(button.getAttribute("aria-current")).toBe(n.key === "events" ? "page" : null);
+      expect(button.getAttribute("aria-current")).toBe(
+        n.key === "events" ? "page" : null,
+      );
     }
   });
 });
@@ -150,24 +174,34 @@ describe("bottom status bar", () => {
       expect(statusBar.textContent).toContain("? keys");
     });
 
-    const themeButton = within(statusBar).getByRole("button", { name: /Theme:/i });
+    const themeButton = within(statusBar).getByRole("button", {
+      name: /Theme:/i,
+    });
     expect(themeButton).toBeTruthy();
-    expect(themeButton.getAttribute("aria-label")).toBe("Theme: dark. Switch to light.");
+    expect(themeButton.getAttribute("aria-label")).toBe(
+      "Theme: dark. Switch to light.",
+    );
 
     act(() => {
       themeButton.click();
     });
-    expect(themeButton.getAttribute("aria-label")).toBe("Theme: light. Switch to contrast.");
+    expect(themeButton.getAttribute("aria-label")).toBe(
+      "Theme: light. Switch to contrast.",
+    );
 
     act(() => {
       themeButton.click();
     });
-    expect(themeButton.getAttribute("aria-label")).toBe("Theme: contrast. Switch to dark.");
+    expect(themeButton.getAttribute("aria-label")).toBe(
+      "Theme: contrast. Switch to dark.",
+    );
 
     act(() => {
       themeButton.click();
     });
-    expect(themeButton.getAttribute("aria-label")).toBe("Theme: dark. Switch to light.");
+    expect(themeButton.getAttribute("aria-label")).toBe(
+      "Theme: dark. Switch to light.",
+    );
   });
 });
 
@@ -175,7 +209,9 @@ describe("inject hotkey (WM-80)", () => {
   test("`i` opens the inject dialog with template search focused", async () => {
     const { findByPlaceholderText } = renderApp();
     act(() => {
-      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "i", bubbles: true }));
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "i", bubbles: true }),
+      );
     });
     const search = await findByPlaceholderText(/search event types/i);
     expect(document.activeElement === search).toBe(true);
@@ -190,11 +226,107 @@ describe("filter hotkey / (WM-217)", () => {
     document.body.appendChild(traceInput);
     try {
       act(() => {
-        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true }));
+        document.body.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "/", bubbles: true }),
+        );
       });
       expect(document.activeElement === traceInput).toBe(true);
     } finally {
       traceInput.remove();
     }
+  });
+});
+
+describe("context strip fast jump chords (WM-235)", () => {
+  test("`g 1`..`g 9` switch to open repo tabs, `g 0` clears to All, `g i` switches to In flight", async () => {
+    sessionStorage.setItem(
+      "factory.contextTabs",
+      JSON.stringify({ openRepos: ["alpha", "bravo"], active: "all" }),
+    );
+    window.location.hash = "#/events";
+    const utils = renderApp();
+    await waitFor(() => {
+      expect(
+        utils.sidebar.getByRole("button", { name: "Events" }),
+      ).toBeDefined();
+    });
+
+    // g 1 jumps to 1st repo (alpha)
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "1" });
+    });
+    expect(window.location.hash).toContain("project=alpha");
+
+    // g 2 jumps to 2nd repo (bravo)
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "2" });
+    });
+    expect(window.location.hash).toContain("project=bravo");
+
+    // g 0 clears to All context
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "0" });
+    });
+    expect(window.location.hash).not.toContain("project=");
+
+    // g i jumps to In flight context (and switches to runs view if not already on runs)
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "i" });
+    });
+    expect(window.location.hash).toBe("#/runs?project=inflight");
+
+    // g i does NOT open the inject dialog
+    expect(utils.queryByPlaceholderText(/search event types/i)).toBeNull();
+  });
+
+  test("view chords (g o, g e, g p, g r) still work alongside context chords", async () => {
+    window.location.hash = "#/overview";
+    const utils = renderApp();
+    await waitFor(() => {
+      expect(
+        utils.sidebar.getByRole("button", { name: "Overview" }),
+      ).toBeDefined();
+    });
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "e" });
+    });
+    expect(window.location.hash).toBe("#/events");
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "p" });
+    });
+    expect(window.location.hash).toBe("#/proposals");
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "r" });
+    });
+    expect(window.location.hash).toBe("#/runs");
+  });
+
+  test("`g` prefix arms and displays GoPrefixHint legend with context chords", async () => {
+    const utils = renderApp();
+    await waitFor(() => {
+      expect(
+        utils.sidebar.getByRole("button", { name: "Overview" }),
+      ).toBeDefined();
+    });
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+    });
+
+    const hint = utils.getByText(/Navigation prefix g armed/);
+    expect(hint).toBeDefined();
+    expect(utils.container.textContent).toContain("0 All");
+    expect(utils.container.textContent).toContain("1–9 repos");
+    expect(utils.container.textContent).toContain("i In flight");
   });
 });

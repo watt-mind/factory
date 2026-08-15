@@ -30,6 +30,15 @@ export interface RunSpec {
   maxAttempts: number;
   idempotencyKey: string;
   placement?: Record<string, unknown> | null;
+  /**
+   * Declared intent and the model it resolved to at plan time (WM-135). Both
+   * fields appear together or not at all: a definition that declares neither
+   * produces a spec byte-identical to the pre-WM-135 shape, which is why these
+   * are optional here and `null` is a different fact from absent — `null`
+   * means the routed adapter takes no model.
+   */
+  modelTier?: string | null;
+  model?: string | null;
 }
 
 export interface Proposal {
@@ -82,6 +91,14 @@ export interface RunListItem {
   eventSource: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Plan-time pins (WM-135), flattened out of the spec for the Model column
+   * (WM-221). Optional for the same reason they are optional on `RunSpec`:
+   * absent is a third state next to `null`, and the column renders it the
+   * same way — "this run pinned nothing" — rather than guessing.
+   */
+  modelTier?: string | null;
+  model?: string | null;
   /** Repos the spec input names. Empty if unscoped. */
   repos: string[];
 }
@@ -189,6 +206,24 @@ export interface ArtifactRef {
   sizeBytes: number;
 }
 
+/** Accepted result that keeps an artifact reachable in the content-addressed store. */
+export interface ArtifactReference {
+  runId: string;
+  kind: string | null;
+  agent: string | null;
+  state: RunState | null;
+  createdAt: string | null;
+}
+
+/** One physical file returned by the artifact inventory endpoint. */
+export interface ArtifactInventoryItem {
+  sha256: string;
+  sizeBytes: number;
+  mtime: string;
+  referenced: boolean;
+  references: ArtifactReference[];
+}
+
 export interface RunDetail {
   run: {
     runId: string;
@@ -212,6 +247,13 @@ export interface RunDetail {
   } | null;
   receipt: Record<string, string | null> | null;
   workspace: string | null;
+  /**
+   * What the harness reported it actually ran on, read out of the stored
+   * transcript (WM-221) — the only source for a run whose spec pins the
+   * `default` sentinel. Null when no transcript was captured, the adapter
+   * takes no model, or the harness named none.
+   */
+  observedModel: string | null;
 }
 
 /** Which event types route to an agent, and how (GET /agents). */
@@ -220,6 +262,14 @@ export interface AgentEventRoute {
   adapter: string;
   idempotencyScope: string;
   proposalTtlSeconds: number | null;
+  /**
+   * What the planner would pin for this route (WM-135). Resolution is per
+   * adapter, which is why it rides the route and not the definition: the same
+   * `model_tier: strong` is `default` on claude and a codex id on pi. Null
+   * both when the adapter takes no model and when the definition declares
+   * none — `routeModel` in views/Agents.tsx tells those two apart.
+   */
+  resolvedModel: string | null;
 }
 
 /** One registered agent, fully readable: definition, prompt, schemas, pins. */
@@ -243,6 +293,10 @@ export interface AgentDef {
   command: string[] | null;
   actionRegistry: Record<string, { remote: string }> | null;
   hosts: string[] | null;
+  /** Declared intent (WM-135): strong | standard | light, or null for none. */
+  modelTier: string | null;
+  /** Exact model id, when a definition overrides its tier outright. */
+  model: string | null;
   eventTypes: AgentEventRoute[];
 }
 
@@ -271,6 +325,38 @@ export interface AgentsView {
 /** A worker's own report of what it is doing; "stopped" is a clean exit. */
 export type WorkerState = "idle" | "busy" | "stopped";
 
+export type CapacityLimitingFactor =
+  | "at worker max"
+  | "no idle worker"
+  | "per-repo max_in_flight reached"
+  | "owned-paths collision"
+  | "budget ceiling";
+
+export interface WorkerClassCapacity {
+  name: string;
+  running: number;
+  capacity: number;
+}
+
+/** One consistent capacity projection shared by GET /status and GET /workers. */
+export interface WorkerCapacity {
+  running: number;
+  capacity: number;
+  queued: number;
+  live: number;
+  idle: number;
+  draining: number;
+  /** Current non-draining pool size; becomes the supervisor target when persisted. */
+  target: number;
+  min: number | null;
+  max: number | null;
+  supervisor: "active" | "absent" | "stopped";
+  source: "live-workers" | "worker-policy";
+  limitingFactor: CapacityLimitingFactor | null;
+  /** Empty until class-aware worker policy ships. */
+  classes: WorkerClassCapacity[];
+}
+
 /** One registered worker process (GET /workers) — the fleet, not the leases. */
 export interface Worker {
   workerId: string;
@@ -286,6 +372,8 @@ export interface Worker {
   stale: boolean;
   startedAt: string;
   stoppedAt: string | null;
+  /** The pool supervisor has asked this worker to exit at its next idle boundary. */
+  draining?: boolean;
 }
 
 /** A stale worker still holding a run — the doctor's projection, not the row. */
@@ -320,6 +408,12 @@ export interface ProposalPilingUp {
   threshold: number;
 }
 
+/** A queued run whose placement requirements match no live worker. */
+export interface UnmatchedPlacementRun {
+  runId: string;
+  placement: Record<string, unknown>;
+}
+
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
@@ -327,6 +421,8 @@ export interface StatusView {
   runs: { byState: Partial<Record<RunState, number>> };
   /** Fleet counts; `live` and `busy` exclude stale workers, as the API does. */
   workers: { live: number; busy: number; stale: number };
+  /** Absent only when the UI is talking to a pre-WM-228 control API. */
+  capacity?: WorkerCapacity;
   /** Artifact store rollup; `orphans` counts files no result references. Cached ~10s server-side (`at` = when computed). */
   artifacts: { files: number; bytes: number; orphans: number; orphanBytes: number; at?: string };
   anomalies: {
@@ -337,6 +433,8 @@ export interface StatusView {
     deadLettered: { source: string; eventId: string; lastError: string | null }[];
     stalledWorkers: StalledWorker[];
     stoppedSchedules?: StoppedSchedule[];
+    /** Placement-constrained queued runs that no active, non-stale worker can claim. */
+    unmatchedPlacementRuns?: UnmatchedPlacementRun[];
     /** Queued runs with no live worker to claim them. */
     noWorkers: boolean;
     ambiguousOpenProposals: { runId: string; count: number }[];

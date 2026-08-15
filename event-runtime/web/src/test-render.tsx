@@ -86,6 +86,8 @@ export function createRunListItemFixture(overrides?: Partial<RunListItem>): RunL
     eventSource: "github",
     created_at: now,
     updated_at: now,
+    modelTier: null,
+    model: null,
     repos: ["repo-test"],
     ...overrides,
   };
@@ -168,6 +170,7 @@ export function createRunDetailFixture(overrides?: Partial<RunDetail>): RunDetai
     result: overrides?.result ?? null,
     receipt: overrides?.receipt ?? null,
     workspace: overrides?.workspace ?? null,
+    observedModel: overrides?.observedModel ?? null,
   };
 }
 

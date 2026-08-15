@@ -5,8 +5,8 @@
  * `#/overview` `#/events` `#/events?type=` `#/events/:source/:eventId`
  * `#/proposals` `#/proposals/:id` `#/runs` `#/runs/:id` `#/run/:id` (the
  * full-page run view — distinct first segment so expand/back get push
- * semantics) `#/agents` `#/agents/:ref` `#/workers` `#/workers/:id`
- * `#/graph` `#/graph/:nodeId`
+ * semantics) `#/agents` `#/agents/:ref` `#/artifacts` `#/artifacts?kind=…`
+ * `#/workers` `#/workers/:id` `#/graph` `#/graph/:nodeId`
  *
  * Optional `?project=` (OPS-356) restores the context-tab filter; `inflight`
  * is reserved. The path still names the view. A pasted `#/runs/:id` without
@@ -179,6 +179,20 @@ export function eventsHash(
 ): string {
   const path = hashPath("events", source, eventId);
   return type ? `${path}?type=${encodeURIComponent(type)}` : path;
+}
+
+/** Shareable Artifacts view filters. Project context is added by `withProject`. */
+export function artifactsHash(filters: {
+  kind?: string | null;
+  orphan?: boolean | null;
+  search?: string | null;
+} = {}): string {
+  const query = new URLSearchParams();
+  if (filters.kind) query.set("kind", filters.kind);
+  if (filters.orphan != null) query.set("orphan", String(filters.orphan));
+  if (filters.search) query.set("search", filters.search);
+  const qs = query.toString();
+  return qs ? `artifacts?${qs}` : "artifacts";
 }
 
 /** `?project=` on the hash — the context strip's active filter, not the view. */

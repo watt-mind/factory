@@ -150,6 +150,61 @@ export function preserveWip(wt, ticketIdentifier) {
   }
 }
 
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Atomically acquire a dispatch claim lock, replacing corrupt or stale locks.
+ *
+ * Dependencies are injectable so tests can verify that invalid PIDs are never
+ * passed to process.kill().
+ */
+export function acquireClaimLock(
+  lock,
+  {
+    currentPid = process.pid,
+    now = Date.now,
+    isProcessAlive = processIsAlive,
+    onStale = () => {},
+  } = {},
+) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lock, `${currentPid} ${now()}\n`, { flag: "wx" });
+      return true;
+    } catch {
+      let raw;
+      try {
+        raw = readFileSync(lock, "utf8");
+      } catch {
+        // The file may have disappeared between the exclusive create and read.
+        // Retry once rather than treating that race as a held lock.
+        continue;
+      }
+
+      const fields = raw.trim().split(/\s+/);
+      const pid = Number(fields[0]);
+      const at = Number(fields[1]);
+      const valid = fields.length === 2
+        && Number.isInteger(pid)
+        && pid > 0
+        && Number.isFinite(at);
+      const alive = valid && isProcessAlive(pid);
+      if (alive && now() - at < 120_000) return false;
+
+      onStale(valid ? pid : null);
+      try { unlinkSync(lock); } catch {}
+    }
+  }
+  return false;
+}
+
 export async function main(argv = process.argv.slice(2)) {
 const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
 const APPLY = argv.includes("--apply");
@@ -684,23 +739,6 @@ let drained = false;
 const LOCK = path.join(homedir(), ".factory/locks", `${repo.name}.dispatch.lock`);
 mkdirSync(path.dirname(LOCK), { recursive: true });
 
-function acquireClaimLock() {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(LOCK, `${process.pid} ${Date.now()}\n`, { flag: "wx" });
-      return true;
-    } catch {
-      let pid = 0, at = 0;
-      try { [pid, at] = readFileSync(LOCK, "utf8").trim().split(/\s+/).map(Number); } catch { return false; }
-      let alive = false;
-      try { process.kill(pid, 0); alive = true; } catch { alive = false; }
-      if (alive && Date.now() - at < 120_000) return false;
-      console.log(c.yellow(`  stale dispatch lock from pid ${pid} — taking it`));
-      try { unlinkSync(LOCK); } catch {}
-    }
-  }
-  return false;
-}
 const releaseClaimLock = () => { try { unlinkSync(LOCK); } catch {} };
 
 async function fill() {
@@ -714,7 +752,13 @@ async function fill() {
   // Everything from here to the last claim() must be exclusive: read the queue,
   // decide, claim. Another dispatcher reading in the middle of it would see
   // slots we are about to take.
-  if (!acquireClaimLock()) {
+  if (!acquireClaimLock(LOCK, {
+    onStale: (pid) => console.log(c.yellow(
+      pid === null
+        ? "  corrupt dispatch lock — taking it"
+        : `  stale dispatch lock from pid ${pid} — taking it`,
+    )),
+  })) {
     console.log(c.dim(`  another dispatcher is claiming for ${repo.name} — skipping this pass`));
     return;
   }

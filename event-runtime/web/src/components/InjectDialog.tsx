@@ -1177,7 +1177,7 @@ export function InjectDialog({
                   className="text-[11px] text-(--text-dim) hover:text-(--accent)"
                   title="Format JSON (⌘⇧F)"
                 >
-                  Format JSON <span className="mono opacity-70">⌘⇧F</span>
+                  Format JSON <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">⌘⇧F</span>
                 </button>
               </div>
             )}
@@ -1298,7 +1298,7 @@ export function InjectDialog({
               </>
             ) : (
               <Button variant="primary" onClick={submit} disabled={inject.isPending}>
-                Inject… <span className="ml-1 font-normal opacity-70">⌘↵</span>
+                Inject… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">⌘↵</span>
               </Button>
             )}
           </div>

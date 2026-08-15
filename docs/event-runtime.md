@@ -75,17 +75,21 @@ here is a separate per-loop decision, and the MVP enables no timer (§3).
 Conversely, what no event type above needs yet — and is therefore explicitly
 deferred, with its trigger named:
 
-- **`FOR UPDATE SKIP LOCKED`** — the first *remote* worker node. Fencing
-  tokens shipped with the worker split (OPS-233); the claim is `BEGIN
-  IMMEDIATE` on SQLite (§10), correct for multiple processes on one machine.
+- **API-mediated worker claims** — the first *remote* worker node. The
+  control plane keeps `BEGIN IMMEDIATE` and SQLite behind authenticated
+  `/worker/v1` endpoints; workers receive fencing tokens, never database
+  credentials ([event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)).
+  The former `FOR UPDATE SKIP LOCKED`/shared-Postgres cut-line is rejected and
+  superseded (§10).
 - **Declared workflows with `dependsOn` and deterministic joins (§11)** — the
   first event type that needs a fan-out and a join. What shipped is the
   *discovered* form: one typed recommendation per completed run, resolved
   through `edges.json`.
 - **`mounted`, `container` and `persistent` workspaces (§7)** — filesystem
   isolation as a policy axis, and any run needing a durable named workspace.
-- **Remote workers** — undated; see §10 for why this is a possibility to keep
-  cheap, not a requirement to build toward.
+- **Remote workers** — undated; the protocol and migration are designed, but
+  per-node auth, artifact ingest, and node-local workspace prerequisites remain
+  unbuilt (§10 and [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)).
 
 What has left that list by being built: semantic verification and
 `evidenceSetHash` (slice 2), the chain engine (`lib/chain.mjs`), fencing
@@ -250,7 +254,7 @@ returns the existing admission record and never spawns a second run.
     "type": "ephemeral",
     "retainOnFailure": true
   },
-  "adapter": "claude",
+  "adapter": "pi",
   "promptVersion": "git:7d91d88",
   "policyVersion": "git:7d91d88",
   "outputContract": "factory.status-report/v1",
@@ -378,9 +382,9 @@ is readable in `GET /registry`.
 optional `"model_tier": "strong" | "standard" | "light"` — a statement of
 intent, never a concrete model id. What each tier means is operator policy:
 the `models:` block in `config/policy.yaml`, keyed per adapter
-(`models.claude.standard: sonnet`), so retiering the fleet is a one-line
-policy PR instead of an edit fanned across definitions. The literal value
-`default` is a sentinel meaning "pass no model flag — ride the CLI's own
+(`models.pi.standard: openai-codex/gpt-5.6-terra`), so retiering the fleet is
+a one-line policy PR instead of an edit fanned across definitions. The literal
+value `default` is a sentinel meaning "pass no model flag — ride the CLI's own
 default"; any other value is passed verbatim as `--model`. The **planner
 resolves tier → model at plan time and pins the result into the RunSpec**
 (`modelTier` + `model`, the same pattern as `repoPin`), so the proposal the
@@ -391,23 +395,40 @@ per-route resolved value. Resolution order: per-definition `"model"` override
 wins) > tier map > adapter default (absent fields = no spec fields = today's
 behavior). A declared tier with no mapping for a routed model-consuming
 adapter is a **load error, fail closed** — never a silent fall-through to the
-adapter default. Only the `claude` adapter consumes models; on
+adapter default. Only the LLM adapters (`claude`, `pi`) consume models; on
 `command`/`actions`/`fake` routes a declared tier is recorded as not
-applicable (`model: null`), never an error. Tier assignments are intent the
-runtime cannot yet audit: per-run usage observability (WM-66) is what will
+applicable (`model: null`), never an error. Since WM-215 every committed LLM
+route is `pi`, so `models.pi` is the map that has to cover every tier the
+registry declares (`strong`/`standard`/`light` → sol/terra/luna);
+`models.claude` stays populated for the per-route exception and for
+`--adapter-override claude`. Tier assignments are intent the runtime cannot
+yet audit: per-run usage observability (WM-66) is what will
 show whether a tier is over- or under-provisioned and inform re-mapping.
 
-**Adapters are a registry, not a flag.** `"adapter": "claude"` in the run spec
+**Adapters are a registry, not a flag.** `"adapter": "pi"` in the run spec
 names an entry in a small adapter registry, one per harness the runtime has
 actually tested. The emit pipeline targets several harnesses (Claude Code,
 Codex, Gemini, Cursor, Pi); the event runtime admits only adapters with a
 passing conformance test covering structured output, timeout and shutdown
-behavior, and workspace confinement. The registry has entries for `claude`
-(the primary LLM harness), `pi` (OPS-296, a second LLM harness on the Codex
-subscription window), `command` (a closed argv template), `actions` (an
-approved action list resolved against a closed registry, remote-SSH or
-local-argv), and `fake` (tests and demo environments). It does not inherit the
-current runner's entire adapter surface.
+behavior, and workspace confinement. The registry has entries for `pi`
+(OPS-296, the default LLM harness on the Codex subscription window, WM-215),
+`claude` (Claude Code, still fully supported), `command` (a closed argv
+template), `actions` (an approved action list resolved against a closed
+registry, remote-SSH or local-argv), and `fake` (tests and demo
+environments). It does not inherit the current runner's entire adapter
+surface.
+
+**pi is the default harness, per route, not per mode (WM-215).** Every
+LLM-routed event type in `event-runtime/event-types.json` declares
+`"adapter": "pi"`; `command`/`actions` routes are untouched. The choice lives
+in one field per route, so routing a single event type back to Claude Code is
+a one-line edit of that route — there is no global harness mode to flip, and
+no route inherits a default. `claude` remains a first-class adapter: it is
+what the per-route exception selects, and `--adapter-override claude`
+(`cli.mjs serve`/`work`) forces runs onto it without touching the
+registry. Note that an adapter override changes execution only — the model
+still resolves against the **registered** route's adapter (§6, WM-135), so an
+overridden run carries the pinned `models.pi` value.
 
 **The `pi` adapter (`lib/adapters/pi.mjs`, OPS-296) mirrors `claude.mjs`,
 adapted to a different CLI shape.** `pi -p --mode json` (prompt piped to
@@ -416,11 +437,14 @@ stdin, matching `runners/run-agent.sh`'s existing invocation) rather than
 directly (`openai-codex/gpt-5.6-terra`), no separate `--provider` flag. There
 is no `--max-budget-usd` equivalent and no per-tool settings/sandbox policy —
 those, and native capability enforcement derived from `spec.capabilities`, are
-deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls`:
-pi's own documented read-only pattern is omitting bash/edit/write from the
+deliberately stage 2. `mutating: false` passes `--tools read,grep,find,ls,write`:
+pi's own documented read-only pattern is omitting bash/edit from the
 tool allowlist entirely, never exposing them to the model, rather than
 intercepting a call to them at runtime the way claude's settings/sandbox
-policy does — see §14. (An earlier draft of this design read `-r` as pi's
+policy does — see §14. (`write` stays even on a read-only run: every
+agent-result contract requires the model to write `./result.json`, so a run
+without it fails `contract_violation:missing_result` before doing anything —
+the same reasoning that keeps Write/Edit in claude's `READ_ONLY_TOOLS`.) (An earlier draft of this design read `-r` as pi's
 read-only flag; the installed CLI's own `--help` says otherwise — `-r` is
 `--resume`, a session selector, unrelated to tool access. Verify adapter flags
 against the actual CLI before relying on ticket text.) `mutating: true` pi
@@ -438,6 +462,38 @@ message the way claude's `type: "result"` is one, so `usage` is accumulated
 across every assistant turn's own reported tokens/cost and emitted once at
 process close; fields pi never reported land as explicit `null`/`{}`, never a
 guessed value.
+
+**Both LLM adapters apply the same push-credential carve-out (WM-128,
+WM-223).** `safeChildEnvironment(env, def)` in either adapter hands a mutating
+run `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GITHUB_TOKEN` and `GH_TOKEN` on top of
+the base inherited set, and strips all four from a non-mutating one — after the
+caller's `env` is merged, so a read-only run cannot be handed a token through
+`env` either. `pi.mjs` imports `PUSH_CREDENTIAL_ENV` from `claude.mjs` rather
+than restating it: one list, no drift. Until WM-223 pi had no
+mutating/non-mutating distinction at all, which meant the runtime's only
+mutating LLM agent (`dispatch@1`, pi-routed since WM-215) reached its push step
+with no credential of any kind — surviving only because `gh` reads its own
+stored OAuth from `~/.config/gh/hosts.yml` through the inherited
+`HOME`/`XDG_CONFIG_HOME`, and git picks up the `gh` credential helper the same
+way. That gh-over-HTTPS route remains the paved road a dispatch run should
+push on (`agents/dispatch.md` step 5); the carve-out is what makes an SSH or
+token push a real fallback rather than a guaranteed failure. The optional
+`gh auth status` preflight refusal considered alongside this was deliberately
+not adopted: with the credentials restored, a mutating run can legitimately
+push without gh being authenticated, so gating the start of the run on it would
+refuse work that would have succeeded.
+
+**One wrinkle the carve-out leaves open: `SSH_AUTH_SOCK` is not only a push
+credential.** It is also how an agent reaches infrastructure over SSH, and a
+read-only infra agent — `disk-diagnose` declares `mutating: false` with
+`services: ["ssh:read:lab", "ssh:read:web"]` — may legitimately want the agent
+socket despite being non-mutating. Both adapters strip it from such a run
+today; `disk-diagnose` works because key-file authentication is reachable
+through the inherited `HOME`, not because the socket survives. The fix, if that
+ever becomes a real failure, is a capability-driven exception (a declared
+`ssh:read` service inheriting the socket), **not** widening the non-mutating
+default — the point of the strip is that a read-only run holds no authority it
+did not declare.
 
 **Live trace is an optional adapter capability (`factory.trace/v1`).** An
 adapter may stream what the agent is doing mid-run — via the `onTrace`
@@ -584,6 +640,18 @@ ephemeral workspace could never be rechecked, and slice 2's recompute needs
 the bytes. Evidence too large to inline waits for the content-addressed
 artifact store rather than being silently dropped.
 
+A typed refusal may be bare or may carry an artifact and evidence explaining
+why the agent could not proceed. When present, that context is not an escape
+from the output contract: the verifier validates the artifact against the
+agent's output schema, applies its closed semantic predicates, retains the
+artifact and bounded evidence in the accepted result, and recomputes their
+hashes. An invalid refusal artifact therefore fails as a contract violation;
+a valid one still produces `REFUSED` with its original reason code and no
+completion event. The refusal's verification receipt records a passed
+contract check, while the accepted result supplies the refusal reason and the
+hash-bound explanatory context; bare refusals continue to have no artifact or
+evidence hashes.
+
 Repository work later adds the exact repository verification command, executed
 separately from the implementing agent. GitHub Actions is not required. The
 verification record binds the immutable source ref, command, environment,
@@ -623,32 +691,36 @@ orchestrator keeps its stateless model unchanged.
 Because the contracts must not care where workers run, the logical model avoids
 host-local PIDs, locks, and paths. The physical substrate can start small:
 
-- **MVP: one embedded database.** SQLite (or a local Postgres, if already at
-  hand) with a handful of tables: admitted events; action proposals and
-  approvals; immutable run specifications; run attempts and leases; append-only
-  lifecycle events; accepted results; transactional outbox events. With one
-  worker (§3), lease contention does not exist; `FOR UPDATE SKIP LOCKED` is the
-  mechanism the day a second worker process arrives, and guards nothing before
-  then.
-- **Second process: still SQLite** (shipped, OPS-233). A correction to this
-  section's original plan: splitting the worker out of the API process did not
-  need Postgres. SQLite in WAL mode already serves multiple processes on one
-  machine — what it needed was `BEGIN IMMEDIATE` on the claim (the default
-  deferred transaction lets two workers read the same `QUEUED` row before
-  either writes) and `busy_timeout` set before `journal_mode`. Postgres with
-  `FOR UPDATE SKIP LOCKED` is the **remote node** requirement, not the
-  multi-process one.
-- **Remote workers: a possibility kept cheap, not a requirement built toward**
-  (expanded into a staged, ticket-shaped design in
-  [event-runtime-workers.md](event-runtime-workers.md))**.**
-  The binding constraint today is one machine and one usage window — the same
-  reason architecture.md §4 rejects cross-repo parallelism. Keeping host-local
-  assumptions out of the contracts costs nothing; buying distributed
-  infrastructure ahead of a demonstrated need costs plenty.
+- **MVP: one embedded database.** SQLite holds admitted events; action
+  proposals and approvals; immutable run specifications; run attempts and
+  leases; append-only lifecycle events; accepted results; and transactional
+  outbox events. The control plane is its only database principal.
+- **Second process: still SQLite** (shipped, OPS-233). Splitting the worker out
+  of the API process did not need Postgres. SQLite in WAL mode supports local
+  contention with `BEGIN IMMEDIATE` on claim (the default deferred transaction
+  lets two claimers read the same `QUEUED` row before either writes) and
+  `busy_timeout` set before `journal_mode`.
+- **Remote workers use the control API, not a shared database** (designed in
+  [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)). This
+  is an explicit boundary move and **supersedes this section's former cut-line
+  #1**: do not port `db.mjs` to Postgres for distribution and do not put
+  `FOR UPDATE SKIP LOCKED` or DB credentials in workers. The server performs
+  the same atomic claim transaction behind `POST /worker/v1/claim`, returns a
+  fencing token, accepts heartbeats and cancellation polling, and publishes a
+  verified result plus outbox event transactionally. Local workers migrate to
+  that API over loopback too, so schema evolution and substrate choice remain
+  control-plane concerns.
+- **Remote placement remains earned machinery, not an immediate requirement.**
+  Per-node identity, HTTPS, content-addressed artifact ingest, adapters, repo
+  mirrors/config, and (for tier-2) worktree coordination must exist before a
+  remote node is enabled. The binding constraint today is still one usage
+  window; keeping paths out of contracts is cheap, while deploying a fleet
+  ahead of need is not.
 
-Transcripts and artifact bytes may start on local disk, addressed by content
-hash, and move behind an artifact-store interface when a second node is
-introduced.
+Transcripts and artifact bytes start on local disk, addressed by content hash.
+A remote worker uploads bytes through OPS-298's `POST /artifacts`; the control
+plane recomputes hashes and deduplicates before the result endpoint may bind
+them. Worker-local `file://` paths never cross the protocol.
 
 The append-only event journal is the replay surface. **Replay needs ordering,
 not a chain**: a monotonic sequence column plus per-record content hashes give
@@ -876,15 +948,79 @@ The remaining enforcement path, in order:
 Until one of these exists, a compromised or confused agent is limited by the
 watched approval gate and read-only scope, not by the capability list.
 
-**The control API is a trust surface of its own.** It binds to loopback only,
-so the clients need no authentication story beyond local user access. The web
-app (OPS-212) consumes the same endpoints and deliberately kept that boundary
-rather than adding auth: `ACTOR` is hardcoded `"operator"`, and the web server
-is a loopback static+proxy process. Real authentication and an authenticated
-actor identity are a **precondition** of either surface ever binding to a
-non-loopback address — not something to retrofit after exposure. Loopback is
-not by itself a defence against a browser: see OPS-408 (no `Origin`/`Host`
-check on mutating routes).
+### 14.1 The Gondolin microVM sandbox (WM-185)
+
+Paths 1 and 3 above now exist for **one adapter**, and the scope limit is the
+important part of this section: a `command`-adapter definition may declare a
+`sandbox` block, which moves that run off the host and into a Gondolin
+microVM. **The claude and pi adapters still execute on the host** with the
+worker's environment — the sandbox is not yet where the LLM agents run, and
+nothing here should be read as if it were.
+
+```json
+"sandbox": {
+  "provider": "gondolin",
+  "allowedHosts": ["api.github.com"],
+  "secrets": { "GITHUB_TOKEN": { "hosts": ["api.github.com"], "env": "GH_FACTORY_TOKEN" } }
+}
+```
+
+What that buys, verified by real-VM tests in
+`lib/sandbox/invariants.test.mjs` rather than asserted:
+
+- **Filesystem.** The workspace is mounted read-write at `/workspace` and
+  nothing else is visible — not the runtime home, not `~/.config`, not the
+  rest of the checkout. Writes cross the boundary, so `result.json` and
+  captured artifacts work unchanged.
+- **Network.** Egress is default-deny at the host proxy. **An omitted
+  `allowedHosts` denies everything**, which deliberately inverts the SDK's own
+  default of allow-all-on-omission: a definition that forgets the key must not
+  silently get the internet.
+- **Secrets.** A definition names a host env var; it never carries a value.
+  The guest receives an opaque `GONDOLIN_SECRET_…` placeholder, and the host
+  proxy substitutes the real credential only on that secret's allowlisted
+  upstreams. A placeholder sent anywhere else stays a meaningless string. A
+  secret scoped to a host the allowlist does not permit is a policy error, not
+  a no-op.
+
+The result contract is identical to the host path — same `result.json`, same
+artifacts, same exit-code semantics — so verification and receipts cannot tell
+which path ran.
+
+**The VM host runs under Node, not Bun, and that boundary is load-bearing.**
+Measured against `@earendil-works/gondolin` 0.12.0 on macOS arm64: under Bun
+the VM boots, the VFS mounts, and `vm.exec()` works, but the host-side TLS
+mediation never answers — an allowlisted request hangs until its own timeout,
+with no error and no debug output. Under Node it returns normally. So
+`lib/sandbox/gondolin.mjs` (Bun) spawns `lib/sandbox/runner.mjs` (Node) as a
+child and they speak NDJSON over a pipe; resolved secrets travel on **stdin**,
+never argv, which any process can read via `ps`.
+
+Operationally:
+
+- `bun event-runtime/cli.mjs sandbox doctor` reports whether this host can
+  honour a sandboxed run (QEMU, a Node ≥ 23.6, the SDK), and names what is
+  missing when it cannot.
+- `bun event-runtime/cli.mjs sandbox exec --dir . --allow api.github.com -- …`
+  runs anything inside the sandbox by hand, without an event or a worker.
+- A worker advertises `sandbox=gondolin` **only when that preflight passes**,
+  so placement never routes a sandboxed run to a host that would just fail it.
+  An explicit `--label sandbox=…` always wins, so a node can be forced off.
+- Warm boot measured 51–93 ms; the first boot on a machine is ~10 s while
+  ~200 MB of guest assets load once. The guest is Alpine with `bash`, `curl`,
+  `node`, `npm`, and `python3` — **no `git`**, which is the main reason
+  running the coding agents themselves in-guest is a separate piece of work
+  rather than a flag flip.
+
+**The control API is a trust surface of its own.** The operator/web routes bind
+loopback today, so they still rely on local-user access: `ACTOR` is hardcoded
+`"operator"`, and the web server is a loopback static+proxy process. The
+separate designed worker surface is never exempt: even a loopback worker uses
+a scoped node credential, and non-loopback worker traffic requires HTTPS
+([event-runtime-worker-protocol.md](event-runtime-worker-protocol.md) §2).
+Real authenticated operator identity remains a **precondition** of exposing
+operator or web routes. Loopback is not by itself a defence against a browser:
+see OPS-408 (no `Origin`/`Host` check on mutating routes).
 
 A rejected event writes no run. It may record a minimal rejection receipt that
 contains hashes and reason codes but not a sensitive webhook body.

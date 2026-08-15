@@ -71,7 +71,7 @@ async function runApply(plan, { headSha = PINNED_SHA } = {}) {
 }
 
 describe("merge-scan registration (WM-109)", () => {
-  test("merge-scan@1 is a read-only claude agent with no repository workspace", () => {
+  test("merge-scan@1 is a read-only pi agent with no repository workspace", () => {
     const def = registry.agents.get("merge-scan@1");
     expect(def.mutating).toBe(false);
     // It reads PRs via gh, not a source tree — ephemeral, like the other
@@ -81,11 +81,11 @@ describe("merge-scan registration (WM-109)", () => {
     expect(def.capabilities.services).toContain("gh:read");
   });
 
-  test("factory.merge.requested maps to merge-scan@1 on the claude adapter, deduped by inputHash", () => {
+  test("factory.merge.requested maps to merge-scan@1 on the pi adapter, deduped by inputHash", () => {
     const mapping = registry.eventTypes["factory.merge.requested"];
     expect(mapping).toEqual({
       agent: "merge-scan@1",
-      adapter: "claude",
+      adapter: "pi",
       idempotencyScope: ["inputHash"],
       proposalTtlSeconds: 1800,
     });
@@ -174,7 +174,7 @@ function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-e2e-ws-"));
-  const adapters = { claude: fake, actions: fake, command: fake };
+  const adapters = { pi: fake, actions: fake, command: fake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function approveNext(agentRef) {

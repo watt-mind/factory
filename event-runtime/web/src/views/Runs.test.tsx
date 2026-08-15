@@ -95,6 +95,65 @@ function renderRuns(props: Partial<Parameters<typeof Runs>[0]> = {}) {
   );
 }
 
+describe("Runs sortable columns (OPS-492)", () => {
+  test("every data header cycles ascending, descending, and default order with accessible state", async () => {
+    const onSelectRun = mock(() => {});
+    const later = stubListItem("run_zulu", "RUNNING", {
+      agent: "z-agent",
+      adapter: "pi",
+      attempts: 2,
+      reasonCode: "z-reason",
+      eventId: "event_zulu",
+      eventSource: "github",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    });
+    const earlier = stubListItem("run_alpha", "FAILED", {
+      agent: "a-agent",
+      adapter: "claude",
+      attempts: 1,
+      reasonCode: "a-reason",
+      eventId: "event_alpha",
+      eventSource: "linear",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [later, earlier] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ onSelectRun });
+        await waitFor(() => r.getByRole("columnheader", { name: /Run/ }));
+
+        for (const label of ["Run", "State", "Agent", "Adapter", "Model", "Attempts", "Reason", "Origin", "Updated"]) {
+          const header = r.getByRole("columnheader", { name: new RegExp(label) });
+          expect(header.getAttribute("aria-sort")).toBe("none");
+          expect(header.querySelector("button")).toBeTruthy();
+        }
+
+        const runHeader = r.getByRole("columnheader", { name: /Run/ });
+        fireEvent.click(r.getByRole("button", { name: /Run/ }));
+        expect(runHeader.getAttribute("aria-sort")).toBe("ascending");
+        expect(Array.from(r.container.querySelectorAll("tbody tr td:first-child")).map((cell) => cell.textContent)).toEqual([
+          "run_alpha",
+          "run_zulu",
+        ]);
+
+        act(() => {
+          document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+        });
+        expect(onSelectRun).toHaveBeenLastCalledWith("run_alpha");
+
+        fireEvent.click(r.getByRole("button", { name: /Run/ }));
+        expect(runHeader.getAttribute("aria-sort")).toBe("descending");
+        fireEvent.click(r.getByRole("button", { name: /Run/ }));
+        expect(runHeader.getAttribute("aria-sort")).toBe("none");
+      },
+    );
+  });
+});
+
 describe("Runs table short run ids (WM-96)", () => {
   test("run id cell displays the short form and carries the full id as title", async () => {
     const runId = "run_ec9c87f9-4c1d-4f4a-9d7e-2c2f3a1b0c9d";
@@ -314,7 +373,7 @@ describe("Runs component harness: cross-tab reveal", () => {
         });
 
         await waitFor(() => {
-          const tab = getByRole("tab", { name: /^RUNNING/i });
+          const tab = getByRole("tab", { name: /^Active/i });
           expect(tab.getAttribute("aria-selected")).toBe("true");
         });
 
@@ -335,7 +394,7 @@ describe("Runs component harness: cross-tab reveal", () => {
 
         // Should switch to ALL tab and reveal the FAILED run
         await waitFor(() => {
-          const allTab = getByRole("tab", { name: /^ALL/i });
+          const allTab = getByRole("tab", { name: /^All/i });
           expect(allTab.getAttribute("aria-selected")).toBe("true");
           const targetCell = container.querySelector(`td[title="run_failed_target"]`);
           expect(targetCell).toBeTruthy();
@@ -457,10 +516,116 @@ describe("Runs component harness: cross-tab reveal", () => {
         });
 
         await waitFor(() => {
-          const tab = getByRole("tab", { name: /^CANCELLED/i });
+          const tab = getByRole("tab", { name: /^Cancelled/i });
           expect(tab.getAttribute("aria-selected")).toBe("true");
           expect(onFocusStateConsumed).toHaveBeenCalledTimes(1);
         });
+      },
+    );
+  });
+});
+
+describe("Runs Model column (WM-221)", () => {
+  test("renders the pinned model per row, with the sentinel and n/a spelled out", async () => {
+    const modelRows = [
+      stubListItem("run_pinned", "COMPLETED", { adapter: "claude", modelTier: "standard", model: "sonnet" }),
+      stubListItem("run_sentinel", "COMPLETED", { adapter: "claude", modelTier: "strong", model: "default" }),
+      stubListItem("run_command", "COMPLETED", { adapter: "command", modelTier: null, model: null }),
+    ];
+    await withApi(
+      {
+        runs: async () => ({ runs: modelRows }),
+        run: async () => stubDetail("run_pinned", "COMPLETED", []),
+        status: async () => createStatusFixture(),
+        trace: async () => ({ head: 0, entries: [] }),
+      },
+      async () => {
+        const { findByText, getByText } = renderRuns();
+        // The column is offered like every other one, and on by default —
+        // same call as the Agents view's Model column (WM-211).
+        expect(await findByText("sonnet")).toBeTruthy();
+        expect(getByText("default (CLI)")).toBeTruthy();
+        expect(getByText("n/a")).toBeTruthy();
+      },
+    );
+  });
+
+  test("the column can be hidden through Display Options like any other", async () => {
+    localStorage.setItem("evrt-display-runs", JSON.stringify({ hiddenColumns: ["model"] }));
+    const modelRows = [stubListItem("run_pinned", "COMPLETED", { adapter: "claude", model: "sonnet" })];
+    await withApi(
+      {
+        runs: async () => ({ runs: modelRows }),
+        run: async () => stubDetail("run_pinned", "COMPLETED", []),
+        status: async () => createStatusFixture(),
+        trace: async () => ({ head: 0, entries: [] }),
+      },
+      async () => {
+        const { findByText, queryByText } = renderRuns();
+        await findByText("run_pinned");
+        expect(queryByText("sonnet")).toBeNull();
+      },
+    );
+  });
+});
+
+describe("Runs copy chords and hints (WM-233)", () => {
+  test("copy chords: c (id), c l (link), c i / c c (CLI inspect command) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const runId = "run_12345678-abcd-ef01-2345-6789abcdef01";
+    const rows = [stubListItem(runId, "RUNNING")];
+
+    await withApi(
+      {
+        runs: async () => ({ runs: rows }),
+        run: async () => stubDetail(runId, "RUNNING", []),
+        status: async () => createStatusFixture(),
+        trace: async () => ({ head: 0, entries: [] }),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        await r.findByText("copy:");
+
+        // Verify utility hint badges
+        const idBtn = r.getByRole("button", { name: "id" });
+        expect(idBtn.textContent).toContain("c");
+        const cliBtn = r.getByRole("button", { name: "CLI" });
+        expect(cliBtn.textContent).toContain("c i");
+        const linkBtn = r.getByRole("button", { name: "link" });
+        expect(linkBtn.textContent).toContain("c l");
+
+        // 1. Press 'c' -> copies runId
+        fireEvent.keyDown(document.body, { key: "c" });
+        expect(written).toBe(runId);
+
+        // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+        fireEvent.keyDown(document.body, { key: "l" });
+        expect(written).toBe(window.location.href);
+
+        // 3. Press 'c' then 'i' within 800ms -> copies CLI inspect command
+        fireEvent.keyDown(document.body, { key: "c" });
+        fireEvent.keyDown(document.body, { key: "i" });
+        expect(written).toBe(`bun event-runtime/cli.mjs inspect ${runId}`);
+
+        // 4. Press 'c' then 'c' within 800ms -> copies CLI inspect command
+        fireEvent.keyDown(document.body, { key: "c" });
+        fireEvent.keyDown(document.body, { key: "c" });
+        expect(written).toBe(`bun event-runtime/cli.mjs inspect ${runId}`);
       },
     );
   });

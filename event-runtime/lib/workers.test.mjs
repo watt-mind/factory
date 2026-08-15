@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDb } from "./db.mjs";
 import { createRun } from "./lifecycle.mjs";
 import { claimNext } from "./worker.mjs";
 import {
+  DEFAULT_POOL,
   deregisterWorker,
   HEARTBEAT_STALE_MS,
   heartbeat,
   listWorkers,
+  loadWorkerPolicy,
+  parsePoolSpec,
+  poolCounts,
+  poolDecision,
   pruneWorkers,
   registerWorker,
   satisfiesPlacement,
@@ -171,5 +176,133 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     registerWorker(d, { workerId: "live" });
     expect(pruneWorkers(d)).toBe(1);
     expect(listWorkers(d).map((w) => w.workerId)).toEqual(["live"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pool supervision (WM-226)
+// ---------------------------------------------------------------------------
+
+describe("worker pool policy (WM-226)", () => {
+  const configRoot = (yaml) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-cfg-"));
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    if (yaml !== null) writeFileSync(path.join(root, "config", "policy.yaml"), yaml, "utf8");
+    return root;
+  };
+
+  test("an absent workers: block is null, not a default — that absence keeps the single-worker stack", () => {
+    expect(loadWorkerPolicy({ root: configRoot(null) })).toBeNull();
+    expect(loadWorkerPolicy({ root: configRoot("concurrency:\n  max_in_flight_per_repo: 3\n") })).toBeNull();
+  });
+
+  test("a workers: block is read, and a partial one falls back per bound", () => {
+    expect(loadWorkerPolicy({ root: configRoot("workers:\n  min: 2\n  max: 5\n") })).toEqual({ min: 2, max: 5 });
+    expect(loadWorkerPolicy({ root: configRoot("workers:\n  max: 4\n") })).toEqual({ min: DEFAULT_POOL.min, max: 4 });
+    // An empty block is still a block: it selects the pool at its defaults.
+    expect(loadWorkerPolicy({ root: configRoot("workers: {}\n") })).toEqual(DEFAULT_POOL);
+  });
+
+  test("nonsense bounds fail closed, naming the key — an unbounded pool is the expensive mistake", () => {
+    expect(() => loadWorkerPolicy({ root: configRoot("workers:\n  min: 4\n  max: 2\n") })).toThrow(/min \(4\) cannot exceed max \(2\)/);
+    expect(() => loadWorkerPolicy({ root: configRoot("workers:\n  max: 0\n") })).toThrow(/max must be at least 1/);
+    expect(() => loadWorkerPolicy({ root: configRoot("workers:\n  min: -1\n") })).toThrow(/min must be a non-negative integer/);
+    expect(() => loadWorkerPolicy({ root: configRoot("workers:\n  max: two\n") })).toThrow(/max must be a non-negative integer/);
+    expect(() => loadWorkerPolicy({ root: configRoot("workers: [1, 3]\n") })).toThrow(/must be a map with min\/max/);
+  });
+
+  test("--workers min:max parses; a bare N pins the pool", () => {
+    expect(parsePoolSpec("1:3")).toEqual({ min: 1, max: 3 });
+    expect(parsePoolSpec("2")).toEqual({ min: 2, max: 2 });
+    expect(parsePoolSpec(" 0:4 ")).toEqual({ min: 0, max: 4 });
+    expect(() => parsePoolSpec("")).toThrow(/expects min:max/);
+    expect(() => parsePoolSpec("1:2:3")).toThrow(/expects min:max/);
+    expect(() => parsePoolSpec("3:1")).toThrow(/cannot exceed max/);
+  });
+});
+
+describe("pool scaling decisions (WM-226)", () => {
+  const decide = (o) => poolDecision({ min: 1, max: 3, ...o });
+
+  test("queued work with no idle worker spawns, bounded by max", () => {
+    expect(decide({ queued: 1, idle: 0, pool: 1 }).action).toBe("spawn");
+    expect(decide({ queued: 5, idle: 0, pool: 2 }).action).toBe("spawn");
+    const capped = decide({ queued: 5, idle: 0, pool: 3 });
+    expect(capped.action).toBe("hold");
+    expect(capped.reason).toContain("workers.max 3");
+  });
+
+  test("an idle worker already covers the queue — no spawn", () => {
+    expect(decide({ queued: 4, idle: 1, pool: 1 }).action).toBe("hold");
+  });
+
+  test("a worker still booting is capacity, not absence — one queued run cannot spawn the whole ceiling", () => {
+    // The registry has not seen it yet (idle 0) but the process exists (pool 1).
+    const d = decide({ queued: 1, idle: 0, pool: 1, pending: 1 });
+    expect(d.action).toBe("hold");
+    expect(d.reason).toContain("still starting");
+  });
+
+  test("below min always spawns, even while another worker is booting", () => {
+    expect(decide({ min: 2, max: 3, queued: 0, idle: 0, pool: 1, pending: 1 }).action).toBe("spawn");
+  });
+
+  test("idle surplus above min drains, one worker per tick", () => {
+    const d = decide({ queued: 0, idle: 3, pool: 3 });
+    expect(d.action).toBe("drain");
+    expect(d.reason).toContain("above workers.min 1");
+    // At min, an idle worker is the floor, not surplus.
+    expect(decide({ queued: 0, idle: 1, pool: 1 }).action).toBe("hold");
+    // And work waiting is never a reason to shrink.
+    expect(decide({ queued: 2, idle: 1, pool: 3 }).action).toBe("hold");
+  });
+
+  test("a worker already draining is not counted as staying — the pool cannot drain through its floor", () => {
+    // Two workers, min 1, one already asked to leave. Counting it as present
+    // would drain the second too, and the pool would respawn from empty.
+    expect(decide({ queued: 0, idle: 2, pool: 2, draining: 1 }).action).toBe("hold");
+    expect(decide({ queued: 0, idle: 3, pool: 3, draining: 1 }).action).toBe("drain");
+    // Symmetrically, a departure that takes the pool under min is refilled now
+    // rather than a tick after the floor is breached.
+    expect(decide({ queued: 0, idle: 1, pool: 1, draining: 1 }).action).toBe("spawn");
+  });
+
+  test("min 0 lets the pool reach zero and come back", () => {
+    expect(decide({ min: 0, queued: 0, idle: 1, pool: 1 }).action).toBe("drain");
+    expect(decide({ min: 0, queued: 1, idle: 0, pool: 0 }).action).toBe("spawn");
+  });
+
+  test("every decision carries the counts that justified it", () => {
+    expect(decide({ queued: 2, idle: 0, pool: 1, pending: 0 }).counts).toEqual({
+      queued: 2, idle: 0, pool: 1, pending: 0, draining: 0, min: 1, max: 3,
+    });
+  });
+});
+
+describe("poolCounts (WM-226)", () => {
+  test("counts queued runs and the fleet that can take them, naming the idle workers", () => {
+    const d = db();
+    queueRun(d, { runId: "run_a" });
+    queueRun(d, { runId: "run_b" });
+    registerWorker(d, { workerId: "w-idle" });
+    registerWorker(d, { workerId: "w-busy" });
+    heartbeat(d, "w-busy", { state: "busy", runId: "run_b" });
+
+    const counts = poolCounts(d);
+    expect(counts).toMatchObject({ queued: 2, live: 2, busy: 1, idle: 1 });
+    expect([...counts.idleWorkerIds]).toEqual(["w-idle"]);
+  });
+
+  test("a stale or stopped worker is not capacity — counting it as idle is how a queue starves", () => {
+    const d = db();
+    const started = Date.now();
+    queueRun(d, { runId: "run_a" });
+    registerWorker(d, { workerId: "w-gone", now: started });
+    registerWorker(d, { workerId: "w-stopped", now: started });
+    deregisterWorker(d, "w-stopped", { now: started });
+
+    const counts = poolCounts(d, { now: started + HEARTBEAT_STALE_MS + 1000 });
+    expect(counts).toMatchObject({ queued: 1, live: 0, idle: 0 });
+    expect(poolDecision({ ...counts, pool: 0, min: 1, max: 2 }).action).toBe("spawn");
   });
 });

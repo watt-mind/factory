@@ -1,18 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { api, ApiError } from "../api";
-import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   sortRows,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
 import {
@@ -23,6 +26,7 @@ import {
   RunFailureBanner,
   clockTo,
   isCancellable,
+  pinnedModelText,
 } from "../components/RunDetailBlocks";
 import { readPinnedRuns, savePinnedRuns } from "../components/ContextTabs";
 import type { OperatorContext } from "../context";
@@ -50,9 +54,61 @@ import {
   shortId,
 } from "../components/ui";
 
-const STATE_TABS: (RunState | "ALL")[] = [
-  "ALL", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED",
-];
+export type RunTab = "ALL" | "ACTIVE" | "COMPLETED" | "FAILED" | "CANCELLED";
+
+export const RUN_TABS: readonly RunTab[] = [
+  "ALL",
+  "ACTIVE",
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+] as const;
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
+
+export const RUN_TAB_LABELS: Record<RunTab, string> = {
+  ALL: "All",
+  ACTIVE: "Active",
+  COMPLETED: "Completed",
+  FAILED: "Failed",
+  CANCELLED: "Cancelled",
+};
+
+export const RUN_TAB_TITLES: Record<RunTab, string> = {
+  ALL: "All runs",
+  ACTIVE: "QUEUED, LEASED, RUNNING, VERIFYING",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED, TIMED_OUT, REFUSED",
+  CANCELLED: "CANCELLED",
+};
+
+export function matchesRunTab(state: RunState, tab: RunTab): boolean {
+  if (tab === "ALL") return true;
+  if (tab === "ACTIVE") return ["QUEUED", "LEASED", "RUNNING", "VERIFYING"].includes(state);
+  if (tab === "FAILED") return ["FAILED", "TIMED_OUT", "REFUSED"].includes(state);
+  if (tab === "COMPLETED") return state === "COMPLETED";
+  if (tab === "CANCELLED") return state === "CANCELLED";
+  return true;
+}
+
+export function tabForRunState(state: string): RunTab {
+  if (["QUEUED", "LEASED", "RUNNING", "VERIFYING"].includes(state)) return "ACTIVE";
+  if (["FAILED", "TIMED_OUT", "REFUSED"].includes(state)) return "FAILED";
+  if (state === "COMPLETED") return "COMPLETED";
+  if (state === "CANCELLED") return "CANCELLED";
+  return "ALL";
+}
+
+/**
+ * The pinned model as a list cell (WM-221) — the pair to the Agents view's
+ * Model column (WM-211), same words for the same facts. The *observed* model
+ * is deliberately detail-only: answering it per row means opening one stored
+ * transcript per run.
+ */
+const rowModel = (r: RunListItem) => pinnedModelText(r.adapter, r.model);
+
 /**
  * Grouping/ordering/columns (OPS-493). One config for every status tab: the
  * tabs only filter rows, the column set never changes with them.
@@ -72,19 +128,32 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     },
     { key: "agent", label: "Agent", get: (r) => r.agent },
     { key: "adapter", label: "Adapter", get: (r) => r.adapter },
+    { key: "model", label: "Model", get: rowModel },
   ],
   subGroups: ["agent", "adapter", "state"],
   sorts: [
-    { key: "created", label: "Created", get: (r) => r.created_at, defaultDir: "desc", column: "created" },
-    { key: "updated", label: "Updated", get: (r) => r.updated_at, defaultDir: "desc", column: "updated" },
+    { key: "run", label: "Run", get: (r) => r.runId, column: "run" },
+    { key: "state", label: "State", get: (r) => r.state, column: "state" },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
+    { key: "adapter", label: "Adapter", get: (r) => r.adapter, column: "adapter" },
+    { key: "model", label: "Model", get: rowModel, column: "model" },
     { key: "attempts", label: "Attempts", get: (r) => r.attempts, defaultDir: "desc", column: "attempts" },
+    { key: "reason", label: "Reason", get: (r) => r.reasonCode ?? "", column: "reason" },
+    {
+      key: "origin",
+      label: "Origin",
+      get: (r) => `${r.eventSource ?? ""}:${r.eventId ?? ""}`,
+      column: "origin",
+    },
+    { key: "updated", label: "Updated", get: (r) => r.updated_at, defaultDir: "desc", column: "updated" },
+    { key: "created", label: "Created", get: (r) => r.created_at, defaultDir: "desc" },
   ],
   columns: [
     { key: "run", label: "Run", always: true },
     { key: "state", label: "State" },
     { key: "agent", label: "Agent" },
     { key: "adapter", label: "Adapter" },
+    { key: "model", label: "Model" },
     { key: "attempts", label: "Attempts" },
     { key: "reason", label: "Reason" },
     { key: "origin", label: "Origin" },
@@ -110,6 +179,17 @@ function RowDeadlines({ r, now }: { r: RunListItem; now: number }) {
 
 const rowWash = (s: string) =>
   s === "FAILED" || s === "TIMED_OUT" ? "row-wash-err" : s === "REFUSED" ? "row-wash-warn" : "";
+
+/** Route raw links rendered by RunDetailBlocks to the deep-linkable artifact inspector. */
+export function handleRunArtifactClick(event: ReactMouseEvent<HTMLElement>) {
+  const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+  if (!target) return;
+  const match = (target.getAttribute("href") ?? "").match(/\/api\/artifacts\/([0-9a-f]{64})(?=[?#]|$)/);
+  if (!match) return;
+  event.preventDefault();
+  event.stopPropagation();
+  window.location.hash = `#/artifacts/${match[1]}`;
+}
 
 /** Runs (webui spec §4.3): state tabs, lifecycle timeline, guarded verbs. */
 export function Runs({
@@ -137,7 +217,7 @@ export function Runs({
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<(typeof STATE_TABS)[number]>("ALL");
+  const [tab, setTab] = useState<RunTab>("ALL");
   const [filter, setFilter] = useState("");
   const [confirm, setConfirm] = useState<"cancel" | "force-retry" | null>(null);
   const [cancelReason, setCancelReason] = useState("");
@@ -147,7 +227,7 @@ export function Runs({
   const fetchAll = context.kind !== "all";
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab],
-    queryFn: () => api.runs(fetchAll || tab === "ALL" ? undefined : tab),
+    queryFn: () => api.runs(),
     refetchInterval: 2000,
   });
   const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
@@ -162,8 +242,8 @@ export function Runs({
     [rows, context, focusRunId],
   );
   const byTab = useMemo(
-    () => (!fetchAll || tab === "ALL" ? scoped : scoped.filter((r) => r.state === tab)),
-    [fetchAll, scoped, tab],
+    () => (tab === "ALL" ? scoped : scoped.filter((r) => matchesRunTab(r.state, tab))),
+    [scoped, tab],
   );
   // `is:stale` is the doctor's projection, not a guess this view makes: a run
   // held by a worker whose heartbeat has gone (lib/workers.mjs stalledWorkers).
@@ -244,7 +324,7 @@ export function Runs({
     }
 
     const onTab = rows.some(
-      (r) => r.runId === focusRunId && (!fetchAll || tab === "ALL" || r.state === tab),
+      (r) => r.runId === focusRunId && (tab === "ALL" || matchesRunTab(r.state, tab)),
     );
     if (onTab) {
       const latch = pendingReveal.current;
@@ -280,10 +360,8 @@ export function Runs({
   }, [focusRunId, rejumpEpoch, rows, tab, visible, fetchAll, filter]);
 
   useEffect(() => {
-    if (focusState && (STATE_TABS as readonly string[]).includes(focusState)) {
-      setTab(focusState as (typeof STATE_TABS)[number]);
-      onFocusStateConsumed();
-    } else if (focusState) {
+    if (focusState) {
+      setTab(tabForRunState(focusState));
       onFocusStateConsumed();
     }
   }, [focusState, onFocusStateConsumed]);
@@ -291,7 +369,7 @@ export function Runs({
   // In flight is LEASED+RUNNING; a COMPLETED (etc.) status tab would be empty.
   useEffect(() => {
     if (context.kind !== "inflight") return;
-    setTab((t) => (t === "LEASED" || t === "RUNNING" || t === "ALL" ? t : "ALL"));
+    setTab((t) => (t === "ACTIVE" || t === "ALL" ? t : "ALL"));
   }, [context.kind]);
 
   const sel = useMemo(
@@ -337,11 +415,41 @@ export function Runs({
     },
   });
 
-  const selectTab = (t: (typeof STATE_TABS)[number]) => {
+  const byState = statusQ.data?.runs.byState ?? {};
+  const tabCount = (t: RunTab) => {
+    if (fetchAll) {
+      return t === "ALL" ? scoped.length : scoped.filter((r) => matchesRunTab(r.state, t)).length;
+    }
+    if (t === "ALL") return Object.values(byState).reduce((n, v) => n + (v ?? 0), 0);
+    if (t === "ACTIVE")
+      return (byState.QUEUED ?? 0) + (byState.LEASED ?? 0) + (byState.RUNNING ?? 0) + (byState.VERIFYING ?? 0);
+    if (t === "FAILED") return (byState.FAILED ?? 0) + (byState.TIMED_OUT ?? 0) + (byState.REFUSED ?? 0);
+    if (t === "COMPLETED") return byState.COMPLETED ?? 0;
+    if (t === "CANCELLED") return byState.CANCELLED ?? 0;
+    return 0;
+  };
+
+  const selectTab = (t: RunTab) => {
     setTab(t);
     if (selectedId) onSelectRun(null);
   };
-  useTabKeys(STATE_TABS, tab, selectTab);
+  useTabKeys(RUN_TABS, tab, selectTab);
+
+  const pendingC = useRef<number>(0);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= RUN_TABS.length) {
+        e.preventDefault();
+        selectTab(RUN_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectTab]);
 
   useListKeys({
     count: flat.length,
@@ -358,9 +466,44 @@ export function Runs({
     keys: {
       // §5 convention: `x` is the destructive verb on the selection — here, cancel.
       x: () => sel && connected && isCancellable(sel.state) && setConfirm("cancel"),
-      c: () => sel && copyText(sel.runId, "run id"),
+      c: () => {
+        if (!sel) return;
+        const now = Date.now();
+        if (pendingC.current > 0 && now - pendingC.current < 800) {
+          copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command");
+          pendingC.current = 0;
+        } else {
+          copyText(sel.runId, "run id");
+          pendingC.current = now;
+        }
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (!sel) return;
+      const now = Date.now();
+      if (pendingC.current > 0 && now - pendingC.current < 800) {
+        if (e.key === "i" || e.key === "I") {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command");
+          pendingC.current = 0;
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [sel]);
 
   const d = detail.data;
   const attemptsExhausted = d ? d.run.attempts >= d.run.spec.maxAttempts : false;
@@ -384,7 +527,12 @@ export function Runs({
         { label: "Open in tab", run: () => pinRun(sel.runId) },
         { label: "Open full view", hint: "o", run: () => onOpenFull(sel.runId) },
         { label: "Copy run id", hint: "c", run: () => copyText(sel.runId, "run id") },
-        { label: "Copy link", run: copyLink },
+        {
+          label: "Copy CLI inspect command",
+          hint: "c i",
+          run: () => copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command"),
+        },
+        { label: "Copy link", hint: "c l", run: copyLink },
       ];
       if (!d || !connected) {
         setContextActions(copy);
@@ -428,15 +576,8 @@ export function Runs({
           {/* Wrap, never scroll or clip: at 1280px the strip used to run out of
               width at CANCELLED with no scrollbar affordance (WM-96). */}
           <div className="flex min-w-0 flex-1 flex-wrap gap-1" role="tablist" aria-label="Run state">
-            {STATE_TABS.map((t) => {
-              const byState = statusQ.data?.runs.byState ?? {};
-              const count = fetchAll
-                ? t === "ALL"
-                  ? scoped.length
-                  : scoped.filter((r) => r.state === t).length
-                : t === "ALL"
-                  ? Object.values(byState).reduce((n, v) => n + (v ?? 0), 0)
-                  : (byState[t] ?? 0);
+            {RUN_TABS.map((t, idx) => {
+              const count = tabCount(t);
               return (
                 <button
                   key={t}
@@ -444,12 +585,16 @@ export function Runs({
                   role="tab"
                   aria-selected={tab === t}
                   onClick={() => selectTab(t)}
+                  title={RUN_TAB_TITLES[t]}
                   className={`shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium ${
                     tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
                   }`}
                 >
-                  {t === "ALL" ? "All" : t}
+                  {RUN_TAB_LABELS[t]}
                   {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                    {idx + 1}
+                  </span>
                 </button>
               );
             })}
@@ -460,6 +605,7 @@ export function Runs({
               state={display}
               onChange={setDisplay}
               onExport={visible.length > 0 ? handleExport : undefined}
+              rows={scoped}
             />
           </span>
           <FilterInput
@@ -479,13 +625,17 @@ export function Runs({
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -500,17 +650,17 @@ export function Runs({
                   aria-selected={r.runId === selectedId}
                   className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
                 >
-                  <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5" title={r.runId}>
+                  <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={r.runId}>
                     {shortId(r.runId)}
                   </td>
                   {show.has("state") && (
-                    <td className="border-b border-(--border) px-3 py-1.5">
+                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5">
                       <StateBadge state={r.state} />
                       {IN_FLIGHT.includes(r.state) && <RowDeadlines r={r} now={now} />}
                     </td>
                   )}
                   {show.has("agent") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
                       <JumpLink
                         onClick={() => onJumpAgent(r.agent)}
                         title={`Open ${r.agent} in Agents`}
@@ -520,24 +670,40 @@ export function Runs({
                     </td>
                   )}
                   {show.has("adapter") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">{r.adapter}</td>
+                    <td className="max-w-24 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={r.adapter}>
+                      {r.adapter}
+                    </td>
+                  )}
+                  {show.has("model") && (
+                    <td
+                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      title={
+                        rowModel(r) === "n/a"
+                          ? `The ${r.adapter} adapter runs a fixed argv, not a model.`
+                          : r.model && r.model !== "default"
+                            ? `Pinned into the RunSpec at plan time${r.modelTier ? ` from model_tier "${r.modelTier}"` : ""} — open the run for the model it was observed on.`
+                            : "This run pinned no model, so the CLI picked — open the run for the one it was observed on."
+                      }
+                    >
+                      {rowModel(r)}
+                    </td>
                   )}
                   {show.has("attempts") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    <td className="max-w-16 whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
                       {r.attempts}/{r.maxAttempts}
                     </td>
                   )}
                   {show.has("reason") && (
                     <td
                       className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
-                      title={r.reasonCode ?? undefined}
+                      title={r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : undefined}
                     >
-                      {r.reasonCode ?? "-"}
+                      {r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : ""}
                     </td>
                   )}
                   {show.has("origin") && (
                     <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="mono max-w-32 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
                       title={r.eventId ?? undefined}
                     >
                       {r.eventId && r.eventSource ? (
@@ -545,18 +711,21 @@ export function Runs({
                           onClick={() => onJumpEvent(r.eventSource!, r.eventId!)}
                           title={`Open origin event ${r.eventId}`}
                         >
-                          {r.eventId}
+                          {shortId(r.eventId)}
                         </JumpLink>
                       ) : (
-                        (r.eventId ?? "-")
+                        (r.eventId ? shortId(r.eventId) : "-")
                       )}
                     </td>
                   )}
                   {show.has("updated") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                    <td className="max-w-24 whitespace-nowrap border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
                       <Ago iso={r.updated_at} now={now} />
                     </td>
                   )}
+                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    <CustomCell key={c.key} row={r} path={c.key.replace(/^custom:/, "")} />
+                  ))}
                 </tr>
               );
               if (!grouped(display)) return sections[0]?.rows.map(renderRow);
@@ -596,7 +765,8 @@ export function Runs({
               <ListEmpty
                 colSpan={cols.length}
                 query={list}
-                filtered={scoped.length > 0}
+                filtered={byTab.length > 0}
+                onClear={filter.trim() ? () => setFilter("") : undefined}
                 noun="runs"
                 empty={
                   context.kind === "inflight"
@@ -605,8 +775,9 @@ export function Runs({
                       ? `No runs for ${context.name}.`
                       : tab === "ALL"
                         ? "No runs."
-                        : `No ${tab} runs.`
+                        : `No ${RUN_TAB_LABELS[tab].toLowerCase()} runs.`
                 }
+                escHint={Boolean(filter.trim())}
                 action={
                   // Only In flight can strand an operator with no way back but the
                   // context strip's All tab — offer the same exit inline (WM-91).
@@ -656,15 +827,61 @@ export function Runs({
           }
           actions={
             <>
-              <Button onClick={() => pinRun(sel.runId)}>Open in tab</Button>
-              <Button onClick={() => onOpenFull(sel.runId)}>
-                Expand <span className="mono ml-1 opacity-70">o</span>
-              </Button>
-              <Button onClick={() => copyText(sel.runId, "run id")}>Copy id</Button>
-              <Button onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command")}>
-                Copy CLI
-              </Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              <div className="flex items-center gap-1.5">
+                {d && isCancellable(d.run.state) && (
+                  <Button
+                    variant="danger"
+                    disabled={!connected || cancel.isPending}
+                    onClick={() => setConfirm("cancel")}
+                  >
+                    Cancel <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">x</span>
+                  </Button>
+                )}
+                {d && d.run.state === "FAILED" && (
+                  attemptsExhausted ? (
+                    <Button disabled={!connected} onClick={() => setConfirm("force-retry")}>
+                      Force retry…
+                    </Button>
+                  ) : (
+                    <Button
+                      disabled={!connected || retry.isPending}
+                      onClick={() => retry.mutate({ id: d.run.runId, force: false })}
+                    >
+                      Retry
+                    </Button>
+                  )
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Button onClick={() => onOpenFull(sel.runId)}>
+                  Expand <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">o</span>
+                </Button>
+                <Button onClick={() => pinRun(sel.runId)}>Open in tab</Button>
+              </div>
+            </>
+          }
+          utility={
+            <>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.runId, "run id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                CLI <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c i</span>
+              </button>
+              <span>·</span>
+              <button type="button" onClick={copyLink} className="cursor-pointer hover:text-(--text)">
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectRun(null)}>Close</Button>}
@@ -677,28 +894,30 @@ export function Runs({
           {d && (
             <>
           <RunFailureBanner state={d.run.state} lifecycle={d.lifecycle} />
-          <RunDetailBlocks
-            d={d}
-            now={now}
-            connected={connected}
-            origin={sel}
-            onJumpAgent={onJumpAgent}
-            onJumpEvent={onJumpEvent}
-            onCancel={() => setConfirm("cancel")}
-            onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
-            onForceRetry={() => setConfirm("force-retry")}
-            retryPending={retry.isPending}
-            verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
-            afterLifecycle={
-              /* key: a run switch must reset the feed's cursor and scroll state. */
-              <RunTrace
-                key={d.run.runId}
-                runId={d.run.runId}
-                state={d.run.state}
-                onExpand={() => onOpenFull(d.run.runId)}
-              />
-            }
-          />
+          <div onClickCapture={handleRunArtifactClick}>
+            <RunDetailBlocks
+              d={d}
+              now={now}
+              connected={connected}
+              origin={sel}
+              onJumpAgent={onJumpAgent}
+              onJumpEvent={onJumpEvent}
+              onCancel={() => setConfirm("cancel")}
+              onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
+              onForceRetry={() => setConfirm("force-retry")}
+              retryPending={retry.isPending}
+              verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
+              afterLifecycle={
+                /* key: a run switch must reset the feed's cursor and scroll state. */
+                <RunTrace
+                  key={d.run.runId}
+                  runId={d.run.runId}
+                  state={d.run.state}
+                  onExpand={() => onOpenFull(d.run.runId)}
+                />
+              }
+            />
+          </div>
             </>
           )}
         </DetailPane>

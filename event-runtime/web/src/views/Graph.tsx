@@ -1,10 +1,12 @@
 import {
+  applyNodeChanges,
   Background,
   Controls,
   MiniMap,
   ReactFlow,
   type Edge,
   type Node,
+  type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
@@ -13,8 +15,9 @@ import { api } from "../api";
 import { keyGuard, useNow } from "../hooks";
 import { buildCapabilityGraph, type GraphNode } from "../graph/model";
 import { nodeTypes } from "../graph/nodes";
-import { largestComponentIds, matchNodes } from "../graph/search";
+import { largestComponentIds, matchNodes, missingFocusNode, searchEnter } from "../graph/search";
 import { EDGE_STYLES, legendEntries } from "../graph/style";
+import { hashPath, hashProject, withProject } from "../hash";
 import type { EventFocus } from "../types";
 import type { OperatorContext } from "../context";
 import {
@@ -37,6 +40,45 @@ import { ScopeCaption } from "../components/ContextTabs";
 // (WM-99). The initial fit centers on the largest component and never goes
 // below this floor — the minimap covers "where is everything else".
 const INITIAL_FIT_MIN_ZOOM = 0.65;
+
+function flowEdges(graph: { edges: Array<{ id: string; source: string; target: string; kind: keyof typeof EDGE_STYLES; label?: string }> }): Edge[] {
+  return graph.edges.map((edge) => ({
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    label: edge.label,
+    animated: false,
+    style: {
+      stroke: EDGE_STYLES[edge.kind].stroke,
+      strokeWidth: 1.5,
+      strokeDasharray: EDGE_STYLES[edge.kind].strokeDasharray,
+    },
+    labelStyle: { fill: "var(--text-faint)", fontSize: 10 },
+    labelBgStyle: { fill: "var(--surface-0)" },
+  }));
+}
+
+function applyGraphOverlay(
+  prev: { nodes: Node[]; edges: Edge[] } | null,
+  graph: { nodes: GraphNode[]; edges: Parameters<typeof flowEdges>[0]["edges"] },
+): { nodes: Node[]; edges: Edge[] } | null {
+  if (!prev) return prev;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  if (prev.nodes.length !== graph.nodes.length || prev.nodes.some((n) => !byId.has(n.id))) {
+    return prev;
+  }
+  return {
+    nodes: prev.nodes.map((n) => ({
+      ...n,
+      data: { ...(n.data as object), node: byId.get(n.id) },
+    })),
+    edges: flowEdges(graph),
+  };
+}
+
+function jumpHash(path: string) {
+  window.location.hash = `#/${withProject(path, hashProject(window.location.hash))}`;
+}
 
 /**
  * Graph (webui roadmap / OPS-224 phase 1, chrome OPS-230, phase 2 overlays OPS-227):
@@ -65,6 +107,9 @@ export function Graph({
 
   const [positioned, setPositioned] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);
   const [layoutError, setLayoutError] = useState<"chunk" | "layout" | "mapping" | null>(null);
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
+  const lastIdentityRef = useRef<string | null>(null);
+  const epochLaidOutRef = useRef(0);
   const flowRef = useRef<{
     getZoom: () => number;
     fitView: (opts: {
@@ -101,13 +146,23 @@ export function Graph({
     setLayoutError(null);
     // elkjs is ~1.4 MB of pre-minified layout engine, so it rides in its own
     // async chunk (OPS-255) — fetched the first time there is a graph to lay
-    // out, never by the list views.
+    // out, never by the list views. Overlay polls reuse positions when
+    // node/edge identity is unchanged (WM-154).
     import("../graph/layout")
       .then(
-        ({ layoutGraph, NODE_HEIGHT, NODE_WIDTH }) =>
-          layoutGraph(graph)
-            .then((positions) => {
+        ({ layoutGraphIfIdentityChanged, NODE_HEIGHT, NODE_WIDTH }) => {
+          const prevIdentity =
+            layoutEpoch !== epochLaidOutRef.current ? null : lastIdentityRef.current;
+          return layoutGraphIfIdentityChanged(graph, prevIdentity)
+            .then((result) => {
               if (cancelled) return;
+              lastIdentityRef.current = result.identity;
+              epochLaidOutRef.current = layoutEpoch;
+              if (!result.positions) {
+                setPositioned((prev) => applyGraphOverlay(prev, graph));
+                return;
+              }
+              const positions = result.positions;
               try {
                 setPositioned({
                   nodes: graph.nodes.map((node) => ({
@@ -119,20 +174,7 @@ export function Graph({
                     width: NODE_WIDTH,
                     height: NODE_HEIGHT,
                   })),
-                  edges: graph.edges.map((edge) => ({
-                    id: edge.id,
-                    source: edge.source,
-                    target: edge.target,
-                    label: edge.label,
-                    animated: false,
-                    style: {
-                      stroke: EDGE_STYLES[edge.kind].stroke,
-                      strokeWidth: 1.5,
-                      strokeDasharray: EDGE_STYLES[edge.kind].strokeDasharray,
-                    },
-                    labelStyle: { fill: "var(--text-faint)", fontSize: 10 },
-                    labelBgStyle: { fill: "var(--surface-0)" },
-                  })),
+                  edges: flowEdges(graph),
                 });
               } catch (err) {
                 if (cancelled) return;
@@ -144,7 +186,8 @@ export function Graph({
               if (cancelled) return;
               console.error("graph layout calculation failed", err);
               setLayoutError("layout");
-            }),
+            });
+        },
         (err: unknown) => {
           if (cancelled) return;
           console.error("graph layout chunk import failed", err);
@@ -154,7 +197,7 @@ export function Graph({
     return () => {
       cancelled = true;
     };
-  }, [graph]);
+  }, [graph, layoutEpoch]);
 
   // Node search (WM-99): case-insensitive substring on label/id, matches
   // highlighted on canvas, Enter cycles through them.
@@ -172,17 +215,21 @@ export function Graph({
         ? positioned.nodes.map((n) => ({
             ...n,
             selected: n.id === focusNodeId,
-            data: { ...n.data, searchHit: matchSet.has(n.id) },
+            data: { ...n.data, searchHit: matchSet.has(n.id), searchCurrent: n.id === currentMatch },
           }))
         : [],
-    [positioned, focusNodeId, matchSet],
+    [positioned, focusNodeId, matchSet, currentMatch],
   );
 
   const selected: GraphNode | undefined = graph?.nodes.find((n) => n.id === focusNodeId);
+  const graphLoaded = Boolean(graph) && !registry.isPending && !proposalsQ.isPending;
+  const staleFocus = missingFocusNode(graph?.nodes, focusNodeId, graphLoaded);
   const agentDef =
     selected?.kind === "agent"
       ? registry.data?.agents.find((a) => a.ref === selected.label)
       : undefined;
+
+  const pendingC = useRef<number>(0);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -194,8 +241,19 @@ export function Graph({
       if (e.key === "c" && focusNodeId) {
         e.preventDefault();
         const node = graph?.nodes.find((n) => n.id === focusNodeId);
-        if (node) copyText(node.label, node.kind === "agent" ? "agent ref" : "id");
+        if (node) {
+          copyText(node.label, node.kind === "agent" ? "agent ref" : "id");
+          pendingC.current = Date.now();
+        }
         return;
+      }
+      if (e.key === "l" && focusNodeId) {
+        if (pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          e.preventDefault();
+          copyLink();
+          pendingC.current = 0;
+          return;
+        }
       }
       const order = positioned
         ? [...positioned.nodes]
@@ -291,36 +349,56 @@ export function Graph({
             what this runtime can do — registered routes and recommendation edges
           </div>
           <ScopeCaption context={context} surface="graph" />
-        </div>
-        {positioned && graph && graph.nodes.length > 0 && (
-          <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2">
-            <div className="flex items-center gap-2">
-              {query.trim() && (
-                <span className="text-[11px] text-(--text-faint)">
-                  {matches.length ? `${safeMatchIdx + 1} / ${matches.length}` : "no matches"}
-                </span>
-              )}
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && matches.length) {
-                    e.preventDefault();
-                    setMatchIdx((i) => (i + 1) % matches.length);
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    if (query) setQuery("");
-                    else e.currentTarget.blur();
-                  }
-                }}
-                placeholder="Search nodes…"
-                aria-label="Search graph nodes"
-                spellCheck={false}
-                className="w-52 rounded-md border border-(--border) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
-              />
+          {staleFocus && (
+            <div
+              className="mt-2 flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px]"
+              role="status"
+              style={{
+                color: "var(--hue-warn)",
+                background: "color-mix(in oklch, var(--hue-warn) 10%, transparent)",
+              }}
+            >
+              <span>Node not found</span>
+              <Button onClick={() => onSelectNode(null)}>Show graph</Button>
             </div>
-            {legend && (legend.nodes.length > 0 || legend.edges.length > 0) && (
+          )}
+        </div>
+        <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            {query.trim() && (
+              <span className="text-[11px] text-(--text-faint)">
+                {matches.length ? `${safeMatchIdx + 1} / ${matches.length}` : "no matches"}
+              </span>
+            )}
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const result = searchEnter(matches, safeMatchIdx, focusNodeId);
+                  if (result) {
+                    e.preventDefault();
+                    setMatchIdx(result.nextIdx);
+                    onSelectNode(result.selectId);
+                  }
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  if (query) setQuery("");
+                  else e.currentTarget.blur();
+                }
+              }}
+              placeholder="Search nodes…"
+              aria-label="Search graph nodes"
+              data-view-filter
+              spellCheck={false}
+              className="w-52 rounded-md border border-(--border) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
+            />
+            {positioned && graph && graph.nodes.length > 0 && (
+              <Button onClick={() => setLayoutEpoch((n) => n + 1)}>Reset layout</Button>
+            )}
+          </div>
+          {positioned && graph && graph.nodes.length > 0 && legend && (legend.nodes.length > 0 || legend.edges.length > 0) && (
               <div
                 className="flex flex-col gap-1 rounded-md border border-(--border) bg-(--surface-1) px-2.5 py-2"
                 role="img"
@@ -358,7 +436,6 @@ export function Graph({
               </div>
             )}
           </div>
-        )}
         {positioned && graph && graph.nodes.length > 0 ? (
           <ReactFlow
             nodes={nodes}
@@ -366,11 +443,20 @@ export function Graph({
             nodeTypes={nodeTypes}
             onNodeClick={(_, node) => onSelectNode(node.id)}
             onPaneClick={() => onSelectNode(null)}
+            onNodesChange={(changes: NodeChange[]) => {
+              const kept = changes.filter((c) => c.type === "position" || c.type === "dimensions");
+              if (kept.length === 0) return;
+              setPositioned((prev) => {
+                if (!prev) return prev;
+                return { ...prev, nodes: applyNodeChanges(kept, prev.nodes) };
+              });
+            }}
             onInit={(inst) => {
               flowRef.current = inst;
               setFlowReady((n) => n + 1);
             }}
             nodesFocusable
+            deleteKeyCode={null}
             proOptions={{ hideAttribution: true }}
             minZoom={0.2}
           >
@@ -400,16 +486,28 @@ export function Graph({
         <DetailPane
           widthClass="w-[420px]"
           title={selected.label}
-          actions={
+          actions={<Button onClick={revealSelected}>Show on canvas</Button>}
+          utility={
             <>
-              <Button onClick={() => copyText(selected.label, selected.kind === "agent" ? "agent ref" : "id")}>
-                {selected.kind === "agent" ? "Copy ref" : "Copy id"}
-              </Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={revealSelected}>Show on canvas</Button>
-              <Button onClick={() => onSelectNode(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(selected.label, selected.kind === "agent" ? "agent ref" : "id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                {selected.kind === "agent" ? "ref" : "id"} <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectNode(null)}>Close</Button>}
         >
 
           {selected.kind === "eventType" && (
@@ -490,6 +588,9 @@ export function Graph({
               {selected.agentRef && (
                 <Button onClick={() => onJumpAgent(selected.agentRef!)}>Open in Agents</Button>
               )}
+              <Button onClick={() => jumpHash(hashPath("proposals", selected.proposalId))}>
+                Open in Proposals
+              </Button>
             </>
           )}
 

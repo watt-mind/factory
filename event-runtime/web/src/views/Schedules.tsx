@@ -1,7 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ScheduleItem, type TriggerOutcome } from "../api";
 import { useListKeys, useNow } from "../hooks";
+import {
+  cycleColumnSort,
+  defaultDisplayState,
+  sortRows,
+  type DisplayConfig,
+} from "../displayOptions";
 import { setContextActions } from "../palette";
 import type { AdmittedEvent, AgentDef } from "../types";
 import type { OperatorContext } from "../context";
@@ -19,6 +25,7 @@ import {
   ListEmpty,
   ListPane,
   Section,
+  Th,
   VerbError,
   copyLink,
   copyText,
@@ -43,6 +50,50 @@ export function scheduleFilterTokens(s: ScheduleItem): string[] {
     s.error ? "error" : !s.enabled ? "not scheduled" : s.stopped ? "stopped" : "running",
   ];
 }
+
+const scheduleState = (schedule: ScheduleItem): string =>
+  schedule.error ? "error" : !schedule.enabled ? "not scheduled" : schedule.stopped ? "stopped" : "running";
+
+const SCHEDULES_SORT: DisplayConfig<ScheduleItem> = {
+  view: "schedules-table-sort",
+  groups: [],
+  sorts: [
+    { key: "loop", label: "Loop", get: (schedule) => schedule.loop, column: "loop" },
+    {
+      key: "cadence",
+      label: "Cadence",
+      get: (schedule) => schedule.cadenceSeconds ?? Number.POSITIVE_INFINITY,
+      column: "cadence",
+    },
+    { key: "enabled", label: "Enabled", get: (schedule) => Number(schedule.enabled), column: "enabled" },
+    { key: "approval", label: "Approval", get: (schedule) => schedule.approval, column: "approval" },
+    { key: "catchUp", label: "Catch-up", get: (schedule) => schedule.catchUp, column: "catchUp" },
+    {
+      key: "lastFire",
+      label: "Last fire",
+      get: (schedule) => schedule.lastSlot ?? "",
+      defaultDir: "desc",
+      column: "lastFire",
+    },
+    {
+      key: "nextDue",
+      label: "Next due",
+      get: (schedule) => schedule.nextDue ?? "",
+      column: "nextDue",
+    },
+    { key: "state", label: "State", get: scheduleState, column: "state" },
+  ],
+  columns: [
+    { key: "loop", label: "Loop" },
+    { key: "cadence", label: "Cadence" },
+    { key: "enabled", label: "Enabled" },
+    { key: "approval", label: "Approval" },
+    { key: "catchUp", label: "Catch-up" },
+    { key: "lastFire", label: "Last fire" },
+    { key: "nextDue", label: "Next due" },
+    { key: "state", label: "State" },
+  ],
+};
 
 /**
  * Schedules view (OPS-400, OPS-401) — surfaces recurring loops, last fire,
@@ -94,13 +145,15 @@ export function Schedules({
   const allEvents = eventsQ.data?.events ?? [];
 
   const [filter, setFilter] = useState("");
-  const visible = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((s) =>
       scheduleFilterTokens(s).some((v) => (v ?? "").toLowerCase().includes(q)),
     );
   }, [rows, filter]);
+  const [sort, setSort] = useState(() => defaultDisplayState(SCHEDULES_SORT));
+  const visible = useMemo(() => sortRows(filtered, SCHEDULES_SORT, sort), [filtered, sort]);
 
   const selectedLoop = focusScheduleLoop;
   const selectedIndex = useMemo(
@@ -152,6 +205,8 @@ export function Schedules({
     if (focusScheduleLoop) setFilter("");
   }, [focusScheduleLoop]);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: visible.length,
     selected: selectedIndex,
@@ -161,7 +216,17 @@ export function Schedules({
       else if (filter) setFilter("");
     },
     keys: {
-      c: () => sel && copyText(sel.loop, "schedule loop"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.loop, "schedule loop");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
       r: () => sel && connected !== false && setConfirmLoop(sel),
     },
   });
@@ -172,7 +237,7 @@ export function Schedules({
     } else {
       const copy = [
         { label: `Copy ${sel.loop}`, hint: "c", run: () => copyText(sel.loop, "schedule loop") },
-        { label: "Copy link to this schedule", run: copyLink },
+        { label: "Copy link to this schedule", hint: "c l", run: copyLink },
       ];
       setContextActions(
         connected === false
@@ -189,7 +254,11 @@ export function Schedules({
         chrome={
           <>
             <h1 className="display mb-4 text-lg font-semibold">Schedules</h1>
-            <ScopeCaption context={context} surface="registry" />
+            <ScopeCaption
+              context={context}
+              surface="registry"
+              subject={{ label: "Schedules", plural: true }}
+            />
             <div className="mb-3">
               <FilterInput
                 value={filter}
@@ -204,25 +273,26 @@ export function Schedules({
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Loop</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Cadence</th>
-              <th
-                className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium"
-                title="Config flag from event-runtime/schedules.json — edit that file (or use the CLI) to enable/disable; there is no toggle in this UI"
-              >
-                Enabled
-              </th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Approval</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Catch-up</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Last fire</th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium">Next due</th>
-              <th
-                className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 font-medium"
-                title="Runtime health of the scheduler loop: running, stopped (no ticks), not scheduled (disabled), or error"
-              >
-                State
-              </th>
-              <th className="sticky top-0 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1.5 text-right font-medium">Action</th>
+              {SCHEDULES_SORT.columns.map((column) => {
+                const field = SCHEDULES_SORT.sorts.find((candidate) => candidate.column === column.key)!;
+                const title =
+                  column.key === "enabled"
+                    ? "Config flag from event-runtime/schedules.json — edit that file (or use the CLI) to enable/disable; there is no toggle in this UI"
+                    : column.key === "state"
+                      ? "Runtime health of the scheduler loop: running, stopped (no ticks), not scheduled (disabled), or error"
+                      : undefined;
+                return (
+                  <Th
+                    key={column.key}
+                    label={column.label}
+                    title={title}
+                    dir={sort.sortBy === field.key ? sort.sortDir : null}
+                    naturalDir={field.defaultDir ?? "asc"}
+                    onSort={() => setSort((state) => cycleColumnSort(SCHEDULES_SORT, state, column.key))}
+                  />
+                );
+              })}
+              <Th label="Action" align="right" />
             </tr>
           </thead>
           <tbody>
@@ -238,13 +308,13 @@ export function Schedules({
                     isSel ? "row-selected bg-(--surface-3)" : ""
                   }`}
                 >
-                  <td className="mono border-b border-(--border) px-3 py-2 font-medium text-(--text)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 font-medium text-(--text)">
                     {s.loop}
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-2 text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
                     {s.every}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2">
+                  <td className="border-b border-(--border) px-3 py-1.5">
                     {s.enabled ? (
                       <span
                         className="mono text-[11px] text-(--hue-ok)"
@@ -261,10 +331,10 @@ export function Schedules({
                       </span>
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2">
+                  <td className="border-b border-(--border) px-3 py-1.5">
                     {isAuto ? (
                       <span
-                        className="rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase"
+                        className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
                         title="approval: auto — executes unattended without operator prompt"
                         style={{
                           color: "var(--hue-warn)",
@@ -278,13 +348,13 @@ export function Schedules({
                       <span className="text-[11px] text-(--text-dim)">watched</span>
                     )}
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-2 text-[11px] text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
                     {s.catchUp}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2 text-[11px] text-(--text-dim)">
+                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
                     {s.lastSlot ? <Ago iso={s.lastSlot} now={now} /> : <span className="text-(--text-faint)">never</span>}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2 text-[11px] text-(--text-dim)">
+                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
                     {!s.enabled ? (
                       <span className="text-(--text-faint)">-</span>
                     ) : s.error ? (
@@ -300,11 +370,11 @@ export function Schedules({
                       "-"
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2">
+                  <td className="border-b border-(--border) px-3 py-1.5">
                     {s.error ? (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-err)"
-                        style={{ background: "color-mix(in oklch, var(--hue-err) 14%, transparent)" }}
+                        style={{ background: "color-mix(in oklch, var(--hue-err) 12%, transparent)" }}
                         title={s.error}
                       >
                         error
@@ -320,7 +390,7 @@ export function Schedules({
                     ) : s.stopped ? (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-err)"
-                        style={{ background: "color-mix(in oklch, var(--hue-err) 14%, transparent)" }}
+                        style={{ background: "color-mix(in oklch, var(--hue-err) 12%, transparent)" }}
                         title={`Stopped: enabled: true but the scheduler loop is not ticking — no ticks for ${s.intervalsLate} intervals. Check the event runtime serve process.`}
                       >
                         stopped ({s.intervalsLate} late)
@@ -328,14 +398,14 @@ export function Schedules({
                     ) : (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-ok)"
-                        style={{ background: "color-mix(in oklch, var(--hue-ok) 14%, transparent)" }}
+                        style={{ background: "color-mix(in oklch, var(--hue-ok) 12%, transparent)" }}
                         title="Running: enabled: true and the scheduler loop is ticking on cadence"
                       >
                         running
                       </span>
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-2 text-right">
+                  <td className="border-b border-(--border) px-3 py-1.5 text-right">
                     <Button
                       disabled={connected === false}
                       onClick={() => setConfirmLoop(s)}
@@ -374,7 +444,7 @@ export function Schedules({
               </span>
               {sel.approval === "auto" && (
                 <span
-                  className="rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase"
+                  className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
                   style={{
                     color: "var(--hue-warn)",
                     borderColor: "color-mix(in oklch, var(--hue-warn) 40%, var(--border))",
@@ -387,25 +457,40 @@ export function Schedules({
             </span>
           }
           actions={
+            <Button
+              variant="primary"
+              disabled={connected === false}
+              onClick={() => setConfirmLoop(sel)}
+            >
+              Run now… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">r</span>
+            </Button>
+          }
+          utility={
             <>
-              <Button
-                variant="primary"
-                disabled={connected === false}
-                onClick={() => setConfirmLoop(sel)}
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.loop, "schedule loop")}
+                className="cursor-pointer hover:text-(--text)"
               >
-                Run now…
-              </Button>
-              <Button onClick={() => copyText(sel.loop, "schedule loop")}>Copy loop</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectSchedule(null)}>Close</Button>
+                loop <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectSchedule(null)}>Close</Button>}
         >
           <div className="space-y-6">
             {sel.stopped && (
               <div
-                className="rounded-md border border-[color:var(--hue-err)] bg-[color:color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px]"
-                style={{ color: "var(--hue-err)" }}
+                className="rounded-md border border-(--hue-err) bg-[color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px] text-(--hue-err)"
               >
                 <div className="font-semibold">Schedule clock stopped</div>
                 <div className="mt-1 text-(--text-dim)">
@@ -417,15 +502,14 @@ export function Schedules({
 
             {sel.error && (
               <div
-                className="rounded-md border border-[color:var(--hue-err)] bg-[color:color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px]"
-                style={{ color: "var(--hue-err)" }}
+                className="rounded-md border border-(--hue-err) bg-[color-mix(in_oklch,var(--hue-err)_8%,var(--surface-1))] p-3 text-[12px] text-(--hue-err)"
               >
                 <div className="font-semibold">Cadence configuration error</div>
                 <div className="mono mt-1 text-(--text-dim)">{sel.error}</div>
               </div>
             )}
 
-            <Section title="Configuration">
+            <Section id="schedule-configuration" title="Configuration">
               <KV k="loop name" v={<span className="mono">{sel.loop}</span>} />
               <KV
                 k="cadence"
@@ -564,7 +648,7 @@ export function Schedules({
                               {e.eventId}
                             </JumpLink>
                             {isAdhoc && (
-                              <span className="rounded bg-(--surface-3) px-1 text-[10px] text-(--hue-info)">
+                              <span className="rounded bg-(--surface-3) px-1 text-[11px] text-(--hue-info)">
                                 ad-hoc
                               </span>
                             )}

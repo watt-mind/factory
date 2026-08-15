@@ -14,8 +14,8 @@
  * runtime state.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, homedir } from "node:os";
 import path from "node:path";
 import * as actions from "./lib/adapters/actions.mjs";
 import * as claude from "./lib/adapters/claude.mjs";
@@ -24,7 +24,7 @@ import * as fake from "./lib/adapters/fake.mjs";
 import * as pi from "./lib/adapters/pi.mjs";
 import { apiClient } from "./lib/client.mjs";
 import {
-  API_HOST, DEFAULT_PORT, artifactsRoot, dbPath, ensureHome, environmentName, policyVersion, runtimeHome, workspacesRoot,
+  API_HOST, DEFAULT_PORT, FACTORY_ROOT, artifactsRoot, dbPath, ensureHome, environmentName, policyVersion, runtimeHome, workspacesRoot,
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { newWorkerId } from "./lib/ids.mjs";
@@ -37,9 +37,14 @@ import { planAdmittedEvents } from "./lib/planner.mjs";
 import { loadRegistry, updatePins } from "./lib/registry.mjs";
 import { approveProposal } from "./lib/proposals.mjs";
 import { startApi } from "./lib/api.mjs";
-import { claimNext, executeClaimed, runOnce } from "./lib/worker.mjs";
+import {
+  claimNext, CODE_RELOAD_EXIT, createReloadWatcher, executeClaimed, RELOAD_CHECK_INTERVAL_MS, runOnce,
+} from "./lib/worker.mjs";
 import { reapExpiredLeases } from "./lib/reaper.mjs";
-import { deregisterWorker, heartbeat, registerWorker } from "./lib/workers.mjs";
+import { preflight as sandboxPreflight, runInSandbox } from "./lib/sandbox/gondolin.mjs";
+import {
+  DEFAULT_POOL, deregisterWorker, heartbeat, loadWorkerPolicy, parsePoolSpec, poolCounts, poolDecision, registerWorker,
+} from "./lib/workers.mjs";
 
 const USAGE = `event-runtime — watched event → agent runtime (docs/event-runtime.md)
 
@@ -53,8 +58,20 @@ usage: bun event-runtime/cli.mjs <command>
                                  never kill a running agent.
                                  --watch restarts on event-runtime/ changes
   work [--label k=v ...] [--adapter-override fake] [--drain-timeout N]
+       [--reload-on-change] [--drain-file PATH] [--worker-id ID]
                                  worker process: claim, execute, verify, and publish
                                  runs from the database
+                                 --reload-on-change exits ${CODE_RELOAD_EXIT} for a supervisor to
+                                 restart when event-runtime code changes, but
+                                 only between claims (dev; see factory up --dev)
+                                 --drain-file exits 0 once that file appears, at
+                                 an idle poll boundary — never mid-run (WM-226)
+  supervise [--workers min:max] [--interval-ms N] [--once]
+                                 worker pool supervisor (WM-226): scales \`work\`
+                                 processes between workers.min and workers.max
+                                 from config/policy.yaml on observed queue depth.
+                                 Scales down by draining, never by signalling a
+                                 worker that holds a lease.
   status                         events, proposals, runs, anomalies
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
@@ -65,6 +82,12 @@ usage: bun event-runtime/cli.mjs <command>
   workers                        worker processes: host, labels, state, heartbeat
   schedule                       recurring loops: cadence, approval, last fire, next due
   repos                          factory repos: team, base, dispatch vs report-only
+  sandbox doctor                 Gondolin microVM sandbox availability (qemu, node, sdk)
+  sandbox exec [--dir P] [--allow HOST]... [--secret NAME=ENVVAR]... [--shell]
+              [--timeout S] -- <command>
+                                 run a command inside a microVM: P mounted at
+                                 /workspace, egress default-deny, secrets
+                                 injected host-side (guest sees placeholders)
   approve <proposal-id>          approve an open proposal
   reject <proposal-id> <reason>  reject an open proposal
   inject <envelope.json|->       replay an event envelope (same intake as the webhook)
@@ -75,8 +98,8 @@ usage: bun event-runtime/cli.mjs <command>
   trace <run-id>                 live agent trace: assistant text, tool calls, usage
   update-pins                    re-pin agent definition content hashes (edits repo files)
 
-All commands except serve, work, and update-pins are clients of the control API and
-need serve running on ${API_HOST}:${DEFAULT_PORT} (FACTORY_EVENT_PORT to change).`;
+All commands except serve, work, supervise, and update-pins are clients of the control
+API and need serve running on ${API_HOST}:${DEFAULT_PORT} (FACTORY_EVENT_PORT to change).`;
 
 const stamp = () => new Date().toISOString();
 const log = (line) => console.log(`[${stamp()}] ${line}`);
@@ -463,6 +486,7 @@ async function serve(args) {
  * claiming correct; Postgres is what remote nodes need, not this.
  *
  *   bun event-runtime/cli.mjs work [--label k=v ...] [--adapter-override fake] [--poll-ms 500]
+ *                                 [--reload-on-change]
  */
 async function work(args) {
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
@@ -484,20 +508,45 @@ async function work(args) {
     labels[key] = rest.join("=");
   }
 
+  // Pool supervision (WM-226). The drain file is the scale-down signal: the
+  // supervisor creates it, this worker leaves when it next reaches an idle poll
+  // boundary, and a run in flight is finished first — that boundary IS the
+  // guarantee that no leased worker is ever cut off. --worker-id lets the
+  // supervisor name the row it just spawned instead of guessing which of N
+  // registry entries belongs to which slot.
+  const drainFile = flagValue(args, "--drain-file") ?? null;
+
+  // Advertise sandbox capability only when this host can actually honour it
+  // (WM-185). Placement matches on labels, so claiming `sandbox=gondolin`
+  // without a working hypervisor would route sandboxed runs here purely to
+  // fail them. An operator-supplied --label always wins, so the capability
+  // can be forced off for a node under investigation.
+  const sandboxReport = sandboxPreflight();
+  if (labels.sandbox === undefined && sandboxReport.available) {
+    labels.sandbox = "gondolin";
+  }
+
   ensureHome();
   const db = openDb();
   const registry = loadRegistry();
   const pv = policyVersion();
-  const workerId = newWorkerId();
+  const workerId = flagValue(args, "--worker-id") ?? newWorkerId();
   const adapterNames = adapterOverride ? [adapterOverride] : Object.keys(adapters);
 
   registerWorker(db, { workerId, labels, adapters: adapterNames });
   log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
   if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
+  if (!sandboxReport.available) log(`sandbox: unavailable — ${sandboxReport.reason}`);
   if (adapterOverride) log(`adapter override: executing every run with "${adapterOverride}"`);
+  if (drainFile) log(`drain-file: ${drainFile} (supervised worker — exits 0 when it appears, between claims)`);
 
   let draining = false;
   let inFlight = null;
+
+  // Dev live-reload (WM-213). Off unless asked for: a production worker must
+  // never decide on its own that it is out of date.
+  const watcher = args.includes("--reload-on-change") ? createReloadWatcher() : null;
+  if (watcher) log(`reload-on-change: armed at code stamp ${watcher.from} (reloads only between claims)`);
 
   // The heartbeat runs on its own timer, NOT inside the claim loop: that loop
   // blocks for the whole duration of an agent run (up to the spec timeout),
@@ -510,9 +559,36 @@ async function work(args) {
   );
   beat.unref?.();
 
+  /**
+   * True when this worker should exit for a supervisor to restart it. Consulted
+   * from two places for one reason each: the timer notices a change *during* a
+   * run so the deferral is logged while it is still true, and the loop top is
+   * the idle boundary where acting on it is safe.
+   */
+  function reloadWanted() {
+    if (!watcher || draining) return false;
+    const r = watcher.check(inFlight);
+    if (r.action === "deferred") {
+      if (r.first) log(`code changed (${r.from} → ${r.to}) — reload deferred until ${r.runId} finishes`);
+      return false;
+    }
+    if (r.action === "reload") {
+      log(`code changed (${r.from} → ${r.to}) — reloading worker (exit ${CODE_RELOAD_EXIT})`);
+      return true;
+    }
+    return false;
+  }
+
   async function loop() {
     while (!draining) {
       try {
+        if (reloadWanted()) return finish("code_reload", CODE_RELOAD_EXIT);
+        // Checked here and only here: the loop top is the one place where
+        // nothing is in flight, so leaving from it cannot interrupt a run.
+        if (drainFile && existsSync(drainFile)) {
+          log(`drain requested (${drainFile}) — stopping at idle poll boundary`);
+          return finish("drain_requested");
+        }
         heartbeat(db, workerId, { state: inFlight ? "busy" : "idle", runId: inFlight });
         const claim = claimNext(db, {
           owner: workerId, policyVersion: pv, labels,
@@ -549,12 +625,21 @@ async function work(args) {
   // the grace period the worker leaves honestly and says what happens next —
   // the lease expires and the reaper requeues the run.
   const drainTimeoutMs = Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
-  const finish = (reason) => {
+  const finish = (reason, code = 0) => {
     clearInterval(beat);
     deregisterWorker(db, workerId);
     log(`worker stopped (${reason})`);
-    process.exit(0);
+    process.exit(code);
   };
+
+  // Armed only after `finish` exists — this timer is the path that notices a
+  // change while a run is in flight, which is where the deferral line comes from.
+  if (watcher) {
+    const reloadTimer = setInterval(() => {
+      if (reloadWanted()) finish("code_reload", CODE_RELOAD_EXIT);
+    }, RELOAD_CHECK_INTERVAL_MS);
+    reloadTimer.unref?.();
+  }
   const drain = (signal) => {
     if (draining) {
       // A second signal means "now": the operator has decided.
@@ -584,12 +669,323 @@ async function work(args) {
 }
 
 // ---------------------------------------------------------------------------
+// supervise — the worker pool supervisor (WM-226; workers doc §2a)
+// ---------------------------------------------------------------------------
+
+/** Where daemons keep their pidfiles and logs — the same dir bin/live-stack.sh uses. */
+export function runDir() {
+  return process.env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run");
+}
+
+/** One pool slot's four files. The run dir IS the supervisor's durable state. */
+export function slotFiles(dir, n) {
+  return {
+    pid: path.join(dir, `worker-${n}.pid`),
+    drain: path.join(dir, `worker-${n}.drain`),
+    log: path.join(dir, `worker-${n}.log`),
+    id: path.join(dir, `worker-${n}.id`),
+  };
+}
+
+/** Signal 0 probes without delivering: EPERM still proves the process exists. */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+function readFileTrimmed(file) {
+  try {
+    return readFileSync(file, "utf8").trim();
+  } catch {
+    return null;
+  }
+}
+
+function readPidFile(file) {
+  const n = Number(readFileTrimmed(file));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * The pool as the filesystem sees it. Deliberately derived from pidfiles rather
+ * than from supervisor memory: workers are spawned detached, so a supervisor
+ * that restarts (or a `factory events status` run by a human) reads the same
+ * truth, and a control-plane restart adopts the running pool instead of
+ * killing capacity.
+ */
+export function readPool(dir = runDir()) {
+  let names = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    names = [];
+  }
+  const slots = [];
+  for (const name of names) {
+    const m = /^worker-(\d+)\.pid$/.exec(name);
+    if (!m) continue;
+    const n = Number(m[1]);
+    const files = slotFiles(dir, n);
+    const pid = readPidFile(files.pid);
+    slots.push({
+      n, pid,
+      alive: pidAlive(pid),
+      draining: existsSync(files.drain),
+      workerId: readFileTrimmed(files.id),
+    });
+  }
+  slots.sort((a, b) => a.n - b.n);
+  const supervisorPid = readPidFile(path.join(dir, "supervisor.pid"));
+  return {
+    supervisor: supervisorPid === null ? null : { pid: supervisorPid, alive: pidAlive(supervisorPid) },
+    slots,
+    size: slots.filter((s) => s.alive).length,
+  };
+}
+
+/**
+ * A worker takes a second or two to boot and register. Within this window a
+ * freshly spawned slot counts as `pending` rather than as missing capacity —
+ * without it every tick during a spawn sees "queued work, nothing idle" and
+ * spawns again, straight to max, for a single queued run.
+ */
+export const SPAWN_GRACE_MS = 10_000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The pool supervisor: a deterministic loop that maintains
+ * `workers.min ≤ pool ≤ workers.max` from observed queue depth. It is its own
+ * process, not part of `serve`, so restarting the control plane never touches
+ * capacity — and it scales DOWN only by asking a worker to drain, never by
+ * signalling one that might hold a lease.
+ *
+ *   bun event-runtime/cli.mjs supervise [--workers 1:3] [--interval-ms 2000] [--once]
+ */
+async function supervise(args) {
+  const dir = runDir();
+  mkdirSync(dir, { recursive: true });
+
+  let bounds;
+  try {
+    const spec = flagValue(args, "--workers");
+    bounds = spec ? parsePoolSpec(spec) : (loadWorkerPolicy() ?? { ...DEFAULT_POOL });
+  } catch (err) {
+    return fail(`supervise: ${err.message}`);
+  }
+
+  const intervalMs = Number(flagValue(args, "--interval-ms") ?? 2_000);
+  if (!Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 60_000) {
+    return fail("supervise: --interval-ms must be an integer between 100 and 60000");
+  }
+  const drainTimeoutMs = Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
+  const spawnGraceMs = Number(flagValue(args, "--spawn-grace-ms") ?? SPAWN_GRACE_MS);
+  if (!Number.isInteger(spawnGraceMs) || spawnGraceMs < 0) {
+    return fail("supervise: --spawn-grace-ms must be a non-negative integer");
+  }
+  const once = args.includes("--once");
+
+  // Whatever shapes a worker gets handed straight through, so a supervised pool
+  // is configured exactly like the single worker it replaces.
+  const passthrough = [];
+  for (const flag of ["--adapter-override", "--poll-ms", "--drain-timeout"]) {
+    const v = flagValue(args, flag);
+    if (v !== null && v !== undefined) passthrough.push(flag, v);
+  }
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--label") passthrough.push("--label", String(args[i + 1] ?? ""));
+  }
+
+  // One supervisor per run dir. Two would allocate the same slot numbers and
+  // silently orphan each other's workers — pidfiles overwritten, processes
+  // still running, nothing able to drain them.
+  const supervisorPidFile = path.join(dir, "supervisor.pid");
+  const incumbent = readPool(dir).supervisor;
+  if (incumbent?.alive && incumbent.pid !== process.pid) {
+    return fail(`supervise: a supervisor is already running for ${dir} (pid ${incumbent.pid}) — stop it first, or point FACTORY_RUN_DIR elsewhere`);
+  }
+
+  ensureHome();
+  const db = openDb();
+  writeFileSync(supervisorPidFile, `${process.pid}\n`);
+
+  log(`supervisor ${process.pid} — workers min ${bounds.min}, max ${bounds.max}, tick ${intervalMs}ms (run dir ${dir})`);
+
+  const spawnedAt = new Map();
+
+  function releaseSlot(n) {
+    const files = slotFiles(dir, n);
+    for (const f of [files.pid, files.drain, files.id]) rmSync(f, { force: true });
+    spawnedAt.delete(n);
+  }
+
+  function spawnSlot(n) {
+    const files = slotFiles(dir, n);
+    // Never inherit the previous tenant's drain flag: a fresh worker that finds
+    // one exits immediately and the pool silently refuses to grow.
+    rmSync(files.drain, { force: true });
+    const workerId = newWorkerId();
+    const out = openSync(files.log, "a");
+    const child = spawn(
+      process.execPath,
+      [import.meta.path, "work", ...passthrough, "--worker-id", workerId, "--drain-file", files.drain],
+      { cwd: FACTORY_ROOT, detached: true, stdio: ["ignore", out, out], env: process.env },
+    );
+    child.unref();
+    closeSync(out);
+    writeFileSync(files.pid, `${child.pid}\n`);
+    writeFileSync(files.id, `${workerId}\n`);
+    spawnedAt.set(n, Date.now());
+    return { pid: child.pid, workerId, log: files.log };
+  }
+
+  /**
+   * Prefer a slot the registry says is idle, so the common case drains a worker
+   * that is doing nothing. Falling back to the highest slot is safe rather than
+   * merely convenient: the flag is only read at an idle poll boundary, so even
+   * a wrong guess finishes its run before leaving.
+   */
+  function chooseDrainSlot(alive, idleWorkerIds) {
+    const candidates = alive.filter((s) => !s.draining);
+    if (candidates.length === 0) return null;
+    const idle = [...candidates].reverse().find((s) => s.workerId && idleWorkerIds.has(s.workerId));
+    return idle ?? candidates[candidates.length - 1];
+  }
+
+  let lastHold = null;
+
+  function tick() {
+    const now = Date.now();
+    for (const s of readPool(dir).slots) {
+      if (s.alive) continue;
+      log(`slot ${s.n} (worker ${s.workerId ?? "?"}, pid ${s.pid ?? "?"}) exited — slot released`);
+      releaseSlot(s.n);
+    }
+
+    const alive = readPool(dir).slots.filter((s) => s.alive);
+    const observed = poolCounts(db, { now });
+    const pending = alive.filter((s) => now - (spawnedAt.get(s.n) ?? 0) < spawnGraceMs).length;
+    const draining = alive.filter((s) => s.draining).length;
+    const decision = poolDecision({
+      queued: observed.queued, idle: observed.idle, pool: alive.length, pending, draining,
+      min: bounds.min, max: bounds.max,
+    });
+    const counts = `queued=${observed.queued} idle=${observed.idle} busy=${observed.busy} pool=${alive.length} pending=${pending} draining=${draining} min=${bounds.min} max=${bounds.max}`;
+
+    if (decision.action === "spawn") {
+      const taken = new Set(alive.map((s) => s.n));
+      let slot = 1;
+      while (taken.has(slot)) slot += 1;
+      if (slot > bounds.max) {
+        log(`hold — no free slot below max ${bounds.max} [${counts}]`);
+        return decision;
+      }
+      const { pid, workerId, log: logFile } = spawnSlot(slot);
+      log(`spawn slot ${slot} → worker ${workerId} pid ${pid} (${logFile}): ${decision.reason} [${counts}]`);
+      lastHold = null;
+      return decision;
+    }
+
+    if (decision.action === "drain") {
+      const target = chooseDrainSlot(alive, observed.idleWorkerIds);
+      if (!target) {
+        log(`hold — every live slot is already draining [${counts}]`);
+        return decision;
+      }
+      writeFileSync(slotFiles(dir, target.n).drain, `scale-down ${new Date(now).toISOString()}\n`);
+      log(`drain slot ${target.n} (worker ${target.workerId ?? "?"}): ${decision.reason} [${counts}] — it exits at its next idle poll boundary, never mid-run`);
+      lastHold = null;
+      return decision;
+    }
+
+    // Holding is the steady state; logging it every tick would bury the two
+    // decisions that matter. Only the transition is news.
+    if (decision.reason !== lastHold) {
+      log(`hold — ${decision.reason} [${counts}]`);
+      lastHold = decision.reason;
+    }
+    return decision;
+  }
+
+  if (once) {
+    tick();
+    rmSync(supervisorPidFile, { force: true });
+    return;
+  }
+
+  let stopping = false;
+  const timer = setInterval(tick, intervalMs);
+  tick();
+
+  /**
+   * Shutdown escalates, and every step short of the last is a request rather
+   * than a kill: drain flags → SIGTERM (which starts each worker's OWN bounded
+   * graceful drain) → leave the stragglers to their leases and say so. The
+   * reaper requeues whatever a lease outlives; a SIGKILL here would orphan an
+   * agent process and leave a lying registry row instead.
+   */
+  const shutdown = async (signal) => {
+    if (stopping) {
+      log("second signal — leaving the pool to finish on its own");
+      rmSync(supervisorPidFile, { force: true });
+      process.exit(0);
+    }
+    stopping = true;
+    clearInterval(timer);
+    const alive = readPool(dir).slots.filter((s) => s.alive);
+    log(`${signal} — draining ${alive.length} worker(s); anything holding a lease finishes its run first`);
+    for (const s of alive) writeFileSync(slotFiles(dir, s.n).drain, `${signal}\n`);
+
+    const waitFor = async (deadline) => {
+      while (Date.now() < deadline && readPool(dir).slots.some((s) => s.alive)) await sleep(200);
+      return readPool(dir).slots.filter((s) => s.alive);
+    };
+
+    let left = await waitFor(Date.now() + drainTimeoutMs);
+    if (left.length > 0) {
+      log(`${left.length} worker(s) still busy after ${drainTimeoutMs / 1000}s — SIGTERM (each runs its own bounded drain)`);
+      for (const s of left) {
+        try {
+          process.kill(s.pid, "SIGTERM");
+        } catch {
+          // already gone between the read and the signal
+        }
+      }
+      left = await waitFor(Date.now() + drainTimeoutMs);
+    }
+    if (left.length > 0) {
+      log(`${left.length} worker(s) did not exit — leaving them to their leases; the reaper will requeue`);
+    } else {
+      log("pool drained — supervisor stopping");
+    }
+    for (const s of readPool(dir).slots) if (!s.alive) releaseSlot(s.n);
+    rmSync(supervisorPidFile, { force: true });
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  // Nothing else keeps this process alive: the interval is the loop.
+  await new Promise(() => {});
+}
+
+// ---------------------------------------------------------------------------
 // operator verbs — clients of the control API (§12–§13)
 // ---------------------------------------------------------------------------
 
 function countLine(label, counts, order = Object.keys(counts)) {
   const parts = order.map((k) => `${k} ${counts[k] ?? 0}`);
   return `${pad(label, 11)}${parts.join("   ")}`;
+}
+
+function spendLine(label, usage) {
+  const cost = Number(usage?.costUSD ?? 0);
+  return `${pad(label, 11)}${usage?.totalTokens ?? 0} tokens   input ${usage?.inputTokens ?? 0}   output ${usage?.outputTokens ?? 0}   cache-write ${usage?.cacheCreationInputTokens ?? 0}   cache-read ${usage?.cacheReadInputTokens ?? 0}   $${cost.toFixed(4)}`;
 }
 
 export function getAnomalyLines(s) {
@@ -661,6 +1057,34 @@ export function getAnomalyLines(s) {
   return anomalyLines;
 }
 
+/**
+ * The pool, as this machine's run dir reports it (WM-226). Read locally rather
+ * than through the control API on purpose: pidfile liveness is node-local state
+ * the API has no way to see, and the supervisor is deliberately not part of
+ * `serve`. Nothing is printed when no pool was ever started, so a plain
+ * single-worker stack looks exactly as it did before.
+ */
+export function getPoolLines(pool, s) {
+  const started = pool?.supervisor !== null && pool?.supervisor !== undefined;
+  if (!started && (pool?.slots?.length ?? 0) === 0) return { line: null, anomalies: [] };
+
+  const sup = pool.supervisor;
+  const supText = !sup ? "absent" : sup.alive ? `live (pid ${sup.pid})` : `DEAD (stale pid ${sup.pid})`;
+  const draining = pool.slots.filter((sl) => sl.alive && sl.draining).length;
+  const line = `${pad("pool", 11)}supervisor ${supText}   workers ${pool.size}${draining > 0 ? ` (${draining} draining)` : ""}`;
+
+  // §13's shape of anomaly: work waiting with nothing left that can grow the
+  // pool. The queue is not stuck yet — the live workers may still drain it —
+  // but nothing will scale up behind them, and that is what an operator wants
+  // told rather than discovered.
+  const queued = s?.runs?.byState?.QUEUED ?? 0;
+  const anomalies = [];
+  if (sup && !sup.alive && queued > 0) {
+    anomalies.push(`worker pool supervisor is dead (stale pid ${sup.pid}) with ${queued} queued run(s)`);
+  }
+  return { line, anomalies };
+}
+
 export async function status(client) {
   const s = await client.status();
   if (s.env) {
@@ -670,7 +1094,17 @@ export async function status(client) {
   console.log(countLine("proposals", s.proposals, ["open", "expired"]));
   const states = Object.keys(s.runs.byState);
   console.log(states.length ? countLine("runs", s.runs.byState, states) : `${pad("runs", 11)}none`);
-  const anomalyLines = getAnomalyLines(s);
+  const spend = s.runs?.spend;
+  if (spend) {
+    console.log(spendLine("spend 1h", spend.rolling1h));
+    console.log(spendLine("spend 24h", spend.rolling24h));
+    for (const row of spend.byAgent24h ?? []) {
+      console.log(spendLine(`  ${row.agent}`, row));
+    }
+  }
+  const pool = getPoolLines(readPool(), s);
+  if (pool.line) console.log(pool.line);
+  const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
   if (anomalyLines.length === 0) console.log(`${pad("anomalies", 11)}none`);
   else for (const line of anomalyLines) console.log(`${pad("anomalies", 11)}${line}`);
   return anomalyLines;
@@ -752,6 +1186,13 @@ async function inspect(client, runId) {
   console.log(`agent      ${run.spec.agent}   adapter ${run.spec.adapter}   contract ${run.spec.outputContract}`);
   console.log(`created    ${run.created_at}   updated ${run.updated_at}`);
   console.log(`workspace  ${view.workspace ?? "-"}`);
+  if (view.usage) {
+    console.log("\nusage");
+    console.log(`  ${spendLine("total", view.usage.totals).trimStart()}`);
+    for (const row of view.usage.attempts ?? []) {
+      console.log(`  ${spendLine(`attempt ${row.attempt}`, row).trimStart()}   model ${row.model ?? "-"}   adapter ${row.adapter}`);
+    }
+  }
   console.log("\nlifecycle");
   for (const e of view.lifecycle) {
     console.log(`  ${pad(e.at, 26)}${pad(`${e.from_state ?? "·"} → ${e.to_state}`, 26)}${pad(e.actor, 24)}${e.reason ?? ""}`);
@@ -889,6 +1330,93 @@ async function inject(client, file) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Hand-driven sandbox access (WM-185) — the way to try a Gondolin microVM
+ * without wiring an event, an agent definition, or a worker:
+ *
+ *   sandbox doctor
+ *   sandbox exec --dir . --allow api.github.com --secret GITHUB_TOKEN=GH_TOKEN --shell -- \
+ *     'curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user'
+ *
+ * `--secret NAME=ENVVAR` reads ENVVAR from this shell and scopes it to every
+ * --allow host; the guest only ever sees a placeholder. `--shell` runs the
+ * command through the guest's /bin/sh, which is a convenience for interactive
+ * use — the command adapter always uses argv form, with no shell at all.
+ */
+async function sandbox(args) {
+  const sub = args[0];
+
+  if (sub === "doctor") {
+    const report = sandboxPreflight();
+    console.log(`${pad("available", 14)}${report.available ? "yes" : "no"}`);
+    console.log(`${pad("qemu", 14)}${report.qemu ?? "-"}`);
+    console.log(`${pad("node", 14)}${report.node ?? "-"}${report.nodeVersion ? `   (v${report.nodeVersion})` : ""}`);
+    console.log(`${pad("sdk", 14)}${report.sdk ? "@earendil-works/gondolin installed" : "-"}`);
+    if (!report.available) {
+      console.log(`\n${report.reason}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub !== "exec") {
+    fail("usage: sandbox doctor | sandbox exec [--dir P] [--allow HOST]... [--secret NAME=ENVVAR]... [--shell] [--timeout S] -- <command>");
+  }
+
+  const rest = args.slice(1);
+  const separator = rest.indexOf("--");
+  if (separator === -1 || separator === rest.length - 1) {
+    fail("sandbox exec: the command must follow `--` (e.g. sandbox exec --dir . -- /bin/ls -la /workspace)");
+  }
+  const flags = rest.slice(0, separator);
+  const commandArgv = rest.slice(separator + 1);
+
+  const dir = path.resolve(flagValue(flags, "--dir") ?? process.cwd());
+  const shell = flags.includes("--shell");
+  const timeoutSeconds = Number(flagValue(flags, "--timeout") ?? 120);
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) fail("sandbox exec: --timeout must be a positive number of seconds");
+
+  const allowedHosts = [];
+  const secrets = {};
+  for (let i = 0; i < flags.length; i += 1) {
+    if (flags[i] === "--allow") {
+      const host = flags[i + 1];
+      if (!host) fail("sandbox exec: --allow expects a host");
+      allowedHosts.push(host);
+    }
+    if (flags[i] === "--secret") {
+      const [name, ...envRest] = String(flags[i + 1] ?? "").split("=");
+      if (!name) fail("sandbox exec: --secret expects NAME or NAME=ENVVAR");
+      secrets[name] = { env: envRest.length > 0 ? envRest.join("=") : name };
+    }
+  }
+  // A secret is scoped to whatever egress was actually allowed; policy
+  // normalization rejects any wider claim, so this can never over-grant.
+  for (const secret of Object.values(secrets)) secret.hosts = allowedHosts;
+
+  const report = sandboxPreflight();
+  if (!report.available) fail(`sandbox exec: ${report.reason}`);
+
+  try {
+    const { exitCode, timedOut, bootMs } = await runInSandbox({
+      policy: { provider: "gondolin", allowedHosts, secrets },
+      command: shell ? commandArgv.join(" ") : commandArgv,
+      workspaceDir: dir,
+      timeoutMs: timeoutSeconds * 1000,
+      shell,
+      onStdout: (chunk) => process.stdout.write(chunk),
+      onStderr: (chunk) => process.stderr.write(chunk),
+    });
+    console.error(
+      `\n[sandbox] ${dir} mounted at /workspace   egress: ${allowedHosts.length ? allowedHosts.join(", ") : "deny-all"}   boot ${bootMs ?? "?"}ms`,
+    );
+    if (timedOut) fail(`sandbox exec: timed out after ${timeoutSeconds}s`);
+    process.exit(exitCode ?? 1);
+  } catch (err) {
+    fail(`sandbox exec: ${err.message}`);
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
 
@@ -898,6 +1426,9 @@ async function main() {
 
     case "work":
       return work(args);
+
+    case "supervise":
+      return supervise(args);
 
     case "status":
       return withClient(status);
@@ -928,6 +1459,9 @@ async function main() {
 
     case "repos":
       return withClient(repos);
+
+    case "sandbox":
+      return sandbox(args);
 
     case "approve": {
       if (!args[0]) fail("usage: approve <proposal-id>");

@@ -1,17 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import type { Proposal } from "../types";
 import type { OperatorContext } from "../context";
@@ -44,9 +47,15 @@ import {
   VerbError,
   copyText,
   copyLink,
+  shortId,
 } from "../components/ui";
 
 const PROPOSAL_TABS = ["open", "history"] as const;
+type ProposalTab = (typeof PROPOSAL_TABS)[number];
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
 
 const ttlExpiry = (p: Proposal) => new Date(p.created_at).getTime() + p.ttl_seconds * 1000;
 
@@ -65,9 +74,17 @@ const OPEN_DISPLAY: DisplayConfig<Proposal> = {
   ],
   subGroups: ["agent", "decision"],
   sorts: [
-    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
-    { key: "ttl", label: "Time left", get: ttlExpiry, column: "ttl" },
     { key: "agent", label: "Agent", get: (p) => p.agent ?? "", column: "agent" },
+    { key: "decision", label: "Decision", get: (p) => p.decision, column: "decision" },
+    { key: "ttl", label: "Time left", get: ttlExpiry, column: "ttl" },
+    {
+      key: "origin",
+      label: "Origin",
+      get: (p) => `${p.eventSource ?? ""}:${p.eventId ?? ""}`,
+      column: "origin",
+    },
+    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
+    { key: "reason", label: "Reason", get: (p) => p.reason ?? "", column: "reason" },
   ],
   columns: [
     { key: "agent", label: "Agent", always: true },
@@ -93,14 +110,21 @@ const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
   ],
   subGroups: ["agent", "status"],
   sorts: [
-    { key: "decided", label: "Decided", get: (p) => p.decided_at ?? "", defaultDir: "desc", column: "decided" },
-    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
     { key: "agent", label: "Agent", get: (p) => p.agent ?? "", column: "agent" },
+    { key: "status", label: "Status", get: (p) => p.status, column: "status" },
+    { key: "decided", label: "Decided", get: (p) => p.decided_at ?? "", defaultDir: "desc", column: "decided" },
+    {
+      key: "origin",
+      label: "Origin",
+      get: (p) => `${p.eventSource ?? ""}:${p.eventId ?? ""}`,
+      column: "origin",
+    },
+    { key: "created", label: "Created", get: (p) => p.created_at, defaultDir: "desc", column: "created" },
+    { key: "reason", label: "Reason", get: (p) => p.reason ?? "", column: "reason" },
   ],
   columns: [
     { key: "agent", label: "Agent", always: true },
     { key: "status", label: "Status" },
-    { key: "decidedBy", label: "Decided by" },
     { key: "decided", label: "Decided" },
     { key: "origin", label: "Origin" },
     { key: "created", label: "Created" },
@@ -140,10 +164,10 @@ export function Proposals({
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<"open" | "history">("open");
+  const [tab, setTab] = useState<ProposalTab>("open");
   const query = useQuery({
     queryKey: ["proposals"],
-    queryFn: api.proposals,
+    queryFn: () => api.proposals(),
     refetchInterval: 2000,
   });
   const history = useQuery({
@@ -197,7 +221,7 @@ export function Proposals({
 
   const agentsQuery = useQuery({
     queryKey: ["agents"],
-    queryFn: api.agents,
+    queryFn: () => api.agents(),
     refetchInterval: 5000,
   });
 
@@ -218,7 +242,7 @@ export function Proposals({
   const headerCheckboxRef = useRef<HTMLInputElement>(null);
   const bulkReasonRef = useRef<HTMLInputElement>(null);
 
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: () => api.status(), refetchInterval: 2000 });
   // The expired chip only exists on Open; History rows have no live TTL. Derive
   // the gate once so the row filter and the empty copy can never disagree.
   const expiredFilter = expiredOnly && tab === "open";
@@ -504,6 +528,8 @@ export function Proposals({
     setTimeout(() => reasonRef.current?.focus(), 0);
   };
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -521,7 +547,17 @@ export function Proposals({
       // §5: `a` opens the confirm with the spec in view — it never fires the verb directly.
       a: () => canApprove && connected && setConfirmApprove(true),
       x: () => isOpen && connected && openReject(),
-      c: () => sel && copyText(sel.id, "proposal id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.id, "proposal id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -532,7 +568,7 @@ export function Proposals({
     } else {
       const copy = [
         { label: `Copy ${sel.id}`, hint: "c", run: () => copyText(sel.id, "proposal id") },
-        { label: "Copy link to this proposal", run: copyLink },
+        { label: "Copy link to this proposal", hint: "c l", run: copyLink },
       ];
       if (!connected || !isOpen) {
         setContextActions(copy);
@@ -550,13 +586,28 @@ export function Proposals({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel?.id, canApprove, isOpen, connected]);
 
-  const selectTab = (t: (typeof PROPOSAL_TABS)[number]) => {
+  const selectTab = (t: ProposalTab) => {
     setTab(t);
     setExpiredOnly(false);
     onSelectProposal(null);
     setSelectedIds(new Set());
   };
   useTabKeys(PROPOSAL_TABS, tab, selectTab);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= PROPOSAL_TABS.length) {
+        e.preventDefault();
+        selectTab(PROPOSAL_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="flex h-full min-w-0">
@@ -573,7 +624,7 @@ export function Proposals({
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <div className="flex gap-1" role="tablist" aria-label="Proposal status">
-            {PROPOSAL_TABS.map((t) => {
+            {PROPOSAL_TABS.map((t, idx) => {
               const count = t === "open"
                 ? (context.kind === "repo" ? (query.data?.proposals ?? []).filter((p) => matchesRepo(p.repos, context)).length : (statusQ.data?.proposals.open ?? 0))
                 : (history.data?.proposals ?? []).filter((p) => p.status !== "open" && matchesRepo(p.repos, context)).length;
@@ -584,35 +635,43 @@ export function Proposals({
                   role="tab"
                   aria-selected={tab === t}
                   onClick={() => selectTab(t)}
+                  title={t}
                   className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"}`}
                 >
                   {t === "open" ? "Open" : "History"}
                   {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                    {idx + 1}
+                  </span>
                 </button>
               );
             })}
           </div>
-          {tab === "open" && (
+          {tab === "open" && expiredCount > 0 && (
             <button
               type="button"
               aria-pressed={expiredOnly}
               onClick={() => setExpiredOnly((v) => !v)}
-              className={`rounded-md px-2 py-1 text-[12px] ${
+              title="Filter to expired open proposals"
+              className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
                 expiredOnly
                   ? "bg-(--surface-3) text-(--text)"
                   : "text-(--text-faint) hover:bg-(--surface-1)"
               }`}
             >
-              expired
-              {expiredCount > 0 && (
-                <span className="ml-1.5 tabular-nums text-(--text-faint)">
-                  {expiredCount}
-                </span>
-              )}
+              Expired
+              <span className="ml-1.5 tabular-nums text-(--text-faint)">
+                {expiredCount}
+              </span>
             </button>
           )}
           <span className="ml-auto">
-            <DisplayOptions config={displayConfig} state={display} onChange={setDisplay} />
+            <DisplayOptions
+              config={displayConfig}
+              state={display}
+              onChange={setDisplay}
+              rows={scoped}
+            />
           </span>
           {/* Last in the row: the token chips are a full-width item, so anything
               after the filter box would be pushed onto a third line the moment
@@ -647,13 +706,17 @@ export function Proposals({
               )}
               {cols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -684,7 +747,7 @@ export function Proposals({
                       />
                     </td>
                   )}
-                  <td className={tdCls}>
+                  <td className={`${tdCls} max-w-32 truncate`}>
                     {p.agent ? (
                       <JumpLink
                         onClick={() => onJumpAgent(p.agent!)}
@@ -693,11 +756,13 @@ export function Proposals({
                         {p.agent}
                       </JumpLink>
                     ) : (
-                      "—"
+                      <span className="text-(--text-faint)" title="no agent: proposal rejected at planning">
+                        —
+                      </span>
                     )}
                   </td>
                   {show.has("decision") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-28 truncate`}>
                       <StateBadge state={p.decision} hues={DECISION_HUES} />
                       {staleState(p) && (
                         <span className="ml-2" style={{ color: "var(--hue-err)" }}>
@@ -707,47 +772,61 @@ export function Proposals({
                     </td>
                   )}
                   {show.has("ttl") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-20 whitespace-nowrap`}>
                       <Countdown createdAt={p.created_at} ttlSeconds={p.ttl_seconds} />
                     </td>
                   )}
                   {show.has("status") && (
-                    <td className={tdCls}>
+                    <td className={`${tdCls} max-w-28 truncate`}>
                       <StateBadge state={p.status} hues={PROPOSAL_STATUS_HUES} />
                     </td>
                   )}
-                  {show.has("decidedBy") && (
-                    <td className={`${tdCls} text-(--text-dim)`}>{p.decided_by ?? "-"}</td>
-                  )}
                   {show.has("decided") && (
-                    <td className={`${tdCls} text-(--text-faint)`}>
-                      <Ago iso={p.decided_at} now={now} />
+                    <td
+                      className={`max-w-36 truncate ${tdCls} text-(--text-faint)`}
+                      title={
+                        p.decided_at
+                          ? `${new Date(p.decided_at).toLocaleString()}${p.decided_by ? ` · ${p.decided_by}` : ""}`
+                          : undefined
+                      }
+                    >
+                      {p.decided_at ? (
+                        <>
+                          <Ago iso={p.decided_at} now={now} />
+                          {p.decided_by && <span className="text-(--text-faint)"> · {p.decided_by}</span>}
+                        </>
+                      ) : (
+                        "-"
+                      )}
                     </td>
                   )}
                   {show.has("origin") && (
-                    <td className={`mono max-w-40 truncate ${tdCls} text-(--text-faint)`} title={p.eventId ?? undefined}>
+                    <td className={`mono max-w-32 truncate ${tdCls} text-(--text-faint)`} title={p.eventId ?? undefined}>
                       {p.eventId && p.eventSource ? (
                         <JumpLink
                           onClick={() => onJumpEvent(p.eventSource!, p.eventId!)}
-                          title={p.eventId}
+                          title={`Open origin event ${p.eventId}`}
                         >
-                          {p.eventId}
+                          {shortId(p.eventId)}
                         </JumpLink>
                       ) : (
-                        (p.eventId ?? "-")
+                        (p.eventId ? shortId(p.eventId) : "-")
                       )}
                     </td>
                   )}
                   {show.has("created") && (
-                    <td className={`${tdCls} text-(--text-faint)`}>
+                    <td className={`max-w-24 whitespace-nowrap ${tdCls} text-(--text-faint)`}>
                       <Ago iso={p.created_at} now={now} />
                     </td>
                   )}
                   {show.has("reason") && (
-                    <td className={`max-w-64 truncate ${tdCls} text-(--text-dim)`} title={p.reason ?? undefined}>
+                    <td className={`max-w-48 truncate ${tdCls} text-(--text-dim)`} title={p.reason ?? undefined}>
                       {p.reason ?? "-"}
                     </td>
                   )}
+                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    <CustomCell key={c.key} row={p} path={c.key.replace(/^custom:/, "")} />
+                  ))}
                 </tr>
               );
               if (!grouped(display)) return sections[0]?.rows.map(renderRow);
@@ -788,6 +867,14 @@ export function Proposals({
                 colSpan={cols.length + (tab === "open" ? 1 : 0)}
                 query={tab === "open" ? query : history}
                 filtered={unfilteredCount > 0}
+                onClear={
+                  escClearsFilter
+                    ? () => {
+                        setFilter("");
+                        setExpiredOnly(false);
+                      }
+                    : undefined
+                }
                 noun="proposals"
                 empty={
                   expiredFilter
@@ -808,11 +895,70 @@ export function Proposals({
       {sel && (
         <DetailPane
           widthClass="w-[460px]"
-          title={<span title={sel.id}>{sel.agent ?? sel.id}</span>}
+          title={
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectProposal(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to proposals list"
+              >
+                Proposals
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
+              </span>
+              <span className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)" aria-current="page">
+                <StateBadge
+                  state={sel.status === "open" ? sel.decision : sel.status}
+                  hues={sel.status === "open" ? DECISION_HUES : PROPOSAL_STATUS_HUES}
+                />
+                <span className="truncate mono" title={sel.id}>
+                  {shortId(sel.id)}
+                </span>
+              </span>
+            </nav>
+          }
           actions={
+            isOpen ? (
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="danger"
+                  disabled={!connected || reject.isPending}
+                  onClick={openReject}
+                >
+                  Reject… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">x</span>
+                </Button>
+                {canApprove && (
+                  <Button
+                    variant="primary"
+                    disabled={!connected || approve.isPending}
+                    onClick={() => setConfirmApprove(true)}
+                  >
+                    Approve… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">a</span>
+                  </Button>
+                )}
+              </div>
+            ) : null
+          }
+          utility={
             <>
-              <Button onClick={() => copyText(sel.id, "proposal id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.id, "proposal id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectProposal(null)}>Close</Button>}
@@ -836,8 +982,8 @@ export function Proposals({
               k="run"
               v={
                 sel.runId ? (
-                  <JumpLink onClick={() => onRunQueued(sel.runId!)} title="Open run">
-                    {sel.runId}
+                  <JumpLink onClick={() => onRunQueued(sel.runId!)} title={`Open run ${sel.runId}`}>
+                    {shortId(sel.runId)}
                   </JumpLink>
                 ) : null
               }
@@ -851,7 +997,16 @@ export function Proposals({
             <KV k="created" v={<Ago iso={sel.created_at} now={now} />} />
             {sel.decided_at && <KV k="decided at" v={<Ago iso={sel.decided_at} now={now} />} />}
             {sel.decided_by && <KV k="decided by" v={sel.decided_by} />}
-            {sel.reason && <KV k="planner reason" v={sel.reason} />}
+            {sel.reason && (
+              <KV
+                k="planner reason"
+                v={
+                  <span className="break-words whitespace-pre-wrap leading-relaxed text-(--text-dim)">
+                    {sel.reason}
+                  </span>
+                }
+              />
+            )}
           </Section>
 
           {sel.eventId && (
@@ -860,11 +1015,11 @@ export function Proposals({
                 k="eventId"
                 v={
                   sel.eventSource ? (
-                    <JumpLink onClick={() => onJumpEvent(sel.eventSource!, sel.eventId!)} title="Open origin event">
-                      {sel.eventId}
+                    <JumpLink onClick={() => onJumpEvent(sel.eventSource!, sel.eventId!)} title={`Open origin event ${sel.eventId}`}>
+                      {shortId(sel.eventId)}
                     </JumpLink>
                   ) : (
-                    sel.eventId
+                    <span title={sel.eventId}>{shortId(sel.eventId)}</span>
                   )
                 }
               />
@@ -894,7 +1049,7 @@ export function Proposals({
                   <div className="mb-2 flex items-center justify-between border-b border-(--border) pb-2">
                     <div className="flex gap-2">
                       <span className="rounded px-2 py-0.5 text-[11px] font-semibold uppercase" style={{ color: mut ? "var(--hue-err)" : "var(--hue-ok)", background: `color-mix(in oklch, ${mut ? "var(--hue-err)" : "var(--hue-ok)"} 12%, transparent)` }}>
-                        {mut ? "🔴 Mutating" : "🟢 Read-Only"}
+                        {mut ? "Mutating" : "Read-Only"}
                       </span>
                       <span className="rounded px-2 py-0.5 text-[11px] font-semibold uppercase" style={{ color: blastHue, background: `color-mix(in oklch, ${blastHue} 12%, transparent)` }}>
                         Radar: {blast} Risk
@@ -903,16 +1058,16 @@ export function Proposals({
                     <span className="mono text-[11px] text-(--text-faint)">{sel.spec.adapter}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Target Repo</div><div className="mono truncate text-(--text-dim)" title={repo}>{repo}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Target Branch</div><div className="mono truncate text-(--text-dim)" title={branch}>{branch}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Issue ID</div><div className="mono truncate text-(--text-dim)" title={issue}>{issue}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Host</div><div className="mono truncate text-(--text-dim)" title={host}>{host}</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Budget</div><div className="mono text-(--text-dim)">{sel.spec.timeoutSeconds}s · max {sel.spec.maxAttempts} att</div></div>
-                    <div><div className="text-[10px] uppercase text-(--text-faint)">Egress</div><div className="mono truncate text-(--text-dim)">{egress.length ? egress.join(", ") : "none"}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Target Repo</div><div className="mono truncate text-(--text-dim)" title={repo}>{repo}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Target Branch</div><div className="mono truncate text-(--text-dim)" title={branch}>{branch}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Issue ID</div><div className="mono truncate text-(--text-dim)" title={issue}>{issue}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Host</div><div className="mono truncate text-(--text-dim)" title={host}>{host}</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Budget</div><div className="mono text-(--text-dim)">{sel.spec.timeoutSeconds}s · max {sel.spec.maxAttempts} att</div></div>
+                    <div><div className="text-[11px] uppercase text-(--text-faint)">Egress</div><div className="mono truncate text-(--text-dim)">{egress.length ? egress.join(", ") : "none"}</div></div>
                     <div className="col-span-2">
-                      <div className="text-[10px] uppercase text-(--text-faint)">Capabilities</div>
+                      <div className="text-[11px] uppercase text-(--text-faint)">Capabilities</div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {caps.length ? caps.map((c) => <span key={c} className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[10.5px] text-(--text-dim)">{c}</span>) : <span className="text-[11px] text-(--text-faint)">none (sandboxed)</span>}
+                        {caps.length ? caps.map((c) => <span key={c} className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11.5px] text-(--text-dim)">{c}</span>) : <span className="text-[11px] text-(--text-faint)">none (sandboxed)</span>}
                       </div>
                     </div>
                   </div>
@@ -945,22 +1100,6 @@ export function Proposals({
               Reject it to clear the queue.
             </div>
           )}
-          {isOpen && (
-            <div className="flex gap-2">
-              {canApprove && (
-                <Button
-                  variant="primary"
-                  disabled={!connected || approve.isPending}
-                  onClick={() => setConfirmApprove(true)}
-                >
-                  Approve… <span className="mono ml-1 opacity-70">a</span>
-                </Button>
-              )}
-              <Button variant="danger" disabled={!connected || reject.isPending} onClick={openReject}>
-                Reject… <span className="mono ml-1 opacity-70">x</span>
-              </Button>
-            </div>
-          )}
 
           {isOpen && rejecting && (
             <div className="mt-3 flex flex-col gap-2 rounded-md border border-(--border) bg-(--surface-0) p-2.5">
@@ -990,7 +1129,15 @@ export function Proposals({
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && reason.trim()) reject.mutate({ id: sel.id, why: reason.trim() });
+                    if (
+                      (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) &&
+                      reason.trim() &&
+                      !reject.isPending &&
+                      connected
+                    ) {
+                      e.preventDefault();
+                      reject.mutate({ id: sel.id, why: reason.trim() });
+                    }
                     if (e.key === "Escape") setRejecting(false);
                   }}
                   placeholder="Reason (required — rejections are audit records)"
@@ -998,7 +1145,7 @@ export function Proposals({
                 />
                 <Button
                   variant="danger"
-                  disabled={!reason.trim() || reject.isPending}
+                  disabled={!reason.trim() || reject.isPending || !connected}
                   onClick={() => reject.mutate({ id: sel.id, why: reason.trim() })}
                 >
                   Confirm
@@ -1164,7 +1311,12 @@ export function Proposals({
             value={bulkReason}
             onChange={(e) => setBulkReason(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && bulkReason.trim() && !bulkRejecting) {
+              if (
+                (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) &&
+                bulkReason.trim() &&
+                !bulkRejecting &&
+                connected
+              ) {
                 e.preventDefault();
                 handleBulkReject();
               }

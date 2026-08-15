@@ -55,12 +55,17 @@ function vendorChunk(id: string): string | undefined {
 // are fetched on demand, and are deliberately over the limit. kB is 1000 bytes
 // here to match how Vite reports sizes.
 //
-// The budget tracks the measured entry with a little slack, not a round number
-// well above it. Slack this thin means ordinary feature work will eventually
-// trip it; that is the trade, and re-baselining is a normal move.
-// Re-baselined for OPS-513 (after landing 17+ UI feature wave including autocomplete,
-// bulk actions, breadcrumbs, and live graph overlays): 499.82 kB measured on CI Linux.
-const ENTRY_CHUNK_BUDGET_BYTES = 520 * 1000;
+// This budget protects first paint on the operator dashboard: the shared shell
+// and the primary Overview, Runs, and Events views stay eager, while secondary
+// routes (including Agents, Workers, and full-run detail) and occasional dialogs
+// load on demand. Moving one of those surfaces back into the entry is therefore
+// a first-paint tradeoff, not routine feature growth.
+//
+// WM-257 measured the entry at 472.95 kB locally after restoring those splits;
+// 480 kB leaves about 7 kB of slack while keeping the previous 540 kB ratchet
+// from returning. Keep the xyflow and lazy-route chunks visible in build output
+// before considering any future re-baseline.
+const ENTRY_CHUNK_BUDGET_BYTES = 480 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {

@@ -2,18 +2,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
-import { useDisplayOptions, useListKeys, useNow, useRequeuePoll, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useRequeuePoll, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   sortRows,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
 import type { AdmittedEvent, EventFocus } from "../types";
@@ -93,6 +96,10 @@ function setFacetInQuery(filter: string, key: "type" | "source", value: string):
 const STATUS_TABS = ["all", "admitted", "planned", "noop", "human_needed", "dead_lettered"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
+
 /** Only these two statuses may be requeued (planner.mjs requeueEvent). */
 const REQUEUEABLE = new Set(["dead_lettered", "human_needed"]);
 
@@ -135,10 +142,14 @@ const EVENTS_DISPLAY: DisplayConfig<AdmittedEvent> = {
   ],
   subGroups: ["type", "source", "status"],
   sorts: [
+    { key: "event", label: "Event", get: (e) => e.eventId, column: "event" },
+    { key: "source", label: "Source", get: (e) => e.source, column: "source" },
+    { key: "type", label: "Type", get: (e) => e.type, column: "type" },
+    { key: "subject", label: "Subject", get: (e) => e.subject ?? "", column: "subject" },
+    { key: "status", label: "Status", get: (e) => e.status, column: "status" },
+    { key: "admitted", label: "Admitted", get: (e) => e.admittedAt, defaultDir: "desc", column: "admitted" },
     { key: "occurred", label: "Occurred", get: (e) => e.occurredAt, defaultDir: "desc" },
     { key: "received", label: "Received", get: (e) => e.receivedAt, defaultDir: "desc" },
-    { key: "type", label: "Type", get: (e) => e.type, column: "type" },
-    { key: "admitted", label: "Admitted", get: (e) => e.admittedAt, defaultDir: "desc", column: "admitted" },
   ],
   columns: [
     { key: "event", label: "Event", always: true },
@@ -435,6 +446,22 @@ export function Events({
   };
   useTabKeys(STATUS_TABS, tab, selectTab);
 
+  const pendingC = useRef<number>(0);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= STATUS_TABS.length) {
+        e.preventDefault();
+        selectTab(STATUS_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectTab]);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -455,7 +482,17 @@ export function Events({
       // `q` not `r`: `r` is the `g r` navigation suffix, and both listeners
       // see the same keydown — `g r` with a selection must never requeue.
       q: () => canRequeue && connected && sel && requeue.mutate(sel),
-      c: () => sel && copyText(sel.eventId, "event id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.eventId, "event id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -474,7 +511,7 @@ export function Events({
           run: () => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now())),
         },
         { label: `Copy ${sel.eventId}`, hint: "c", run: () => copyText(sel.eventId, "event id") },
-        { label: "Copy link to this event", run: copyLink },
+        { label: "Copy link to this event", hint: "c l", run: copyLink },
       ]);
     }
     return () => setContextActions([]);
@@ -513,7 +550,7 @@ export function Events({
         )}
 
         <div className="mb-3 flex flex-wrap gap-1" role="tablist" aria-label="Event status">
-          {STATUS_TABS.map((t) => {
+          {STATUS_TABS.map((t, idx) => {
             const count = tabCount(t);
             return (
               <button
@@ -522,79 +559,80 @@ export function Events({
                 role="tab"
                 aria-selected={tab === t}
                 onClick={() => selectTab(t)}
+                title={t}
                 className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
                   tab === t ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
                 }`}
               >
                 {TAB_LABEL[t]}
                 {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                  {idx + 1}
+                </span>
               </button>
             );
           })}
         </div>
 
-        {/* Type / source facets get their own line, above the query box: the
-            token chips below the box are full-width, so a facet chip beside it
-            would jump a line the moment a token appeared. */}
         {(types.length > 1 || sources.length > 1) && (
-        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2">
-          {types.length > 1 && (
-            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event types">
-              <span className="text-[11px] font-semibold text-(--text-dim)">Type:</span>
-              {types.map((t) => {
-                const isPressed = activeTypes.has(t.toLowerCase());
-                const count = typeCounts[t] ?? 0;
-                return (
-                  <button
-                    key={t}
-                    type="button"
-                    aria-pressed={isPressed}
-                    onClick={() => {
-                      const next = isPressed ? null : t;
-                      setFilter((cur) => toggleFacetInQuery(cur, "type", t));
-                      onSelectType(next);
-                    }}
-                    className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                      isPressed
-                        ? "bg-(--surface-3) text-(--text)"
-                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
-                    }`}
-                  >
-                    <span>{t}</span>
-                    <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {sources.length > 1 && (
-            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event sources">
-              <span className="text-[11px] font-semibold text-(--text-dim)">Source:</span>
-              {sources.map((s) => {
-                const isPressed = activeSources.has(s.toLowerCase());
-                const count = sourceCounts[s] ?? 0;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    aria-pressed={isPressed}
-                    onClick={() => {
-                      setFilter((cur) => toggleFacetInQuery(cur, "source", s));
-                    }}
-                    className={`rounded-md px-2 py-0.5 font-mono text-[11px] transition-colors ${
-                      isPressed
-                        ? "bg-(--surface-3) text-(--text)"
-                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
-                    }`}
-                  >
-                    <span>{s}</span>
-                    <span className="ml-1.5 font-sans tabular-nums text-(--text-faint)">{count}</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+            {types.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event types">
+                <span className="text-[11px] font-medium text-(--text-dim)">Type:</span>
+                {types.map((t) => {
+                  const isPressed = activeTypes.has(t.toLowerCase());
+                  const count = typeCounts[t] ?? 0;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      aria-pressed={isPressed}
+                      onClick={() => {
+                        const next = isPressed ? null : t;
+                        setFilter((cur) => toggleFacetInQuery(cur, "type", t));
+                        onSelectType(next);
+                      }}
+                      className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+                        isPressed
+                          ? "bg-(--surface-3) text-(--text) font-medium"
+                          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                      }`}
+                    >
+                      <span>{t}</span>
+                      {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {sources.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event sources">
+                <span className="text-[11px] font-medium text-(--text-dim)">Source:</span>
+                {sources.map((s) => {
+                  const isPressed = activeSources.has(s.toLowerCase());
+                  const count = sourceCounts[s] ?? 0;
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      aria-pressed={isPressed}
+                      onClick={() => {
+                        setFilter((cur) => toggleFacetInQuery(cur, "source", s));
+                      }}
+                      className={`rounded-md px-2 py-0.5 mono text-[11px] transition-colors ${
+                        isPressed
+                          ? "bg-(--surface-3) text-(--text) font-medium"
+                          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                      }`}
+                    >
+                      <span>{s}</span>
+                      {count > 0 && <span className="ml-1.5 font-sans tabular-nums text-(--text-faint)">{count}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -604,6 +642,7 @@ export function Events({
               state={display}
               onChange={setDisplay}
               onExport={visible.length > 0 ? handleExport : undefined}
+              rows={scoped}
             />
           </span>
           {/* Last in the row: the token chips are a full-width item, so anything
@@ -626,13 +665,17 @@ export function Events({
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(displayConfig, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -650,28 +693,30 @@ export function Events({
                     aria-selected={isSelected}
                     className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${isSelected ? "row-selected" : ""}`}
                   >
-                    <td className="mono max-w-52 truncate border-b border-(--border) px-3 py-1.5" title={e.eventId}>
+                    <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={e.eventId}>
                       {shortId(e.eventId)}
                     </td>
                     {show.has("source") && (
-                      <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <td className="mono max-w-24 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.source}>
                         {e.source}
                       </td>
                     )}
                     {show.has("type") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{e.type}</td>
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)" title={e.type}>
+                        {e.type}
+                      </td>
                     )}
                     {show.has("subject") && (
-                      <td className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <td className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.subject ?? undefined}>
                         {e.subject ?? "-"}
                       </td>
                     )}
                     {show.has("status") && (
-                      <td className="max-w-56 border-b border-(--border) px-3 py-1.5">
-                        <div>
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5">
+                        <div className="flex items-center">
                           <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
                           {e.planFailures > 0 && (
-                            <span className="ml-2 whitespace-nowrap text-[11px]" style={{ color: "var(--hue-err)" }}>
+                            <span className="ml-2 whitespace-nowrap text-[11px] text-(--hue-err)">
                               {e.planFailures} plan failure{e.planFailures === 1 ? "" : "s"}
                             </span>
                           )}
@@ -691,10 +736,13 @@ export function Events({
                       </td>
                     )}
                     {show.has("admitted") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                      <td className="max-w-24 whitespace-nowrap border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
                         <Ago iso={e.admittedAt} now={now} />
                       </td>
                     )}
+                    {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                      <CustomCell key={c.key} row={e} path={c.key.replace(/^custom:/, "")} />
+                    ))}
                   </tr>
                 );
               };
@@ -735,7 +783,15 @@ export function Events({
               <ListEmpty
                 colSpan={cols.length}
                 query={list}
-                filtered={scoped.length > 0}
+                filtered={tabScoped.length > 0}
+                onClear={
+                  filter.trim()
+                    ? () => {
+                        setFilter("");
+                        onSelectType(null);
+                      }
+                    : undefined
+                }
                 noun="events"
                 empty={
                   context.kind === "repo"
@@ -744,6 +800,7 @@ export function Events({
                     ? "No events."
                     : `No ${TAB_LABEL[tab].toLowerCase()} events.`
                 }
+                escHint={Boolean(filter.trim())}
                 action={
                   tab === "all" ? (
                     <Button onClick={onInject}>Inject event…</Button>
@@ -758,11 +815,69 @@ export function Events({
       {sel && (
         <DetailPane
           widthClass="w-[440px]"
-          title={<span title={sel.eventId}>{sel.eventId}</span>}
+          title={
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectEvent(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to events list"
+              >
+                Events
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
+              </span>
+              <span className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)" aria-current="page">
+                <StateBadge state={sel.status} hues={EVENT_STATUS_HUES} />
+                <span className="truncate mono" title={sel.eventId}>
+                  {shortId(sel.eventId)}
+                </span>
+              </span>
+            </nav>
+          }
           actions={
             <>
-              <Button onClick={() => copyText(sel.eventId, "event id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
+              {canRequeue && (
+                <Button
+                  variant="primary"
+                  disabled={!connected || requeue.isPending}
+                  onClick={() => requeue.mutate(sel)}
+                >
+                  Requeue <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">q</span>
+                </Button>
+              )}
+              <div className="flex items-center gap-1.5">
+                <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
+                  Replay…
+                </Button>
+                <Button
+                  disabled={!connected}
+                  onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
+                >
+                  Trigger again…
+                </Button>
+              </div>
+            </>
+          }
+          utility={
+            <>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.eventId, "event id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
+              </button>
             </>
           }
           close={<Button onClick={() => onSelectEvent(null)}>Close</Button>}
@@ -781,8 +896,8 @@ export function Events({
               k="proposal"
               v={
                 sel.proposalId ? (
-                  <JumpLink onClick={() => onJumpProposal(sel.proposalId!)} title="Open proposal">
-                    {sel.proposalId}
+                  <JumpLink onClick={() => onJumpProposal(sel.proposalId!)} title={sel.proposalId}>
+                    {shortId(sel.proposalId)}
                   </JumpLink>
                 ) : null
               }
@@ -791,8 +906,8 @@ export function Events({
               k="run"
               v={
                 sel.runId ? (
-                  <JumpLink onClick={() => onJumpRun(sel.runId!)} title="Open run">
-                    {sel.runId}
+                  <JumpLink onClick={() => onJumpRun(sel.runId!)} title={sel.runId}>
+                    {shortId(sel.runId)}
                   </JumpLink>
                 ) : null
               }
@@ -829,31 +944,6 @@ export function Events({
             </Disclosure>
           </Section>
 
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
-              {canRequeue && (
-                <Button
-                  variant="primary"
-                  disabled={!connected || requeue.isPending}
-                  onClick={() => requeue.mutate(sel)}
-                >
-                  Requeue <span className="mono ml-1 opacity-70">q</span>
-                </Button>
-              )}
-              <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
-                Replay through intake…
-              </Button>
-              <Button
-                disabled={!connected}
-                onClick={() => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now()))}
-              >
-                Trigger again…
-              </Button>
-            </div>
-            <div className="text-[11px] leading-relaxed text-(--text-faint)">
-              Requeue re-plans this event. Replay re-injects through intake. Trigger again opens inject.
-            </div>
-          </div>
           <VerbError error={requeue.error ?? replay.error} />
         </DetailPane>
       )}

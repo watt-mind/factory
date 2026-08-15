@@ -1,12 +1,24 @@
 import "../test-dom";
-import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { AgentNode, EventTypeNode, ProposalNode, TerminalNode } from "./nodes";
+import { AgentNode, EventTypeNode, ProposalNode, TerminalNode, nodeAccessibleName } from "./nodes";
 import type { GraphNode } from "./model";
+import { Graph } from "../views/Graph";
+import {
+  changeInput,
+  createAgentsFixture,
+  createProposalFixture,
+  createStatusFixture,
+  renderWithClient,
+  restoreApi,
+  withApi,
+} from "../test-render";
+import type { AgentsView } from "../types";
 
 afterEach(() => {
   cleanup();
+  restoreApi();
 });
 
 function renderNode(ui: React.ReactElement) {
@@ -150,6 +162,117 @@ describe("ProposalNode", () => {
   });
 });
 
+describe("node accessible names and selection", () => {
+  const eventNode: GraphNode = {
+    id: "event:gh.failed",
+    kind: "eventType",
+    label: "gh.failed",
+    adapter: "claude",
+    scope: ["repo"],
+    ttl: null,
+    admittedCount: 4,
+    plannedCount: 2,
+  };
+  const agentNode: GraphNode = {
+    id: "agent:doctor@1",
+    kind: "agent",
+    label: "doctor@1",
+    adapter: "claude",
+    mutating: false,
+    execution: "model",
+    contract: "c/v1",
+    capabilities: [],
+    actions: [],
+    hosts: [],
+    activeRuns: [{ state: "RUNNING", count: 1 }],
+  };
+  const terminalNode: GraphNode = {
+    id: "terminal:doctor@1",
+    kind: "terminal",
+    label: "chain ends",
+    reason: "TICKET, ENV",
+  };
+  const proposalNode: GraphNode = {
+    id: "proposal:prop_123",
+    kind: "proposal",
+    label: "pending: ci-rerun@1",
+    proposalId: "prop_123",
+    decision: "run",
+    agentRef: "ci-rerun@1",
+    eventType: "ci.rerun",
+    proposal: {
+      id: "prop_123",
+      decision: "run",
+      status: "open",
+      expired: false,
+      created_at: new Date().toISOString(),
+      ttl_seconds: 600,
+      decided_at: null,
+      decided_by: null,
+      reason: null,
+      runId: "run_456",
+      eventId: "ev_789",
+      eventSource: "gh",
+      agent: "ci-rerun@1",
+      spec: null,
+      repos: [],
+    },
+  };
+
+  test("names include kind, label, and material state for every node kind", () => {
+    expect(nodeAccessibleName(eventNode)).toContain("event type");
+    expect(nodeAccessibleName(eventNode)).toContain("gh.failed");
+    expect(nodeAccessibleName(eventNode)).toMatch(/4 admitted/);
+    expect(nodeAccessibleName(agentNode)).toContain("agent");
+    expect(nodeAccessibleName(agentNode)).toContain("doctor@1");
+    expect(nodeAccessibleName(agentNode)).toContain("RUNNING");
+    expect(nodeAccessibleName(terminalNode)).toContain("terminal");
+    expect(nodeAccessibleName(terminalNode)).toContain("chain ends");
+    expect(nodeAccessibleName(terminalNode)).toContain("TICKET, ENV");
+    expect(nodeAccessibleName(proposalNode)).toContain("proposal");
+    expect(nodeAccessibleName(proposalNode)).toContain("pending: ci-rerun@1");
+    expect(nodeAccessibleName(proposalNode)).toContain("run");
+  });
+
+  test("each kind exposes the accessible name and aria-selected on the node", () => {
+    const cases: Array<{ ui: React.ReactElement; name: RegExp }> = [
+      { ui: <EventTypeNode {...nodeProps(eventNode)} selected />, name: /event type/i },
+      { ui: <AgentNode {...nodeProps(agentNode)} selected />, name: /agent/i },
+      { ui: <TerminalNode {...nodeProps(terminalNode)} selected />, name: /terminal/i },
+      { ui: <ProposalNode {...nodeProps(proposalNode)} selected />, name: /proposal/i },
+    ];
+    for (const { ui, name } of cases) {
+      const { getByRole, unmount } = renderNode(ui);
+      const node = getByRole("button", { name });
+      expect(node.getAttribute("aria-selected")).toBe("true");
+      expect(node.getAttribute("aria-pressed")).toBe("true");
+      unmount();
+    }
+  });
+
+  test("unselected nodes set aria-selected false", () => {
+    const { getByRole } = renderNode(<EventTypeNode {...nodeProps(eventNode)} />);
+    expect(getByRole("button", { name: /event type/i }).getAttribute("aria-selected")).toBe("false");
+    expect(getByRole("button", { name: /event type/i }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("the current search match is visually distinct from other hits", () => {
+    const hit = renderNode(<EventTypeNode {...nodeProps(eventNode, { searchHit: true })} />);
+    const hitEl = hit.getByRole("button", { name: /event type/i });
+    expect(hitEl.getAttribute("data-search-hit")).toBe("true");
+    expect(hitEl.getAttribute("data-search-current")).toBeNull();
+    const hitStyle = (hitEl as HTMLElement).style.outlineStyle;
+    hit.unmount();
+
+    const current = renderNode(
+      <EventTypeNode {...nodeProps(eventNode, { searchHit: true, searchCurrent: true })} />,
+    );
+    const currentEl = current.getByRole("button", { name: /event type/i });
+    expect(currentEl.getAttribute("data-search-current")).toBe("true");
+    expect((currentEl as HTMLElement).style.outlineStyle).not.toBe(hitStyle);
+  });
+});
+
 describe("TerminalNode", () => {
   test("renders terminal node with reason", () => {
     const node: GraphNode = {
@@ -162,5 +285,149 @@ describe("TerminalNode", () => {
     const { getByText } = renderNode(<TerminalNode {...nodeProps(node)} />);
     expect(getByText("chain ends")).toBeTruthy();
     expect(getByText("TICKET, ENV")).toBeTruthy();
+  });
+});
+
+const stubAgent = (ref: string): AgentsView["agents"][number] =>
+  ({
+    ref,
+    id: ref.split("@")[0],
+    version: 1,
+    outputContract: "c/v1",
+    workspace: { type: "ephemeral" },
+    capabilities: { services: [] },
+    limits: { timeout_seconds: 60, attempts: 1 },
+    mutating: false,
+    promptFile: "p.md",
+    prompt: "",
+    inputSchemaFile: "i.json",
+    inputSchema: {},
+    outputSchemaFile: "o.json",
+    outputSchema: {},
+    pins: {},
+    command: null,
+    actionRegistry: null,
+    hosts: null,
+    modelTier: null,
+    model: null,
+    eventTypes: [],
+  }) as AgentsView["agents"][number];
+
+const graphAgents = (): AgentsView =>
+  createAgentsFixture({
+    agents: [stubAgent("doctor@1"), stubAgent("rerun@1")],
+    eventTypes: [
+      {
+        type: "gh.failed",
+        agent: "doctor@1",
+        adapter: "claude",
+        idempotencyScope: [],
+        proposalTtlSeconds: null,
+      },
+      {
+        type: "ci.rerun",
+        agent: "rerun@1",
+        adapter: "command",
+        idempotencyScope: [],
+        proposalTtlSeconds: null,
+      },
+    ],
+  });
+
+function renderGraph(props: Partial<Parameters<typeof Graph>[0]> = {}) {
+  return renderWithClient(
+    <Graph
+      context={{ kind: "all" }}
+      focusNodeId={null}
+      onSelectNode={() => {}}
+      onJumpAgent={() => {}}
+      onJumpEvents={() => {}}
+      {...props}
+    />,
+  );
+}
+
+describe("Graph view inspect loop", () => {
+  test("search input is mounted before layout so / does not leave Graph", async () => {
+    await withApi(
+      {
+        agents: async () => createAgentsFixture(),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByLabelText } = renderGraph();
+        const input = await waitFor(() => getByLabelText("Search graph nodes"));
+        expect(input.hasAttribute("data-view-filter")).toBe(true);
+      },
+    );
+  });
+
+  test("search input carries data-view-filter so / can focus it", async () => {
+    await withApi(
+      {
+        agents: async () => graphAgents(),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByLabelText } = renderGraph();
+        const input = await waitFor(() => getByLabelText("Search graph nodes"));
+        expect(input.hasAttribute("data-view-filter")).toBe(true);
+      },
+    );
+  });
+
+  test("Enter selects match 1 of N instead of skipping to match 2", async () => {
+    const onSelectNode = mock(() => {});
+    await withApi(
+      {
+        agents: async () => graphAgents(),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByLabelText } = renderGraph({ onSelectNode });
+        const input = (await waitFor(() => getByLabelText("Search graph nodes"))) as HTMLInputElement;
+        changeInput(input, "agent:");
+        fireEvent.keyDown(input, { key: "Enter" });
+        expect(onSelectNode).toHaveBeenCalledWith("agent:doctor@1");
+        expect(onSelectNode).not.toHaveBeenCalledWith("agent:rerun@1");
+      },
+    );
+  });
+
+  test("stale deep-link shows Node not found with a control that clears to #/graph", async () => {
+    const onSelectNode = mock(() => {});
+    await withApi(
+      {
+        agents: async () => graphAgents(),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole, getByText } = renderGraph({
+          focusNodeId: "event:does-not-exist",
+          onSelectNode,
+        });
+        await waitFor(() => getByText("Node not found"));
+        fireEvent.click(getByRole("button", { name: "Show graph" }));
+        expect(onSelectNode).toHaveBeenCalledWith(null);
+      },
+    );
+  });
+
+  test("selected proposal node shows Open in Proposals jumping via hashPath", async () => {
+    const proposal = createProposalFixture({ id: "prop_abc", agent: "doctor@1" });
+    await withApi(
+      {
+        agents: async () => graphAgents(),
+        proposals: async () => ({ proposals: [proposal] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { getByRole } = renderGraph({ focusNodeId: "proposal:prop_abc" });
+        const btn = await waitFor(() => getByRole("button", { name: "Open in Proposals" }));
+        window.location.hash = "#/graph/proposal:prop_abc";
+        fireEvent.click(btn);
+        expect(window.location.hash).toBe("#/proposals/prop_abc");
+      },
+    );
   });
 });

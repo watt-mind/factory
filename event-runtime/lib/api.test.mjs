@@ -1,11 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import * as fake from "./adapters/fake.mjs";
-import { isLoopbackHost, isLoopbackOrigin, janitorArgv, repoNamesFromInput, startApi } from "./api.mjs";
+import {
+  isLoopbackHost,
+  isLoopbackOrigin,
+  janitorArgv,
+  observedModelFromTranscript,
+  repoNamesFromInput,
+  startApi,
+} from "./api.mjs";
 import { apiClient } from "./client.mjs";
 import { openDb } from "./db.mjs";
 import { planAdmittedEvents } from "./planner.mjs";
@@ -242,9 +249,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
   let flowProposalId;
   let flowRunId;
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-api-ws-"));
-  // event-types.json maps to the "claude" adapter; back it with the fake so
-  // no real claude process ever spawns in tests.
-  const adapters = { claude: fake };
+  // event-types.json maps to the "pi" adapter (WM-215); back it with the fake so
+  // no real pi process ever spawns in tests.
+  const adapters = { pi: fake };
   const workerOpts = () => ({ workspacesRoot: workspaces, owner: "w-test", policyVersion: PV });
 
   /** Replay + plan one envelope, then return its open proposal via the API. */
@@ -281,7 +288,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(prop.expired).toBe(false);
     expect(prop.agent).toBe("factory-status-report@1");
     expect(prop.repos).toEqual(["ok"]);
-    expect(prop.spec.adapter).toBe("claude");
+    expect(prop.spec.adapter).toBe("pi");
     expect(prop.ttl_seconds).toBe(1800);
     flowProposalId = prop.id;
 
@@ -400,27 +407,33 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
        VALUES (?, ?, ?, ?, 'run', ?, 1800)`,
     ).run("prop_extra_ambiguous", prop.eventSource, prop.eventId, prop.runId, at);
 
-    expect(await s.client.cancel(prop.runId, "never mind")).toEqual({
-      cancelled: true,
-      ambiguousOpenProposals: [{ runId: prop.runId, count: 2 }],
-    });
-    expect((await s.client.run(prop.runId)).run.state).toBe("CANCELLED");
+    try {
+      expect(await s.client.cancel(prop.runId, "never mind")).toEqual({
+        cancelled: true,
+        ambiguousOpenProposals: [{ runId: prop.runId, count: 2 }],
+      });
+      expect((await s.client.run(prop.runId)).run.state).toBe("CANCELLED");
 
-    const open = await s.client.proposals();
-    expect(open.proposals.map((p) => p.id)).toContain(prop.id);
-    expect(open.proposals.map((p) => p.id)).toContain("prop_extra_ambiguous");
+      const open = await s.client.proposals();
+      expect(open.proposals.map((p) => p.id)).toContain(prop.id);
+      expect(open.proposals.map((p) => p.id)).toContain("prop_extra_ambiguous");
 
-    const status = await s.client.status();
-    expect(status.anomalies.ambiguousOpenProposals).toEqual([
-      { runId: prop.runId, count: 2 },
-    ]);
+      const status = await s.client.status();
+      expect(status.anomalies.ambiguousOpenProposals).toEqual([
+        { runId: prop.runId, count: 2 },
+      ]);
+    } finally {
+      s.db
+        .query(`DELETE FROM proposals WHERE id IN (?, ?)`)
+        .run(prop.id, "prop_extra_ambiguous");
+    }
   });
 
   test("retry: 404 on unknown run, 409 when attempts are exhausted, queued with force", async () => {
     const prop = await planned("retry-1");
     const { runId } = await s.client.approve(prop.id);
     // Deterministic terminal FAILED: run with an empty adapters map so the
-    // spec's "claude" adapter is unknown (no requeue, attempts consumed).
+    // spec's "pi" adapter is unknown (no requeue, attempts consumed).
     const summary = await runOnce(s.db, registry, {}, workerOpts());
     expect(summary.runId).toBe(runId);
     expect(summary.terminalState).toBe("FAILED");
@@ -454,7 +467,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       expect(proposals[0].eventSource).toBe("test");
 
       await client.approve(proposals[0].id);
-      await runOnce(db, registry, { claude: fake, fake }, {
+      await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
         owner: "test-worker", policyVersion: PV,
       });
@@ -488,7 +501,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       const { proposals } = await client.proposals();
       await client.approve(proposals[0].id);
-      await runOnce(db, registry, { claude: fake, fake }, {
+      await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
         owner: "test-worker", policyVersion: PV,
       });
@@ -571,6 +584,89 @@ describe("environment identity (webui chip)", () => {
 });
 
 describe("artifact store and agent registry surfacing (OPS-212)", () => {
+  test("GET /artifacts catalogues and filters metadata; POST /artifacts/prune dry-runs and applies", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-artifacts-api-"));
+    const store = path.join(home, "artifacts");
+    mkdirSync(store, { recursive: true });
+    const reportHash = "a".repeat(64);
+    const transcriptHash = "b".repeat(64);
+    const orphanHash = "c".repeat(64);
+    writeFileSync(path.join(store, reportHash), "report", "utf8");
+    writeFileSync(path.join(store, transcriptHash), "transcript", "utf8");
+    writeFileSync(path.join(store, orphanHash), "orphan", "utf8");
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    for (const hash of [reportHash, transcriptHash, orphanHash]) {
+      utimesSync(path.join(store, hash), old, old);
+    }
+
+    const db = openDb(path.join(home, "runtime.db"));
+    const createdAt = "2026-01-02T03:04:05.000Z";
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?)`,
+    ).run("run_catalogue", "idem_catalogue", JSON.stringify({ agent: "catalogue-agent@1" }), "spec-hash", createdAt, createdAt);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:result', '{}', '{}', ?)`,
+    ).run("run_catalogue", JSON.stringify({ artifacts: [
+      { kind: "report", sha256: reportHash },
+      { kind: "transcript", sha256: transcriptHash },
+    ] }), createdAt);
+
+    const server = startApi({
+      db, registry, secret: SECRET, policyVersion: PV, port: 0,
+      env: { name: "test", home, adapter: "fake" },
+    });
+    await new Promise((resolve) => server.on("listening", resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const all = await (await fetch(`${base}/artifacts`)).json();
+      expect(all.artifacts).toHaveLength(3);
+      expect(all.artifacts.find((artifact) => artifact.sha256 === reportHash)).toEqual({
+        sha256: reportHash,
+        sizeBytes: 6,
+        mtime: old.toISOString(),
+        referenced: true,
+        references: [{
+          runId: "run_catalogue",
+          kind: "report",
+          agent: "catalogue-agent@1",
+          state: "COMPLETED",
+          createdAt,
+        }],
+      });
+      expect((await (await fetch(`${base}/artifacts?orphan=true`)).json()).artifacts.map((a) => a.sha256)).toEqual([orphanHash]);
+      expect((await (await fetch(`${base}/artifacts?orphan=false`)).json()).artifacts).toHaveLength(2);
+      expect((await (await fetch(`${base}/artifacts?kind=report`)).json()).artifacts.map((a) => a.sha256)).toEqual([reportHash]);
+      expect((await (await fetch(`${base}/artifacts?search=CATALOGUE-AGENT`)).json()).artifacts).toHaveLength(2);
+      expect((await (await fetch(`${base}/artifacts?limit=1`)).json()).artifacts).toHaveLength(1);
+      expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
+      expect((await fetch(`${base}/artifacts?limit=0`)).status).toBe(422);
+
+      const dry = await fetch(`${base}/artifacts/prune`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dryRun: true }),
+      });
+      expect(dry.status).toBe(200);
+      expect(await dry.json()).toEqual({ deleted: 1, freedBytes: 6, remainingOrphans: 1 });
+      expect(existsSync(path.join(store, orphanHash))).toBe(true);
+
+      const apply = await fetch(`${base}/artifacts/prune`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ apply: true }),
+      });
+      expect(apply.status).toBe(200);
+      expect(await apply.json()).toEqual({ deleted: 1, freedBytes: 6, remainingOrphans: 0 });
+      expect(existsSync(path.join(store, orphanHash))).toBe(false);
+      expect(existsSync(path.join(store, reportHash))).toBe(true);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
   test("declared artifacts and the transcript survive the workspace and stream from the API", async () => {
     const { db, server, port } = await makeServer();
     const client = apiClient({ port });
@@ -580,7 +676,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       const { proposals } = await client.proposals();
       await client.approve(proposals[0].id);
-      const summary = await runOnce(db, registry, { claude: fake, fake }, {
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: path.join(home, "workspaces"),
         artifactStore: path.join(home, "artifacts"),
         owner: "test-worker", policyVersion: PV,
@@ -614,7 +710,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       await client.replay(envelope({ eventId: "art-2", payload: { repos: ["with-artifact"] } }));
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       await client.approve((await client.proposals()).proposals[0].id);
-      const summary = await runOnce(db, registry, { claude: fake, fake }, {
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: path.join(home, "workspaces"),
         artifactStore: path.join(home, "artifacts"),
         owner: "test-worker", policyVersion: PV,
@@ -656,7 +752,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       await client.replay(envelope({ eventId: "trace-1", payload: { repos: ["ok"] } }));
       planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
       await client.approve((await client.proposals()).proposals[0].id);
-      const summary = await runOnce(db, registry, { claude: fake, fake }, {
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
         workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
         owner: "test-worker", policyVersion: PV,
       });
@@ -709,7 +805,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       // resolved value, straight off the committed registry + policy map.
       expect(def.modelTier).toBe("standard");
       expect(def.model).toBeNull();
-      expect(def.eventTypes[0].resolvedModel).toBe("sonnet");
+      expect(def.eventTypes[0].resolvedModel).toBe("openai-codex/gpt-5.6-terra");
       const commandDef = defs.find((d) => d.ref === "reconcile@1");
       expect(commandDef.modelTier).toBeNull();
       expect(commandDef.eventTypes[0].resolvedModel).toBeNull();
@@ -919,6 +1015,52 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
   });
 });
 
+describe("metrics query API (WM-281)", () => {
+  let s;
+  const metricsNow = Date.parse("2026-08-15T12:00:00.000Z");
+  beforeAll(async () => {
+    s = await makeServer({ now: () => metricsNow });
+    s.db.query(
+      `INSERT INTO lifecycle_events
+         (run_id, from_state, to_state, actor, attempt, at, record_hash)
+       VALUES ('metrics-run', 'VERIFYING', 'COMPLETED', 'test', 1,
+               '2026-08-15T11:30:00.000Z', 'metrics-hash')`,
+    ).run();
+  });
+  afterAll(() => s.close());
+
+  test("GET /metrics returns one shared aligned bucket axis", async () => {
+    const res = await fetch(s.url("/metrics?window=24h&bucket=1h&series=runs.outcomes,runs.started"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.buckets).toHaveLength(24);
+    expect(body.series["runs.outcomes"].COMPLETED.at(-1)).toBe(1);
+    expect(body.series["runs.started"].total).toHaveLength(body.buckets.length);
+  });
+
+  test("query validation returns 422 and advertises valid values", async () => {
+    const unknown = await fetch(s.url("/metrics?series=not.real"));
+    expect(unknown.status).toBe(422);
+    const unknownBody = await unknown.json();
+    expect(unknownBody.error).toBe("unknown_series");
+    expect(unknownBody.validSeries).toContain("runs.outcomes");
+
+    const oversized = await fetch(s.url("/metrics?window=30d&bucket=15m&series=runs.started"));
+    expect(oversized.status).toBe(422);
+    expect((await oversized.json()).error).toBe("too_many_buckets");
+  });
+
+  test("GET /metrics/breakdown validates dimensions and returns rows", async () => {
+    const invalid = await fetch(s.url("/metrics/breakdown?window=24h&by=nope&metric=runs"));
+    expect(invalid.status).toBe(422);
+    expect((await invalid.json()).validDimensions).toContain("edge");
+
+    const valid = await fetch(s.url("/metrics/breakdown?window=24h&by=agent&metric=runs"));
+    expect(valid.status).toBe(200);
+    expect((await valid.json()).rows).toEqual([]);
+  });
+});
+
 describe("Host and Origin header security confinement (OPS-408)", () => {
   let s;
   beforeAll(async () => {
@@ -999,6 +1141,22 @@ describe("Host and Origin header security confinement (OPS-408)", () => {
     const res = await rawRequest({ host: "attacker.com", path: "/health" });
     expect(res.status).toBe(403);
     expect(res.json?.error).toBe("invalid_host");
+  });
+
+  test("new metrics routes inherit Host and Origin confinement", async () => {
+    const badHost = await rawRequest({
+      host: "attacker.com",
+      path: "/metrics?window=24h&bucket=1h&series=runs.outcomes",
+    });
+    expect(badHost.status).toBe(403);
+    expect(badHost.json?.error).toBe("invalid_host");
+
+    const badOrigin = await rawRequest({
+      path: "/metrics/breakdown?window=24h&by=agent&metric=runs",
+      headers: { origin: "http://evil.com" },
+    });
+    expect(badOrigin.status).toBe(403);
+    expect(badOrigin.json?.error).toBe("cross_origin_rejected");
   });
 
   test("rejects mutating request carrying a foreign Origin header", async () => {
@@ -1655,9 +1813,11 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
         expect(typeof item.count).toBe("number");
       }
 
-      // noWorkers is boolean false because live workers exist
+      // noWorkers is boolean false because live workers exist; the queued run
+      // has no placement requirements, so it is not a placement anomaly.
       expect(typeof status.anomalies.noWorkers).toBe("boolean");
       expect(status.anomalies.noWorkers).toBe(false);
+      expect(status.anomalies.unmatchedPlacementRuns).toEqual([]);
 
       // StoppedSchedule keys match if present
       const stoppedSchedBlock = extractInterfaceBlock(typesSrc, "StoppedSchedule");
@@ -1803,6 +1963,49 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
     }
   });
 
+  test("GET /status identifies queued runs whose placement matches no active, non-stale worker", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-unmatched-placement-contract-"));
+    const db = openDb(path.join(dir, "runtime.db"));
+    const nowMs = 100000000;
+    const atIso = new Date(nowMs).toISOString();
+    const queue = (runId, placement) => {
+      db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_hash, spec_json, state, attempts, created_at, updated_at)
+         VALUES (?, ?, "dummy", ?, "QUEUED", 1, ?, ?)`,
+      ).run(runId, `idem-${runId}`, JSON.stringify({ placement }), atIso, atIso);
+    };
+
+    queue("run-matched", { node: "lab" });
+    queue("run-unmatched", { node: "gpu", class: "heavy" });
+    queue("run-unconstrained", undefined);
+
+    registerWorker(db, { workerId: "w-live-lab", labels: { node: "lab" }, adapters: ["claude"], now: nowMs });
+    registerWorker(db, { workerId: "w-stale-gpu", labels: { node: "gpu", class: "heavy" }, adapters: ["claude"], now: nowMs - 120000 });
+    registerWorker(db, { workerId: "w-stopped-gpu", labels: { node: "gpu", class: "heavy" }, adapters: ["claude"], now: nowMs });
+    deregisterWorker(db, "w-stopped-gpu", { now: nowMs });
+
+    const s = await makeServer({ db, secret: "sec", now: () => nowMs });
+    try {
+      const status1 = await s.client.status();
+      expect(status1.workers.live).toBe(1);
+      expect(status1.anomalies.noWorkers).toBe(false);
+      expect(status1.anomalies.unmatchedPlacementRuns).toEqual([
+        { runId: "run-unmatched", placement: { node: "gpu", class: "heavy" } },
+      ]);
+
+      registerWorker(db, {
+        workerId: "w-live-gpu",
+        labels: { node: "gpu", class: "heavy" },
+        adapters: ["claude"],
+        now: nowMs,
+      });
+      const status2 = await s.client.status();
+      expect(status2.anomalies.unmatchedPlacementRuns).toEqual([]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("a rename on either StatusView/Worker types or API response triggers contract failure", () => {
     // 1. Rename on API response side fails assertion
     const mockApiResponse = {
@@ -1836,3 +2039,93 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
   });
 });
 
+
+describe("model surfacing on run views (WM-221)", () => {
+  test("reads the claude harness's own init line", () => {
+    const head = [
+      `{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}`,
+      `{"type":"system","subtype":"init","cwd":"/tmp/ws","model":"claude-opus-5[1m]","tools":["Read"]}`,
+      `{"type":"assistant","message":{"content":[]}}`,
+      ``,
+    ].join("\n");
+    expect(observedModelFromTranscript(head)).toBe("claude-opus-5[1m]");
+  });
+
+  test("rejoins pi's provider so the observed id compares to the pinned one", () => {
+    const head = [
+      `{"type":"session","version":3,"id":"01a0"}`,
+      `{"type":"message_start","message":{"role":"assistant","provider":"openai-codex","model":"gpt-5.6-terra"}}`,
+      ``,
+    ].join("\n");
+    expect(observedModelFromTranscript(head)).toBe("openai-codex/gpt-5.6-terra");
+  });
+
+  test("leaves an already-qualified id alone and tolerates a missing provider", () => {
+    const qualified = `{"type":"message_start","message":{"provider":"openai-codex","model":"openai-codex/gpt-5.6-luna"}}\n\n`;
+    expect(observedModelFromTranscript(qualified)).toBe("openai-codex/gpt-5.6-luna");
+    const bare = `{"type":"message_start","message":{"model":"gpt-5.6-luna"}}\n\n`;
+    expect(observedModelFromTranscript(bare)).toBe("gpt-5.6-luna");
+  });
+
+  test("a transcript that names no model is null, never a guess", () => {
+    expect(observedModelFromTranscript("")).toBeNull();
+    expect(observedModelFromTranscript(null)).toBeNull();
+    // `model` appears, but as prose inside a prompt — not a harness field.
+    expect(
+      observedModelFromTranscript(`{"type":"user","message":{"content":[{"text":"pick a \\"model\\""}]}}\n\n`),
+    ).toBeNull();
+  });
+
+  test("survives the partial last line a bounded read always ends on", () => {
+    const truncated =
+      `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n` +
+      `{"type":"assistant","message":{"model":"claude-son`;
+    expect(observedModelFromTranscript(truncated)).toBe("claude-opus-5[1m]");
+    // The model only appears on the severed line: unparseable, so unknown.
+    expect(observedModelFromTranscript(`{"type":"system","subtype":"init","model":"claude-op`)).toBeNull();
+  });
+
+  test("the run list carries the plan-time pins and the detail carries observedModel", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-home-"));
+    const { db, server, port, close } = await makeServer({ env: { name: "test", home } });
+    const client = apiClient({ port });
+    try {
+      await client.replay(envelope({ eventId: "model-1" }));
+      planAdmittedEvents(db, registry, { policyVersion: PV, adapterOverride: "fake" });
+      const { proposals } = await client.proposals();
+      await client.approve(proposals[0].id);
+      const summary = await runOnce(db, registry, { pi: fake, fake }, {
+        workspacesRoot: path.join(home, "workspaces"),
+        artifactStore: path.join(home, "artifacts"),
+        owner: "test-worker", policyVersion: PV,
+      });
+
+      const row = (await client.runs()).runs.find((r) => r.runId === summary.runId);
+      // Flattened out of the spec so the Model column never reads the run detail.
+      expect(row).toHaveProperty("modelTier");
+      expect(row).toHaveProperty("model");
+      const spec = JSON.parse(db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(summary.runId).spec_json);
+      expect(row.modelTier).toBe(spec.modelTier ?? null);
+      expect(row.model).toBe(spec.model ?? null);
+
+      const view = await client.run(summary.runId);
+      // Always present, so the panel distinguishes "not recorded" from an old
+      // runtime; the fake adapter's transcript names no model, hence null.
+      expect(view).toHaveProperty("observedModel");
+      expect(view.observedModel).toBeNull();
+
+      // And the value really comes off the stored bytes: rewrite that same
+      // transcript with a harness init line and the next read reports it.
+      const transcript = view.result.artifacts.find((a) => a.kind === "transcript");
+      expect(transcript).toBeTruthy();
+      writeFileSync(
+        path.join(home, "artifacts", transcript.sha256),
+        `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n`,
+        "utf8",
+      );
+      expect((await client.run(summary.runId)).observedModel).toBe("claude-opus-5[1m]");
+    } finally {
+      close();
+    }
+  });
+});

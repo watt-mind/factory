@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { largestComponentIds, matchNodes } from "./search";
+import { largestComponentIds, matchNodes, missingFocusNode, searchEnter } from "./search";
 import type { CapabilityGraph, GraphNode } from "./model";
 
 const event = (type: string): GraphNode => ({
@@ -50,6 +50,38 @@ describe("matchNodes", () => {
 
   test("no match returns empty", () => {
     expect(matchNodes(nodes, "zzz")).toEqual([]);
+  });
+});
+
+describe("searchEnter", () => {
+  const matches = ["event:a", "agent:b", "agent:c"];
+
+  test("empty matches do not select anything", () => {
+    expect(searchEnter([], 0, null)).toBeNull();
+  });
+
+  test("first Enter selects match 1 of N, not match 2", () => {
+    expect(searchEnter(matches, 0, null)).toEqual({ selectId: "event:a", nextIdx: 0 });
+  });
+
+  test("Enter while the current match is already selected advances to the next", () => {
+    expect(searchEnter(matches, 0, "event:a")).toEqual({ selectId: "agent:b", nextIdx: 1 });
+  });
+});
+
+describe("missingFocusNode", () => {
+  test("does not report a missing node while the graph is still loading", () => {
+    expect(missingFocusNode(undefined, "event:gone", false)).toBe(false);
+    expect(missingFocusNode([{ id: "event:a" }], "event:gone", false)).toBe(false);
+  });
+
+  test("reports missing when a loaded graph has no node for the deep-link id", () => {
+    expect(missingFocusNode([{ id: "event:a" }], "event:gone", true)).toBe(true);
+  });
+
+  test("does not report missing when the deep-link node exists", () => {
+    expect(missingFocusNode([{ id: "event:a" }], "event:a", true)).toBe(false);
+    expect(missingFocusNode([{ id: "event:a" }], null, true)).toBe(false);
   });
 });
 

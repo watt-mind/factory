@@ -84,6 +84,8 @@ describe("Proposals multi-row selection & bulk actions (WM-71)", () => {
     origReject = api.reject;
 
     api.status = async () => stubStatus();
+    api.proposals = async () => ({ proposals: [] });
+    api.proposalHistory = async () => ({ proposals: [] });
     api.runs = async () => ({ runs: [] });
     api.events = async () => ({ events: [] });
     api.agents = async () => ({ agents: [], edges: {}, eventTypes: [], contracts: {} });
@@ -600,6 +602,7 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     origReject = api.reject;
 
     api.status = async () => stubStatus();
+    api.proposals = async () => ({ proposals: [] });
     api.runs = async () => ({ runs: [] });
     api.events = async () => ({ events: [] });
     api.agents = async () => ({ agents: [], edges: {}, eventTypes: [], contracts: {} });
@@ -770,9 +773,161 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     });
 
     const r = renderProposals();
-    const origin = await waitFor(() => r.getByText(eventId));
+    const origin = await waitFor(() => r.getByTitle(eventId));
     expect(origin.closest("td")?.getAttribute("title")).toBe(eventId);
     const reasonCell = r.getByText(reason);
     expect(reasonCell.closest("td")?.getAttribute("title")).toBe(reason);
   });
 });
+
+describe("Proposals copy chords and hints (WM-233)", () => {
+  test("copy chords: c (id), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const proposalId = "prop_12345678-abcd-ef01-2345-6789abcdef01";
+    const p1 = stubProposal(proposalId, "open", { agent: "triage-scan" });
+
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [p1] }),
+        status: async () => createStatusFixture(),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const r = renderProposals({ focusProposalId: proposalId });
+        await r.findByText("copy:");
+
+        // Verify utility hint badges
+        const idBtn = r.getByRole("button", { name: "id" });
+        expect(idBtn.textContent).toContain("c");
+        const linkBtn = r.getByRole("button", { name: "link" });
+        expect(linkBtn.textContent).toContain("c l");
+
+        // 1. Press 'c' -> copies proposalId
+        fireEvent.keyDown(document.body, { key: "c" });
+        expect(written).toBe(proposalId);
+
+        // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+        fireEvent.keyDown(document.body, { key: "l" });
+        expect(written).toBe(window.location.href);
+      },
+    );
+  });
+});
+
+describe("Proposals single-proposal reject dialog hotkeys (WM-236)", () => {
+  let origProposals: typeof api.proposals;
+  let origReject: typeof api.reject;
+
+  beforeEach(() => {
+    origProposals = api.proposals;
+    origReject = api.reject;
+  });
+
+  afterEach(() => {
+    api.proposals = origProposals;
+    api.reject = origReject;
+  });
+
+  test("Cmd+Enter and Ctrl+Enter submit reject dialog when valid and connected", async () => {
+    const p1 = stubProposal("prop_reject_hotkey", "open", { agent: "triage-scan" });
+    const rejectedCalls: { id: string; why?: string }[] = [];
+    api.proposals = async () => ({ proposals: [p1] });
+    api.reject = async (id: string, why?: string) => {
+      rejectedCalls.push({ id, why });
+      return { rejected: true };
+    };
+
+    const r = renderProposals({ focusProposalId: "prop_reject_hotkey", connected: true });
+    await waitFor(() => expect(r.getByRole("button", { name: /^Reject/ })).toBeTruthy());
+
+    fireEvent.click(r.getByRole("button", { name: /^Reject/ }));
+    const reasonInput = await waitFor(() => r.getByPlaceholderText(/Reason \(required/i) as HTMLInputElement);
+
+    // Enter with metaKey (Cmd+Enter)
+    await act(async () => {
+      changeInput(reasonInput, "Not needed right now");
+    });
+    fireEvent.keyDown(reasonInput, { key: "Enter", metaKey: true });
+
+    await waitFor(() => expect(rejectedCalls).toEqual([{ id: "prop_reject_hotkey", why: "Not needed right now" }]));
+
+    // Ctrl+Enter also works on reopened dialog
+    fireEvent.click(r.getByRole("button", { name: /^Reject/ }));
+    const reasonInput2 = await waitFor(() => r.getByPlaceholderText(/Reason \(required/i) as HTMLInputElement);
+
+    await act(async () => {
+      changeInput(reasonInput2, "Second rejection reason");
+    });
+    fireEvent.keyDown(reasonInput2, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(rejectedCalls).toEqual([
+        { id: "prop_reject_hotkey", why: "Not needed right now" },
+        { id: "prop_reject_hotkey", why: "Second rejection reason" },
+      ]),
+    );
+  });
+
+  test("Cmd+Enter does not submit when reason is empty or when disconnected", async () => {
+    const p1 = stubProposal("prop_reject_disconn", "open", { agent: "triage-scan" });
+    const rejectedCalls: { id: string; why?: string }[] = [];
+    api.proposals = async () => ({ proposals: [p1] });
+    api.reject = async (id: string, why?: string) => {
+      rejectedCalls.push({ id, why });
+      return { rejected: true };
+    };
+
+    const r = renderProposals({ focusProposalId: "prop_reject_disconn", connected: true });
+    await waitFor(() => expect(r.getByRole("button", { name: /^Reject/ })).toBeTruthy());
+
+    fireEvent.click(r.getByRole("button", { name: /^Reject/ }));
+    const reasonInput = await waitFor(() => r.getByPlaceholderText(/Reason \(required/i) as HTMLInputElement);
+
+    // Empty / whitespace reason does not submit on Cmd+Enter
+    await act(async () => {
+      changeInput(reasonInput, "   ");
+    });
+    fireEvent.keyDown(reasonInput, { key: "Enter", metaKey: true });
+    expect(rejectedCalls).toEqual([]);
+
+    // Fill valid reason but disconnect
+    await act(async () => {
+      changeInput(reasonInput, "Valid reason");
+    });
+
+    // Rerender with connected={false}
+    r.rerender(
+      <Proposals
+        connected={false}
+        context={{ kind: "all" }}
+        onRunQueued={noop}
+        focusProposalId="prop_reject_disconn"
+        onSelectProposal={noop}
+        focusExpired={false}
+        onFocusExpiredConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+      />,
+    );
+
+    fireEvent.keyDown(reasonInput, { key: "Enter", metaKey: true });
+    expect(rejectedCalls).toEqual([]);
+  });
+});
+

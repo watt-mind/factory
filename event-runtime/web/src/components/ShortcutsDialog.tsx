@@ -1,21 +1,35 @@
 import { Dialog } from "./ui";
 import { NAV } from "../nav";
 
+const CONTEXT_CHORDS: { chord: string; label: string }[] = [
+  { chord: "g 0", label: "All context" },
+  { chord: "g 1–9", label: "1st–9th repo tab" },
+  { chord: "g i", label: "In flight context" },
+];
+
 const ACTIONS: { keys: string; does: string }[] = [
   { keys: "⌘K", does: "command palette" },
   { keys: "⌘K", does: "copy link to this page" },
   { keys: "⌘K · footer theme", does: "cycle theme (dark → light → contrast)" },
   { keys: "i", does: "inject event" },
-  { keys: "/", does: "focus filter (Events, if none on this view)" },
+  { keys: "/", does: "focus this view's filter (Artifacts, Events, Runs, and other lists)" },
+  { keys: "v", does: "display options" },
   { keys: "j k  ↑↓", does: "move list (or graph) selection" },
   { keys: "[ ]", does: "previous / next status tab" },
-  { keys: "Enter / o", does: "open detail · full run view on Runs" },
+  { keys: "1–N", does: "switch status tab" },
+  { keys: "Enter", does: "open detail" },
+  { keys: "o", does: "open current run (Workers) · full run view (Runs)" },
+  { keys: "r", does: "run schedule now (Schedules)" },
+  { keys: "a", does: "approve proposal (Proposals)" },
+  { keys: "x", does: "reject proposal (Proposals) · cancel run (Runs)" },
+  { keys: "q", does: "requeue event (Events)" },
+  { keys: "c", does: "copy selected id / name / ref" },
+  { keys: "c l", does: "copy link to clipboard" },
+  { keys: "c i / c c", does: "copy CLI inspect command (Runs)" },
+  { keys: "c p", does: "copy repo path (Projects)" },
+  { keys: "⌘+Shift+F", does: "format JSON (Inject dialog)" },
+  { keys: "⌘↵", does: "confirm inject (Inject dialog) · confirm reject (Proposals)" },
   { keys: "Esc", does: "close panel, clear filter, or close dialog" },
-  { keys: "⌘↵", does: "confirm inject" },
-  { keys: "c", does: "copy selected id" },
-  { keys: "a", does: "approve selected proposal" },
-  { keys: "x", does: "reject proposal / cancel run" },
-  { keys: "q", does: "requeue dead-lettered / human_needed event" },
   { keys: "?", does: "this list" },
 ];
 
@@ -57,6 +71,15 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
               >
                 <span className="mono text-(--text)">g {n.go}</span>
                 <span className="text-right text-(--text-faint)">{n.label}</span>
+              </div>
+            ))}
+            {CONTEXT_CHORDS.map((c) => (
+              <div
+                key={c.chord}
+                className="flex items-baseline justify-between gap-2 border-b border-(--border) py-1.5"
+              >
+                <span className="mono text-(--text)">{c.chord}</span>
+                <span className="text-right text-(--text-faint)">{c.label}</span>
               </div>
             ))}
           </div>

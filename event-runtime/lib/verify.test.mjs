@@ -8,6 +8,7 @@ import { ContractViolation, verifyResult } from "./verify.mjs";
 
 const registry = loadRegistry();
 const def = getAgent(registry, "factory-status-report@1");
+const dispatchDef = getAgent(registry, "dispatch@1");
 
 function makeSpec(input = { repos: ["bj29"] }) {
   return {
@@ -139,14 +140,52 @@ describe("verifyResult", () => {
       .toThrow(ContractViolation);
   });
 
-  test("refused carrying an artifact → ContractViolation", () => {
+  test("refused carrying run_6fe0cdb4's dispatch artifact shape → REFUSED with context retained", () => {
+    const artifact = {
+      outcome: "BLOCKED",
+      repo: "factory",
+      ticket: "WM-139",
+      prUrl: null,
+      verification: {
+        command: null,
+        passed: false,
+        output: "Not run: production infrastructure and credential handling require a human.",
+      },
+      summary: "Human approval is required for production launchd and SSH credential changes.",
+    };
+    const evidence = {
+      commands: ["gh auth status", "launchctl print gui/$(id -u)/com.wattmind.factory"],
+    };
     const dir = makeWorkspace({
       schemaVersion: "factory.agent-result/v1",
       terminalState: "refused",
       reasonCode: "needs_human",
-      artifact: VALID_ARTIFACT,
+      artifact,
+      evidence,
     });
-    expect(() => verifyResult({ spec: makeSpec(), def, registry, workspaceDir: dir, attempt: 1 }))
+    const spec = { ...makeSpec({ repo: "factory", ticket: "WM-139" }), outputContract: "factory.dispatch-result/v1" };
+
+    const out = verifyResult({ spec, def: dispatchDef, registry, workspaceDir: dir, attempt: 1 });
+
+    expect(out.kind).toBe("refused");
+    expect(out.reasonCode).toBe("needs_human");
+    expect(out.result.terminalState).toBe("refused");
+    expect(out.result.artifact).toEqual(artifact);
+    expect(out.result.artifactHash).toBe(hashJson(artifact));
+    expect(out.result.evidence).toEqual(evidence);
+    expect(out.result.evidenceSetHash).toBe(hashJson(evidence));
+    expect(out.result.verification.checks).toContain("evidence_retained");
+  });
+
+  test("refused carrying an artifact that fails its output schema → ContractViolation", () => {
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      artifact: { outcome: "BLOCKED", repo: "factory" },
+    });
+    const spec = { ...makeSpec({ repo: "factory", ticket: "WM-139" }), outputContract: "factory.dispatch-result/v1" };
+    expect(() => verifyResult({ spec, def: dispatchDef, registry, workspaceDir: dir, attempt: 1 }))
       .toThrow(ContractViolation);
   });
 
