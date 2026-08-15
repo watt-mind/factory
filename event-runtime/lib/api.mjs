@@ -10,7 +10,7 @@
  * no signature. Operator verbs record "operator" as actor — authenticated
  * actor identity is the web-app step, not this one.
  */
-import { createReadStream, readFileSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readFileSync, readSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { findArtifact } from "./artifacts.mjs";
@@ -279,6 +279,11 @@ function runsView(db, state) {
       eventSource: row.event_source ?? null,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      // What the planner pinned (WM-135), so the list can carry a Model column
+      // beside Adapter (WM-221). Absent on a spec whose definition declared no
+      // intent — `null`, never omitted, so the column never renders a hole.
+      modelTier: spec.modelTier ?? null,
+      model: spec.model ?? null,
       repos: repoNamesFromInput(spec.input),
     };
   });
@@ -391,15 +396,92 @@ function looksLikeText(file) {
   return !head.includes(0);
 }
 
-function runView(db, runId) {
+/**
+ * How much of a transcript to read looking for the model id (WM-221).
+ *
+ * Both harnesses name the model in their opening handshake — claude in the
+ * `system`/`init` line, pi on its first assistant message — so the answer is
+ * always in the first few KB of a file that routinely runs to megabytes.
+ * Reading a bounded head keeps `GET /runs/:id` a constant-cost read.
+ */
+export const TRANSCRIPT_MODEL_SCAN_BYTES = 64 * 1024;
+
+/**
+ * The model the CLI actually ran on, read out of the stored transcript
+ * (WM-221). The spec's pinned value cannot answer this: `default` means
+ * "whatever the CLI picks", and only the harness's own handshake says what
+ * that was on the day.
+ *
+ * Neither adapter puts the id in the trace — `mapStreamEvent` maps text, tool
+ * calls, and token usage, and nothing else — so the transcript artifact is
+ * where it is stored, in two shapes:
+ *
+ * - claude: `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}`
+ * - pi:     `{"type":"message_start","message":{"provider":"openai-codex","model":"gpt-5.6-terra"}}`
+ *
+ * pi splits what the spec pins as one string (`openai-codex/gpt-5.6-terra`),
+ * so the provider is joined back on — an observed model an operator cannot
+ * compare to the pinned one answers nothing. Returns null rather than a guess
+ * for anything unrecognized, truncated, or unparseable.
+ *
+ * @param {string} head - the first bytes of a `.transcript.json` NDJSON stream
+ * @returns {string | null}
+ */
+export function observedModelFromTranscript(head) {
+  if (typeof head !== "string" || head === "") return null;
+  const lines = head.split("\n");
+  // The last line of a bounded read is almost always a partial JSON object.
+  lines.pop();
+  for (const line of lines) {
+    if (!line.includes(`"model"`)) continue;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue; // a line longer than the scan window, or not JSON at all
+    }
+    if (!msg || typeof msg !== "object") continue;
+    if (msg.type === "system" && msg.subtype === "init" && typeof msg.model === "string" && msg.model !== "") {
+      return msg.model;
+    }
+    const message = msg.message;
+    if (message && typeof message === "object" && typeof message.model === "string" && message.model !== "") {
+      const provider = typeof message.provider === "string" ? message.provider : "";
+      return provider && !message.model.includes("/") ? `${provider}/${message.model}` : message.model;
+    }
+  }
+  return null;
+}
+
+/** Bounded head of a stored artifact; null when it is missing or unreadable. */
+function artifactHead(artifactsDir, sha256, bytes = TRANSCRIPT_MODEL_SCAN_BYTES) {
+  const found = findArtifact(artifactsDir, sha256);
+  if (!found) return null;
+  let fd;
+  try {
+    fd = openSync(found.file, "r");
+    const buf = Buffer.alloc(Math.min(bytes, found.sizeBytes));
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, read).toString("utf8");
+  } catch {
+    // A pruned or half-written artifact is a missing observation, not a 500.
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function runView(db, runId, { artifactsDir } = {}) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
   if (!row) return null;
   const attempts = db
     .query(`SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt`)
     .all(runId);
-  const result = db
+  const resultRow = db
     .query(`SELECT * FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`)
     .get(runId);
+  const result = resultRow ? JSON.parse(resultRow.result_json) : null;
+  const transcript = (result?.artifacts ?? []).find((a) => a.kind === "transcript");
   const latest = attempts[attempts.length - 1];
   return {
     run: {
@@ -414,9 +496,16 @@ function runView(db, runId) {
     },
     lifecycle: lifecycleOf(db, runId),
     attempts,
-    result: result ? JSON.parse(result.result_json) : null,
-    receipt: result ? JSON.parse(result.receipt_json) : null,
+    result,
+    receipt: resultRow ? JSON.parse(resultRow.receipt_json) : null,
     workspace: latest?.workspace_path ?? null,
+    // Not part of the immutable spec — an observation about the attempt that
+    // ran, alongside `workspace` (WM-221). Null for a run with no transcript
+    // yet, a non-model adapter, or a harness that named no model.
+    observedModel:
+      artifactsDir && transcript?.sha256
+        ? observedModelFromTranscript(artifactHead(artifactsDir, transcript.sha256))
+        : null,
   };
 }
 
@@ -871,7 +960,7 @@ export function createApi({
 
       const runGet = url.pathname.match(/^\/runs\/([^/]+)$/);
       if (req.method === "GET" && runGet) {
-        const view = runView(db, runGet[1]);
+        const view = runView(db, runGet[1], { artifactsDir: artifactsRoot(env?.home) });
         if (!view) return send(res, 404, { error: `unknown run ${runGet[1]}` });
         return send(res, 200, view);
       }

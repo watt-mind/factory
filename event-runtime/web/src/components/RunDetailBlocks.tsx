@@ -2,10 +2,9 @@ import { useState, type ReactNode } from "react";
 import { artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import { dur } from "../heartbeat";
-import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunState } from "../types";
+import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
 import {
   Ago,
-  Button,
   Disclosure,
   humanSize,
   JsonBlock,
@@ -16,6 +15,7 @@ import {
   StateBadge,
   VerbError,
   copyText,
+  shortId,
 } from "./ui";
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
@@ -157,26 +157,25 @@ export function RunFailureBanner({
   return (
     <div
       role="alert"
-      className={`rounded-md border px-3 py-2 ${className}`}
-      style={{ borderColor: hue, background: `color-mix(in oklch, ${hue} 8%, transparent)` }}
+      className={`rounded-md border p-3 ${className}`}
+      style={{ borderColor: hue, background: `color-mix(in oklch, ${hue} 8%, var(--surface-1))` }}
     >
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-[11px] font-medium tracking-wider uppercase" style={{ color: hue }}>
-          {state}
-        </span>
+        <div
+          className="mono text-[12px] leading-relaxed break-words whitespace-pre-wrap font-medium flex-1"
+          style={{ color: hue }}
+        >
+          {reason ?? "No reason recorded on the terminal transition."}
+        </div>
         {reason && (
           <button
             type="button"
             onClick={() => copyText(reason, "failure reason")}
-            className="shrink-0 text-[12px] text-(--text-dim) hover:text-(--accent)"
+            className="shrink-0 cursor-pointer text-[11px] text-(--text-faint) hover:text-(--text) hover:underline"
           >
             Copy reason
           </button>
         )}
-      </div>
-      {/* Full string, wrapping allowed — never truncate the one line that explains the failure. */}
-      <div className="mono mt-1 text-[12.5px] leading-relaxed break-words whitespace-pre-wrap text-(--text)">
-        {reason ?? "No reason recorded on the terminal transition."}
       </div>
     </div>
   );
@@ -187,7 +186,7 @@ export function isWorkerId(actor: string): boolean {
 }
 
 export function ActorRef({ actor, className }: { actor: string; className?: string }) {
-  if (!isWorkerId(actor)) return <>{actor}</>;
+  if (!isWorkerId(actor)) return <span title={actor}>{actor}</span>;
   return (
     <JumpLink
       onClick={() => {
@@ -196,7 +195,7 @@ export function ActorRef({ actor, className }: { actor: string; className?: stri
       title={actor}
       className={className}
     >
-      {actor}
+      {shortId(actor)}
     </JumpLink>
   );
 }
@@ -267,7 +266,7 @@ export function ArtifactRow({ a }: { a: ArtifactRef }) {
         <div className="mt-2">
           {loading && <div className="text-[11px] text-(--text-faint)">Loading artifact preview…</div>}
           {error && (
-            <div className="text-[11px]" style={{ color: "var(--hue-err)" }}>
+            <div className="text-[11px] text-(--hue-err)">
               Failed to load preview: {error}
             </div>
           )}
@@ -279,6 +278,128 @@ export function ArtifactRow({ a }: { a: ArtifactRef }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The adapters that take a model at all — the web-side mirror of
+ * `MODEL_ADAPTERS` in `event-runtime/lib/registry.mjs` (WM-135), same set the
+ * Agents view mirrors for its Model column (WM-211).
+ */
+export const MODEL_ADAPTERS = new Set(["claude", "pi"]);
+
+/**
+ * The sentinel a tier resolves to when the answer is "let the CLI decide"
+ * (`config/policy.yaml` models map). Both adapters treat it as "pass no
+ * `--model`", so it is a real pin with an unknowable value, not a missing one.
+ */
+export const DEFAULT_MODEL = "default";
+
+/** Rendered for the sentinel and for a spec that pins nothing: same outcome. */
+const DEFAULT_MODEL_TEXT = "default (CLI)";
+
+/**
+ * What the spec pinned, as an operator reads it (WM-221). Every branch renders
+ * a word: an empty model cell is the ambiguity this row exists to remove.
+ *
+ * - a non-model adapter has no model *by construction* → `n/a`
+ * - the `default` sentinel, and a spec that declares nothing at all, both mean
+ *   the CLI chose → `default (CLI)`; `model (observed)` is what it chose
+ */
+export const pinnedModelText = (adapter: string, model: string | null | undefined): string => {
+  if (!MODEL_ADAPTERS.has(adapter)) return "n/a";
+  return model == null || model === DEFAULT_MODEL ? DEFAULT_MODEL_TEXT : model;
+};
+
+/**
+ * Declared intent — same split as `tierText` in the Agents view (WM-211): an
+ * exact-id override answers for a definition that names no tier.
+ */
+export const modelTierText = (spec: Pick<RunSpec, "adapter" | "modelTier" | "model">): string => {
+  if (spec.modelTier) return spec.modelTier;
+  if (!MODEL_ADAPTERS.has(spec.adapter)) return "n/a";
+  return spec.model ? "override" : "not declared";
+};
+
+/**
+ * The model rows, next to `adapter` (WM-221): tier and pinned come from the
+ * spec, observed from the transcript the runtime stored. A non-model adapter
+ * collapses to one honest `n/a` row rather than three — a declared tier that
+ * the adapter cannot use is named in its tooltip rather than dropped.
+ */
+function ModelRows({ spec, observed }: { spec: RunSpec; observed: string | null }) {
+  if (!MODEL_ADAPTERS.has(spec.adapter)) {
+    return (
+      <KV
+        k="model"
+        v={
+          <span
+            className="text-(--text-dim)"
+            title={
+              spec.modelTier
+                ? `Declared model_tier "${spec.modelTier}", but the ${spec.adapter} adapter runs a fixed argv, not a model.`
+                : `The ${spec.adapter} adapter runs a fixed argv, not a model.`
+            }
+          >
+            n/a
+          </span>
+        }
+      />
+    );
+  }
+  const pinned = pinnedModelText(spec.adapter, spec.model);
+  return (
+    <>
+      <KV
+        k="model tier"
+        v={
+          <span
+            className="text-(--text-dim)"
+            title={
+              spec.modelTier
+                ? "Declared intent, resolved to a model at plan time (WM-135)."
+                : spec.model
+                  ? "This definition names an exact model instead of a tier."
+                  : "This definition declares no tier, so dispatch rides the CLI's own default."
+            }
+          >
+            {modelTierText(spec)}
+          </span>
+        }
+      />
+      <KV
+        k="model (pinned)"
+        v={
+          <span
+            className={pinned === DEFAULT_MODEL_TEXT ? "text-(--text-dim)" : "mono text-(--text-dim)"}
+            title={
+              pinned !== DEFAULT_MODEL_TEXT
+                ? "What the planner pinned into this RunSpec — passed to the CLI as --model."
+                : spec.model === DEFAULT_MODEL
+                  ? "The tier resolved to the `default` sentinel: no --model is passed and the CLI picks."
+                  : "This spec pins nothing, so no --model was passed and the CLI picked."
+            }
+          >
+            {pinned}
+          </span>
+        }
+      />
+      <KV
+        k="model (observed)"
+        v={
+          <span
+            className={observed ? "mono text-(--text-dim)" : "text-(--text-faint)"}
+            title={
+              observed
+                ? "What the harness reported it ran on, read from this run's stored transcript."
+                : "No model id in this run's transcript — it may predate the capture, or none was stored."
+            }
+          >
+            {observed ?? "not recorded"}
+          </span>
+        }
+      />
+    </>
   );
 }
 
@@ -322,33 +443,27 @@ function InputRows({ input }: { input: unknown }) {
 export function RunDetailBlocks({
   d,
   now,
-  connected,
   origin,
   onJumpAgent,
   onJumpEvent,
-  onCancel,
-  onRetry,
-  onForceRetry,
-  retryPending,
   verbError,
   afterLifecycle,
 }: {
   d: RunDetail;
   now: number;
-  connected: boolean;
+  connected?: boolean;
   /** Origin event from the list join (not served by GET /runs/:id). */
   origin: { eventId?: string | null; eventSource?: string | null } | null;
   onJumpAgent: (ref: string) => void;
   onJumpEvent: (source: string, eventId: string) => void;
-  onCancel: () => void;
-  onRetry: () => void;
-  onForceRetry: () => void;
-  retryPending: boolean;
-  verbError: unknown;
+  onCancel?: () => void;
+  onRetry?: () => void;
+  onForceRetry?: () => void;
+  retryPending?: boolean;
+  verbError?: unknown;
   /** Panel slot for the inline RunTrace; the full page renders its trace in the main column. */
   afterLifecycle?: ReactNode;
 }) {
-  const attemptsExhausted = d.run.attempts >= d.run.spec.maxAttempts;
 
   // The reaper keys off the run's current attempt (`a.attempt = r.attempts`),
   // so that is the only attempt whose deadlines are still running.
@@ -372,6 +487,9 @@ export function RunDetailBlocks({
           }
         />
         <KV k="adapter" v={d.run.spec.adapter} />
+        {/* The harness is only half the answer: which model it ran is the
+            other half, and it used to appear nowhere on the page (WM-221). */}
+        <ModelRows spec={d.run.spec} observed={d.observedModel ?? null} />
         {/* A count, not an identifier — mono bought it nothing but a mismatched
             font next to "any worker" and "26m ago" on the rows around it. */}
         <KV k="attempts" v={`${d.run.attempts}/${d.run.spec.maxAttempts}`} mono={false} />
@@ -383,12 +501,12 @@ export function RunDetailBlocks({
               origin.eventSource ? (
                 <JumpLink
                   onClick={() => onJumpEvent(origin.eventSource!, origin.eventId!)}
-                  title="Open origin event"
+                  title={origin.eventId}
                 >
-                  {`${origin.eventSource} · ${origin.eventId}`}
+                  {`${origin.eventSource} · ${shortId(origin.eventId)}`}
                 </JumpLink>
               ) : (
-                origin.eventId
+                <span title={origin.eventId}>{shortId(origin.eventId)}</span>
               )
             }
           />
@@ -447,24 +565,6 @@ export function RunDetailBlocks({
         </Section>
       )}
 
-      <div className="mb-4 flex gap-2">
-        {isCancellable(d.run.state) && (
-          <Button variant="danger" disabled={!connected} onClick={onCancel}>
-            Cancel <span className="mono ml-1 opacity-70">x</span>
-          </Button>
-        )}
-        {/* §8: only FAILED → QUEUED is a legal retry transition. */}
-        {d.run.state === "FAILED" &&
-          (attemptsExhausted ? (
-            <Button disabled={!connected} onClick={onForceRetry}>
-              Force retry…
-            </Button>
-          ) : (
-            <Button disabled={!connected || retryPending} onClick={onRetry}>
-              Retry
-            </Button>
-          ))}
-      </div>
       <VerbError error={verbError} />
 
       <Section title="Lifecycle">
@@ -479,11 +579,15 @@ export function RunDetailBlocks({
             const jumped = prev != null && e.from_state !== prev.to_state;
             const hue = STATE_HUES[e.to_state] ?? "var(--hue-idle)";
             const time = new Date(e.at).toLocaleTimeString([], { hour12: false });
+            const prevTime = prev ? new Date(prev.at).toLocaleTimeString([], { hour12: false }) : null;
+            const isSameTime = prevTime !== null && time === prevTime;
+            const deltaSeconds = prev
+              ? Math.max(0, Math.round((new Date(e.at).getTime() - new Date(prev.at).getTime()) / 1000))
+              : 0;
             return (
               <li key={e.seq} className="flex gap-2.5 py-1">
                 <span className="mono w-[52px] shrink-0 pt-0.5 text-[11px] tabular-nums text-(--text-faint)" title={e.at}>
-                  {/* A burst of transitions shares one second; repeating it reads as noise. */}
-                  {prev && time === new Date(prev.at).toLocaleTimeString([], { hour12: false }) ? "" : time}
+                  {isSameTime ? <span className="opacity-60">+{deltaSeconds}s</span> : time}
                 </span>
                 {/* Rail: a dot per transition, joined to the next one. */}
                 <span className="relative flex w-2 shrink-0 justify-center" aria-hidden="true">
@@ -493,17 +597,13 @@ export function RunDetailBlocks({
                   <span className="relative mt-[7px] size-1.5 shrink-0 rounded-full" style={{ background: hue }} />
                 </span>
                 <span className="flex min-w-0 flex-1 items-start gap-x-2">
-                  {/* Fixed-width badge column, badge's own dot dropped in favor
-                      of the rail's: with it, every actor started at whatever x
-                      its state name happened to end at, and each row carried
-                      two dots for one state (WM-136). */}
                   <span className="flex w-[100px] shrink-0 items-center gap-1">
                     {jumped && (
                       <span className="shrink-0 text-[10px] text-(--text-faint)" title={`from ${e.from_state ?? "·"}`}>
                         {e.from_state ?? "·"}→
                       </span>
                     )}
-                    <StateBadge state={e.to_state} dot={false} />
+                    <StateBadge state={e.to_state} />
                   </span>
                   {/* WM-145: wrap the reason; title includes it, not actor alone. */}
                   <span

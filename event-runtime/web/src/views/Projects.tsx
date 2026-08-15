@@ -27,14 +27,6 @@ function operatorContext(): OperatorContext {
   return contextFromProject(hashProject(typeof window === "undefined" ? "" : window.location.hash));
 }
 
-const TEAM_HUES: Record<string, string> = {
-  CLNT: "var(--hue-ok)",
-  WM: "var(--accent)",
-  CW: "var(--hue-info)",
-  LAB: "var(--hue-warn)",
-  OPS: "var(--text-dim)",
-};
-
 /** Projects view (OPS-300 + OPS-362): configured factory repositories and janitor maintenance. */
 export function Projects({
   connected,
@@ -179,7 +171,7 @@ export function Projects({
     const r = sel;
     setContextActions([
       {
-        label: `⚡ Dispatch Triage Scan on ${r.name}`,
+        label: `Dispatch Triage Scan on ${r.name}`,
         hint: "triage",
         run: () =>
           setDispatchConfirm({
@@ -190,7 +182,7 @@ export function Projects({
           }),
       },
       {
-        label: `⚡ Dispatch Status Report for ${r.name}`,
+        label: `Dispatch Status Report for ${r.name}`,
         hint: "status",
         run: () =>
           setDispatchConfirm({
@@ -201,7 +193,7 @@ export function Projects({
           }),
       },
       {
-        label: `⚡ Dispatch Janitor Scan on ${r.name}`,
+        label: `Dispatch Janitor Scan on ${r.name}`,
         hint: "janitor",
         run: () =>
           setDispatchConfirm({
@@ -283,7 +275,6 @@ export function Projects({
           </thead>
           <tbody>
             {visible.map((r, i) => {
-              const teamHue = r.team ? TEAM_HUES[r.team] ?? "var(--text-dim)" : "var(--text-dim)";
               return (
                 <tr
                   key={r.name}
@@ -294,13 +285,7 @@ export function Projects({
                   <td className="mono border-b border-(--border) px-3 py-1.5 font-semibold text-(--text)">{r.name}</td>
                   <td className="border-b border-(--border) px-3 py-1.5">
                     {r.team ? (
-                      <span
-                        className="rounded px-1.5 py-0.2 text-[10px] font-semibold tracking-wide"
-                        style={{
-                          color: teamHue,
-                          background: `color-mix(in oklch, ${teamHue} 15%, transparent)`,
-                        }}
-                      >
+                      <span className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11px] font-medium text-(--text-dim)">
                         {r.team}
                       </span>
                     ) : (
@@ -312,7 +297,7 @@ export function Projects({
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5">
                     <span
-                      className="rounded px-1.5 py-0.2 text-[10px] font-semibold uppercase tracking-wide"
+                      className="rounded px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
                       style={
                         r.reportOnly
                           ? {
@@ -321,7 +306,7 @@ export function Projects({
                             }
                           : {
                               color: "var(--hue-ok)",
-                              background: "color-mix(in oklch, var(--hue-ok) 14%, transparent)",
+                              background: "color-mix(in oklch, var(--hue-ok) 12%, transparent)",
                             }
                       }
                     >
@@ -362,51 +347,61 @@ export function Projects({
           widthClass="w-[540px]"
           title={
             <div className="flex items-center gap-2">
-              <span className="mono font-bold" title={sel.name}>
+              <span className="mono font-semibold" title={sel.name}>
                 {sel.name}
               </span>
               {sel.team && (
-                <span
-                  className="rounded px-1.5 py-0.2 text-[10px] font-semibold"
-                  style={{
-                    color: TEAM_HUES[sel.team] ?? "var(--text-dim)",
-                    background: `color-mix(in oklch, ${TEAM_HUES[sel.team] ?? "var(--text-dim)"} 15%, transparent)`,
-                  }}
-                >
+                <span className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11px] font-medium text-(--text-dim)">
                   {sel.team}
                 </span>
               )}
             </div>
           }
           actions={
+            sel.github ? (
+              <a
+                href={`https://github.com/${sel.github}`}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 py-1 text-[12px] font-medium text-(--text) transition-colors hover:bg-(--surface-3)"
+              >
+                GitHub
+              </a>
+            ) : null
+          }
+          utility={
             <>
-              <Button onClick={() => copyText(sel.path, "repo path")}>Copy path</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              {sel.github && (
-                <a
-                  href={`https://github.com/${sel.github}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="rounded border border-(--border) px-2 py-1 text-[12px] font-medium text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
-                >
-                  GitHub ↗
-                </a>
-              )}
-              <Button onClick={() => onSelectRepo(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.path, "repo path")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                path
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectRepo(null)}>Close</Button>}
         >
           <div className="space-y-4">
-            <Section title="⚡ Quick Dispatch (Agent Tasks)">
+            <Section title="Quick Dispatch (Agent Tasks)">
               {env?.name === "live" && (
                 <div
                   className="mb-2 inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
                   style={{
                     color: "var(--hue-warn)",
-                    background: "color-mix(in oklch, var(--hue-warn) 15%, transparent)",
+                    background: "color-mix(in oklch, var(--hue-warn) 12%, transparent)",
                   }}
                 >
-                  <span className="size-1.5 rounded-full" style={{ background: "var(--hue-warn)" }} />
+                  <span className="size-1.5 rounded-full bg-(--hue-warn)" />
                   Live Environment
                 </div>
               )}
@@ -422,7 +417,7 @@ export function Projects({
                     })
                   }
                 >
-                  ⚡ Triage Scan
+                  Triage Scan
                 </Button>
                 <Button
                   disabled={!connected || quickDispatchMutation.isPending}
@@ -435,7 +430,7 @@ export function Projects({
                     })
                   }
                 >
-                  ⚡ Status Report
+                  Status Report
                 </Button>
                 <Button
                   disabled={!connected || quickDispatchMutation.isPending}
@@ -448,7 +443,7 @@ export function Projects({
                     })
                   }
                 >
-                  ⚡ Janitor Scan
+                  Janitor Scan
                 </Button>
               </div>
               <div className="mt-1.5 text-[11px] text-(--text-faint)">
@@ -482,7 +477,7 @@ export function Projects({
                       rel="noreferrer"
                       className="text-(--accent) hover:underline"
                     >
-                      {sel.github} ↗
+                      {sel.github}
                     </a>
                   }
                 />
@@ -518,22 +513,22 @@ export function Projects({
                   className="rounded border border-(--border) p-2"
                   style={{ opacity: sel.hasWorktreeUp ? 1 : 0.4 }}
                 >
-                  <div className="text-[10px] text-(--text-faint) uppercase">Up Script</div>
-                  <div className="font-semibold">{sel.hasWorktreeUp ? "✓ Present" : "None"}</div>
+                  <div className="text-[11px] text-(--text-faint) uppercase">Up Script</div>
+                  <div className="font-semibold">{sel.hasWorktreeUp ? "Present" : "None"}</div>
                 </div>
                 <div
                   className="rounded border border-(--border) p-2"
                   style={{ opacity: sel.hasWorktreeDown ? 1 : 0.4 }}
                 >
-                  <div className="text-[10px] text-(--text-faint) uppercase">Down Script</div>
-                  <div className="font-semibold">{sel.hasWorktreeDown ? "✓ Present" : "None"}</div>
+                  <div className="text-[11px] text-(--text-faint) uppercase">Down Script</div>
+                  <div className="font-semibold">{sel.hasWorktreeDown ? "Present" : "None"}</div>
                 </div>
                 <div
                   className="rounded border border-(--border) p-2"
                   style={{ opacity: sel.hasWorktreeWarm ? 1 : 0.4 }}
                 >
-                  <div className="text-[10px] text-(--text-faint) uppercase">Warm Script</div>
-                  <div className="font-semibold">{sel.hasWorktreeWarm ? "✓ Present" : "None"}</div>
+                  <div className="text-[11px] text-(--text-faint) uppercase">Warm Script</div>
+                  <div className="font-semibold">{sel.hasWorktreeWarm ? "Present" : "None"}</div>
                 </div>
               </div>
             </Section>
@@ -652,7 +647,7 @@ export function Projects({
 
                     {dryResult.held && dryResult.held.length > 0 && (
                       <div>
-                        <div className="text-[11px]" style={{ color: "var(--hue-warn)" }}>
+                        <div className="text-[11px] text-(--hue-warn)">
                           Held by Open PR (Finished ticket, active PR):
                         </div>
                         <div className="mono mt-1 space-y-1">
@@ -662,10 +657,10 @@ export function Projects({
                               className="rounded border border-(--border) bg-(--surface-1) p-1.5 text-[11px]"
                             >
                               <div className="flex items-center gap-1.5">
-                                <span className="font-bold text-(--text)">{h.id}</span>
+                                <span className="font-semibold text-(--text)">{h.id}</span>
                                 {h.state && <span className="text-(--text-dim)">({h.state})</span>}
                                 {h.branch && (
-                                  <span className="rounded bg-(--surface-2) px-1 py-0.2 text-[10px] text-(--text-faint)">
+                                  <span className="rounded bg-(--surface-2) px-1 py-0.2 text-[11px] text-(--text-faint)">
                                     {h.branch}
                                   </span>
                                 )}
@@ -719,7 +714,7 @@ export function Projects({
                               key={id}
                               className="rounded border border-(--border) bg-(--surface-1) px-1.5 py-0.5 text-[11px] text-(--hue-ok)"
                             >
-                              ✓ {id}
+                              {id}
                             </span>
                           ))}
                         </div>
@@ -728,7 +723,7 @@ export function Projects({
 
                     {applyResult.held && applyResult.held.length > 0 && (
                       <div>
-                        <div className="text-[11px]" style={{ color: "var(--hue-warn)" }}>
+                        <div className="text-[11px] text-(--hue-warn)">
                           Held by Open PR (Left in Place):
                         </div>
                         <div className="mono mt-1 space-y-1">
@@ -738,10 +733,10 @@ export function Projects({
                               className="rounded border border-(--border) bg-(--surface-1) p-1.5 text-[11px]"
                             >
                               <div className="flex items-center gap-1.5">
-                                <span className="font-bold text-(--text)">{h.id}</span>
+                                <span className="font-semibold text-(--text)">{h.id}</span>
                                 {h.state && <span className="text-(--text-dim)">({h.state})</span>}
                                 {h.branch && (
-                                  <span className="rounded bg-(--surface-2) px-1 py-0.2 text-[10px] text-(--text-faint)">
+                                  <span className="rounded bg-(--surface-2) px-1 py-0.2 text-[11px] text-(--text-faint)">
                                     {h.branch}
                                   </span>
                                 )}
@@ -755,7 +750,7 @@ export function Projects({
 
                     {applyResult.refused.length > 0 && (
                       <div>
-                        <div className="text-[11px]" style={{ color: "var(--hue-err)" }}>
+                        <div className="text-[11px] text-(--hue-err)">
                           Refused (Uncommitted or Unpushed Work):
                         </div>
                         <div className="mono mt-1 space-y-1">
@@ -764,7 +759,7 @@ export function Projects({
                               key={r.id}
                               className="rounded border border-(--border) bg-(--surface-1) p-1.5 text-[11px]"
                             >
-                              <span className="font-bold">{r.id}:</span> {r.reason}
+                              <span className="font-semibold">{r.id}:</span> {r.reason}
                             </div>
                           ))}
                         </div>
@@ -772,7 +767,7 @@ export function Projects({
                     )}
 
                     {applyResult.skippedApplyReason && (
-                      <div className="text-[11px]" style={{ color: "var(--hue-warn)" }}>
+                      <div className="text-[11px] text-(--hue-warn)">
                         {applyResult.skippedApplyReason}
                       </div>
                     )}
@@ -801,7 +796,7 @@ export function Projects({
 
             <div>
               <label className="text-[11px] font-medium text-(--text-faint)">
-                Type <span className="mono font-bold text-(--text)">{sel.name}</span> to confirm:
+                Type <span className="mono font-semibold text-(--text)">{sel.name}</span> to confirm:
               </label>
               <input
                 type="text"
@@ -855,10 +850,10 @@ export function Projects({
                 style={{
                   borderColor: "var(--hue-warn)",
                   color: "var(--hue-warn)",
-                  background: "color-mix(in oklch, var(--hue-warn) 10%, transparent)",
+                  background: "color-mix(in oklch, var(--hue-warn) 8%, var(--surface-1))",
                 }}
               >
-                <span className="font-bold">LIVE ENVIRONMENT</span>
+                <span className="font-semibold">LIVE ENVIRONMENT</span>
                 <span className="text-(--text-dim)">— dispatches trigger real agent runs in production.</span>
               </div>
             )}
@@ -870,12 +865,12 @@ export function Projects({
                 k="Environment"
                 v={
                   <span
-                    className="rounded px-1.5 py-0.2 text-[10px] font-semibold tracking-wide uppercase"
+                    className="rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
                     style={{
                       color: env?.name === "live" ? "var(--hue-warn)" : "var(--hue-info)",
                       background: `color-mix(in oklch, ${
                         env?.name === "live" ? "var(--hue-warn)" : "var(--hue-info)"
-                      } 15%, transparent)`,
+                      } 16%, transparent)`,
                     }}
                   >
                     {env?.name ?? "unknown"}

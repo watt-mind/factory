@@ -928,6 +928,70 @@ The remaining enforcement path, in order:
 Until one of these exists, a compromised or confused agent is limited by the
 watched approval gate and read-only scope, not by the capability list.
 
+### 14.1 The Gondolin microVM sandbox (WM-185)
+
+Paths 1 and 3 above now exist for **one adapter**, and the scope limit is the
+important part of this section: a `command`-adapter definition may declare a
+`sandbox` block, which moves that run off the host and into a Gondolin
+microVM. **The claude and pi adapters still execute on the host** with the
+worker's environment — the sandbox is not yet where the LLM agents run, and
+nothing here should be read as if it were.
+
+```json
+"sandbox": {
+  "provider": "gondolin",
+  "allowedHosts": ["api.github.com"],
+  "secrets": { "GITHUB_TOKEN": { "hosts": ["api.github.com"], "env": "GH_FACTORY_TOKEN" } }
+}
+```
+
+What that buys, verified by real-VM tests in
+`lib/sandbox/invariants.test.mjs` rather than asserted:
+
+- **Filesystem.** The workspace is mounted read-write at `/workspace` and
+  nothing else is visible — not the runtime home, not `~/.config`, not the
+  rest of the checkout. Writes cross the boundary, so `result.json` and
+  captured artifacts work unchanged.
+- **Network.** Egress is default-deny at the host proxy. **An omitted
+  `allowedHosts` denies everything**, which deliberately inverts the SDK's own
+  default of allow-all-on-omission: a definition that forgets the key must not
+  silently get the internet.
+- **Secrets.** A definition names a host env var; it never carries a value.
+  The guest receives an opaque `GONDOLIN_SECRET_…` placeholder, and the host
+  proxy substitutes the real credential only on that secret's allowlisted
+  upstreams. A placeholder sent anywhere else stays a meaningless string. A
+  secret scoped to a host the allowlist does not permit is a policy error, not
+  a no-op.
+
+The result contract is identical to the host path — same `result.json`, same
+artifacts, same exit-code semantics — so verification and receipts cannot tell
+which path ran.
+
+**The VM host runs under Node, not Bun, and that boundary is load-bearing.**
+Measured against `@earendil-works/gondolin` 0.12.0 on macOS arm64: under Bun
+the VM boots, the VFS mounts, and `vm.exec()` works, but the host-side TLS
+mediation never answers — an allowlisted request hangs until its own timeout,
+with no error and no debug output. Under Node it returns normally. So
+`lib/sandbox/gondolin.mjs` (Bun) spawns `lib/sandbox/runner.mjs` (Node) as a
+child and they speak NDJSON over a pipe; resolved secrets travel on **stdin**,
+never argv, which any process can read via `ps`.
+
+Operationally:
+
+- `bun event-runtime/cli.mjs sandbox doctor` reports whether this host can
+  honour a sandboxed run (QEMU, a Node ≥ 23.6, the SDK), and names what is
+  missing when it cannot.
+- `bun event-runtime/cli.mjs sandbox exec --dir . --allow api.github.com -- …`
+  runs anything inside the sandbox by hand, without an event or a worker.
+- A worker advertises `sandbox=gondolin` **only when that preflight passes**,
+  so placement never routes a sandboxed run to a host that would just fail it.
+  An explicit `--label sandbox=…` always wins, so a node can be forced off.
+- Warm boot measured 51–93 ms; the first boot on a machine is ~10 s while
+  ~200 MB of guest assets load once. The guest is Alpine with `bash`, `curl`,
+  `node`, `npm`, and `python3` — **no `git`**, which is the main reason
+  running the coding agents themselves in-guest is a separate piece of work
+  rather than a flag flip.
+
 **The control API is a trust surface of its own.** It binds to loopback only,
 so the clients need no authentication story beyond local user access. The web
 app (OPS-212) consumes the same endpoints and deliberately kept that boundary

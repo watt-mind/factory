@@ -7,11 +7,13 @@ import {
   cycleColumnSort,
   flattenSections,
   grouped,
+  removeCustomColumn,
   toggleCollapsed,
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
 import { DisplayOptions } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import type { Worker } from "../types";
 import type { OperatorContext } from "../context";
@@ -237,13 +239,13 @@ function FleetStatusBanner({ banner }: { banner: FleetBanner }) {
       className="mb-3 rounded-md border p-3 text-[12px]"
       style={{
         color: hue,
-        borderColor: `color-mix(in oklch, ${hue} 55%, var(--border))`,
+        borderColor: hue,
         background: `color-mix(in oklch, ${hue} 8%, var(--surface-1))`,
       }}
     >
       <div className="flex items-center gap-2 font-semibold">
         <span
-          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "animate-pulse"}`}
+          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "motion-safe:animate-pulse"}`}
           style={{ background: hue }}
         />
         <span>{title}</span>
@@ -415,7 +417,12 @@ export function Workers({
                 })}
               </div>
               <span className="ml-auto">
-                <DisplayOptions config={WORKERS_DISPLAY} state={display} onChange={setDisplay} />
+                <DisplayOptions
+                  config={WORKERS_DISPLAY}
+                  state={display}
+                  onChange={setDisplay}
+                  rows={byTab}
+                />
               </span>
               <FilterInput
                 value={filter}
@@ -433,13 +440,17 @@ export function Workers({
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((c) => {
                 const sort = WORKERS_DISPLAY.sorts.find((s) => s.column === c.key);
+                const isCustom = c.isCustom || c.key.startsWith("custom:");
+                const customPath = c.key.replace(/^custom:/, "");
+                const isCurrentSort = isCustom ? display.sortBy === c.key : (sort && display.sortBy === sort.key);
                 return (
                   <Th
                     key={c.key}
                     label={c.label}
-                    dir={sort && display.sortBy === sort.key ? display.sortDir : null}
-                    naturalDir={sort?.defaultDir}
-                    onSort={sort ? () => setDisplay((s) => cycleColumnSort(WORKERS_DISPLAY, s, c.key)) : undefined}
+                    dir={isCurrentSort ? display.sortDir : null}
+                    naturalDir={sort?.defaultDir ?? "asc"}
+                    onSort={sort || isCustom ? () => setDisplay((s) => cycleColumnSort(WORKERS_DISPLAY, s, c.key)) : undefined}
+                    onRemove={isCustom ? () => setDisplay((s) => removeCustomColumn(s, customPath)) : undefined}
                   />
                 );
               })}
@@ -511,6 +522,9 @@ export function Workers({
                       <HeartbeatCell w={w} now={now} />
                     </td>
                   )}
+                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    <CustomCell key={c.key} row={w} path={c.key.replace(/^custom:/, "")} />
+                  ))}
                 </tr>
               );
               if (!grouped(display)) return sections[0]?.rows.map(renderRow);
@@ -570,13 +584,27 @@ export function Workers({
               </span>
             </span>
           }
-          actions={
+          utility={
             <>
-              <Button onClick={() => copyText(sel.workerId, "worker id")}>Copy id</Button>
-              <Button onClick={copyLink}>Copy link</Button>
-              <Button onClick={() => onSelectWorker(null)}>Close</Button>
+              <span>copy:</span>
+              <button
+                type="button"
+                onClick={() => copyText(sel.workerId, "worker id")}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                id
+              </button>
+              <span>·</span>
+              <button
+                type="button"
+                onClick={copyLink}
+                className="cursor-pointer hover:text-(--text)"
+              >
+                link
+              </button>
             </>
           }
+          close={<Button onClick={() => onSelectWorker(null)}>Close</Button>}
         >
           {selHeartbeat.kind === "stale" && (
             <div

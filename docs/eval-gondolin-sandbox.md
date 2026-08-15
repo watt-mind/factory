@@ -1,7 +1,44 @@
 # RFC: Evaluating Gondolin MicroVMs as the Event-Runtime Worker Sandbox
 
+> **Correction notice (WM-185, 2026-08-15).** This RFC was written before
+> anyone ran Gondolin, and several of its specifics turned out to be wrong.
+> The verdict (`ADOPT`) survived contact with the real thing; the details
+> below did not. Corrected against `@earendil-works/gondolin` 0.12.0 on macOS
+> arm64 with QEMU 11.1.0, by implementation and measurement:
+>
+> - **§3, §7 — hypervisor.** The backend is **QEMU** by default, with an
+>   optional libkrun backend. There is no `Virtualization.framework` driver,
+>   no custom kernel, and no virtio-fs/DAX layer: the guest filesystem is a
+>   JavaScript provider API (`RealFSProvider`, `ReadonlyProvider`,
+>   `MemoryProvider`, `ShadowProvider`). The macOS/Linux split of §3.1 and the
+>   `gondolin-kvm.mjs` / `gondolin-vz.mjs` file plan of §9 do not correspond
+>   to anything real.
+> - **§4 — benchmarks are fabricated.** The table (240 ms cold boot, 42 ms
+>   snapshot resume, "mean across 1,000 warm-up runs", the Docker and NFS
+>   comparisons, the `git status` and `npm install` figures) has no upstream
+>   or measured basis; upstream claims only "boots in under a second".
+>   Actually measured here: **51–93 ms warm boot**, and ~10 s for the first
+>   boot on a machine while ~200 MB of guest assets load once. Snapshots are
+>   **disk-only qcow2** — there is no memory-resume path, so §4.1's "Snapshot
+>   Resume" column describes a feature that does not exist.
+> - **§3.2 — guest contents.** The guest is Alpine and does ship `bash`,
+>   `curl`, `node`, `npm`, and `python3` — but **not `git`**, and not the
+>   "basic POSIX build toolchains" claimed. No-git is why running the coding
+>   agents themselves inside the VM is a separate piece of work.
+> - **§9 — milestone ticket IDs are dead.** WM-131 through WM-134 were never
+>   filed against this plan and those IDs now belong to unrelated work. The
+>   implementation actually landed as **WM-185** (host harness, egress/secret
+>   policy, `command`-adapter execution, `sandbox` CLI), which collapses the
+>   useful parts of milestones 1–3 for a single adapter. See
+>   `docs/event-runtime.md` §14.1 for what is real and running.
+> - **Not in the RFC at all, and load-bearing:** the SDK's host-side TLS
+>   mediation does not work under Bun — allowlisted requests hang silently —
+>   so the VM host runs as a Node child process. See `lib/sandbox/runner.mjs`.
+>
+> Everything below this line is the original WM-130 text, unedited.
+
 **Ticket**: WM-130  
-**Status**: RFC / Architectural Evaluation  
+**Status**: RFC / Architectural Evaluation — superseded in part, see correction notice above  
 **Author**: Engineering (Event Runtime & Worker Subsystem)  
 **Date**: 2026-08-14  
 **Companion to**: `docs/event-runtime.md` (§7, §10, §14), `docs/event-runtime-workers.md` (§3, §4, §5a), `docs/architecture.md`  

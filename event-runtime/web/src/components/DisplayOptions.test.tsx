@@ -16,6 +16,11 @@ interface Row {
   id: string;
   state: string;
   agent: string;
+  envelope?: {
+    payload?: {
+      repo?: string;
+    };
+  };
 }
 
 const CONFIG: DisplayConfig<Row> = {
@@ -32,7 +37,13 @@ const CONFIG: DisplayConfig<Row> = {
   ],
 };
 
-function Harness({ onState }: { onState?: (s: DisplayState) => void }) {
+function Harness({
+  onState,
+  rows,
+}: {
+  onState?: (s: DisplayState) => void;
+  rows?: Row[];
+}) {
   const [state, setState] = useState(() => defaultDisplayState(CONFIG));
   const update = (next: DisplayState | ((s: DisplayState) => DisplayState)) => {
     setState((prev) => {
@@ -41,7 +52,7 @@ function Harness({ onState }: { onState?: (s: DisplayState) => void }) {
       return value;
     });
   };
-  return <DisplayOptions config={CONFIG} state={state} onChange={update} />;
+  return <DisplayOptions config={CONFIG} state={state} onChange={update} rows={rows} />;
 }
 
 afterEach(() => {
@@ -83,6 +94,38 @@ describe("DisplayOptions panel", () => {
     fireEvent.click(pill);
     expect(latest?.hiddenColumns).toEqual(["agent"]);
     expect(pill.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("adds and removes dynamic custom column via input", () => {
+    let latest: DisplayState | undefined;
+    const r = render(<Harness onState={(s) => (latest = s)} />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+
+    const input = r.getByPlaceholderText(/e\.g\. payload\.repo/i);
+    fireEvent.change(input, { target: { value: "payload.repo" } });
+    fireEvent.submit(input.closest("form")!);
+
+    expect(latest?.customColumns).toEqual(["payload.repo"]);
+    expect(r.getByRole("button", { name: "payload.repo" })).toBeTruthy();
+
+    const removeBtn = r.getByLabelText("Remove column payload.repo");
+    fireEvent.click(removeBtn);
+    expect(latest?.customColumns).toEqual([]);
+  });
+
+  test("discovered fields suggestion chip adds column", () => {
+    let latest: DisplayState | undefined;
+    const sampleRows: Row[] = [
+      { id: "r1", state: "RUNNING", agent: "a", envelope: { payload: { repo: "watt-mind/factory" } } },
+    ];
+    const r = render(<Harness onState={(s) => (latest = s)} rows={sampleRows} />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+
+    const chip = r.getByRole("button", { name: /\+ payload\.repo/i });
+    expect(chip).toBeTruthy();
+    fireEvent.click(chip);
+
+    expect(latest?.customColumns).toContain("payload.repo");
   });
 
   test("Escape closes the panel and releases the modal depth", () => {
