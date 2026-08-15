@@ -15,6 +15,7 @@ import {
   StateBadge,
   VerbError,
   copyText,
+  shortId,
 } from "./ui";
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
@@ -186,7 +187,7 @@ export function isWorkerId(actor: string): boolean {
 }
 
 export function ActorRef({ actor, className }: { actor: string; className?: string }) {
-  if (!isWorkerId(actor)) return <>{actor}</>;
+  if (!isWorkerId(actor)) return <span title={actor}>{actor}</span>;
   return (
     <JumpLink
       onClick={() => {
@@ -195,7 +196,7 @@ export function ActorRef({ actor, className }: { actor: string; className?: stri
       title={actor}
       className={className}
     >
-      {actor}
+      {shortId(actor)}
     </JumpLink>
   );
 }

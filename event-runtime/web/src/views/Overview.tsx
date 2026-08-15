@@ -17,6 +17,7 @@ import {
   JumpLink,
   Section,
   StateBadge,
+  StateIcon,
   VerbError,
   ago,
   copyText,
@@ -25,154 +26,6 @@ import {
 } from "../components/ui";
 
 const FEED_CAP = 50;
-
-/**
- * 14px viewBox, 1.5px stroke state icons per OPS-498 / §5.2.
- * Shape is redundancy for color-blind and peripheral reading.
- */
-export function StateIcon({ state, className = "size-3.5 shrink-0" }: { state: string; className?: string }) {
-  const norm = state.toLowerCase();
-  switch (norm) {
-    case "admitted":
-      return (
-        <svg viewBox="0 0 14 14" fill="currentColor" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="3" />
-        </svg>
-      );
-    case "planned":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
-          <polygon points="5,3.5 10.5,7 5,10.5" fill="currentColor" fillOpacity="0.2" />
-        </svg>
-      );
-    case "noop":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <line x1="4" y1="7" x2="10" y2="7" />
-        </svg>
-      );
-    case "human_needed":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
-          <path d="M7 2.5 L12 11.5 L2 11.5 Z" fill="currentColor" fillOpacity="0.18" />
-          <line x1="7" y1="5.5" x2="7" y2="8" />
-          <circle cx="7" cy="9.8" r="0.5" fill="currentColor" />
-        </svg>
-      );
-    case "dead_lettered":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <line x1="3.8" y1="10.2" x2="10.2" y2="3.8" />
-        </svg>
-      );
-    case "queued":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2 2" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-        </svg>
-      );
-    case "leased":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <circle cx="7" cy="7" r="1.8" fill="currentColor" />
-        </svg>
-      );
-    case "running":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <path d="M7 2.5 A4.5 4.5 0 0 1 7 11.5 Z" fill="currentColor" />
-        </svg>
-      );
-    case "verifying":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="6" cy="6" r="3.5" />
-          <line x1="8.5" y1="8.5" x2="11.5" y2="11.5" />
-        </svg>
-      );
-    case "completed":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
-          <polyline points="4.8,7.2 6.3,8.7 9.3,5.3" />
-        </svg>
-      );
-    case "failed":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
-          <line x1="5" y1="5" x2="9" y2="9" />
-          <line x1="9" y1="5" x2="5" y2="9" />
-        </svg>
-      );
-    case "timed_out":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <polyline points="7,4.5 7,7 9,7" />
-        </svg>
-      );
-    case "cancelled":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <line x1="4" y1="7" x2="10" y2="7" />
-        </svg>
-      );
-    case "refused":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <line x1="10" y1="4" x2="4" y2="10" />
-        </svg>
-      );
-    case "open":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" strokeDasharray="3 2" />
-        </svg>
-      );
-    case "expired":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
-          <line x1="7" y1="4" x2="7" y2="7.5" />
-          <circle cx="7" cy="9.5" r="0.5" fill="currentColor" />
-        </svg>
-      );
-    case "live":
-    case "idle":
-      return (
-        <svg viewBox="0 0 14 14" fill="currentColor" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="3.5" />
-        </svg>
-      );
-    case "busy":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" />
-          <path d="M7 2.5 A4.5 4.5 0 0 1 7 11.5 Z" fill="currentColor" />
-        </svg>
-      );
-    case "stale":
-      return (
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" fill="currentColor" fillOpacity="0.18" />
-          <line x1="7" y1="4" x2="7" y2="7.5" />
-          <circle cx="7" cy="9.5" r="0.5" fill="currentColor" />
-        </svg>
-      );
-    default:
-      return (
-        <svg viewBox="0 0 14 14" fill="currentColor" className={className} aria-hidden="true">
-          <circle cx="7" cy="7" r="2.5" />
-        </svg>
-      );
-  }
-}
 
 export interface Segment {
   key: string;
@@ -282,7 +135,7 @@ export function StageCard({
   children,
   className = "",
 }: {
-  index: number;
+  index?: number;
   title: string;
   headline?: ReactNode;
   headlineHue?: string;
@@ -294,7 +147,7 @@ export function StageCard({
     <section className={`rounded-lg border border-(--border) bg-(--surface-1) p-3.5 ${className}`}>
       <div className="mb-2.5 flex items-baseline justify-between gap-3">
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-(--text-faint)">
-          {index}. {title}
+          {index != null ? `${index}. ${title}` : title}
         </h2>
         <div className="flex items-baseline gap-2">
           {meta && <span className="text-[11px] text-(--text-faint)">{meta}</span>}
@@ -534,7 +387,7 @@ function RecentOutcomesStrip({
     <div className="rounded-lg border border-(--border) bg-(--surface-1) p-3.5">
       <div className="mb-2 flex items-baseline justify-between text-[11px]">
         <span className="font-medium uppercase tracking-wide text-(--text-faint)">
-          Recent Outcomes ({outcomes.length})
+          Recent Outcomes · last {outcomes.length}
         </span>
         <span className="text-[11px] text-(--text-faint)">newest → oldest</span>
       </div>
@@ -553,7 +406,7 @@ function RecentOutcomesStrip({
               key={o.seq}
               type="button"
               onClick={() => onJumpRun(o.runId)}
-              className="h-4 w-2 rounded-xs transition-opacity hover:opacity-100 opacity-80"
+              className="h-4 w-2 cursor-pointer rounded-xs transition-all hover:scale-125 hover:opacity-100 opacity-80"
               style={{ backgroundColor: hue }}
               title={`${o.runId} · ${o.to}${o.reason ? ` (${o.reason})` : ""} · ${ago(o.at, now)}`}
             />
@@ -613,8 +466,8 @@ export function Overview({
   onJumpRuns,
   onNavigate,
   onJumpExpired: _onJumpExpired,
-  onJumpGraph,
-  onInject,
+  onJumpGraph: _onJumpGraph,
+  onInject: _onInject,
 }: {
   connected: boolean;
   context: OperatorContext;
@@ -623,9 +476,9 @@ export function Overview({
   onJumpEvents: (focus: EventFocus) => void;
   onJumpRuns: (state?: string) => void;
   onNavigate: (path: string) => void;
-  onJumpExpired: () => void;
-  onJumpGraph: () => void;
-  onInject: () => void;
+  onJumpExpired?: () => void;
+  onJumpGraph?: () => void;
+  onInject?: () => void;
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
@@ -780,14 +633,6 @@ export function Overview({
     <div className="h-full min-w-0 overflow-auto p-5">
       <div className="mb-4 flex items-baseline justify-between gap-3">
         <h1 className="display text-lg font-semibold">Overview</h1>
-        <div className="flex gap-3 text-[12px] text-(--text-dim)">
-          <button type="button" className="hover:text-(--accent)" onClick={onJumpGraph}>
-            Graph
-          </button>
-          <button type="button" className="hover:text-(--accent)" onClick={onInject}>
-            Inject event…
-          </button>
-        </div>
       </div>
       <OverviewScopeNotice context={context} />
 
@@ -883,11 +728,9 @@ export function Overview({
           <div className="flex items-center gap-2">
             <span className="size-2 rounded-full bg-(--hue-ok)" />
             <span className="font-medium text-(--text)">Doctor: All systems nominal</span>
-            <span className="text-(--text-faint)">·</span>
-            <span className="text-(--text-faint)">No active anomalies detected</span>
           </div>
           <div className="text-[11px] text-(--text-faint)">
-            {feedsUnscoped ? "factory-wide" : "in scope"}
+            {feedsUnscoped ? "scope: factory-wide" : "scope: all repos"}
           </div>
         </div>
       )}
@@ -899,121 +742,153 @@ export function Overview({
         </div>
       ) : (
         <div className="mb-6 flex flex-col gap-4">
-          {/* Stage 1 & Stage 2 in 2-column layout */}
-          <div className="grid gap-4 lg:grid-cols-3">
-            {/* Stage 1: Event Intake & Triage Card */}
-            <StageCard
-              index={1}
-              title="Event Intake & Triage"
-              headline={intakeTotal}
-              meta={intakeTotal > 0 ? `${intakeTotal} total` : "no events yet"}
-              className="lg:col-span-2"
-            >
-              <SegmentMeter
-                segments={eventSegs}
-                onSegment={(k) => onJumpEvents({ status: k })}
-              />
-              <div className="mt-2.5 flex flex-wrap items-center gap-1">
-                {eventSegs.map((seg) => (
-                  <StatLegendItem
-                    key={seg.key}
-                    token={seg.key}
-                    label={`events · ${seg.key}`}
-                    value={seg.value}
-                    hue={seg.value > 0 ? seg.hue : undefined}
-                    attention={ATTENTION_KEYS.has(seg.key)}
-                    onClick={() => onJumpEvents({ status: seg.key })}
-                  />
-                ))}
-              </div>
-            </StageCard>
-
-            {/* Stage 2: Watched Approval Gate Card */}
-            <StageCard
-              index={2}
-              title="Watched Approval Gate"
-              headline={proposalTotal}
-              headlineHue={proposalExpired > 0 ? "var(--hue-warn)" : proposalOpen > 0 ? "var(--hue-info)" : undefined}
-              meta={proposalExpired > 0 ? `${proposalExpired} expired` : "gate queue"}
-            >
-              <SegmentMeter
-                segments={proposalSegs}
-                onSegment={() => onNavigate("proposals")}
-              />
-              <div className="mt-2.5 flex flex-wrap items-center gap-1">
-                <StatLegendItem
-                  token="open"
-                  label="proposals · open"
-                  value={proposalOpen}
-                  hue={proposalOpen > 0 ? "var(--hue-info)" : undefined}
-                  onClick={() => onNavigate("proposals")}
-                />
-                <StatLegendItem
-                  token="expired"
-                  label="proposals · expired"
-                  value={proposalExpired}
-                  hue={proposalExpired > 0 ? "var(--hue-warn)" : undefined}
-                  attention={proposalExpired > 0}
-                  onClick={() => onNavigate("proposals")}
-                />
-              </div>
-            </StageCard>
-          </div>
-
-          {/* Stage 3: Execution Fleet & Capacity Card */}
+          {/* Card 1: Intake & Approval Gate */}
           <StageCard
-            index={3}
-            title="Execution Fleet & Capacity"
+            title="Intake & Approval Gate"
+            headline={intakeTotal + proposalTotal}
+            meta="total"
+          >
+            {/* Sub-row 1: Event Intake */}
+            <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
+              <span className="font-medium text-(--text-faint)">Event Intake</span>
+              <span className="mono text-(--text-dim)">
+                {intakeTotal > 0 ? `${intakeTotal} events` : "no events yet"}
+              </span>
+            </div>
+            {intakeTotal > 0 ? (
+              <>
+                <SegmentMeter
+                  segments={eventSegs}
+                  onSegment={(k) => onJumpEvents({ status: k })}
+                />
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                  {eventSegs.map((seg) => (
+                    <StatLegendItem
+                      key={seg.key}
+                      token={seg.key}
+                      label={`events · ${seg.key}`}
+                      value={seg.value}
+                      hue={seg.value > 0 ? seg.hue : undefined}
+                      attention={ATTENTION_KEYS.has(seg.key)}
+                      onClick={() => onJumpEvents({ status: seg.key })}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="text-[12px] text-(--text-faint)">no events yet</div>
+            )}
+
+            {/* Sub-row 2: Approval Gate */}
+            <div className="mt-3.5 border-t border-(--border) pt-2.5">
+              <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
+                <span className="font-medium text-(--text-faint)">Approval Gate</span>
+                <span className="mono text-(--text-dim)">
+                  {proposalTotal > 0
+                    ? `${proposalExpired > 0 ? `${proposalExpired} expired · ` : ""}${proposalOpen} open`
+                    : "no proposals in gate"}
+                </span>
+              </div>
+              {proposalTotal > 0 ? (
+                <>
+                  <SegmentMeter
+                    segments={proposalSegs}
+                    onSegment={() => onNavigate("proposals")}
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <StatLegendItem
+                      token="open"
+                      label="proposals · open"
+                      value={proposalOpen}
+                      hue={proposalOpen > 0 ? "var(--hue-info)" : undefined}
+                      onClick={() => onNavigate("proposals")}
+                    />
+                    <StatLegendItem
+                      token="expired"
+                      label="proposals · expired"
+                      value={proposalExpired}
+                      hue={proposalExpired > 0 ? "var(--hue-warn)" : undefined}
+                      attention={proposalExpired > 0}
+                      onClick={() => onNavigate("proposals")}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="text-[12px] text-(--text-faint)">no proposals in gate</div>
+              )}
+            </div>
+          </StageCard>
+
+          {/* Card 2: Execution & Fleet Capacity */}
+          <StageCard
+            title="Execution & Fleet Capacity"
             headline={inflightTotal}
             headlineHue={inflightTotal > 0 ? "var(--hue-info)" : undefined}
             meta="in flight"
           >
             {/* Sub-row 1: Active In-Flight Workloads */}
-            <div className="mb-1 text-[11px] font-medium text-(--text-faint)">
-              Active In-Flight Pipeline
+            <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
+              <span className="font-medium text-(--text-faint)">Active In-Flight Pipeline</span>
+              <span className="mono text-(--text-dim)">
+                {inflightTotal > 0 ? `${inflightTotal} active` : "nothing in flight"}
+              </span>
             </div>
-            <SegmentMeter
-              segments={inflightSegs}
-              onSegment={(k) => onJumpRuns(k)}
-            />
-            <div className="mt-2 flex flex-wrap items-center gap-1">
-              {inflightSegs.map((seg) => (
-                <StatLegendItem
-                  key={seg.key}
-                  token={seg.key}
-                  label={`active · ${seg.label}`}
-                  value={seg.value}
-                  hue={seg.value > 0 ? seg.hue : undefined}
-                  onClick={() => onJumpRuns(seg.key)}
+            {inflightTotal > 0 ? (
+              <>
+                <SegmentMeter
+                  segments={inflightSegs}
+                  onSegment={(k) => onJumpRuns(k)}
                 />
-              ))}
-            </div>
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                  {inflightSegs.map((seg) => (
+                    <StatLegendItem
+                      key={seg.key}
+                      token={seg.key}
+                      label={`active · ${seg.label}`}
+                      value={seg.value}
+                      hue={seg.value > 0 ? seg.hue : undefined}
+                      onClick={() => onJumpRuns(seg.key)}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="text-[12px] text-(--text-faint)">nothing in flight</div>
+            )}
 
             {/* Sub-row 2: Outcomes */}
             <div className="mt-3.5 border-t border-(--border) pt-2.5">
               <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
                 <span className="font-medium text-(--text-faint)">Terminal Outcomes</span>
                 <span className="mono text-(--text-dim)">
-                  {finishedTotal > 0 ? `${Math.round((okTotal / finishedTotal) * 100)}% completed (${finishedTotal} total)` : "no terminal runs"}
+                  {finishedTotal > 0
+                    ? `${Math.round((okTotal / finishedTotal) * 100)}% completed (${finishedTotal} total)`
+                    : "no terminal runs"}
                 </span>
               </div>
-              <SegmentMeter
-                segments={terminalSegs}
-                onSegment={(k) => onJumpRuns(k)}
-              />
-              <div className="mt-2 flex flex-wrap items-center gap-1">
-                {terminalSegs.map((seg) => (
-                  <StatLegendItem
-                    key={seg.key}
-                    token={seg.key}
-                    label={`runs · ${seg.label}`}
-                    value={seg.value}
-                    hue={seg.value > 0 ? seg.hue : undefined}
-                    attention={ATTENTION_KEYS.has(seg.key)}
-                    onClick={() => onJumpRuns(seg.key)}
+              {finishedTotal > 0 ? (
+                <>
+                  <SegmentMeter
+                    segments={terminalSegs}
+                    onSegment={(k) => onJumpRuns(k)}
                   />
-                ))}
-              </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    {terminalSegs.map((seg) => (
+                      <StatLegendItem
+                        key={seg.key}
+                        token={seg.key}
+                        label={`runs · ${seg.label}`}
+                        value={seg.value}
+                        hue={seg.value > 0 ? seg.hue : undefined}
+                        attention={ATTENTION_KEYS.has(seg.key)}
+                        onClick={() => onJumpRuns(seg.key)}
+                      />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="text-[12px] text-(--text-faint)">no terminal runs</div>
+              )}
             </div>
 
             {/* Sub-row 3: Worker Fleet Capacity */}
@@ -1133,7 +1008,7 @@ export function Overview({
                     className="truncate text-(--text-faint)"
                     title={`by ${g.actor}${g.reason ? ` (${g.reason})` : ""}${g.count > 1 ? ` · ${g.count} transitions` : ""}`}
                   >
-                    by {g.actor}
+                    by {shortId(g.actor)}
                     {g.reason ? ` (${g.reason})` : ""}
                     {g.count > 1 ? ` · ${g.count} transitions` : ""}
                   </span>
@@ -1144,7 +1019,7 @@ export function Overview({
         </Section>
 
         <Section
-          title={feedsUnscoped ? "Outbox — published results · factory-wide" : "Outbox — published results"}
+          title={feedsUnscoped ? "Outbox · published results · factory-wide" : "Outbox · published results"}
           card={false}
         >
           <div id="outbox">

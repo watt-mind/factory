@@ -474,7 +474,7 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
     });
 
     try {
-      const { getByRole, queryByRole } = renderOverview({ kind: "inflight" });
+      const { getByRole, queryByRole, getAllByText } = renderOverview({ kind: "inflight" });
 
       await waitFor(() => getByRole("button", { name: "active · leased: 2" }));
 
@@ -484,7 +484,7 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
       expect(getByRole("button", { name: "active · leased: 2" })).toBeTruthy();
       expect(getByRole("button", { name: "active · running: 1" })).toBeTruthy();
       expect(queryByRole("button", { name: "runs · completed: 9" })).toBeNull();
-      expect(getByRole("button", { name: "runs · completed: 0" })).toBeTruthy();
+      expect(getAllByText(/no terminal runs/).length).toBeGreaterThan(0);
     } finally {
       restore();
     }
@@ -541,14 +541,13 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
 
     try {
       const { getByText } = renderOverview();
-      await waitFor(() => getByText(/1\. Event Intake/));
+      await waitFor(() => getByText(/Intake & Approval Gate/));
 
-      const stage1 = getByText(/1\. Event Intake/).closest("section");
+      const stage1 = getByText(/Intake & Approval Gate/).closest("section");
       expect(stage1?.className).toMatch(/\brounded-lg\b/);
-      expect(stage1?.className).toMatch(/\blg:col-span-2\b/);
 
-      const stage3 = getByText(/3\. Execution Fleet/).closest("section");
-      expect(stage3?.className).toMatch(/\brounded-lg\b/);
+      const stage2 = getByText(/Execution & Fleet Capacity/).closest("section");
+      expect(stage2?.className).toMatch(/\brounded-lg\b/);
     } finally {
       restore();
     }
@@ -620,7 +619,8 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
     try {
       const { getByText } = renderOverview();
       await waitFor(() => getByText(/Doctor: All systems nominal/));
-      expect(getByText(/No active anomalies detected/)).toBeTruthy();
+      expect(getByText(/Doctor: All systems nominal/)).toBeTruthy();
+      expect(getByText(/scope: all repos/)).toBeTruthy();
     } finally {
       api.status = origStatus;
       api.proposals = origProposals;
@@ -670,7 +670,7 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
       expect(getByText(/3 live · 1 busy · 2 idle/)).toBeTruthy();
 
       // Recent outcomes strip displays completed & failed terminal entries (2 total)
-      expect(getByText(/Recent Outcomes \(2\)/)).toBeTruthy();
+      expect(getByText(/Recent Outcomes · last 2/)).toBeTruthy();
       expect(getByTitle(/run_term_1 · COMPLETED/)).toBeTruthy();
       expect(getByTitle(/run_term_2 · FAILED/)).toBeTruthy();
 

@@ -318,6 +318,7 @@ no shared set. Every rule below is checkable in review.
    | Glyph     | Meaning                     | Where                                            |
    | --------- | --------------------------- | ------------------------------------------------ |
    | `▶`       | collapse/expand chevron     | `GroupHeaderRow` only — 9px, `rotate-90` on open |
+   | `→`       | transition / direction      | lifecycle spans (`QUEUED → RUNNING`), feed transitions, sort orders |
    | `×`       | dismiss/remove this item    | chips and tokens only — never "failed"           |
    | `↑` / `↓` | sort direction              | `Th` header cells only                           |
    | `·`       | inline metadata separator   | footer/status lines                              |
