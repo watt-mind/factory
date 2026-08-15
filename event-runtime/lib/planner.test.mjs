@@ -7,7 +7,7 @@ import { hashJson } from "./canonical.mjs";
 import { DEAD_LETTER_AFTER } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
-import { createRun, lifecycleOf, runState } from "./lifecycle.mjs";
+import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
 import { buildRunSpec, idempotencyKeyFor, planAdmittedEvents, planEvent } from "./planner.mjs";
 import { loadRegistry } from "./registry.mjs";
 
@@ -186,6 +186,93 @@ describe("planEvent", () => {
     expect(second.reason).toBe("duplicate_run");
     expect(second.runId).toBe(first.runId);
     expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+  });
+
+  test("chain repeat triggers coalesce while active and self-feed again after terminal completion (WM-319)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents), eventTypes: { ...registry.eventTypes } };
+    synthetic.eventTypes["test.chain.requested"] = {
+      agent: "test-chain@1",
+      adapter: "fake",
+      idempotencyScope: ["inputHash"],
+    };
+    synthetic.agents.set("test-chain@1", {
+      id: "test-chain",
+      version: 1,
+      ref: "test-chain@1",
+      output_contract: "factory.test/v1",
+      workspace: { type: "ephemeral" },
+      capabilities: { services: [] },
+      limits: { timeout_seconds: 60, attempts: 1 },
+      mutating: false,
+      inputSchema: { type: "object" },
+    });
+
+    const chainEvent = (eventId, causationId) => ({
+      eventId,
+      type: "test.chain.requested",
+      source: "chain",
+      subject: "factory",
+      correlationId: "lineage-001",
+      causationId,
+      payload: { repo: "factory" },
+    });
+    const db = openDb(":memory:");
+
+    const firstRef = admit(db, chainEvent("chain-dispatch-1", "run_dispatch_1"));
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+    expect(first.decision).toBe("run");
+
+    const concurrentRef = admit(db, chainEvent("chain-dispatch-2", "run_dispatch_2"));
+    const concurrent = planEvent(db, synthetic, concurrentRef, { now: NOW + 1000, policyVersion: "git:test" });
+    expect(concurrent).toMatchObject({ decision: "noop", reason: "duplicate_run", runId: first.runId });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    const nextCycleRef = admit(db, chainEvent("chain-dispatch-3", "run_dispatch_3"));
+    const nextCycle = planEvent(db, synthetic, nextCycleRef, { now: NOW + 2000, policyVersion: "git:test" });
+    expect(nextCycle.decision).toBe("run");
+    expect(nextCycle.runId).not.toBe(first.runId);
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+
+    const coalescedAgainRef = admit(db, chainEvent("chain-dispatch-4", "run_dispatch_4"));
+    const coalescedAgain = planEvent(db, synthetic, coalescedAgainRef, { now: NOW + 3000, policyVersion: "git:test" });
+    expect(coalescedAgain).toMatchObject({ decision: "noop", reason: "duplicate_run", runId: nextCycle.runId });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: nextCycle.runId, to, actor: "test" });
+    }
+
+    // Even if a concrete generation key collides after resolution (for
+    // example, two planners racing around a terminal generation), the raw
+    // SQLite error is converted to a typed noop naming the winning run.
+    const collisionEventId = "chain-collision";
+    const collisionKey = `${first.proposal.idempotency_key}:trigger:${hashJson({ source: "chain", eventId: collisionEventId })}`;
+    createRun(db, {
+      runId: "run_collision_winner",
+      idempotencyKey: collisionKey,
+      spec: {},
+      specJson: "{}",
+      specHash: "sha256:0",
+      actor: "planner",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_old",
+      policyVersion: "git:test",
+      now: NOW + 4000,
+    });
+    transition(db, { runId: "run_collision_winner", to: "CANCELLED", actor: "test", now: NOW + 4000 });
+
+    const collisionRef = admit(db, chainEvent(collisionEventId, "run_dispatch_5"));
+    const collision = planEvent(db, synthetic, collisionRef, { now: NOW + 5000, policyVersion: "git:test" });
+    expect(collision).toMatchObject({
+      decision: "noop",
+      reason: "idempotency_collision:run_collision_winner",
+      runId: "run_collision_winner",
+    });
+    expect(db.query(`SELECT status FROM events WHERE event_id = ?`).get(collisionEventId).status).toBe("noop");
   });
 
   test("unregistered event type → human_needed", () => {

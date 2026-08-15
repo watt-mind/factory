@@ -1,13 +1,13 @@
 # Event runtime: workers, placement, and chaining
 
 Status: **stage 1 shipped (OPS-233), pool supervision shipped (WM-226);
-stages 2–3 are still design**. Tracking: OPS-221.
+stages 2–3 are still design**. Tracking: OPS-221 and WM-308.
 Companion to [event-runtime.md](event-runtime.md) §3, §8, §10, §11 — this
-note expands the "second process → Postgres → remote workers" line of §10
-into something ticket-shaped, without changing any decision made there.
-§6 tracks the cut-lines, recording what has shipped (in-process workers,
-placement, claim verification, chaining) versus what remains deferred for
-remote distribution (Postgres substrate, shared artifact store).
+note describes process and node placement. WM-308 deliberately replaces the
+former "second process → Postgres → remote workers" line: remote workers use
+the authenticated control protocol in
+[event-runtime-worker-protocol.md](event-runtime-worker-protocol.md), never a
+shared database. §6 records that superseded cut-line explicitly.
 
 ---
 
@@ -41,9 +41,10 @@ The smallest real step, and a prerequisite for everything after:
   `BEGIN IMMEDIATE` on the claim (the default deferred transaction lets two
   workers read the same QUEUED row before either writes) and `busy_timeout`
   set *before* `journal_mode`, or a second process opening the database
-  fails with `SQLITE_BUSY_RECOVERY`. Postgres with `FOR UPDATE SKIP LOCKED`
-  is the **remote node** requirement (stage 2), not the multi-process one;
-  the claim path is one module so that swap stays an implementation change.
+  fails with `SQLITE_BUSY_RECOVERY`. The old plan made Postgres with
+  `FOR UPDATE SKIP LOCKED` the remote-node requirement. WM-308 supersedes it:
+  SQLite remains private to the control plane, and remote claims cross the
+  worker API. The server still calls the same claim module and transaction.
 - **`cli.mjs work`** — a standalone process running the loop `runOnce`
   already contains: claim → workspace → adapter → verify → fenced publish.
   `serve` keeps API, planner, approval, outbox, and the reaper, and no longer
@@ -144,30 +145,43 @@ threshold — is blocked on WM-66's per-run usage data; until it exists,
 
 ## 3. Stage 2 — workers on other nodes
 
-A `work` process on another machine, talking to Postgres over the tailnet.
-Workers do **not** talk to the control API — the API stays loopback on the
-control node, so distribution adds no network-facing operator surface. The
-webhook intake, approval, and web UI do not move.
+A `work` process on another machine talks to the authenticated `/worker/v1`
+control surface over HTTPS on the tailnet. It never opens SQLite or Postgres.
+Webhook intake, approval, and the web/operator routes do not move or become
+network-visible; only the narrowly scoped worker and artifact-ingest routes
+bind beyond loopback. The full claim/heartbeat/result, fencing, idempotency,
+auth, and durable-buffer contract is
+[event-runtime-worker-protocol.md](event-runtime-worker-protocol.md).
 
 What actually has to exist first:
 
-- **Shared artifact backend.** Receipts and hashes live in the database, but
-  artifact/transcript *bytes* are node-local disk behind `lib/artifacts.mjs`.
-  That interface needs a shared backend — Postgres blobs are adequate at
-  current volume, an object store later — or `inspect` and the web UI can
-  only read artifacts from runs that happened to execute on the control
-  node. Workspaces stay node-local and ephemeral; retained-on-failure
-  debugging leans on captured transcripts, not remote paths.
+- **Content-addressed artifact ingest (OPS-298).** Receipts and hashes remain
+  control-plane state, while artifact/transcript bytes begin on worker-local
+  disk. The worker uploads bytes through `POST /artifacts`; the server
+  recomputes SHA-256 and deduplicates, and result publication binds only those
+  hashes. Workspaces stay node-local and ephemeral; no remote `file://` path
+  enters a result.
 - **Registry verification at claim, not trust.** Definitions are pinned by
   content hash and the RunSpec records `defHash` (OPS-409). The worker
   resolves prompt and schema files from its checkout and **verifies the spec's
   content hash before executing; mismatch → typed refusal**
-  (`agent_definition_mismatch`), preventing version skew between approval and
-  execution.
-- **Per-node credentials and adapters.** Secrets are worker-injected (§14):
-  each node carries its own Linear key / claude auth. A node registers only
-  adapters it has passed conformance for — a node without the `claude` CLI
-  simply never claims agent runs, only deterministic-command ones.
+  (`agent_definition_mismatch`). The server independently checks the pinned
+  contract and uploaded hashes before accepting a result.
+- **Per-node identity, credentials, and adapters.** Each node gets a distinct,
+  revocable `worker:execute` credential whose server-side allow-list bounds
+  labels and adapters. Adapter/service credentials remain worker-injected
+  (§14), but are never the control credential. A node advertises only adapters
+  it has passed conformance for; a node without an agent CLI claims only the
+  deterministic kinds it supports.
+- **A durable local result buffer.** The worker atomically spools canonical
+  result metadata and artifact bytes before workspace cleanup. It retries
+  outages with one idempotency key and deletes only after an accepted response;
+  a stale lease is fenced and quarantined rather than overwriting a rerun.
+- **Node-local workspace prerequisites.** First scope is workspace-only jobs
+  and tier-1 read-only scans on nodes with an adapter, mirror/fetch credential,
+  and per-node repo mapping. Tier-2 mutating worktrees remain disabled until
+  their machine-specific scripts, ports, databases, and dispatch coordination
+  are shared across nodes (event-runtime-dispatch.md §9).
 
 ## 4. Labels and placement
 
@@ -180,11 +194,13 @@ the whole mechanism:
 - An agent definition (and therefore its RunSpec, resolved at planning time in
   `lib/planner.mjs`) may declare `placement`: label requirements such as
   `{ node: "lab", can: "infra-exec" }`. No requirement → any worker.
-- `claimNext` (`lib/worker.mjs`) claims only runs whose placement its labels satisfy
-  (`satisfiesPlacement` in `lib/workers.mjs`). In SQLite today, the worker
-  filters candidate runs in JS within `claimNext`; Postgres will evaluate the
-  filter inside the same `SKIP LOCKED` query — there is no scheduler process,
-  no bin-packing, no second coordinator (§3's rule: two mutation coordinators race).
+- `claimNext` (`lib/worker.mjs`) claims only runs whose placement its labels
+  satisfy (`satisfiesPlacement` in `lib/workers.mjs`). In SQLite today, the
+  local process filters candidates in JS inside `BEGIN IMMEDIATE`. Under the
+  worker protocol, the authenticated server performs that same filter and
+  transaction; the remote worker cannot request a run ID or broaden the
+  labels/adapters allowed by its credential. There is still no scheduler
+  process, bin-packing layer, or second coordinator.
 
 Slice 2 is the motivating case: `keephq.disk-alert.raised` remediation must
 execute *on the affected host*. Labels also encode the quota split cleanly:
@@ -279,17 +295,21 @@ stand as the rules that design satisfies:
 
 ## 6. Ticket cut-lines
 
-1. **Postgres substrate** — **deferred (Stage 2)**: port `db.mjs`; same schema;
-   `FOR UPDATE SKIP LOCKED` in `claimNext` for remote nodes; SQLite with WAL mode
-   and `BEGIN IMMEDIATE` remains the default substrate for local multi-process
-   operation, tests, and demos.
+1. **API-mediated worker protocol** — **designed (WM-308), superseding the
+   rejected Postgres cut-line**: do not port `db.mjs`, expose DB credentials,
+   or add `FOR UPDATE SKIP LOCKED` for worker distribution. The control plane
+   keeps SQLite and `BEGIN IMMEDIATE`; local and remote workers use versioned,
+   authenticated claim/heartbeat/result endpoints with fencing, idempotency,
+   cancellation polling, and a durable worker result buffer. See
+   [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md).
 2. **`cli.mjs work`** — **shipped (OPS-233)**: worker-as-process; `serve`
    runs no worker by default (`--with-worker` for all-in-one demo/tests);
    two-process lease/fencing contention verified in `lib/workers.test.mjs`.
-3. **Artifact store backend** — **deferred (Stage 2)**: shared-bytes
-   implementation behind `lib/artifacts.mjs` (Postgres blobs or object store);
-   control-node reads for any remote node's artifacts; node-local content-addressed
-   disk store (`<home>/artifacts/<sha256>`) remains current.
+3. **Artifact ingest** — **deferred (Stage 2, OPS-298)**: authenticated
+   `POST /artifacts` streams bytes to the control plane's content-addressed
+   store, which recomputes SHA-256 and deduplicates before result publication.
+   Node-local content-addressed disk (`<home>/artifacts/<sha256>`) remains the
+   current implementation; remote results never contain local paths.
 4. **Labels + placement** — **shipped (OPS-233, OPS-454)**: worker label set
    (`--label k=v`, `registerWorker` in `lib/workers.mjs`), `placement` in agent
    definitions and RunSpec (`lib/planner.mjs`), claim-side filtering via
@@ -313,5 +333,7 @@ stand as the rules that design satisfies:
    status/doctor. Weight-class caps (`heavy`/`light`, item 4's machinery) and
    the budget-aware ceiling (blocked on WM-66) are the explicit follow-ups.
 
-Items 2, 4, 5, 6, and 7 are shipped and verified in the test suite; items 1
-and 3 remain the prerequisites for multi-node distribution (Stage 2).
+Items 2, 4, 5, 6, and 7 are shipped and verified in the test suite. Item 1 is
+now a concrete, sequenced protocol design rather than a database migration;
+its server/client/auth/remote implementation and item 3 remain prerequisites
+for multi-node distribution (Stage 2).

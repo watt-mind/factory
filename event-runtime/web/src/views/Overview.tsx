@@ -5,6 +5,7 @@ import { useNow, useRequeuePoll } from "../hooks";
 import type { JournalEntry, EventFocus, Proposal, RunState, StatusView } from "../types";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
+import type { WorkerHealthFilter } from "./Workers";
 import {
   Ago,
   Button,
@@ -485,6 +486,7 @@ export function Overview({
   onJumpProposal,
   onJumpEvents,
   onJumpRuns,
+  onJumpWorkers,
   onNavigate,
   onJumpExpired: _onJumpExpired,
   onJumpGraph: _onJumpGraph,
@@ -496,6 +498,7 @@ export function Overview({
   onJumpProposal: (id: string) => void;
   onJumpEvents: (focus: EventFocus) => void;
   onJumpRuns: (state?: string) => void;
+  onJumpWorkers?: (health: WorkerHealthFilter) => void;
   onNavigate: (path: string) => void;
   onJumpExpired?: () => void;
   onJumpGraph?: () => void;
@@ -666,6 +669,10 @@ export function Overview({
         classes: [],
       })
     : null;
+  const jumpToWorkerHealth = (health: WorkerHealthFilter) => {
+    if (onJumpWorkers) onJumpWorkers(health);
+    else onNavigate("workers");
+  };
 
   return (
     <div className="h-full min-w-0 overflow-auto p-5">
@@ -988,7 +995,9 @@ export function Overview({
                   { key: "idle", label: "idle", value: idleWorkers, hue: "var(--hue-ok)" },
                   { key: "stale", label: "stale", value: s.workers.stale, hue: "var(--hue-warn)" },
                 ]}
-                onSegment={() => onNavigate("workers")}
+                onSegment={(status) =>
+                  jumpToWorkerHealth(status === "busy" || status === "stale" ? status : "live")
+                }
               />
               <div className="mt-2 grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap">
                 <StatLegendItem
@@ -996,7 +1005,7 @@ export function Overview({
                   label="workers · live"
                   value={s.workers.live}
                   hue={s.workers.live > 0 ? "var(--hue-ok)" : undefined}
-                  onClick={() => onNavigate("workers")}
+                  onClick={() => jumpToWorkerHealth("live")}
                   factoryWide={factoryWide}
                   total={s.workers.live + s.workers.stale}
                 />
@@ -1005,7 +1014,7 @@ export function Overview({
                   label="workers · busy"
                   value={s.workers.busy}
                   hue={s.workers.busy > 0 ? "var(--hue-info)" : undefined}
-                  onClick={() => onNavigate("workers")}
+                  onClick={() => jumpToWorkerHealth("busy")}
                   factoryWide={factoryWide}
                   total={s.workers.live + s.workers.stale}
                 />
@@ -1015,7 +1024,7 @@ export function Overview({
                   value={s.workers.stale}
                   hue={s.workers.stale > 0 ? "var(--hue-warn)" : undefined}
                   attention={s.workers.stale > 0}
-                  onClick={() => onNavigate("workers")}
+                  onClick={() => jumpToWorkerHealth("stale")}
                   factoryWide={factoryWide}
                   total={s.workers.live + s.workers.stale}
                 />

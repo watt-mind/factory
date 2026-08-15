@@ -125,20 +125,35 @@ describe("evaluateTicketDrift (WM-11, WM-16)", () => {
     expect(evaluateTicketDrift(issue, "watt-mind/legalease", prStates)).toBeNull();
   });
 
-  test("Active ticket with MERGED PR detects drift to Done", () => {
-    const issue = {
-      identifier: "CLNT-400",
-      state: { name: "In Review", type: "started" },
-    };
-    const prStates = [
-      { number: 100, state: "MERGED" },
-    ];
-    const res = evaluateTicketDrift(issue, "watt-mind/legalease", prStates);
-    expect(res).not.toBeNull();
-    expect(res.type).toBe("merged-not-done");
-    expect(res.merged).toEqual([100]);
-    expect(res.targetState).toBe("Done");
-  });
+  test.each(["In Review", "In Progress"])(
+    "%s ticket with MERGED PR detects drift to Done",
+    (stateName) => {
+      const issue = {
+        identifier: "CLNT-400",
+        state: { name: stateName, type: "started" },
+      };
+      const prStates = [{ number: 100, state: "MERGED" }];
+
+      const res = evaluateTicketDrift(issue, "watt-mind/legalease", prStates);
+      expect(res).not.toBeNull();
+      expect(res.type).toBe("merged-not-done");
+      expect(res.merged).toEqual([100]);
+      expect(res.targetState).toBe("Done");
+    },
+  );
+
+  test.each(["Todo", "Triage", "Backlog", "Blocked"])(
+    "%s ticket with MERGED PR is ignored",
+    (stateName) => {
+      const issue = {
+        identifier: "CLNT-401",
+        state: { name: stateName, type: "unstarted" },
+      };
+      const prStates = [{ number: 100, state: "MERGED" }];
+
+      expect(evaluateTicketDrift(issue, "watt-mind/legalease", prStates)).toBeNull();
+    },
+  );
 
   test("In Progress ticket with OPEN PR and quiet time >= quietMin detects drift to In Review", () => {
     const issue = {

@@ -58,6 +58,19 @@ describe("protectedBranchesFor & isProtectedBranch", () => {
     expect(isProtectedBranch("feat/CLNT-520", repo)).toBe(false);
     expect(isProtectedBranch("fix/WM-13-test", repo)).toBe(false);
   });
+
+  test("normalizes ref prefixes and case before matching protected branches", () => {
+    expect(isProtectedBranch("refs/heads/develop", repo)).toBe(true);
+    expect(isProtectedBranch("origin/develop", repo)).toBe(true);
+    expect(isProtectedBranch("heads/develop", repo)).toBe(true);
+    expect(isProtectedBranch("Develop", repo)).toBe(true);
+    expect(isProtectedBranch("MASTER", repo)).toBe(true);
+    expect(isProtectedBranch("REFS/HEADS/PRODUCTION", repo)).toBe(true);
+    expect(isProtectedBranch("origin/Staging", repo)).toBe(true);
+    expect(isProtectedBranch("staging", { ...repo, base: "StAgInG" })).toBe(true);
+    expect(isProtectedBranch("upstream/develop", repo)).toBe(false);
+    expect(isProtectedBranch("feature/origin/develop", repo)).toBe(false);
+  });
 });
 
 describe("openPrHold", () => {
@@ -143,6 +156,20 @@ describe("evaluateBranchGuard", () => {
     });
     expect(resMain.ok).toBe(false);
     expect(resMain.exitCode).toBe(EXIT.REFUSED);
+  });
+
+  test("returns REFUSED (2) for prefixed and case-variant protected branches", () => {
+    for (const branch of ["refs/heads/develop", "origin/develop", "heads/develop", "Develop", "Master", "MAIN"]) {
+      const res = evaluateBranchGuard({
+        branch,
+        repo,
+        targetPr: 100,
+        openPrs: [],
+      });
+      expect(res.ok).toBe(false);
+      expect(res.exitCode).toBe(EXIT.REFUSED);
+      expect(res.reason).toContain("protected branch");
+    }
   });
 
   test("returns REFUSED (2) when held by another open PR", () => {

@@ -1015,6 +1015,52 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
   });
 });
 
+describe("metrics query API (WM-281)", () => {
+  let s;
+  const metricsNow = Date.parse("2026-08-15T12:00:00.000Z");
+  beforeAll(async () => {
+    s = await makeServer({ now: () => metricsNow });
+    s.db.query(
+      `INSERT INTO lifecycle_events
+         (run_id, from_state, to_state, actor, attempt, at, record_hash)
+       VALUES ('metrics-run', 'VERIFYING', 'COMPLETED', 'test', 1,
+               '2026-08-15T11:30:00.000Z', 'metrics-hash')`,
+    ).run();
+  });
+  afterAll(() => s.close());
+
+  test("GET /metrics returns one shared aligned bucket axis", async () => {
+    const res = await fetch(s.url("/metrics?window=24h&bucket=1h&series=runs.outcomes,runs.started"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.buckets).toHaveLength(24);
+    expect(body.series["runs.outcomes"].COMPLETED.at(-1)).toBe(1);
+    expect(body.series["runs.started"].total).toHaveLength(body.buckets.length);
+  });
+
+  test("query validation returns 422 and advertises valid values", async () => {
+    const unknown = await fetch(s.url("/metrics?series=not.real"));
+    expect(unknown.status).toBe(422);
+    const unknownBody = await unknown.json();
+    expect(unknownBody.error).toBe("unknown_series");
+    expect(unknownBody.validSeries).toContain("runs.outcomes");
+
+    const oversized = await fetch(s.url("/metrics?window=30d&bucket=15m&series=runs.started"));
+    expect(oversized.status).toBe(422);
+    expect((await oversized.json()).error).toBe("too_many_buckets");
+  });
+
+  test("GET /metrics/breakdown validates dimensions and returns rows", async () => {
+    const invalid = await fetch(s.url("/metrics/breakdown?window=24h&by=nope&metric=runs"));
+    expect(invalid.status).toBe(422);
+    expect((await invalid.json()).validDimensions).toContain("edge");
+
+    const valid = await fetch(s.url("/metrics/breakdown?window=24h&by=agent&metric=runs"));
+    expect(valid.status).toBe(200);
+    expect((await valid.json()).rows).toEqual([]);
+  });
+});
+
 describe("Host and Origin header security confinement (OPS-408)", () => {
   let s;
   beforeAll(async () => {
@@ -1095,6 +1141,22 @@ describe("Host and Origin header security confinement (OPS-408)", () => {
     const res = await rawRequest({ host: "attacker.com", path: "/health" });
     expect(res.status).toBe(403);
     expect(res.json?.error).toBe("invalid_host");
+  });
+
+  test("new metrics routes inherit Host and Origin confinement", async () => {
+    const badHost = await rawRequest({
+      host: "attacker.com",
+      path: "/metrics?window=24h&bucket=1h&series=runs.outcomes",
+    });
+    expect(badHost.status).toBe(403);
+    expect(badHost.json?.error).toBe("invalid_host");
+
+    const badOrigin = await rawRequest({
+      path: "/metrics/breakdown?window=24h&by=agent&metric=runs",
+      headers: { origin: "http://evil.com" },
+    });
+    expect(badOrigin.status).toBe(403);
+    expect(badOrigin.json?.error).toBe("cross_origin_rejected");
   });
 
   test("rejects mutating request carrying a foreign Origin header", async () => {
