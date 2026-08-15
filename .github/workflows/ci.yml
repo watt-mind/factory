@@ -19,7 +19,13 @@ jobs:
     # Self-hosted per project-conventions PC-03 / PC-22 — cloud runners are
     # forbidden, and shadow is the dedicated host runner label.
     runs-on: [self-hosted, shadow]
-    timeout-minutes: 10
+    # Runaway guard, not a performance budget: it should trip on a wedged job,
+    # never on a healthy suite under load. Raised 10 -> 25 on 2026-08-15 after
+    # PRs #319 and #325 were both cancelled at 15m0s while green — the suite
+    # grew ~970 -> ~1540 tests in a day and several Verify jobs now share this
+    # host, so wall-clock runs well past solo time (WM-300). Compare against
+    # measured job durations before lowering.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v7
