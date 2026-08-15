@@ -66,7 +66,7 @@ export function CommandPalette({
       if (e.key !== "k" || !(e.metaKey || e.ctrlKey)) return;
       e.preventDefault();
       setOpen((o) => {
-        if (o) return false;
+        if (o) return modal.depth > 1;
         if (modal.depth > 0) return false;
         return true;
       });

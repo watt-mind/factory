@@ -93,6 +93,15 @@ describe("CommandPalette", () => {
     expect(modal.depth).toBe(0);
   });
 
+  test("⌘K keeps the palette open while another dialog is stacked above it", () => {
+    const r = renderPalette();
+    chordK();
+    modal.depth += 1;
+    chordK();
+    expect(r.getByRole("dialog", { name: "Command palette" })).toBeTruthy();
+    expect(modal.depth).toBe(2);
+  });
+
   test("opening focuses the search input", () => {
     const r = renderPalette();
     chordK();
