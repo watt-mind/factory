@@ -511,7 +511,7 @@ export function App() {
       <main
         ref={mainRef}
         tabIndex={-1}
-        className="flex min-w-0 flex-1 flex-col focus:outline-none focus:ring-2 focus:ring-inset focus:ring-(--focus-ring)"
+        className="flex min-w-0 flex-1 flex-col focus:outline-none"
       >
         <div aria-live="polite" aria-atomic="true" className="sr-only">
           {viewAnnouncement}

@@ -330,3 +330,23 @@ describe("context strip fast jump chords (WM-235)", () => {
     expect(utils.container.textContent).toContain("i In flight");
   });
 });
+
+describe("view navigation landmark focus and announcement (WM-325)", () => {
+  test("main landmark receives focus without visual focus ring on view navigation", async () => {
+    const utils = renderApp();
+    const main = utils.getByRole("main");
+    expect(main.className).toContain("focus:outline-none");
+    expect(main.className).not.toContain("focus:ring");
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "r" });
+    });
+    expect(window.location.hash).toBe("#/runs");
+
+    await waitFor(() => {
+      expect(main.textContent).toContain("Runs view");
+    });
+  });
+});
+
