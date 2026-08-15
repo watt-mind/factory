@@ -55,7 +55,7 @@ jobs:
           # The E2E seed + verify scratch measured 45 MiB after completion on
           # 2026-08-15. A 1 GiB floor leaves more than 22x that measured usage
           # for Actions' own temp files and transient test growth.
-          temp_floor_kib=$((1024 * 1024 * 1024))
+          temp_floor_kib=$((1024 * 1024))
           # The full Verify process tree measured a 13.7 GiB peak on this host.
           # Require 16 GiB available before admitting it: 2.3 GiB (17%) of
           # headroom beyond the measured peak.
@@ -66,7 +66,7 @@ jobs:
           failed=0
 
           if [ -z "$temp_available_kib" ] || [ "$temp_available_kib" -lt "$temp_floor_kib" ]; then
-            echo "::error::Runner temp space below 1 PiB (WM-320 negative demonstration): ${temp_available_kib:-unknown} KiB available at $RUNNER_TEMP."
+            echo "::error::Runner temp space below 1 GiB: ${temp_available_kib:-unknown} KiB available at $RUNNER_TEMP."
             failed=1
           else
             echo "Runner temp space: $temp_available_kib KiB available at $RUNNER_TEMP."
