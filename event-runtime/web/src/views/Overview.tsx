@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
-import { useNow, useRequeuePoll } from "../hooks";
+import { goPrefixActive } from "../goSequence";
+import { keyGuard, useNow, useRequeuePoll } from "../hooks";
 import type { JournalEntry, EventFocus, Proposal, RunState, StatusView } from "../types";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
@@ -576,6 +577,41 @@ export function Overview({
   }, [anomalies, proposalsById, onJumpProposal, onJumpRuns, onJumpEvents, onJumpRun, onNavigate, s, now]);
 
   const hasAnomalies = anomalyRows.length > 0;
+  const anomalyRowRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey || goPrefixActive()) return;
+
+      const runState = ["QUEUED", "RUNNING", "COMPLETED"][Number(e.key) - 3];
+      if (e.key === "1" || e.key === "2" || runState) {
+        e.preventDefault();
+        if (e.key === "1") onJumpEvents({});
+        else if (e.key === "2") onNavigate("proposals");
+        else onJumpRuns(runState);
+        return;
+      }
+
+      const focusedIndex = anomalyRowRefs.current.indexOf(
+        document.activeElement as HTMLDivElement,
+      );
+      if (e.key === "." && anomalyRows.length > 0) {
+        e.preventDefault();
+        anomalyRowRefs.current[(focusedIndex + 1) % anomalyRows.length]?.focus();
+        return;
+      }
+
+      if (e.key === "r") {
+        const focused = anomalyRows[focusedIndex];
+        if (!focused?.requeue || !connected || requeue.isPending) return;
+        e.preventDefault();
+        requeue.mutate(focused.requeue);
+      }
+    }
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [anomalyRows, connected, onJumpEvents, onJumpRuns, onNavigate, requeue]);
 
   const activeRunStates: RunState[] = ["QUEUED", "LEASED", "RUNNING", "VERIFYING"];
   const terminalRunStates: RunState[] = ["COMPLETED", "FAILED", "REFUSED", "TIMED_OUT", "CANCELLED"];
@@ -701,7 +737,13 @@ export function Overview({
             {anomalyRows.map((a, i) => (
               <div
                 key={i}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0"
+                ref={(node) => {
+                  anomalyRowRefs.current[i] = node;
+                }}
+                role="group"
+                aria-label={`Anomaly ${i + 1} of ${anomalyRows.length}`}
+                tabIndex={-1}
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0 focus-visible:outline-2 focus-visible:outline-(--accent)"
               >
                 <div className="min-w-0 flex items-start sm:items-center gap-2">
                   <CategoryPill kind={a.kind} />

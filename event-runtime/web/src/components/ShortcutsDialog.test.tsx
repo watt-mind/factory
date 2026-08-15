@@ -34,6 +34,18 @@ describe("ShortcutsDialog", () => {
     expect(runTrace.textContent).toContain("copy CLI inspect command");
   });
 
+  test("documents Overview pipeline and anomaly shortcuts (WM-292)", () => {
+    const r = render(<ShortcutsDialog onClose={() => {}} />);
+    const overview = r.getByRole("region", { name: "Overview" });
+
+    expect(overview.textContent).toContain("1–5");
+    expect(overview.textContent).toContain("pipeline stage views");
+    expect(overview.textContent).toContain(".");
+    expect(overview.textContent).toContain("next anomaly");
+    expect(overview.textContent).toContain("r");
+    expect(overview.textContent).toContain("requeue focused dead-letter event");
+  });
+
   test("documents context chords under Navigation chords (g 0, g 1–9, g i)", () => {
     const r = render(<ShortcutsDialog onClose={() => {}} />);
 

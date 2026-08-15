@@ -33,6 +33,12 @@ const ACTIONS: { keys: string; does: string }[] = [
   { keys: "?", does: "this list" },
 ];
 
+const OVERVIEW_KEYS: { keys: string; does: string }[] = [
+  { keys: "1–5", does: "open pipeline stage views (Events, Proposals, queued, running, outcomes)" },
+  { keys: ".", does: "focus next anomaly" },
+  { keys: "r", does: "requeue focused dead-letter event" },
+];
+
 const CONTEXT_STRIP: { keys: string; does: string }[] = [
   { keys: "Tab", does: "focus context strip (single stop, roving tabindex)" },
   { keys: "← →", does: "move focus among All / repos / In flight tabs" },
@@ -91,6 +97,23 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
           </div>
           <div>
             {ACTIONS.map((r) => (
+              <div
+                key={`${r.keys}::${r.does}`}
+                className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 sm:gap-4 border-b border-(--border) py-1.5 last:border-0"
+              >
+                <span className="mono text-(--text)">{r.keys}</span>
+                <span className="text-left sm:text-right text-(--text-faint)">{r.does}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section aria-label="Overview">
+          <div className="mb-2 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
+            Overview
+          </div>
+          <div>
+            {OVERVIEW_KEYS.map((r) => (
               <div
                 key={`${r.keys}::${r.does}`}
                 className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 sm:gap-4 border-b border-(--border) py-1.5 last:border-0"

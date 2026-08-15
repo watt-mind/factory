@@ -1,6 +1,6 @@
 import "../test-dom";
-import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Overview, groupJournalEntries, buildAnomalyRows } from "./Overview";
 import { shortId } from "../components/ui";
@@ -111,16 +111,26 @@ const stubProposal: Proposal = {
   repos: [],
 };
 
-function renderOverview(context: OperatorContext = { kind: "all" }) {
+type OverviewCallbacks = Partial<
+  Pick<
+    React.ComponentProps<typeof Overview>,
+    "onJumpRun" | "onJumpProposal" | "onJumpEvents" | "onJumpRuns" | "onNavigate"
+  >
+>;
+
+function renderOverview(
+  context: OperatorContext = { kind: "all" },
+  callbacks: OverviewCallbacks = {},
+) {
   return renderWithClient(
     <Overview
       connected={true}
       context={context}
-      onJumpRun={noop}
-      onJumpProposal={noop}
-      onJumpEvents={noop}
-      onJumpRuns={noop}
-      onNavigate={noop}
+      onJumpRun={callbacks.onJumpRun ?? noop}
+      onJumpProposal={callbacks.onJumpProposal ?? noop}
+      onJumpEvents={callbacks.onJumpEvents ?? noop}
+      onJumpRuns={callbacks.onJumpRuns ?? noop}
+      onNavigate={callbacks.onNavigate ?? noop}
       onJumpExpired={noop}
       onJumpGraph={noop}
       onInject={noop}
@@ -231,6 +241,116 @@ describe("Overview activity feed rendering (WM-100)", () => {
       api.proposals = origProposals;
       api.outbox = origOutbox;
       api.journal = origJournal;
+    }
+  });
+});
+
+describe("Overview keyboard navigation (WM-292)", () => {
+  function stubOverviewApis(status: StatusView) {
+    const restore = {
+      status: api.status,
+      proposals: api.proposals,
+      outbox: api.outbox,
+      journal: api.journal,
+      requeue: api.requeue,
+    };
+    api.status = async () => status;
+    api.proposals = async () => ({ proposals: [] });
+    api.outbox = async () => ({ outbox: [] });
+    api.journal = async () => ({ entries: [], head: 0 });
+    return () => {
+      api.status = restore.status;
+      api.proposals = restore.proposals;
+      api.outbox = restore.outbox;
+      api.journal = restore.journal;
+      api.requeue = restore.requeue;
+    };
+  }
+
+  test("1–5 jump to the corresponding pipeline views", async () => {
+    const restore = stubOverviewApis(baseStatus());
+    const onJumpEvents = mock(() => {});
+    const onJumpRuns = mock((_state?: string) => {});
+    const onNavigate = mock(() => {});
+
+    try {
+      renderOverview({ kind: "all" }, { onJumpEvents, onJumpRuns, onNavigate });
+
+      for (const key of ["1", "2", "3", "4", "5"]) {
+        fireEvent.keyDown(document.body, { key });
+      }
+
+      expect(onJumpEvents).toHaveBeenCalledTimes(1);
+      expect(onJumpEvents).toHaveBeenCalledWith({});
+      expect(onNavigate).toHaveBeenCalledWith("proposals");
+      expect(onJumpRuns.mock.calls.map((call) => call[0])).toEqual([
+        "QUEUED",
+        "RUNNING",
+        "COMPLETED",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("stage shortcuts stand down for modifiers and typing targets", () => {
+    const restore = stubOverviewApis(baseStatus());
+    const onJumpEvents = mock(() => {});
+    const onNavigate = mock(() => {});
+
+    try {
+      const view = renderOverview({ kind: "all" }, { onJumpEvents, onNavigate });
+      fireEvent.keyDown(document.body, { key: "1", metaKey: true });
+      fireEvent.keyDown(document.body, { key: "2", ctrlKey: true });
+      const input = document.createElement("input");
+      view.container.append(input);
+      fireEvent.keyDown(input, { key: "1" });
+
+      expect(onJumpEvents).not.toHaveBeenCalled();
+      expect(onNavigate).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  test(". cycles anomaly focus and r requeues only a focused dead-letter event", async () => {
+    const restore = stubOverviewApis(
+      baseStatus({
+        expiredOpenProposals: ["prop_expired"],
+        deadLettered: [
+          { source: "github", eventId: "evt_dead", lastError: "planner failed" },
+        ],
+      }),
+    );
+    const requeue = mock(
+      (_source: string, _eventId: string) => new Promise<{ requeued: boolean }>(() => {}),
+    );
+    api.requeue = requeue;
+
+    try {
+      const view = renderOverview();
+      await waitFor(() => view.getByText(/Anomalies · 2 active issues/));
+
+      fireEvent.keyDown(document.body, { key: "." });
+      expect(document.activeElement).toBe(
+        view.getByRole("group", { name: "Anomaly 1 of 2" }),
+      );
+      fireEvent.keyDown(document.body, { key: "r" });
+      expect(requeue).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(document.body, { key: "." });
+      expect(document.activeElement).toBe(
+        view.getByRole("group", { name: "Anomaly 2 of 2" }),
+      );
+      fireEvent.keyDown(document.body, { key: "r" });
+      await waitFor(() => expect(requeue).toHaveBeenCalledWith("github", "evt_dead"));
+
+      fireEvent.keyDown(document.body, { key: "." });
+      expect(document.activeElement).toBe(
+        view.getByRole("group", { name: "Anomaly 1 of 2" }),
+      );
+    } finally {
+      restore();
     }
   });
 });
