@@ -1,9 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
-import { artifactUrl, fetchArtifacts } from "../api";
-import { Ago, FilterInput, JumpLink, ListEmpty, ListPane, humanSize } from "../components/ui";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { api, artifactUrl, fetchArtifacts } from "../api";
+import {
+  Ago,
+  Button,
+  DetailPane,
+  FilterInput,
+  JumpLink,
+  ListEmpty,
+  ListPane,
+  copyText,
+  humanSize,
+  shortId,
+} from "../components/ui";
 import { useNow } from "../hooks";
-import type { ArtifactInventoryItem, StatusView } from "../types";
+import type { AdmittedEvent, ArtifactInventoryItem, StatusView } from "../types";
 
 export type ArtifactFilters = {
   kind: string | null;
@@ -29,6 +40,65 @@ function matchesSearch(artifact: ArtifactInventoryItem, search: string): boolean
       reference.state,
     ]),
   ].some((value) => String(value ?? "").toLowerCase().includes(term));
+}
+
+const ARTIFACT_HASH = /^[0-9a-f]{64}$/;
+
+type LinkedEvent = AdmittedEvent & { causationId?: string | null };
+
+function artifactShaFromHash(hash = window.location.hash): string | null {
+  const path = hash.replace(/^#\/?/, "").split("?", 1)[0];
+  const [, encoded] = path.split("/");
+  if (!encoded) return null;
+  try {
+    const sha256 = decodeURIComponent(encoded);
+    return ARTIFACT_HASH.test(sha256) ? sha256 : null;
+  } catch {
+    return null;
+  }
+}
+
+function openArtifactInspector(sha256: string) {
+  if (!ARTIFACT_HASH.test(sha256)) return;
+  window.location.hash = `#/artifacts/${encodeURIComponent(sha256)}`;
+}
+
+function containsArtifactHash(value: unknown, sha256: string, seen = new Set<object>()): boolean {
+  if (typeof value === "string") return value === sha256 || value === `sha256:${sha256}`;
+  if (!value || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  return Array.isArray(value)
+    ? value.some((entry) => containsArtifactHash(entry, sha256, seen))
+    : Object.values(value).some((entry) => containsArtifactHash(entry, sha256, seen));
+}
+
+function formattedContent(raw: string, kinds: string[]): string {
+  if (kinds.some((kind) => /json/i.test(kind)) || /^\s*[\[{]/.test(raw)) {
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      // NDJSON/log streams that start with JSON still belong in the text viewer.
+    }
+  }
+  return raw;
+}
+
+function highlightedLine(line: string, search: string): ReactNode {
+  const term = search.trim();
+  if (!term) return line || " ";
+  const lower = line.toLowerCase();
+  const needle = term.toLowerCase();
+  const chunks: ReactNode[] = [];
+  let at = 0;
+  let match = lower.indexOf(needle);
+  while (match >= 0) {
+    chunks.push(line.slice(at, match));
+    chunks.push(<mark key={`${match}:${chunks.length}`} className="bg-(--hue-warn) text-inherit">{line.slice(match, match + term.length)}</mark>);
+    at = match + term.length;
+    match = lower.indexOf(needle, at);
+  }
+  chunks.push(line.slice(at));
+  return chunks;
 }
 
 function KindBadge({ kind }: { kind: string }) {
@@ -78,6 +148,35 @@ export function Artifacts({
     refetchInterval: 10_000,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
+  const [selectedSha, setSelectedSha] = useState(() => artifactShaFromHash());
+  const [contentSearch, setContentSearch] = useState("");
+
+  useEffect(() => {
+    const syncSelection = () => setSelectedSha(artifactShaFromHash());
+    window.addEventListener("hashchange", syncSelection);
+    return () => window.removeEventListener("hashchange", syncSelection);
+  }, []);
+
+  const selected = useMemo(
+    () => artifacts.find((artifact) => artifact.sha256 === selectedSha) ?? null,
+    [artifacts, selectedSha],
+  );
+  const contentQ = useQuery({
+    queryKey: ["artifact-content", selectedSha],
+    queryFn: async () => {
+      const response = await fetch(artifactUrl(selectedSha as string));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    },
+    enabled: selectedSha !== null,
+  });
+  const eventsQ = useQuery({
+    queryKey: ["events", "all-for-artifacts"],
+    queryFn: () => api.events(),
+    enabled: selectedSha !== null,
+    refetchInterval: 10_000,
+  });
+
   const kinds = useMemo(
     () =>
       [...new Set([...COMMON_KINDS, ...artifacts.flatMap(kindsOf)])].sort((a, b) =>
@@ -95,6 +194,45 @@ export function Artifacts({
     [artifacts, filters],
   );
 
+  const linkedEvents = (eventsQ.data?.events ?? []) as LinkedEvent[];
+  const producerRunIds = useMemo(
+    () => new Set(selected?.references.map((reference) => reference.runId) ?? []),
+    [selected],
+  );
+  const consumers = useMemo(
+    () =>
+      selectedSha
+        ? linkedEvents.filter(
+            (event) =>
+              event.runId &&
+              !producerRunIds.has(event.runId) &&
+              containsArtifactHash(event.envelope, selectedSha),
+          )
+        : [],
+    [linkedEvents, producerRunIds, selectedSha],
+  );
+  const causation = useMemo(
+    () => linkedEvents.filter((event) => event.causationId && producerRunIds.has(event.causationId)),
+    [linkedEvents, producerRunIds],
+  );
+  const selectedKinds = selected ? kindsOf(selected) : [];
+  const preview = contentQ.data === undefined ? null : formattedContent(contentQ.data, selectedKinds);
+  const previewLines = preview?.split("\n") ?? [];
+  const matchCount = contentSearch.trim()
+    ? previewLines.filter((line) => line.toLowerCase().includes(contentSearch.trim().toLowerCase())).length
+    : null;
+
+  const selectArtifact = (sha256: string) => {
+    setContentSearch("");
+    setSelectedSha(sha256);
+    openArtifactInspector(sha256);
+  };
+  const closeInspector = () => {
+    setSelectedSha(null);
+    setContentSearch("");
+    window.location.hash = "#/artifacts";
+  };
+
   const fallbackMetrics = useMemo(
     () => ({
       files: artifacts.length,
@@ -111,6 +249,7 @@ export function Artifacts({
   const set = (patch: Partial<ArtifactFilters>) => onFiltersChange({ ...filters, ...patch });
 
   return (
+    <div className="flex h-full min-w-0">
     <ListPane
       chrome={
         <>
@@ -211,11 +350,17 @@ export function Artifacts({
             const artifactKinds = kindsOf(artifact);
             const name = `${artifact.sha256.slice(0, 12)}${artifactKinds[0] ? `.${artifactKinds[0]}` : ""}`;
             return (
-              <tr key={artifact.sha256} className="hover:bg-(--surface-1)">
+              <tr
+                key={artifact.sha256}
+                onClick={() => selectArtifact(artifact.sha256)}
+                aria-selected={artifact.sha256 === selectedSha}
+                className={`cursor-pointer hover:bg-(--surface-1) ${artifact.sha256 === selectedSha ? "row-selected" : ""}`}
+              >
                 <td className="mono max-w-40 border-b border-(--border) px-3 py-2" title={artifact.sha256}>
                   <a
                     href={artifactUrl(artifact.sha256, name)}
                     download={name}
+                    onClick={(event) => event.stopPropagation()}
                     className="text-(--accent) hover:underline"
                     aria-label={`Download artifact ${artifact.sha256}`}
                   >
@@ -288,5 +433,126 @@ export function Artifacts({
         </tbody>
       </table>
     </ListPane>
+
+    {selectedSha && (
+      <DetailPane
+        widthClass="w-full sm:w-[560px]"
+        title={
+          <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+            <button type="button" onClick={closeInspector} className="text-(--text-dim) hover:text-(--accent)">
+              Artifacts
+            </button>
+            <span aria-hidden="true" className="text-(--text-faint)">/</span>
+            <span className="mono truncate font-semibold text-(--text)" title={selectedSha} aria-current="page">
+              {selectedSha.slice(0, 12)}
+            </span>
+          </nav>
+        }
+        actions={
+          <>
+            <a
+              href={artifactUrl(selectedSha, `${selectedSha.slice(0, 12)}${selectedKinds[0] ? `.${selectedKinds[0]}` : ""}`)}
+              download
+              className="inline-flex rounded-md border border-(--border-strong) px-2.5 py-1.5 text-[12px] font-medium hover:bg-(--surface-2)"
+            >
+              Download
+            </a>
+            <Button disabled={contentQ.data === undefined} onClick={() => copyText(contentQ.data ?? "", "raw artifact content")}>
+              Copy Raw Content
+            </Button>
+            <Button onClick={() => copyText(selectedSha, "SHA-256")}>Copy SHA-256</Button>
+          </>
+        }
+        close={<Button onClick={closeInspector}>Close</Button>}
+      >
+        {!selected && artifactsQ.isPending && <div className="text-(--text-faint)">Loading artifact metadata…</div>}
+        {!selected && !artifactsQ.isPending && (
+          <div className="mb-4 rounded-md border border-(--border) p-3 text-(--text-faint)">
+            Artifact metadata is unavailable. The content may have been pruned.
+          </div>
+        )}
+
+        {selected && (
+          <>
+            <section aria-label="Artifact metadata" className="grid grid-cols-2 gap-2 text-[12px]">
+              <div><span className="text-(--text-faint)">Size</span><div className="mono mt-0.5">{humanSize(selected.sizeBytes)}</div></div>
+              <div><span className="text-(--text-faint)">Modified</span><div className="mono mt-0.5">{new Date(selected.mtime).toLocaleString()}</div></div>
+              <div className="col-span-2">
+                <span className="text-(--text-faint)">Kinds</span>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {selectedKinds.length ? selectedKinds.map((kind) => <KindBadge key={kind} kind={kind} />) : <span>unknown</span>}
+                </div>
+              </div>
+              <div className="col-span-2 min-w-0">
+                <span className="text-(--text-faint)">SHA-256</span>
+                <div className="mono mt-0.5 break-all">{selectedSha}</div>
+              </div>
+            </section>
+
+            <section aria-label="Artifact run references" className="mt-5 border-t border-(--border) pt-4 text-[12px]">
+              <h2 className="display font-semibold">Run references</h2>
+              <div className="mt-3 grid gap-3">
+                <div>
+                  <div className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">Producing runs</div>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    {selected.references.length ? selected.references.map((reference) => (
+                      <JumpLink key={`${reference.runId}:${reference.kind ?? "unknown"}`} onClick={() => onJumpRun(reference.runId)} title={`Open producing run ${reference.runId}`}>
+                        {shortId(reference.runId)}{reference.kind ? ` · ${reference.kind}` : ""}
+                      </JumpLink>
+                    )) : <span className="text-(--text-faint)">No accepted result references this artifact.</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">Consuming runs</div>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    {consumers.length ? consumers.map((event) => (
+                      <JumpLink key={`${event.source}:${event.eventId}:${event.runId}`} onClick={() => onJumpRun(event.runId!)} title={`Open consuming run ${event.runId}`}>
+                        {shortId(event.runId!)}
+                      </JumpLink>
+                    )) : <span className="text-(--text-faint)">{eventsQ.isPending ? "Resolving…" : "No consuming runs found."}</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">Causation links</div>
+                  <div className="mt-1.5 grid gap-1">
+                    {causation.length ? causation.map((event) => (
+                      <div key={`${event.source}:${event.eventId}`} className="flex flex-wrap items-center gap-1.5">
+                        <span className="mono text-(--text-faint)">{event.source}:{shortId(event.eventId)}</span>
+                        {event.runId && <><span aria-hidden="true">→</span><JumpLink onClick={() => onJumpRun(event.runId!)} title={`Open caused run ${event.runId}`}>{shortId(event.runId)}</JumpLink></>}
+                      </div>
+                    )) : <span className="text-(--text-faint)">{eventsQ.isPending ? "Resolving…" : "No caused events found."}</span>}
+                  </div>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+
+        <section aria-label="Artifact preview" className="mt-5 border-t border-(--border) pt-4">
+          <div className="flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <h2 className="display text-[12px] font-semibold">Preview</h2>
+              <p className="mt-0.5 text-[11px] text-(--text-faint)">
+                {matchCount === null ? `${previewLines.length.toLocaleString()} lines` : `${matchCount.toLocaleString()} matching lines`}
+              </p>
+            </div>
+            <FilterInput value={contentSearch} onChange={setContentSearch} placeholder="Find in content…" label="Search artifact content" />
+          </div>
+          {contentQ.isPending && <div className="mt-3 text-[12px] text-(--text-faint)">Loading artifact preview…</div>}
+          {contentQ.isError && <div className="mt-3 text-[12px] text-(--hue-err)">Could not load artifact content: {(contentQ.error as Error).message}</div>}
+          {preview !== null && (
+            <div role="region" aria-label="Artifact content" className="mono mt-3 max-h-[60vh] overflow-auto rounded-md border border-(--border) bg-(--surface-0) py-2 text-[11.5px] leading-relaxed">
+              {previewLines.map((line, index) => (
+                <div key={index} className={`grid grid-cols-[4rem_minmax(0,1fr)] px-2 ${contentSearch.trim() && line.toLowerCase().includes(contentSearch.trim().toLowerCase()) ? "bg-(--surface-2)" : ""}`}>
+                  <span aria-hidden="true" className="select-none border-r border-(--border) pr-2 text-right text-(--text-faint)">{index + 1}</span>
+                  <span className="min-w-0 whitespace-pre-wrap break-words pl-3">{highlightedLine(line, contentSearch)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </DetailPane>
+    )}
+    </div>
   );
 }

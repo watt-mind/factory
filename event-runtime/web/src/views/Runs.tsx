@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { api, ApiError } from "../api";
 import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
 import { goPrefixActive } from "../goSequence";
@@ -179,6 +179,17 @@ function RowDeadlines({ r, now }: { r: RunListItem; now: number }) {
 
 const rowWash = (s: string) =>
   s === "FAILED" || s === "TIMED_OUT" ? "row-wash-err" : s === "REFUSED" ? "row-wash-warn" : "";
+
+/** Route raw links rendered by RunDetailBlocks to the deep-linkable artifact inspector. */
+export function handleRunArtifactClick(event: ReactMouseEvent<HTMLElement>) {
+  const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+  if (!target) return;
+  const match = (target.getAttribute("href") ?? "").match(/\/api\/artifacts\/([0-9a-f]{64})(?=[?#]|$)/);
+  if (!match) return;
+  event.preventDefault();
+  event.stopPropagation();
+  window.location.hash = `#/artifacts/${match[1]}`;
+}
 
 /** Runs (webui spec §4.3): state tabs, lifecycle timeline, guarded verbs. */
 export function Runs({
@@ -883,28 +894,30 @@ export function Runs({
           {d && (
             <>
           <RunFailureBanner state={d.run.state} lifecycle={d.lifecycle} />
-          <RunDetailBlocks
-            d={d}
-            now={now}
-            connected={connected}
-            origin={sel}
-            onJumpAgent={onJumpAgent}
-            onJumpEvent={onJumpEvent}
-            onCancel={() => setConfirm("cancel")}
-            onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
-            onForceRetry={() => setConfirm("force-retry")}
-            retryPending={retry.isPending}
-            verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
-            afterLifecycle={
-              /* key: a run switch must reset the feed's cursor and scroll state. */
-              <RunTrace
-                key={d.run.runId}
-                runId={d.run.runId}
-                state={d.run.state}
-                onExpand={() => onOpenFull(d.run.runId)}
-              />
-            }
-          />
+          <div onClickCapture={handleRunArtifactClick}>
+            <RunDetailBlocks
+              d={d}
+              now={now}
+              connected={connected}
+              origin={sel}
+              onJumpAgent={onJumpAgent}
+              onJumpEvent={onJumpEvent}
+              onCancel={() => setConfirm("cancel")}
+              onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
+              onForceRetry={() => setConfirm("force-retry")}
+              retryPending={retry.isPending}
+              verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
+              afterLifecycle={
+                /* key: a run switch must reset the feed's cursor and scroll state. */
+                <RunTrace
+                  key={d.run.runId}
+                  runId={d.run.runId}
+                  state={d.run.state}
+                  onExpand={() => onOpenFull(d.run.runId)}
+                />
+              }
+            />
+          </div>
             </>
           )}
         </DetailPane>
