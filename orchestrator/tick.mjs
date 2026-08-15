@@ -35,6 +35,26 @@ import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
 export const DISPATCH_FAILURE_THRESHOLD = 3;
 
+/**
+ * A failed spawn emits `error` asynchronously and is commonly followed by
+ * `close`. Observe both without allowing the same child to settle twice.
+ */
+export function observeChildTermination(child, onTermination) {
+  let settled = false;
+  const settle = async (outcome) => {
+    if (settled) return;
+    settled = true;
+    await onTermination(outcome);
+  };
+
+  child.on("error", async (error) => {
+    await settle({ error, code: null });
+  });
+  child.on("close", async (code) => {
+    await settle({ error: null, code });
+  });
+}
+
 export function isDispatchFailureComment(body) {
   if (!body || typeof body !== "string") return false;
   return /Dispatch (run )?failed/i.test(body.trim());
@@ -511,8 +531,6 @@ async function runTicket(t) {
     void emitFactoryEvent("factory.ticket.dispatched",
       { repo: repo.name, ticket: t.identifier, harness: HARNESS, worktree: wt },
       { eventId: `dispatch:${t.identifier}:${stamp}`, subject: t.identifier });
-    child.on("close", () => children.delete(child));
-
     let buf = "";
     let recorded = false;
     let turnCount = 0;
@@ -589,18 +607,28 @@ async function runTicket(t) {
       for (const line of lines) processLine(line);
     });
     child.stderr.on("data", (d) => out.write(d));
-    child.on("close", async (code) => {
-      // The final "result" line isn't guaranteed a trailing newline, so
-      // whatever is still in `buf` when the process exits needs a look too —
-      // otherwise a clean exit with no trailing "\n" silently reports nothing.
-      if (buf.trim()) processLine(buf);
-      // If the child never emitted a parseable result (crash, bad spawn,
-      // killed by the timeout), record it as a failure explicitly. Silence
-      // here previously showed up as "0 ok, 0 failed" — indistinguishable
-      // from an empty run.
-      if (!recorded) {
-        console.log(`${c.dim(clock())} ${tag} ${c.red("FAILED")} ${c.dim(`no result (exit ${code})`)}`);
-        results.push({ id: t.identifier, ok: false, log, why: `no result emitted (exit ${code})` });
+    observeChildTermination(child, async ({ error, code }) => {
+      children.delete(child);
+      if (error) {
+        const detail = `${error.code ? `${error.code}: ` : ""}${error.message || error}`;
+        const why = `agent spawn failed (${detail})`;
+        console.log(`${c.dim(clock())} ${tag} ${c.red("FAILED")} ${c.dim(why)}`);
+        out.write(`[dispatcher] ${why}\n`);
+        results.push({ id: t.identifier, ok: false, log, why });
+        recorded = true;
+        noteEnvFailure("agent spawn");
+      } else {
+        // The final "result" line isn't guaranteed a trailing newline, so
+        // whatever is still in `buf` when the process exits needs a look too —
+        // otherwise a clean exit with no trailing "\n" silently reports nothing.
+        if (buf.trim()) processLine(buf);
+        // If the child never emitted a parseable result (crash or killed by the
+        // timeout), record it as a failure explicitly. Silence here previously
+        // showed up as "0 ok, 0 failed" — indistinguishable from an empty run.
+        if (!recorded) {
+          console.log(`${c.dim(clock())} ${tag} ${c.red("FAILED")} ${c.dim(`no result (exit ${code})`)}`);
+          results.push({ id: t.identifier, ok: false, log, why: `no result emitted (exit ${code})` });
+        }
       }
       out.end();
       // A failed run must not keep its claim (unclaim() checks the ticket
