@@ -18,10 +18,12 @@
  * CLI (`pi --help`, `pi 0.84.1`): `-r` is `--resume`, not read-only — using it
  * for `mutating: false` would have been actively wrong (it selects a session
  * to resume, it does not restrict tools). pi's own documented read-only
- * pattern is `--tools read,grep,find,ls`: the write/bash tools are never
- * offered to the model, so there is no runtime "permission denied" message to
- * intercept the way claude's settings/sandbox policy produces one — coarser
- * than claude's per-tool deny list, audited-not-enforced per §14 until stage
+ * pattern is `--tools read,grep,find,ls,write`: bash/edit are never offered
+ * to the model, so there is no runtime "permission denied" message to
+ * intercept the way claude's settings/sandbox policy produces one. `write`
+ * stays even for mutating: false — the result contract requires writing
+ * ./result.json (OPS-518) — so read-only containment here is bash/edit
+ * omission plus the workspace cwd, audited-not-enforced per §14 until stage
  * 2's native capability enforcement lands.
  *
  * Trace mapping targets pi's real `--mode json` shape (investigated live, not
@@ -48,10 +50,15 @@ export const KILL_GRACE_MS = 30_000;
 /** Trace events preview text; the recorder's byte bound is the real limit. */
 const TEXT_PREVIEW_CHARS = 4000;
 
-// pi's own documented read-only pattern (`pi --help`, "Read-only mode (no
-// file modifications possible)"): omit bash/edit/write from the tool
-// allowlist entirely, rather than intercept calls to them at runtime.
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
+// pi's documented read-only pattern omits bash/edit from the tool allowlist
+// rather than intercepting calls at runtime — but `write` must stay: every
+// agent-result contract requires the model to write ./result.json, and a run
+// that cannot write it fails contract_violation:missing_result before doing
+// anything (OPS-518; same reasoning as claude.mjs's READ_ONLY_TOOLS keeping
+// Write/Edit). Containment for mutating: false is therefore bash/edit omission
+// plus the workspace-cwd boundary — audited, not enforced, per §14 until
+// stage 2's native capability enforcement (OPS-515).
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write"];
 
 export class CliNotFoundError extends Error {
   constructor(message) {

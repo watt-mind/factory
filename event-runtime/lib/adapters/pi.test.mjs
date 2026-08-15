@@ -129,11 +129,11 @@ describe("buildPiArgv", () => {
     expect(buildPiArgv({ def: { mutating: true }, model: null })).toEqual(["-p", "--mode", "json"]);
   });
 
-  test("mutating: false → --tools read,grep,find,ls (pi's own read-only pattern, not -r)", () => {
+  test("mutating: false → --tools read,grep,find,ls,write (pi's own read-only pattern, not -r)", () => {
     const argv = buildPiArgv({ def: { mutating: false }, model: null });
     expect(argv).toContain("--tools");
     expect(argv[argv.indexOf("--tools") + 1]).toBe(READ_ONLY_TOOLS.join(","));
-    expect(argv).toEqual(["-p", "--mode", "json", "--tools", "read,grep,find,ls"]);
+    expect(argv).toEqual(["-p", "--mode", "json", "--tools", "read,grep,find,ls,write"]);
   });
 
   test("mutating: true → no --tools restriction", () => {
@@ -348,7 +348,7 @@ process.stdin.on("end", () => {
     expect(record.argv).toContain("--model");
     expect(record.argv[record.argv.indexOf("--model") + 1]).toBe("openai-codex/gpt-5.6-terra");
     expect(record.argv).toContain("--tools");
-    expect(record.argv[record.argv.indexOf("--tools") + 1]).toBe("read,grep,find,ls");
+    expect(record.argv[record.argv.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write");
 
     // 4. .transcript.json artifact capture
     const transcriptPath = path.join(workspaceDir, ".transcript.json");
