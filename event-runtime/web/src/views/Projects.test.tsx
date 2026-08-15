@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { Projects } from "./Projects";
 import {
   renderWithClient,
@@ -9,12 +9,14 @@ import {
 } from "../test-render";
 import type { JanitorResult, RepoItem } from "../types";
 import { CONTEXT_STORAGE_KEY } from "../context";
+import { goPrefix } from "../goSequence";
 
 afterEach(() => {
   cleanup();
   restoreApi();
   window.location.hash = "";
   sessionStorage.clear();
+  goPrefix.armedAt = 0;
 });
 
 const noop = () => {};
@@ -207,3 +209,142 @@ describe("Projects Clean Reclaimable Apply (WM-157)", () => {
     );
   });
 });
+
+describe("Projects mode tabs and hotkeys (WM-234)", () => {
+  test("renders mode tabs with role=tab, aria-selected, and numeric hints", async () => {
+    await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
+      const r = renderProjects();
+      await waitFor(() => {
+        expect(r.getByText("factory")).toBeTruthy();
+      });
+
+      const tablist = r.getByRole("tablist", { name: "Project mode" });
+      expect(tablist).toBeTruthy();
+
+      const tabs = r.getAllByRole("tab");
+      expect(tabs.length).toBe(3);
+      expect(tabs[0].textContent).toContain("All");
+      expect(tabs[0].textContent).toContain("1");
+      expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+
+      expect(tabs[1].textContent).toContain("Dispatchable");
+      expect(tabs[1].textContent).toContain("2");
+      expect(tabs[1].getAttribute("aria-selected")).toBe("false");
+
+      expect(tabs[2].textContent).toContain("Report-Only");
+      expect(tabs[2].textContent).toContain("3");
+      expect(tabs[2].getAttribute("aria-selected")).toBe("false");
+    });
+  });
+
+  test("cycles mode tabs with [ and ] keys", async () => {
+    await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
+      const r = renderProjects();
+      await waitFor(() => {
+        expect(r.getByText("factory")).toBeTruthy();
+      });
+
+      const tabs = r.getAllByRole("tab");
+      expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+
+      act(() => {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "]", bubbles: true }));
+      });
+      expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+
+      act(() => {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "]", bubbles: true }));
+      });
+      expect(tabs[2].getAttribute("aria-selected")).toBe("true");
+
+      act(() => {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "[", bubbles: true }));
+      });
+      expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+    });
+  });
+
+  test("switches mode tabs directly with 1..3 number keys", async () => {
+    await withApi(
+      {
+        repos: async () => ({
+          repos: [
+            repo({ name: "r-dispatch", reportOnly: false }),
+            repo({ name: "r-report", reportOnly: true }),
+          ],
+        }),
+      },
+      async () => {
+        const r = renderProjects();
+        await waitFor(() => {
+          expect(r.getByText("r-dispatch")).toBeTruthy();
+          expect(r.getByText("r-report")).toBeTruthy();
+        });
+
+        const tabs = r.getAllByRole("tab");
+
+        // Key 2 -> Dispatchable
+        act(() => {
+          document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "2", bubbles: true }));
+        });
+        expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+        expect(r.getByText("r-dispatch")).toBeTruthy();
+        expect(r.queryByText("r-report")).toBeNull();
+
+        // Key 3 -> Report-Only
+        act(() => {
+          document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "3", bubbles: true }));
+        });
+        expect(tabs[2].getAttribute("aria-selected")).toBe("true");
+        expect(r.queryByText("r-dispatch")).toBeNull();
+        expect(r.getByText("r-report")).toBeTruthy();
+
+        // Key 1 -> All
+        act(() => {
+          document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "1", bubbles: true }));
+        });
+        expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+        expect(r.getByText("r-dispatch")).toBeTruthy();
+        expect(r.getByText("r-report")).toBeTruthy();
+      },
+    );
+  });
+
+  test("number keys are ignored when typing in filter input", async () => {
+    await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
+      const r = renderProjects();
+      await waitFor(() => {
+        expect(r.getByText("factory")).toBeTruthy();
+      });
+
+      const tabs = r.getAllByRole("tab");
+      const input = r.getByPlaceholderText(/Filter repo/i);
+      input.focus();
+
+      act(() => {
+        fireEvent.keyDown(input, { key: "2" });
+      });
+      expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+      expect(tabs[1].getAttribute("aria-selected")).toBe("false");
+    });
+  });
+
+  test("number keys are ignored when go prefix is armed", async () => {
+    await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
+      const r = renderProjects();
+      await waitFor(() => {
+        expect(r.getByText("factory")).toBeTruthy();
+      });
+
+      const tabs = r.getAllByRole("tab");
+      goPrefix.armedAt = Date.now();
+
+      act(() => {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "2", bubbles: true }));
+      });
+      expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+      expect(tabs[1].getAttribute("aria-selected")).toBe("false");
+    });
+  });
+});
+

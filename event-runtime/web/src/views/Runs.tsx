@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
@@ -62,6 +63,10 @@ export const RUN_TABS: readonly RunTab[] = [
   "FAILED",
   "CANCELLED",
 ] as const;
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
 
 export const RUN_TAB_LABELS: Record<RunTab, string> = {
   ALL: "All",
@@ -409,6 +414,21 @@ export function Runs({
   };
   useTabKeys(RUN_TABS, tab, selectTab);
 
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= RUN_TABS.length) {
+        e.preventDefault();
+        selectTab(RUN_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectTab]);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -494,7 +514,7 @@ export function Runs({
           {/* Wrap, never scroll or clip: at 1280px the strip used to run out of
               width at CANCELLED with no scrollbar affordance (WM-96). */}
           <div className="flex min-w-0 flex-1 flex-wrap gap-1" role="tablist" aria-label="Run state">
-            {RUN_TABS.map((t) => {
+            {RUN_TABS.map((t, idx) => {
               const count = tabCount(t);
               return (
                 <button
@@ -510,6 +530,9 @@ export function Runs({
                 >
                   {RUN_TAB_LABELS[t]}
                   {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                    {idx + 1}
+                  </span>
                 </button>
               );
             })}

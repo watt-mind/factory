@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
   cycleColumnSort,
@@ -79,6 +80,10 @@ export function capacityFromWorkers(rows: Worker[]): WorkerCapacity {
     limitingFactor: null,
     classes: [],
   };
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
 }
 
 /**
@@ -373,6 +378,21 @@ export function Workers({
   const tab = tabChoice ?? defaultWorkerTab(rows);
   useTabKeys(WORKER_TABS, tab, setTabChoice);
 
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= WORKER_TABS.length) {
+        e.preventDefault();
+        setTabChoice(WORKER_TABS[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // Live before stopped regardless of recency; within a group the registry's
   // own order stands. Display Options grouping/sorting (OPS-493) applies on
   // top of whatever the active tab lets through.
@@ -479,7 +499,7 @@ export function Workers({
             {query.isSuccess && <CapacityBand capacity={capacity} />}
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto" role="tablist" aria-label="Worker state">
-                {WORKER_TABS.map((t) => {
+                {WORKER_TABS.map((t, idx) => {
                   const count =
                     t === "ALL" ? rows.length : t === "LIVE" ? parts.live.length : parts.stopped.length;
                   return (
@@ -496,6 +516,9 @@ export function Workers({
                     >
                       {t === "ALL" ? "All" : t === "LIVE" ? "Live" : "Stopped"}
                       {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
+                      <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                        {idx + 1}
+                      </span>
                     </button>
                   );
                 })}

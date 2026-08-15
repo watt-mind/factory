@@ -25,4 +25,14 @@ describe("ShortcutsDialog", () => {
     expect(contextStrip.textContent).toContain("Home / End");
     expect(contextStrip.textContent).toContain("Delete / ⌫");
   });
+
+  test("documents 'v' for display options and '1–N' for status tabs (WM-234)", () => {
+    const r = render(<ShortcutsDialog onClose={() => {}} />);
+    const actions = r.getByRole("region", { name: "Actions" });
+
+    expect(actions.textContent).toContain("v");
+    expect(actions.textContent).toContain("display options");
+    expect(actions.textContent).toContain("1–N");
+    expect(actions.textContent).toContain("switch status tab");
+  });
 });

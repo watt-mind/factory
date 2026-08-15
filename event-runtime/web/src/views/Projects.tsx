@@ -3,10 +3,18 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import { contextFromProject, type OperatorContext } from "../context";
 import { hashProject } from "../hash";
-import { useListKeys } from "../hooks";
+import { keyGuard, useListKeys, useTabKeys } from "../hooks";
+import { goPrefixActive } from "../goSequence";
 import { setContextActions } from "../palette";
 import type { JanitorResult } from "../types";
 import { ScopeCaption } from "../components/ContextTabs";
+
+const PROJECT_MODES = ["ALL", "DISPATCHABLE", "REPORT_ONLY"] as const;
+type ProjectMode = (typeof PROJECT_MODES)[number];
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
 import {
   Button,
   DetailPane,
@@ -40,7 +48,23 @@ export function Projects({
   const queryClient = useQueryClient();
   const context = operatorContext();
   const [filter, setFilter] = useState("");
-  const [filterMode, setFilterMode] = useState<"ALL" | "DISPATCHABLE" | "REPORT_ONLY">("ALL");
+  const [filterMode, setFilterMode] = useState<ProjectMode>("ALL");
+  useTabKeys(PROJECT_MODES, filterMode, setFilterMode);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (goPrefixActive()) return;
+      if (isTypingTarget(e.target)) return;
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= PROJECT_MODES.length) {
+        e.preventDefault();
+        setFilterMode(PROJECT_MODES[num - 1]);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Janitor state per selected repo
   const [dryResult, setDryResult] = useState<JanitorResult | null>(null);
@@ -243,11 +267,13 @@ export function Projects({
                 label="Filter repositories"
               />
             </div>
-            <div className="mb-3 flex gap-1 text-[12px]">
-              {(["ALL", "DISPATCHABLE", "REPORT_ONLY"] as const).map((mode) => (
+            <div className="mb-3 flex gap-1 text-[12px]" role="tablist" aria-label="Project mode">
+              {PROJECT_MODES.map((mode, idx) => (
                 <button
                   key={mode}
                   type="button"
+                  role="tab"
+                  aria-selected={filterMode === mode}
                   onClick={() => setFilterMode(mode)}
                   className={`rounded px-2 py-0.5 font-medium transition-colors ${
                     filterMode === mode
@@ -256,6 +282,9 @@ export function Projects({
                   }`}
                 >
                   {mode === "ALL" ? "All" : mode === "DISPATCHABLE" ? "Dispatchable" : "Report-Only"}
+                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                    {idx + 1}
+                  </span>
                 </button>
               ))}
             </div>
