@@ -506,6 +506,8 @@ export function Proposals({
     setTimeout(() => reasonRef.current?.focus(), 0);
   };
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -523,7 +525,17 @@ export function Proposals({
       // §5: `a` opens the confirm with the spec in view — it never fires the verb directly.
       a: () => canApprove && connected && setConfirmApprove(true),
       x: () => isOpen && connected && openReject(),
-      c: () => sel && copyText(sel.id, "proposal id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.id, "proposal id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -534,7 +546,7 @@ export function Proposals({
     } else {
       const copy = [
         { label: `Copy ${sel.id}`, hint: "c", run: () => copyText(sel.id, "proposal id") },
-        { label: "Copy link to this proposal", run: copyLink },
+        { label: "Copy link to this proposal", hint: "c l", run: copyLink },
       ];
       if (!connected || !isOpen) {
         setContextActions(copy);
@@ -889,7 +901,7 @@ export function Proposals({
                 onClick={() => copyText(sel.id, "proposal id")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                id
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -897,7 +909,7 @@ export function Proposals({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }

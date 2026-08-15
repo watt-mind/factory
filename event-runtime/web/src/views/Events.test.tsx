@@ -649,3 +649,51 @@ describe("Events table short event ids (WM-142)", () => {
     );
   });
 });
+
+describe("Events copy chords and hints (WM-233)", () => {
+  test("copy chords: c (id), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const eventId = "evt_12345678-abcd-ef01-2345-6789abcdef01";
+    const e1 = stubEvent(eventId, "admitted");
+
+    await withApi(
+      {
+        events: async () => ({ events: [e1] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({ focusEvent: { source: "github", eventId } });
+        await r.findByText("copy:");
+
+        // Verify utility hint badges
+        const idBtn = r.getByRole("button", { name: "id" });
+        expect(idBtn.textContent).toContain("c");
+        const linkBtn = r.getByRole("button", { name: "link" });
+        expect(linkBtn.textContent).toContain("c l");
+
+        // 1. Press 'c' -> copies eventId
+        fireEvent.keyDown(document.body, { key: "c" });
+        expect(written).toBe(eventId);
+
+        // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+        fireEvent.keyDown(document.body, { key: "l" });
+        expect(written).toBe(window.location.href);
+      },
+    );
+  });
+});

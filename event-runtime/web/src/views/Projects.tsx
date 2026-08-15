@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { contextFromProject, type OperatorContext } from "../context";
 import { hashProject } from "../hash";
@@ -104,6 +104,8 @@ export function Projects({
     if (focusRepoName) setFilter("");
   }, [focusRepoName]);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: visible.length,
     selected: selectedIndex,
@@ -113,7 +115,23 @@ export function Projects({
       else if (filter) setFilter("");
     },
     keys: {
-      c: () => sel && copyText(sel.name, "repo name"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.name, "repo name");
+        pendingC.current = Date.now();
+      },
+      p: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyText(sel.path, "repo path");
+          pendingC.current = 0;
+        }
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -204,11 +222,18 @@ export function Projects({
           }),
       },
       {
+        label: `Copy ${r.name}`,
+        hint: "c",
+        run: () => copyText(r.name, "repo name"),
+      },
+      {
         label: `Copy path for ${r.name}`,
+        hint: "c p",
         run: () => copyText(r.path, "repo path"),
       },
       {
         label: `Copy link to ${r.name}`,
+        hint: "c l",
         run: copyLink,
       },
       {
@@ -377,7 +402,7 @@ export function Projects({
                 onClick={() => copyText(sel.path, "repo path")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                path
+                path <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c p</span>
               </button>
               <span>·</span>
               <button
@@ -385,7 +410,7 @@ export function Projects({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }

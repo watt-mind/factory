@@ -25,4 +25,17 @@ describe("ShortcutsDialog", () => {
     expect(contextStrip.textContent).toContain("Home / End");
     expect(contextStrip.textContent).toContain("Delete / ⌫");
   });
+
+  test("documents universal copy chords (WM-233)", () => {
+    const r = render(<ShortcutsDialog onClose={() => {}} />);
+    const actions = r.getByRole("region", { name: "Actions" });
+
+    expect(actions.textContent).toContain("copy selected id / name / ref");
+    expect(actions.textContent).toContain("c l");
+    expect(actions.textContent).toContain("copy link to clipboard");
+    expect(actions.textContent).toContain("c i / c c");
+    expect(actions.textContent).toContain("copy CLI inspect command (Runs)");
+    expect(actions.textContent).toContain("c p");
+    expect(actions.textContent).toContain("copy repo path (Projects)");
+  });
 });

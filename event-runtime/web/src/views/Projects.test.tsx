@@ -207,3 +207,54 @@ describe("Projects Clean Reclaimable Apply (WM-157)", () => {
     );
   });
 });
+
+describe("Projects copy chords and hints (WM-233)", () => {
+  test("copy chords: c (name), c p (path), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const testRepo = repo({ name: "factory", path: "/tmp/factory" });
+
+    await withApi(
+      {
+        repos: async () => ({ repos: [testRepo] }),
+      },
+      async () => {
+        const r = renderProjects("factory");
+        await r.findByText("copy:");
+
+        // Verify utility hint badges
+        const pathBtn = r.getByRole("button", { name: "path" });
+        expect(pathBtn.textContent).toContain("c p");
+        const linkBtn = r.getByRole("button", { name: "link" });
+        expect(linkBtn.textContent).toContain("c l");
+
+        // 1. Press 'c' -> copies repo name
+        fireEvent.keyDown(document.body, { key: "c" });
+        expect(written).toBe(testRepo.name);
+
+        // 2. Press 'p' immediately after 'c' -> 'c p' copies repo path
+        fireEvent.keyDown(document.body, { key: "p" });
+        expect(written).toBe(testRepo.path);
+
+        // 3. Press 'c' then 'l' -> 'c l' copies link
+        fireEvent.keyDown(document.body, { key: "c" });
+        fireEvent.keyDown(document.body, { key: "l" });
+        expect(written).toBe(window.location.href);
+      },
+    );
+  });
+});

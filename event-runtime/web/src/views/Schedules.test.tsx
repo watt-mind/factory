@@ -309,3 +309,44 @@ describe("Schedules aria-selected (WM-156)", () => {
     expect(dataRows()[1]!.getAttribute("aria-selected")).toBe("false");
   });
 });
+
+describe("Schedules copy chords and hints (WM-233)", () => {
+  test("copy chords: c (loop), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const r = renderSchedules({
+      connected: true,
+      focusScheduleLoop: "loop-enabled-running",
+    });
+
+    await r.findByText("copy:");
+
+    // Verify utility hint badges
+    const loopBtn = r.getByRole("button", { name: "loop" });
+    expect(loopBtn.textContent).toContain("c");
+    const linkBtn = r.getByRole("button", { name: "link" });
+    expect(linkBtn.textContent).toContain("c l");
+
+    // 1. Press 'c' -> copies loop
+    fireEvent.keyDown(document.body, { key: "c" });
+    expect(written).toBe("loop-enabled-running");
+
+    // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+    fireEvent.keyDown(document.body, { key: "l" });
+    expect(written).toBe(window.location.href);
+  });
+});

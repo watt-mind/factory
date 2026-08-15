@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ScheduleItem, type TriggerOutcome } from "../api";
 import { useListKeys, useNow } from "../hooks";
 import { setContextActions } from "../palette";
@@ -152,6 +152,8 @@ export function Schedules({
     if (focusScheduleLoop) setFilter("");
   }, [focusScheduleLoop]);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: visible.length,
     selected: selectedIndex,
@@ -161,7 +163,17 @@ export function Schedules({
       else if (filter) setFilter("");
     },
     keys: {
-      c: () => sel && copyText(sel.loop, "schedule loop"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.loop, "schedule loop");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
       r: () => sel && connected !== false && setConfirmLoop(sel),
     },
   });
@@ -172,7 +184,7 @@ export function Schedules({
     } else {
       const copy = [
         { label: `Copy ${sel.loop}`, hint: "c", run: () => copyText(sel.loop, "schedule loop") },
-        { label: "Copy link to this schedule", run: copyLink },
+        { label: "Copy link to this schedule", hint: "c l", run: copyLink },
       ];
       setContextActions(
         connected === false
@@ -403,7 +415,7 @@ export function Schedules({
                 onClick={() => copyText(sel.loop, "schedule loop")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                loop
+                loop <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -411,7 +423,7 @@ export function Schedules({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }

@@ -356,6 +356,8 @@ export function Workers({
     if (tab !== "ALL" && (tab === "LIVE") !== isLive(w)) setTabChoice("ALL");
   }, [focusWorkerId, rows, tab]);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -365,7 +367,17 @@ export function Workers({
       else if (filter) setFilter("");
     },
     keys: {
-      c: () => sel && copyText(sel.workerId, "worker id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.workerId, "worker id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
       o: () => sel?.currentRun && openRun(sel.currentRun),
     },
   });
@@ -379,7 +391,7 @@ export function Workers({
         ...(sel.currentRun
           ? [{ label: `Open run ${sel.currentRun}`, hint: "o", run: () => openRun(sel.currentRun!) }]
           : []),
-        { label: "Copy link to this worker", run: copyLink },
+        { label: "Copy link to this worker", hint: "c l", run: copyLink },
       ]);
     }
     return () => setContextActions([]);
@@ -592,7 +604,7 @@ export function Workers({
                 onClick={() => copyText(sel.workerId, "worker id")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                id
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -600,7 +612,7 @@ export function Workers({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }

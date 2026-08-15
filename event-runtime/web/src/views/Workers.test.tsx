@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Workers, defaultWorkerTab, fleetBanner, isLive, partitionWorkers } from "./Workers";
 import { api } from "../api";
@@ -165,6 +165,48 @@ describe("fleet banner vs Live tab (WM-155)", () => {
       expect(queryByText("No live workers detected")).toBeNull();
       expect(queryByText(/stopped or stale/)).toBeNull();
       expect(getByText(/2 registered workers are stopped/)).toBeTruthy();
+    });
+  });
+});
+
+describe("Workers copy chords and hints (WM-233)", () => {
+  test("copy chords: c (workerId), c l (link) and utility hints", async () => {
+    let written = "";
+    const mockClipboard = {
+      writeText: (t: string) => {
+        written = t;
+        return Promise.resolve();
+      },
+    };
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+
+    const w = stubWorker("worker-copy-test", "idle");
+    await withWorkers([w], async () => {
+      const r = renderWithClient(
+        <Workers context={{ kind: "all" }} focusWorkerId="worker-copy-test" onSelectWorker={noop} />,
+      );
+      await r.findByText("copy:");
+
+      // Verify utility hint badges
+      const idBtn = r.getByRole("button", { name: "id" });
+      expect(idBtn.textContent).toContain("c");
+      const linkBtn = r.getByRole("button", { name: "link" });
+      expect(linkBtn.textContent).toContain("c l");
+
+      // 1. Press 'c' -> copies workerId
+      fireEvent.keyDown(document.body, { key: "c" });
+      expect(written).toBe("worker-copy-test");
+
+      // 2. Press 'l' immediately after 'c' -> 'c l' copies link
+      fireEvent.keyDown(document.body, { key: "l" });
+      expect(written).toBe(window.location.href);
     });
   });
 });

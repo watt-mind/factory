@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useDisplayOptions, useListKeys } from "../hooks";
 import {
@@ -199,6 +199,8 @@ export function Agents({
     if (focusAgentRef) setFilter("");
   }, [focusAgentRef]);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -208,7 +210,17 @@ export function Agents({
       else if (filter) setFilter("");
     },
     keys: {
-      c: () => sel && copyText(sel.ref, "agent ref"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.ref, "agent ref");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -218,7 +230,7 @@ export function Agents({
     } else {
       setContextActions([
         { label: `Copy ${sel.ref}`, hint: "c", run: () => copyText(sel.ref, "agent ref") },
-        { label: "Copy link to this agent", run: copyLink },
+        { label: "Copy link to this agent", hint: "c l", run: copyLink },
       ]);
     }
     return () => setContextActions([]);
@@ -417,7 +429,7 @@ export function Agents({
                 onClick={() => copyText(sel.ref, "agent ref")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                ref
+                ref <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -425,7 +437,7 @@ export function Agents({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }

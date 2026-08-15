@@ -437,6 +437,8 @@ export function Events({
   };
   useTabKeys(STATUS_TABS, tab, selectTab);
 
+  const pendingC = useRef<number>(0);
+
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
@@ -457,7 +459,17 @@ export function Events({
       // `q` not `r`: `r` is the `g r` navigation suffix, and both listeners
       // see the same keydown — `g r` with a selection must never requeue.
       q: () => canRequeue && connected && sel && requeue.mutate(sel),
-      c: () => sel && copyText(sel.eventId, "event id"),
+      c: () => {
+        if (!sel) return;
+        copyText(sel.eventId, "event id");
+        pendingC.current = Date.now();
+      },
+      l: () => {
+        if (sel && pendingC.current > 0 && Date.now() - pendingC.current < 800) {
+          copyLink();
+          pendingC.current = 0;
+        }
+      },
     },
   });
 
@@ -476,7 +488,7 @@ export function Events({
           run: () => onTriggerAgain(retriggerEnvelope(sel.envelope, Date.now())),
         },
         { label: `Copy ${sel.eventId}`, hint: "c", run: () => copyText(sel.eventId, "event id") },
-        { label: "Copy link to this event", run: copyLink },
+        { label: "Copy link to this event", hint: "c l", run: copyLink },
       ]);
     }
     return () => setContextActions([]);
@@ -822,7 +834,7 @@ export function Events({
                 onClick={() => copyText(sel.eventId, "event id")}
                 className="cursor-pointer hover:text-(--text)"
               >
-                id
+                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
               </button>
               <span>·</span>
               <button
@@ -830,7 +842,7 @@ export function Events({
                 onClick={copyLink}
                 className="cursor-pointer hover:text-(--text)"
               >
-                link
+                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
               </button>
             </>
           }
