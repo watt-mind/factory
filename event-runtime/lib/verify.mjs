@@ -67,19 +67,47 @@ export function verifyResult({ spec, def, registry, workspaceDir, attempt, journ
   const shape = validate(registry.schemas.agentResult, candidate);
   if (!shape.valid) throw new ContractViolation(shape.errors);
 
-  if (candidate.terminalState === "refused") return verifyRefused({ spec, candidate, attempt });
+  if (candidate.terminalState === "refused") return verifyRefused({ spec, def, candidate, attempt });
   return verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts });
 }
 
-/** Refusal is not failure (§5.3) — but only typed, known reasons are admitted. */
-function verifyRefused({ spec, candidate, attempt }) {
+/**
+ * Refusal is not failure (§5.3) — but only typed, known reasons are admitted.
+ * An optional artifact explains the refusal through the same output contract
+ * as a completion, so useful context is retained without weakening validation.
+ */
+function verifyRefused({ spec, def, candidate, attempt }) {
   const violations = [];
   if (!candidate.reasonCode) violations.push("refused_without_reason_code");
   else if (!REFUSAL_REASONS.includes(candidate.reasonCode)) {
     violations.push(`unknown_refusal_reason: ${candidate.reasonCode}`);
   }
-  if (candidate.artifact !== undefined) violations.push("refused_with_artifact");
   if (violations.length > 0) throw new ContractViolation(violations);
+
+  const context = {};
+  const checks = ["schema_valid"];
+  if (candidate.artifact !== undefined) {
+    const artifactCheck = validate(def.outputSchema, candidate.artifact);
+    if (!artifactCheck.valid) throw new ContractViolation(artifactCheck.errors);
+
+    const semantic = SEMANTIC_CHECKS[spec.outputContract];
+    if (semantic) {
+      const semanticViolations = semantic(candidate);
+      if (semanticViolations.length > 0) throw new ContractViolation(semanticViolations);
+      checks.push("evidence_recomputed");
+    }
+
+    context.artifact = candidate.artifact;
+    context.artifactHash = hashJson(candidate.artifact);
+    checks.push("hash_recomputed");
+  }
+
+  const { evidence, evidenceSetHash } = retainedEvidence(candidate);
+  if (evidence !== undefined) {
+    context.evidence = evidence;
+    context.evidenceSetHash = evidenceSetHash;
+    checks.push("evidence_retained");
+  }
 
   const result = {
     schemaVersion: "factory.run-result/v1",
@@ -88,10 +116,22 @@ function verifyRefused({ spec, candidate, attempt }) {
     terminalState: "refused",
     reasonCode: candidate.reasonCode,
     outputContract: spec.outputContract,
-    verification: { status: "passed", checks: ["schema_valid"] },
+    ...context,
+    verification: { status: "passed", checks },
     artifacts: [],
   };
   return { kind: "refused", reasonCode: candidate.reasonCode, result };
+}
+
+function retainedEvidence(candidate) {
+  if (candidate.evidence === undefined) return { evidence: undefined, evidenceSetHash: null };
+
+  const canonical = canonicalJson(candidate.evidence);
+  const bytes = Buffer.byteLength(canonical, "utf8");
+  if (bytes > EVIDENCE_INLINE_LIMIT_BYTES) {
+    throw new ContractViolation([`evidence_too_large: ${bytes} bytes > ${EVIDENCE_INLINE_LIMIT_BYTES}`]);
+  }
+  return { evidence: candidate.evidence, evidenceSetHash: hashBytes(canonical) };
 }
 
 /** Last integer in a raw probe output — `df --output=used -B1` style. */
@@ -202,17 +242,7 @@ function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalH
 
   const artifactHash = hashJson(candidate.artifact);
 
-  let evidence;
-  let evidenceSetHash = null;
-  if (candidate.evidence !== undefined) {
-    const canonical = canonicalJson(candidate.evidence);
-    const bytes = Buffer.byteLength(canonical, "utf8");
-    if (bytes > EVIDENCE_INLINE_LIMIT_BYTES) {
-      throw new ContractViolation([`evidence_too_large: ${bytes} bytes > ${EVIDENCE_INLINE_LIMIT_BYTES}`]);
-    }
-    evidence = candidate.evidence;
-    evidenceSetHash = hashBytes(canonical);
-  }
+  const { evidence, evidenceSetHash } = retainedEvidence(candidate);
 
   const result = {
     schemaVersion: "factory.run-result/v1",
