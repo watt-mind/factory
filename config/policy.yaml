@@ -11,6 +11,24 @@ concurrency:
   # produce a base-CI failure that belongs to neither.
   max_concurrent_merges: 1
 
+workers:
+  # Worker pool bounds for `cli.mjs supervise` (WM-226). Presence of this block
+  # is what makes `factory up` start the supervisor instead of one fixed worker;
+  # delete it and the stack goes back to a single `cli.mjs work` process.
+  #
+  # These are worker PROCESSES, not concurrent agent runs — and the distinction
+  # is the whole design. An idle worker costs a poll every 500ms; a busy one
+  # costs a worktree and an LLM subprocess. The supervisor spends the cheap
+  # resource (count) to manage the scarce ones, so `max` is the real ceiling on
+  # concurrent agent runs on this machine and should be read that way.
+  min: 1                    # never zero: something has to notice the next
+                            # queued run and grow the pool back
+  max: 3                    # same argument as max_in_flight_per_repo above —
+                            # beyond ~3 concurrent agent runs the constraint is
+                            # the subscription usage window, which nothing here
+                            # can observe yet (WM-66 is the prerequisite for a
+                            # budget-aware ceiling)
+
 actions_cache:
   # GitHub's cache API reports decimal bytes. The initial 73 GB quota is
   # derived from the 2026-08 Actions alert (65.67 GB shown as 90% used); update

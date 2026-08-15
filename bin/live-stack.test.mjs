@@ -16,20 +16,36 @@ import path from "node:path";
 
 const LIVE_STACK = path.resolve(import.meta.dir, "live-stack.sh");
 
-/** worktree-common.sh replaced by recorders: no daemon is ever started. */
+/**
+ * worktree-common.sh replaced by recorders: no daemon is ever started.
+ *
+ * `pid_alive` is false by default (so `up` always spawns) and consults real
+ * pidfiles only under FAKE_ALIVE=1, which is what the pool-drain path in `down`
+ * needs to exercise. A terminated daemon stops being alive, modelling a process
+ * that honours SIGTERM — unless FAKE_IGNORES_TERM=1, the case whose whole point
+ * is that `down` gives up on a schedule instead of hanging.
+ */
 const COMMON_STUB = `#!/usr/bin/env bash
 repo_root() { printf '%s' "$FAKE_REPO"; }
 info() { printf '==> %s\\n' "$*"; }
 warn() { printf 'warn: %s\\n' "$*" >&2; }
 die() { printf 'error: %s\\n' "$*" >&2; exit 1; }
-pid_alive() { return 1; }
+pid_alive() {
+  [[ "\${FAKE_ALIVE:-0}" == "1" ]] || return 1
+  [[ -f "$1" ]] || return 1
+  [[ -f "$1.terminated" ]] && return 1
+  return 0
+}
 spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   local pidfile="$1" logfile="$2" workdir="$3"
   shift 3
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
   printf '1\\n' >"$pidfile"
 }
-term_daemon() { printf 'TERM %s\\n' "$2" >>"$SPAWN_LOG"; }
+term_daemon() {
+  printf 'TERM %s\\n' "$2" >>"$SPAWN_LOG"
+  [[ "\${FAKE_IGNORES_TERM:-0}" == "1" ]] || touch "$1.terminated"
+}
 await_daemon() { printf 'AWAIT %s\\n' "$2" >>"$SPAWN_LOG"; }
 `;
 
@@ -54,11 +70,15 @@ if (process.env.FAKE_WORKER_MODE === "wait-term") {
 }
 `;
 
-function makeFixture({ withWebDeps = true } = {}) {
+function makeFixture({ withWebDeps = true, policy = null } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "live-stack-"));
   mkdirSync(path.join(root, "bin"), { recursive: true });
   mkdirSync(path.join(root, "event-runtime", "web"), { recursive: true });
   mkdirSync(path.join(root, "stubs"), { recursive: true });
+  if (policy !== null) {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(path.join(root, "config", "policy.yaml"), policy, "utf8");
+  }
   copyFileSync(LIVE_STACK, path.join(root, "bin", "live-stack.sh"));
   writeFileSync(path.join(root, "bin", "worktree-common.sh"), COMMON_STUB, "utf8");
   writeFileSync(path.join(root, "event-runtime", "cli.mjs"), FAKE_CLI, "utf8");
@@ -72,6 +92,7 @@ function makeFixture({ withWebDeps = true } = {}) {
 
   return {
     root,
+    runDir: path.join(root, "run"),
     spawnLog: path.join(root, "spawns.log"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
@@ -196,6 +217,131 @@ test("`down` stops all three daemons in either mode", () => {
       expect(r.spawns).toContain(`TERM ${label}`);
       expect(r.spawns).toContain(`AWAIT ${label}`);
     }
+  } finally {
+    f.cleanup();
+  }
+});
+
+// --- worker pool (WM-226) ----------------------------------------------------
+
+test("a config with no workers: block keeps the plain single worker (regression)", () => {
+  const f = makeFixture({ policy: "concurrency:\n  max_in_flight_per_repo: 3\n" });
+  try {
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    const worker = spawnFor(r.spawns, "worker.pid");
+    expect(worker).toContain("cli.mjs work");
+    expect(worker).not.toContain("supervise");
+    expect(r.stdout).not.toContain("supervised pool");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a workers: block in policy.yaml is the switch — `up` starts the supervisor instead", () => {
+  const f = makeFixture({ policy: "workers:\n  min: 1\n  max: 3\n" });
+  try {
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    const worker = spawnFor(r.spawns, "worker.pid");
+    expect(worker).toContain("cli.mjs supervise");
+    expect(worker).not.toContain("--workers"); // bounds come from policy, not the flag
+    expect(r.stdout).toContain("starting worker pool supervisor");
+    expect(r.stdout).toContain("supervised pool");
+    // The supervisor still takes the worker.pid slot, so down/tail are unchanged.
+    expect(spawnFor(r.spawns, "worker.pid")).toContain("pid=worker.pid");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`up --workers 2:4` selects the pool even with no policy file, and passes the bounds through", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "2:4"]);
+    expect(r.status).toBe(0);
+    expect(spawnFor(r.spawns, "worker.pid")).toContain("cli.mjs supervise --workers 2:4");
+    expect(r.stdout).toContain("starting worker pool supervisor (workers 2:4)");
+    expect(r.stdout).toContain("supervised pool (2:4)");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`--workers` and `--dev` both claim the worker slot — the conflict is named, nothing starts", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--dev", "--workers", "1:3"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("--workers and --dev both replace the worker daemon");
+    expect(r.spawns).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`up --dev` ignores a workers: block and keeps WM-213's reload supervisor", () => {
+  const f = makeFixture({ policy: "workers:\n  min: 1\n  max: 3\n" });
+  try {
+    const r = runStack(f, ["up", "--dev"]);
+    expect(r.status).toBe(0);
+    const worker = spawnFor(r.spawns, "worker.pid");
+    expect(worker).toContain("bin/live-stack.sh __supervise-worker --reload-on-change");
+    expect(worker).not.toContain("cli.mjs supervise");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`down` drains the pool before the ordinary teardown, and clears the slot files", () => {
+  const f = makeFixture({ policy: "workers:\n  min: 1\n  max: 3\n" });
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    for (const [name, body] of [
+      ["supervisor.pid", "4242\n"], ["worker.pid", "4242\n"],
+      ["worker-1.pid", "4243\n"], ["worker-1.drain", "scale-down\n"], ["worker-1.id", "worker_x\n"],
+    ]) writeFileSync(path.join(f.runDir, name), body, "utf8");
+
+    const r = runStack(f, ["down"], { FAKE_ALIVE: "1", FACTORY_POOL_DRAIN_TIMEOUT: "5" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("draining worker pool (up to 5s — runs in flight finish first)");
+    // The supervisor is stopped FIRST and waited for, not lumped into the
+    // three-second await that is right for a web server and wrong here.
+    expect(r.spawns[0]).toBe("TERM worker pool supervisor");
+    expect(r.stderr).not.toContain("still draining");
+    for (const name of ["worker-1.pid", "worker-1.drain", "worker-1.id", "supervisor.pid"]) {
+      expect(existsSync(path.join(f.runDir, name))).toBe(false);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`down` gives the pool a bounded wait, then says so instead of hanging", () => {
+  const f = makeFixture({ policy: "workers:\n  min: 1\n  max: 3\n" });
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "supervisor.pid"), "4242\n", "utf8");
+    writeFileSync(path.join(f.runDir, "worker.pid"), "4242\n", "utf8");
+
+    const r = runStack(f, ["down"], {
+      FAKE_ALIVE: "1", FAKE_IGNORES_TERM: "1", FACTORY_POOL_DRAIN_TIMEOUT: "1",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("worker pool still draining after 1s");
+    expect(r.stderr).toContain("the reaper requeues any lease left behind");
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("`down` without a supervisor pidfile is the pre-pool teardown, unchanged", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["down"], { FAKE_ALIVE: "1" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain("draining worker pool");
+    expect(r.spawns[0]).toBe("TERM web server");
   } finally {
     f.cleanup();
   }

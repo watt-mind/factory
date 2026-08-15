@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Manage the live production event-runtime stack (OPS-233, WM-60).
 #
-#   factory up                   # start live api (7381), worker, and web UI (7382)
+#   factory up                   # start live api (7381), worker(s), and web UI (7382)
 #   factory up --fake            # start with fake adapter (for staging/testing on live db)
 #   factory up --dev             # live-reload stack: serve --watch, vite HMR web,
 #                                # drain-aware worker (WM-213)
-#   factory down                 # cleanly stop live daemons
+#   factory up --workers 1:3     # supervised worker pool instead of one worker (WM-226)
+#   factory down                 # cleanly stop live daemons (drains the pool first)
 #   factory tail                 # tail all live logs (serve.log, worker.log, web.log)
 #   factory tail worker          # tail a specific daemon log
 #
@@ -28,6 +29,7 @@ case "$ACTION" in
   up)
     ADAPTER_FLAG=()
     DEV=0
+    WORKERS_SPEC=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --fake) ADAPTER_FLAG=("--adapter-override" "fake") ;;
@@ -35,15 +37,35 @@ case "$ACTION" in
         --port) API_PORT="$2"; shift ;;
         --web-port) WEB_PORT="$2"; shift ;;
         --dev) DEV=1 ;;
+        --workers) WORKERS_SPEC="$2"; shift ;;
         -h|--help)
-          echo "usage: factory up [--fake] [--dev] [--port 7381] [--web-port 7382]"
-          echo "  --dev  live reload: serve --watch, vite HMR web UI, worker restarts when idle"
+          echo "usage: factory up [--fake] [--dev] [--workers min:max] [--port 7381] [--web-port 7382]"
+          echo "  --dev      live reload: serve --watch, vite HMR web UI, worker restarts when idle"
+          echo "  --workers  supervised pool scaling between min and max on queue depth (WM-226);"
+          echo "             without it, a workers: block in config/policy.yaml selects the pool"
           exit 0
           ;;
         *) die "unknown option '$1' (see: factory up --help)" ;;
       esac
       shift
     done
+
+    # A supervised pool and --dev both want to own the worker slot, and they
+    # want it for different reasons (scale vs. reload). Saying so beats silently
+    # picking one — WM-213's reload supervisor drives a single worker by design.
+    if [[ "$DEV" -eq 1 && -n "$WORKERS_SPEC" ]]; then
+      die "--workers and --dev both replace the worker daemon — run the pool without --dev"
+    fi
+
+    # Policy-driven by default: the presence of a workers: block is the switch,
+    # so a checkout without one keeps starting exactly one plain worker (the
+    # pre-WM-226 behavior, unchanged).
+    POOL=0
+    if [[ -n "$WORKERS_SPEC" ]]; then
+      POOL=1
+    elif [[ "$DEV" -eq 0 && -f "$REPO/config/policy.yaml" ]] && grep -qE '^workers:[[:space:]]*(#.*)?$' "$REPO/config/policy.yaml"; then
+      POOL=1
+    fi
 
     # --dev swaps each of the three daemons for its reloading twin and changes
     # nothing else. SERVE_ARGS/WORKER_ARGS are built rather than branched so the
@@ -54,6 +76,15 @@ case "$ACTION" in
       SERVE_ARGS+=("${ADAPTER_FLAG[@]}")
     fi
     WORKER_ARGS=(bun "$REPO/event-runtime/cli.mjs" work)
+    if [[ "$POOL" -eq 1 ]]; then
+      # The supervisor takes the worker.pid slot; the workers it spawns get
+      # their own worker-N.pid files in the same run dir, so `down`, `tail`, and
+      # `factory events status` all keep working on the pool as a whole.
+      WORKER_ARGS=(bun "$REPO/event-runtime/cli.mjs" supervise)
+      if [[ -n "$WORKERS_SPEC" ]]; then
+        WORKER_ARGS+=(--workers "$WORKERS_SPEC")
+      fi
+    fi
     if [[ "$DEV" -eq 1 ]]; then
       SERVE_ARGS+=(--watch)
       # The worker is supervised rather than watched: it exits 75 at an idle
@@ -87,7 +118,11 @@ case "$ACTION" in
     if pid_alive "$RUN_DIR/worker.pid"; then
       info "worker already running (pid $(cat "$RUN_DIR/worker.pid"))"
     else
-      info "starting worker"
+      if [[ "$POOL" -eq 1 ]]; then
+        info "starting worker pool supervisor${WORKERS_SPEC:+ (workers $WORKERS_SPEC)}"
+      else
+        info "starting worker"
+      fi
       spawn_daemon "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$REPO" \
         env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
         "${WORKER_ARGS[@]}"
@@ -129,6 +164,11 @@ case "$ACTION" in
     printf '  control    http://127.0.0.1:%s\n' "$API_PORT"
     printf '  web UI     http://127.0.0.1:%s\n' "$WEB_PORT"
     printf '  logs       %s/{serve,worker,web}.log\n\n' "$RUN_DIR"
+    if [[ "$POOL" -eq 1 ]]; then
+      printf '  workers    supervised pool%s — per-worker logs %s/worker-N.log\n' \
+        "${WORKERS_SPEC:+ ($WORKERS_SPEC)}" "$RUN_DIR"
+      printf '             scale-down drains; a worker holding a run finishes it first\n\n'
+    fi
     if [[ "$DEV" -eq 1 ]]; then
       printf '  reload     serve: bun --watch  |  web: vite HMR  |  worker: on exit 75 when idle\n'
       printf '             agents/schemas need: bun event-runtime/cli.mjs update-pins\n\n'
@@ -178,13 +218,32 @@ case "$ACTION" in
 
   down)
     info "stopping live factory stack..."
+    # A supervised pool (WM-226) needs its own wait: await_daemon gives a daemon
+    # three seconds and then SIGKILLs it, which is right for a web server and
+    # wrong for a supervisor whose workers are still finishing agent runs. Term
+    # it first and wait properly — it drains its pool, escalates on its own
+    # schedule, and only then exits. FACTORY_POOL_DRAIN_TIMEOUT bounds our
+    # patience; past it we fall through to the ordinary teardown, which is the
+    # operator's "stop now" and says so.
+    if [[ -f "$RUN_DIR/supervisor.pid" ]] && pid_alive "$RUN_DIR/worker.pid"; then
+      POOL_WAIT="${FACTORY_POOL_DRAIN_TIMEOUT:-180}"
+      info "draining worker pool (up to ${POOL_WAIT}s — runs in flight finish first)"
+      term_daemon "$RUN_DIR/worker.pid" "worker pool supervisor"
+      DEADLINE=$(( $(date +%s) + POOL_WAIT ))
+      while pid_alive "$RUN_DIR/worker.pid" && [[ $(date +%s) -lt $DEADLINE ]]; do
+        sleep 0.5
+      done
+      if pid_alive "$RUN_DIR/worker.pid"; then
+        warn "worker pool still draining after ${POOL_WAIT}s — stopping it anyway; the reaper requeues any lease left behind"
+      fi
+    fi
     term_daemon "$RUN_DIR/web.pid" "web server"
     term_daemon "$RUN_DIR/worker.pid" "worker"
     term_daemon "$RUN_DIR/serve.pid" "event runtime"
     await_daemon "$RUN_DIR/web.pid" "web server"
     await_daemon "$RUN_DIR/worker.pid" "worker"
     await_daemon "$RUN_DIR/serve.pid" "event runtime"
-    rm -f "$RUN_DIR"/*.pid
+    rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.drain "$RUN_DIR"/*.id
     info "done — live factory stack is down (durable state preserved at $HOME_DIR)"
     ;;
 

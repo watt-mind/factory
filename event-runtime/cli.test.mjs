@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,11 +11,18 @@ const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 /** A loopback port nothing in these tests ever listens on. */
 const DEAD_PORT = "59987";
 
+/**
+ * A throwaway run dir, so nothing here reads this machine's real
+ * ~/.factory/run — `status` reports the local worker pool from pidfiles
+ * (WM-226), and a developer's own running stack must not change a test result.
+ */
+const throwawayRunDir = () => mkdtempSync(path.join(os.tmpdir(), "evrt-cli-run-"));
+
 function runCli(args, env = {}) {
   const home = mkdtempSync(path.join(os.tmpdir(), "evrt-cli-"));
   const result = spawnSync("bun", [CLI, ...args], {
     encoding: "utf8",
-    env: { ...process.env, FACTORY_EVENT_HOME: home, ...env },
+    env: { ...process.env, FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: throwawayRunDir(), ...env },
   });
   return { ...result, all: `${result.stdout}${result.stderr}` };
 }
@@ -26,13 +33,14 @@ describe("cli", () => {
     expect(r.status).not.toBe(0);
     for (const verb of [
       "serve", "status", "doctor", "ps", "runs", "proposals", "approve", "reject",
-      "inject", "cancel", "retry", "inspect", "update-pins",
+      "inject", "cancel", "retry", "inspect", "update-pins", "supervise",
     ]) {
       expect(r.all).toContain(verb);
     }
     expect(r.all).toContain("usage:");
     expect(r.all).toContain("--watch");
     expect(r.all).toContain("--reload-on-change");
+    expect(r.all).toContain("--workers min:max");
   });
 
   test("unknown command → usage text, non-zero exit", () => {
@@ -556,7 +564,7 @@ describe("cli", () => {
       expect(out).toContain("control API on");
       docRes = spawnSync("bun", [CLI, "doctor"], {
         encoding: "utf8",
-        env: { ...process.env, FACTORY_EVENT_HOME: home, FACTORY_EVENT_PORT: port },
+        env: { ...process.env, FACTORY_EVENT_HOME: home, FACTORY_EVENT_PORT: port, FACTORY_RUN_DIR: throwawayRunDir() },
       });
     } finally {
       child.kill("SIGTERM");
@@ -598,7 +606,7 @@ describe("cli", () => {
       expect(out).toContain("control API on");
       docRes = spawnSync("bun", [CLI, "doctor"], {
         encoding: "utf8",
-        env: { ...process.env, FACTORY_EVENT_HOME: home, FACTORY_EVENT_PORT: port },
+        env: { ...process.env, FACTORY_EVENT_HOME: home, FACTORY_EVENT_PORT: port, FACTORY_RUN_DIR: throwawayRunDir() },
       });
     } finally {
       child.kill("SIGTERM");
@@ -759,4 +767,261 @@ describe("work --reload-on-change (WM-213)", () => {
     expect(["TIMED_OUT", "FAILED", "COMPLETED"]).toContain(row?.state);
     verifyDb.close();
   }, 45_000);
+});
+
+// ---------------------------------------------------------------------------
+// worker pool supervisor (WM-226)
+// ---------------------------------------------------------------------------
+
+/** A QUEUED run in `home`'s database, straight through the real lifecycle. */
+async function seedRun(home, { runId, input = {}, timeoutSeconds = 5 }) {
+  const { createRun, transition } = await import("./lib/lifecycle.mjs");
+  const { canonicalJson, hashJson } = await import("./lib/canonical.mjs");
+  const db = openDb(path.join(home, "runtime.db"));
+  const spec = {
+    schemaVersion: "factory.run-spec/v1",
+    runId,
+    agent: "factory-status-report@1",
+    input,
+    inputHash: hashJson(input),
+    workspace: { type: "ephemeral", retainOnFailure: false },
+    adapter: "fake",
+    promptVersion: "git:test",
+    policyVersion: "git:test",
+    outputContract: "factory.status-report/v1",
+    capabilities: ["linear:read"],
+    timeoutSeconds,
+    maxAttempts: 1,
+    idempotencyKey: `idem_${runId}`,
+  };
+  createRun(db, {
+    runId, idempotencyKey: spec.idempotencyKey,
+    spec, specJson: canonicalJson(spec), specHash: hashJson(spec),
+    actor: "test", policyVersion: "test", now: Date.now(),
+  });
+  transition(db, { runId, to: "APPROVED", actor: "test", now: Date.now() });
+  transition(db, { runId, to: "QUEUED", actor: "test", now: Date.now() });
+  db.close();
+}
+
+function spawnSupervisor(args, env) {
+  const child = spawn("bun", [CLI, "supervise", ...args], {
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const box = { out: "", child };
+  child.stdout.on("data", (b) => { box.out += b; });
+  child.stderr.on("data", (b) => { box.out += b; });
+  return box;
+}
+
+/** Every worker the supervisor left behind, killed hard — tests do not drain. */
+async function killPool(box, dir) {
+  const { readPool } = await import("./cli.mjs");
+  box.child.kill("SIGKILL");
+  for (const slot of readPool(dir).slots) {
+    if (slot.alive) { try { process.kill(slot.pid, "SIGKILL"); } catch { /* already gone */ } }
+  }
+}
+
+async function poolSize(dir) {
+  const { readPool } = await import("./cli.mjs");
+  return readPool(dir).size;
+}
+
+describe("supervise (WM-226)", () => {
+  test("rejects bounds and intervals it cannot honour, naming the flag", () => {
+    expect(runCli(["supervise", "--workers", "3:1", "--once"]).all).toContain("min (3) cannot exceed max (1)");
+    expect(runCli(["supervise", "--workers", "1:2:3", "--once"]).all).toContain("--workers expects min:max");
+    expect(runCli(["supervise", "--workers", "1:2", "--interval-ms", "10", "--once"]).all)
+      .toContain("--interval-ms must be an integer between 100 and 60000");
+    for (const args of [["supervise", "--workers", "3:1", "--once"], ["supervise", "--workers", "x", "--once"]]) {
+      expect(runCli(args).status).not.toBe(0);
+    }
+  });
+
+  test("refuses to be the second supervisor on one run dir — two would orphan each other's workers", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-dup-"));
+    try {
+      // This process stands in for a live incumbent supervisor.
+      writeFileSync(path.join(dir, "supervisor.pid"), `${process.pid}\n`, "utf8");
+      const r = runCli(["supervise", "--workers", "1:2", "--once"], { FACTORY_RUN_DIR: dir });
+      expect(r.status).not.toBe(0);
+      expect(r.all).toContain(`a supervisor is already running for ${dir} (pid ${process.pid})`);
+      expect(existsSync(path.join(dir, "worker-1.pid"))).toBe(false); // nothing spawned
+
+      // A stale pidfile is not an incumbent: the pool starts.
+      writeFileSync(path.join(dir, "supervisor.pid"), "2147483646\n", "utf8");
+      expect(runCli(["supervise", "--workers", "1:1", "--once"], { FACTORY_RUN_DIR: dir }).status).toBe(0);
+      const pid = Number(readFileSync(path.join(dir, "worker-1.pid"), "utf8").trim());
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a queued run with no idle worker spawns one within a tick, and the pool stops at workers.max", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-up-"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-up-run-"));
+    // "hang" occupies a worker for the whole spec timeout, so the queue stays
+    // hot long enough for the ceiling to be the thing that stops the pool.
+    for (const runId of ["run_pool_a", "run_pool_b", "run_pool_c"]) {
+      await seedRun(home, { runId, input: { repos: ["hang"] }, timeoutSeconds: 20 });
+    }
+    const box = spawnSupervisor(
+      ["--workers", "1:2", "--interval-ms", "150", "--spawn-grace-ms", "150",
+       "--adapter-override", "fake", "--poll-ms", "50", "--drain-timeout", "1"],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(await waitFor(box, "spawn slot 1")).toBe(true);
+      expect(await waitFor(box, "spawn slot 2")).toBe(true);
+      // Three queued runs, two workers: the next decision is a hold at the cap.
+      expect(await waitFor(box, "pool is at workers.max 2")).toBe(true);
+      expect(box.out).not.toContain("spawn slot 3");
+      expect(await poolSize(dir)).toBe(2);
+      // The counts that justified each spawn are in the line, not just the verdict.
+      expect(box.out).toMatch(/spawn slot 2 → worker \S+ pid \d+ .*queued=\d+ idle=0 busy=\d+ pool=1 pending=0 draining=0 min=1 max=2/);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("surplus idle workers drain back to workers.min, and the pool is not respawned past target", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-down-"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-down-run-"));
+    // Two short hangs: long enough to force a second worker, short enough that
+    // both go idle while the supervisor is still watching.
+    for (const runId of ["run_drain_a", "run_drain_b"]) {
+      await seedRun(home, { runId, input: { repos: ["hang"] }, timeoutSeconds: 3 });
+    }
+    const box = spawnSupervisor(
+      ["--workers", "1:2", "--interval-ms", "150", "--spawn-grace-ms", "150",
+       "--adapter-override", "fake", "--poll-ms", "50", "--drain-timeout", "1"],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(await waitFor(box, "spawn slot 2", 30_000)).toBe(true);
+      expect(await waitFor(box, "drain slot", 30_000)).toBe(true);
+      expect(box.out).toMatch(/drain slot \d+ \(worker \S+\): \d+ idle worker\(s\) and no queued runs, pool 2 above workers.min 1/);
+      // Asked, never signalled: the flag is the whole mechanism.
+      expect(box.out).toContain("it exits at its next idle poll boundary, never mid-run");
+      expect(await waitFor(box, "slot released", 30_000)).toBe(true);
+
+      // Converged at min and stayed there — a drain that is immediately undone
+      // by the next tick's spawn is a busy loop, not a scale-down.
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        expect(await poolSize(dir)).toBeLessThanOrEqual(2);
+        await Bun.sleep(200);
+      }
+      expect(await poolSize(dir)).toBe(1);
+      expect(box.out.split("spawn slot").length - 1).toBe(2); // slots 1 and 2, no third
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe("work --drain-file (WM-226)", () => {
+  test("a drain-signalled worker holding a lease finishes its run first, then exits 0", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-busy-"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-busy-run-"));
+    const drainFile = path.join(dir, "worker-1.drain");
+    await seedRun(home, { runId: "run_drain_busy", input: { repos: ["hang"] }, timeoutSeconds: 4 });
+
+    const box = spawnWorker(
+      ["--adapter-override", "fake", "--poll-ms", "50", "--drain-file", drainFile],
+      { FACTORY_EVENT_HOME: home },
+    );
+    try {
+      expect(await waitFor(box, "claimed run_drain_busy")).toBe(true);
+      writeFileSync(drainFile, "scale-down\n", "utf8");
+
+      // Proven, not assumed: still alive and still running the claim a moment
+      // after the flag appeared. A worker that leaves here is one that dropped
+      // a leased run on the floor.
+      await Bun.sleep(500);
+      expect(box.child.exitCode).toBe(null);
+      expect(box.out).not.toContain("run_drain_busy → ");
+
+      const { code } = await exitOf(box.child);
+      expect(code).toBe(0); // a clean drain, not the reload code
+      // Order is the guarantee: the run reached a terminal state BEFORE the exit.
+      expect(box.out.indexOf("run_drain_busy → ")).toBeGreaterThan(-1);
+      expect(box.out.indexOf("run_drain_busy → ")).toBeLessThan(box.out.indexOf("drain requested"));
+      expect(box.out).toContain("worker stopped (drain_requested)");
+    } finally {
+      box.child.kill("SIGKILL");
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 45_000);
+
+  test("plain work ignores a drain file it was never given", async () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-off-"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-off-run-"));
+    writeFileSync(path.join(dir, "worker-1.drain"), "scale-down\n", "utf8");
+    const box = spawnWorker(["--adapter-override", "fake", "--poll-ms", "50"], { FACTORY_EVENT_HOME: home });
+    try {
+      expect(await waitFor(box, "adapter override")).toBe(true);
+      await Bun.sleep(1000);
+      expect(box.out).not.toContain("drain-file");
+      expect(box.child.exitCode).toBe(null);
+    } finally {
+      box.child.kill("SIGTERM");
+      await exitOf(box.child);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe("pool visibility in status/doctor (WM-226)", () => {
+  test("no pool ever started → no pool line and no anomaly (single-worker stacks look unchanged)", async () => {
+    const { getPoolLines, readPool } = await import("./cli.mjs");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-view-none-"));
+    try {
+      const view = getPoolLines(readPool(dir), { runs: { byState: { QUEUED: 4 } } });
+      expect(view.line).toBeNull();
+      expect(view.anomalies).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a live supervisor reports its pool size; a dead one with a queue is an anomaly", async () => {
+    const { getPoolLines, readPool } = await import("./cli.mjs");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-view-"));
+    try {
+      // This process stands in for a live supervisor and a live worker.
+      writeFileSync(path.join(dir, "supervisor.pid"), `${process.pid}\n`);
+      writeFileSync(path.join(dir, "worker-1.pid"), `${process.pid}\n`);
+      writeFileSync(path.join(dir, "worker-1.id"), "worker_live\n");
+      let view = getPoolLines(readPool(dir), { runs: { byState: { QUEUED: 2 } } });
+      expect(view.line).toContain(`supervisor live (pid ${process.pid})`);
+      expect(view.line).toContain("workers 1");
+      expect(view.anomalies).toEqual([]);
+
+      // A drained slot is visible while it winds down.
+      writeFileSync(path.join(dir, "worker-1.drain"), "scale-down\n");
+      expect(getPoolLines(readPool(dir), {}).line).toContain("(1 draining)");
+
+      // A queue with waiting runs and a dead supervisor is the §13 anomaly:
+      // nothing is left that can grow the pool behind the workers still up.
+      writeFileSync(path.join(dir, "supervisor.pid"), "2147483646\n");
+      view = getPoolLines(readPool(dir), { runs: { byState: { QUEUED: 2 } } });
+      expect(view.line).toContain("supervisor DEAD");
+      expect(view.anomalies).toEqual(["worker pool supervisor is dead (stale pid 2147483646) with 2 queued run(s)"]);
+
+      // Dead but nothing waiting is a stopped stack, not an anomaly.
+      expect(getPoolLines(readPool(dir), { runs: { byState: { QUEUED: 0 } } }).anomalies).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,6 +1,7 @@
 # Event runtime: workers, placement, and chaining
 
-Status: **stage 1 shipped (OPS-233); stages 2–3 are still design**. Tracking: OPS-221.
+Status: **stage 1 shipped (OPS-233), pool supervision shipped (WM-226);
+stages 2–3 are still design**. Tracking: OPS-221.
 Companion to [event-runtime.md](event-runtime.md) §3, §8, §10, §11 — this
 note expands the "second process → Postgres → remote workers" line of §10
 into something ticket-shaped, without changing any decision made there.
@@ -19,11 +20,12 @@ each registering in the worker table with labels and a heartbeat.
 
 Two consequences worth stating because they answer real operator questions:
 
-- **Concurrency is a worker count, and the count is a deployment choice.** Two
-  `work` processes execute two runs at once, and the claim is correct under
-  contention (`BEGIN IMMEDIATE`, leases, fencing tokens). The reason to keep it
-  at one is the unobservable subscription usage window (architecture.md §2.9),
-  not a structural limit.
+- **Concurrency is a worker count, and the count is now a supervised, dynamic
+  one (§2a).** Two `work` processes execute two runs at once, and the claim is
+  correct under contention (`BEGIN IMMEDIATE`, leases, fencing tokens). What
+  used to be a manual deployment choice is `config/policy.yaml`'s
+  `workers: {min, max}`; the reason `max` stays small is still the unobservable
+  subscription usage window (architecture.md §2.9), not a structural limit.
 - **A run occupies the worker for its whole duration.** A 10-minute agent
   run means 10 minutes of queue. The lease (spec timeout + 120 s grace) and
   fencing token already make this safe to change — they were built for the
@@ -64,6 +66,81 @@ The smallest real step, and a prerequisite for everything after:
 
 Nothing downstream of the claim changes: contracts, verification, the FSM,
 and the approval gate are untouched.
+
+## 2a. The pool — supervised, dynamic worker count — **shipped, WM-226**
+
+§2 left worker count as a manual decision: an operator started `work`
+processes and remembered to stop them. `cli.mjs supervise` makes it a
+deterministic function of observed queue depth.
+
+The insight that shapes the whole design: **idle workers are nearly free.**
+An idle worker costs a poll every 500ms and a heartbeat every 15s. A *busy*
+one costs a worktree and an LLM subprocess, and draws on a shared
+subscription usage window nothing here can observe (§3, and event-runtime.md
+§3's open problem). So the supervisor spends the cheap resource — process
+count — to bound the scarce ones, and `workers.max` should be read as the
+real ceiling on concurrent agent runs on that machine.
+
+- **Its own process, not part of `serve`.** Decisions and execution stay
+  separated; restarting the control plane must not kill capacity. Because
+  workers are spawned detached with their own pidfiles, a supervisor that
+  restarts *adopts* the running pool rather than replacing it. launchd
+  (WM-139) supervises `serve` and the supervisor; the supervisor supervises
+  workers.
+- **Deterministic, from config, never model-driven.** The rule is a pure
+  function of counts — `poolDecision({queued, idle, pool, pending, min, max})`
+  in `lib/workers.mjs` — and `config/policy.yaml`'s `workers: {min, max}`
+  block supplies the bounds. One decision per tick: scaling by one and
+  re-observing is what keeps a burst of queued runs from spawning the whole
+  ceiling for work a single worker would have absorbed. `pending` exists for
+  the same reason at the other end — a worker takes a second to register, and
+  without counting it every tick in that window sees "queued work, nothing
+  idle" and spawns again.
+- **Scale-down is a request, never a signal.** The supervisor writes
+  `worker-N.drain` in the run dir; `work --drain-file` reads it at its **idle
+  poll boundary only** — the same place WM-213's code-stamp check lives, and
+  for the same reason. A worker holding a lease finishes its run and *then*
+  exits 0. The supervisor never sends a signal to a worker it is merely
+  shrinking, so "no leased worker is ever killed" is a structural property,
+  not a race it usually wins.
+- **Shutdown escalates, and says which rung it is on.** On SIGTERM the
+  supervisor writes every drain flag, waits, then SIGTERMs the stragglers —
+  which starts each worker's own bounded graceful drain from §2 — and
+  finally leaves whatever is left to its leases, logging that the reaper will
+  requeue. `factory down` gives the pool a matching wait
+  (`FACTORY_POOL_DRAIN_TIMEOUT`, default 180s) rather than the three-second
+  `await_daemon` that suits a web server.
+- **Every spawn and drain is logged with the counts that justified it** —
+  `queued`, `idle`, `busy`, `pool`, `pending`, and the bounds — because a
+  scaling decision you cannot reconstruct is indistinguishable from a bug.
+  Holds are logged only when the reason changes.
+- **Visible in status/doctor.** `status` grows a `pool` line (supervisor
+  liveness, pool size, how many are draining), and a queue with waiting runs
+  behind a *dead* supervisor is an anomaly — nothing is left that can grow
+  the pool. Read from the run dir rather than the control API, because
+  pidfile liveness is node-local state the API cannot see.
+
+Operationally:
+
+```
+factory up                     # policy-driven: a workers: block starts the pool
+factory up --workers 1:3       # explicit bounds, no policy block needed
+factory up --dev               # unchanged — WM-213's single reload-aware worker
+factory down                   # drains the pool, then the rest of the stack
+factory tail worker-2          # one worker's log; worker.log is the supervisor
+```
+
+Deleting the `workers:` block restores the pre-WM-226 stack exactly: one
+plain `cli.mjs work` process. `--dev` and `--workers` are mutually exclusive
+— both replace the worker daemon, and WM-213's reload supervisor drives a
+single worker by design.
+
+**Not yet, deliberately.** Weight-class caps (`heavy`/`light` labels, so four
+cheap scans and four concurrent coding runs are not the same budget) reuse
+the §4 placement machinery and need claim-side class filtering first. A
+budget-aware ceiling — throttling spawns when rolling token spend crosses a
+threshold — is blocked on WM-66's per-run usage data; until it exists,
+`workers.max` is the only guard on the usage window, and it is a blunt one.
 
 ## 3. Stage 2 — workers on other nodes
 
@@ -227,5 +304,14 @@ stand as the rules that design satisfies:
    re-entering the planner for watched proposals with per-edge earned automation
    (CI failure doctor: `ci-doctor@1` → `FLAKE|ENV → ci-rerun@1` / `TICKET → ci-notify@1`).
 
-Items 2, 4, 5, and 6 are shipped and verified in the test suite; items 1 and 3
-remain the prerequisites for multi-node distribution (Stage 2).
+7. **Worker pool supervisor** — **shipped (WM-226)**: `cli.mjs supervise`
+   scaling `work` processes between `workers.min` and `workers.max`
+   (`config/policy.yaml`) on observed queue depth; `poolDecision` /
+   `poolCounts` / `loadWorkerPolicy` in `lib/workers.mjs`, drain-file
+   scale-down honoured at the worker's idle poll boundary (`work
+   --drain-file`), `factory up --workers min:max`, pool liveness in
+   status/doctor. Weight-class caps (`heavy`/`light`, item 4's machinery) and
+   the budget-aware ceiling (blocked on WM-66) are the explicit follow-ups.
+
+Items 2, 4, 5, 6, and 7 are shipped and verified in the test suite; items 1
+and 3 remain the prerequisites for multi-node distribution (Stage 2).
