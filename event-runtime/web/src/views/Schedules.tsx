@@ -505,7 +505,7 @@ export function Schedules({
               </div>
             )}
 
-            <Section title="Configuration">
+            <Section id="schedule-configuration" title="Configuration">
               <KV k="loop name" v={<span className="mono">{sel.loop}</span>} />
               <KV
                 k="cadence"
