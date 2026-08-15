@@ -162,4 +162,145 @@ describe("RunTrace a11y (WM-143)", () => {
       window.removeEventListener("keydown", onWin);
     }
   });
+
+  test("single-key shortcuts 1-5 and [ / ] switch filter tabs (WM-217)", async () => {
+    const r = renderTrace();
+    await waitForChrome(r);
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "2", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^Tools/ }).getAttribute("aria-selected")).toBe("true");
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "3", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^Reasoning/ }).getAttribute("aria-selected")).toBe("true");
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "4", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^Errors/ }).getAttribute("aria-selected")).toBe("true");
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "5", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^Usage/ }).getAttribute("aria-selected")).toBe("true");
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "1", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^All/ }).getAttribute("aria-selected")).toBe("true");
+
+    // [ and ] relative cycling
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "]", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^Tools/ }).getAttribute("aria-selected")).toBe("true");
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "[", bubbles: true }));
+    });
+    expect(r.getByRole("tab", { name: /^All/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  test("e toggles expand/collapse details and l toggles follow live (WM-217)", async () => {
+    const r = renderTrace();
+    await waitForChrome(r);
+
+    const expandBtn = r.getByRole("button", { name: /Expand details/ });
+    expect(expandBtn).toBeTruthy();
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "e", bubbles: true }));
+    });
+    expect(r.getByRole("button", { name: /Collapse details/ })).toBeTruthy();
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "e", bubbles: true }));
+    });
+    expect(r.getByRole("button", { name: /Expand details/ })).toBeTruthy();
+
+    // l toggles follow live
+    const followLiveBtn = r.getByRole("button", { name: /Follow live/ });
+    expect(followLiveBtn.textContent).toContain("Follow live");
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(r.getByRole("button", { name: /Follow live \(paused\)/ })).toBeTruthy();
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(r.getByRole("button", { name: /Follow live/ })).toBeTruthy();
+  });
+
+  test(". jumps to next error and G jumps to latest (WM-217)", async () => {
+    const r = renderTrace();
+    await waitForChrome(r);
+
+    const errorBtn = r.getByRole("button", { name: /1 error/ });
+    expect(errorBtn).toBeTruthy();
+
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: ".", bubbles: true }));
+    });
+    expect(r.getByText(/\(1\/1\)/)).toBeTruthy();
+
+    // G triggers jump to latest
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "G", bubbles: true }));
+    });
+    expect(r.getByRole("button", { name: /Follow live/ })).toBeTruthy();
+  });
+
+  test("search input Esc clears query, Enter/Shift+Enter cycles matches (WM-217)", async () => {
+    const r = renderTrace();
+    await waitForChrome(r);
+
+    const search = r.getByPlaceholderText("Search trace…") as HTMLInputElement;
+    search.focus();
+    act(() => {
+      changeInput(search, "Read");
+    });
+    expect(search.value).toBe("Read");
+
+    // Enter cycles match
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(r.getByText("1/1")).toBeTruthy();
+
+    // Esc clears search text
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(search.value).toBe("");
+
+    // Next Esc blurs
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(document.activeElement).not.toBe(search);
+  });
+
+  test("renders subtle shortcut hints on tabs, search, buttons, and live chips (WM-217)", async () => {
+    const r = renderTrace();
+    await waitForChrome(r);
+
+    // Number hints on tabs
+    const tabs = r.getAllByRole("tab");
+    expect(tabs[0].textContent).toContain("1");
+    expect(tabs[1].textContent).toContain("2");
+    expect(tabs[2].textContent).toContain("3");
+    expect(tabs[3].textContent).toContain("4");
+    expect(tabs[4].textContent).toContain("5");
+
+    // / hint on search
+    expect(r.getByText("/")).toBeTruthy();
+
+    // e hint on Expand details
+    expect(r.getByRole("button", { name: /Expand details/ }).textContent).toContain("e");
+
+    // l hint on Follow live
+    expect(r.getByRole("button", { name: /Follow live/ }).textContent).toContain("l");
+
+    // . hint on Error button
+    expect(r.getByRole("button", { name: /1 error/ }).textContent).toContain(".");
+  });
 });

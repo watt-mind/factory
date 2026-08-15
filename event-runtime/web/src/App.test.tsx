@@ -181,3 +181,20 @@ describe("inject hotkey (WM-80)", () => {
     expect(document.activeElement === search).toBe(true);
   });
 });
+
+describe("filter hotkey / (WM-217)", () => {
+  test("`/` focuses trace search when data-trace-search element is present", async () => {
+    renderApp();
+    const traceInput = document.createElement("input");
+    traceInput.setAttribute("data-trace-search", "");
+    document.body.appendChild(traceInput);
+    try {
+      act(() => {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true }));
+      });
+      expect(document.activeElement === traceInput).toBe(true);
+    } finally {
+      traceInput.remove();
+    }
+  });
+});

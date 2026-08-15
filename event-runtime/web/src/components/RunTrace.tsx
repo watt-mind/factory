@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { goPrefixActive } from "../goSequence";
+import { keyGuard } from "../hooks";
 import type { RunState, TraceEntry, TracePayload } from "../types";
 import { isCancellable } from "./RunDetailBlocks";
 import { humanSize, JsonBlock, Section, notify } from "./ui";
@@ -568,7 +570,7 @@ export function RunTrace({
   const tailCut = !full && visibleEntries.length > PANEL_TAIL;
   const shown = tailCut ? visibleEntries.slice(-PANEL_TAIL) : visibleEntries;
 
-  const handleJumpToError = () => {
+  const handleJumpToError = useCallback(() => {
     if (allErrorEntries.length === 0) return;
     const nextIdx = activeErrorIdx === null ? 0 : (activeErrorIdx + 1) % allErrorEntries.length;
     const target = allErrorEntries[nextIdx];
@@ -585,7 +587,7 @@ export function RunTrace({
         setFilter(full ? "all" : "errors");
       }
     }
-  };
+  }, [allErrorEntries, activeErrorIdx, shown, full]);
 
   // Waterfall timing calculations:
   const { durations, maxDurationMs } = useMemo(() => {
@@ -624,6 +626,18 @@ export function RunTrace({
   const scroller = useRef<HTMLDivElement>(null);
   const regionRef = useRef<HTMLDivElement>(null);
 
+  const jumpToLatest = useCallback(() => {
+    setFollowLive(true);
+    setUnreadCount(0);
+    lastSeenSeqRef.current = entries.length > 0 ? entries[entries.length - 1].seq : 0;
+    if (scroller.current) {
+      scroller.current.scrollTo({
+        top: scroller.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }
+  }, [entries]);
+
   const onTraceRegionKeyDown = (e: ReactKeyboardEvent) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (isTypingTarget(e.target)) return;
@@ -649,6 +663,27 @@ export function RunTrace({
   };
 
   const onSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (search) {
+        setSearch("");
+        setActiveMatch(0);
+      } else {
+        e.currentTarget.blur();
+      }
+      return;
+    }
+    if (e.key === "Enter" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (searchMatches.length > 0) {
+        e.preventDefault();
+        if (e.shiftKey || e.key === "ArrowUp") {
+          setActiveMatch((m) => (m - 1 + searchMatches.length) % searchMatches.length);
+        } else {
+          setActiveMatch((m) => (m + 1) % searchMatches.length);
+        }
+        return;
+      }
+    }
     if (e.key !== "x" || e.metaKey || e.ctrlKey || e.altKey) return;
     if (!isCancellable(state)) return;
     e.preventDefault();
@@ -660,6 +695,65 @@ export function RunTrace({
     e.currentTarget.blur();
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true }));
   };
+
+  // Single-key shortcuts for trace navigation: 1-5 for kind tabs, [ / ] to cycle,
+  // e for expand/collapse details, l for follow-live, G for jump-to-latest, . for jump-to-error.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (keyGuard(e) || isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey || goPrefixActive()) return;
+
+      if (e.key === "1") {
+        e.preventDefault();
+        setFilter("all");
+      } else if (e.key === "2") {
+        e.preventDefault();
+        setFilter("tools");
+      } else if (e.key === "3") {
+        e.preventDefault();
+        setFilter("reasoning");
+      } else if (e.key === "4") {
+        e.preventDefault();
+        setFilter("errors");
+      } else if (e.key === "5") {
+        e.preventDefault();
+        setFilter("usage");
+      } else if (e.key === "[") {
+        e.preventDefault();
+        const i = FILTER_ORDER.indexOf(filter);
+        if (i >= 0) setFilter(FILTER_ORDER[(i - 1 + FILTER_ORDER.length) % FILTER_ORDER.length]);
+      } else if (e.key === "]") {
+        e.preventDefault();
+        const i = FILTER_ORDER.indexOf(filter);
+        if (i >= 0) setFilter(FILTER_ORDER[(i + 1) % FILTER_ORDER.length]);
+      } else if (e.key === "e") {
+        e.preventDefault();
+        setExpandAll((v) => {
+          if (v) setExpandedSeqs(new Set());
+          return !v;
+        });
+      } else if (e.key === "l") {
+        if (live) {
+          e.preventDefault();
+          if (followLive) {
+            setFollowLive(false);
+            lastSeenSeqRef.current = entries.length > 0 ? entries[entries.length - 1].seq : 0;
+          } else {
+            jumpToLatest();
+          }
+        }
+      } else if (e.key === "G") {
+        e.preventDefault();
+        jumpToLatest();
+      } else if (e.key === ".") {
+        if (counts.errors > 0) {
+          e.preventDefault();
+          handleJumpToError();
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [filter, live, followLive, entries, counts.errors, handleJumpToError, jumpToLatest]);
 
   // Jump to active search match:
   useEffect(() => {
@@ -723,18 +817,6 @@ export function RunTrace({
     }
   };
 
-  const jumpToLatest = () => {
-    setFollowLive(true);
-    setUnreadCount(0);
-    lastSeenSeqRef.current = entries.length > 0 ? entries[entries.length - 1].seq : 0;
-    if (scroller.current) {
-      scroller.current.scrollTo({
-        top: scroller.current.scrollHeight,
-        behavior: "smooth",
-      });
-    }
-  };
-
   // Multi-attempt runs: divider per attempt (entries are seq-ascending, so
   // attempts are contiguous). A single attempt needs no labels.
   const multiAttempt = new Set(shown.map((e) => e.attempt)).size > 1;
@@ -767,13 +849,14 @@ export function RunTrace({
                   ? "border-(--border-strong) bg-(--surface-2) text-(--text)"
                   : "border-(--border) bg-(--surface-0) text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text-dim)"
               }`}
-              title={followLive ? "Auto-scrolling live. Click to pause." : "Auto-scroll paused. Click to follow live."}
+              title={followLive ? "Auto-scrolling live (l). Click to pause." : "Auto-scroll paused (l). Click to follow live."}
             >
               <span
                 className={`size-1.5 rounded-full ${followLive ? "animate-pulse" : ""}`}
                 style={{ background: followLive ? "var(--hue-warn)" : "var(--text-faint)" }}
               />
               <span>{followLive ? "Follow live" : "Follow live (paused)"}</span>
+              <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">l</span>
             </button>
             {unreadCount > 0 && !followLive ? (
               <span className="text-[11px] font-medium" style={{ color: "var(--hue-warn)" }}>
@@ -794,7 +877,7 @@ export function RunTrace({
       {entries.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1" role="tablist" aria-label="Trace kind">
-            {filterTabs.map((t) => (
+            {filterTabs.map((t, idx) => (
               <button
                 key={t.key}
                 type="button"
@@ -809,9 +892,13 @@ export function RunTrace({
                     : "text-(--text-faint) hover:bg-(--surface-2)"
                 }`}
                 style={t.key === "errors" && t.count > 0 ? { color: "var(--hue-err)" } : undefined}
+                title={`Filter to ${t.label} (${idx + 1})`}
               >
-                {t.label}
+                <span>{t.label}</span>
                 {t.count > 0 && <span className="ml-1 tabular-nums opacity-75">{t.count}</span>}
+                <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                  {idx + 1}
+                </span>
               </button>
             ))}
           </div>
@@ -827,7 +914,7 @@ export function RunTrace({
                   color: "var(--hue-err)",
                   background: "color-mix(in oklch, var(--hue-err) 10%, transparent)",
                 }}
-                title="Jump to next error entry"
+                title="Jump to next error entry (.)"
               >
                 <span>{counts.errors === 1 ? "1 error" : `${counts.errors} errors`}</span>
                 {activeErrorIdx !== null && (
@@ -835,11 +922,14 @@ export function RunTrace({
                     ({(activeErrorIdx % counts.errors) + 1}/{counts.errors})
                   </span>
                 )}
+                <span aria-hidden="true" className="mono ml-0.5 opacity-75 text-[10px]">.</span>
               </button>
             )}
 
             <div className="flex items-center gap-1 rounded border border-(--border) bg-(--surface-0) px-1.5 py-0.5 text-[11px]">
               <input
+                data-trace-search
+                data-view-filter="trace"
                 value={search}
                 onChange={(e) => {
                   setSearch(e.target.value);
@@ -850,6 +940,11 @@ export function RunTrace({
                 aria-label="Search trace"
                 className="w-24 bg-transparent outline-none text-(--text) placeholder:text-(--text-faint) sm:w-32"
               />
+              {!search && (
+                <kbd aria-hidden="true" className="mono text-[9px] text-(--text-faint) border border-(--border) rounded px-1 bg-(--surface-1)">
+                  /
+                </kbd>
+              )}
               {search && (
                 <>
                   <span className="mono text-[10px] text-(--text-faint)">
@@ -895,9 +990,11 @@ export function RunTrace({
                 setExpandAll((v) => !v);
                 if (expandAll) setExpandedSeqs(new Set());
               }}
-              className="text-[11px] text-(--text-faint) hover:text-(--text-dim)"
+              className="flex items-center gap-1 text-[11px] text-(--text-faint) hover:text-(--text-dim)"
+              title="Toggle expand/collapse details (e)"
             >
-              {expandAll ? "Collapse details" : "Expand details"}
+              <span>{expandAll ? "Collapse details" : "Expand details"}</span>
+              <span aria-hidden="true" className="mono text-[10px] text-(--text-faint)">e</span>
             </button>
           </div>
         </div>
@@ -972,12 +1069,14 @@ export function RunTrace({
                 type="button"
                 onClick={jumpToLatest}
                 className="flex items-center gap-1.5 rounded-full bg-(--accent) px-3 py-1 text-[11px] font-medium text-white shadow-lg transition-transform hover:scale-105 active:scale-95"
+                title="Jump to latest trace entry (G)"
               >
                 <span>
                   {unreadCount > 0
                     ? `New activity (${unreadCount}) — Jump to latest`
                     : "Jump to latest"}
                 </span>
+                <span aria-hidden="true" className="mono ml-0.5 text-white/75 text-[10px]">G</span>
               </button>
             </div>
           )}
