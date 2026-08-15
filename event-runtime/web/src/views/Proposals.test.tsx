@@ -84,6 +84,8 @@ describe("Proposals multi-row selection & bulk actions (WM-71)", () => {
     origReject = api.reject;
 
     api.status = async () => stubStatus();
+    api.proposals = async () => ({ proposals: [] });
+    api.proposalHistory = async () => ({ proposals: [] });
     api.runs = async () => ({ runs: [] });
     api.events = async () => ({ events: [] });
     api.agents = async () => ({ agents: [], edges: {}, eventTypes: [], contracts: {} });
@@ -600,6 +602,7 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     origReject = api.reject;
 
     api.status = async () => stubStatus();
+    api.proposals = async () => ({ proposals: [] });
     api.runs = async () => ({ runs: [] });
     api.events = async () => ({ events: [] });
     api.agents = async () => ({ agents: [], edges: {}, eventTypes: [], contracts: {} });
@@ -770,7 +773,7 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     });
 
     const r = renderProposals();
-    const origin = await waitFor(() => r.getByText(eventId));
+    const origin = await waitFor(() => r.getByTitle(eventId));
     expect(origin.closest("td")?.getAttribute("title")).toBe(eventId);
     const reasonCell = r.getByText(reason);
     expect(reasonCell.closest("td")?.getAttribute("title")).toBe(reason);

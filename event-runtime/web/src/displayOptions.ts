@@ -1,8 +1,8 @@
 /**
- * Linear-style display options for the table views (OPS-493): grouping into
+ * Linear-style display options for the table views (OPS-493, WM-214): grouping into
  * collapsible sections, sub-grouping, in-group ordering, "show empty groups",
- * and column visibility — all behind one per-view config, the same shape of
- * per-view declaration `filterQuery.ts` uses for facets.
+ * column visibility, and dynamic payload-path custom columns — all behind one per-view config,
+ * the same shape of per-view declaration `filterQuery.ts` uses for facets.
  *
  * Everything here is pure. The views own their `<table>` markup; this module
  * only decides how rows partition into sections and in what order, and the
@@ -10,6 +10,7 @@
  * rows of open sections in render order — so keyboard traversal skips
  * collapsed groups without the hook ever learning about groups.
  */
+import { extractRowValue } from "./pathExtractor";
 
 export interface ColumnDef {
   key: string;
@@ -17,6 +18,8 @@ export interface ColumnDef {
   /** Identity columns the view cannot render without; not toggleable. */
   always?: boolean;
   defaultHidden?: boolean;
+  /** True for operator-added dynamic payload / spec path columns (WM-214). */
+  isCustom?: boolean;
 }
 
 export interface GroupField<T> {
@@ -64,6 +67,8 @@ export interface DisplayState {
   showEmpty: boolean;
   hiddenColumns: string[];
   collapsed: string[];
+  /** Custom property paths configured by operator (e.g. ["payload.repo", "spec.input.model"]). */
+  customColumns: string[];
 }
 
 /** "No grouping" / "API order" sentinels — always offered, never in configs. */
@@ -79,6 +84,7 @@ export function defaultDisplayState<T>(config: DisplayConfig<T>): DisplayState {
     showEmpty: false,
     hiddenColumns: config.columns.filter((c) => c.defaultHidden).map((c) => c.key),
     collapsed: [],
+    customColumns: [],
     ...config.defaults,
   };
 }
@@ -107,9 +113,22 @@ export function loadDisplayState<T>(config: DisplayConfig<T>): DisplayState {
   }
   if (typeof parsed !== "object" || parsed === null) return fallback;
   const p = parsed as Record<string, unknown>;
+
+  const customColumns: string[] = Array.isArray(p.customColumns)
+    ? p.customColumns.filter((k): k is string => typeof k === "string" && k.trim().length > 0)
+    : fallback.customColumns;
+
+  const customColKeys = new Set(customColumns.map((c) => (c.startsWith("custom:") ? c : `custom:${c}`)));
   const groupKeys = new Set([NONE, ...config.groups.map((g) => g.key)]);
-  const sortKeys = new Set([DEFAULT_ORDER, ...config.sorts.map((s) => s.key)]);
-  const columnKeys = new Set(config.columns.filter((c) => !c.always).map((c) => c.key));
+  const sortKeys = new Set([
+    DEFAULT_ORDER,
+    ...config.sorts.map((s) => s.key),
+    ...customColKeys,
+  ]);
+  const columnKeys = new Set([
+    ...config.columns.filter((c) => !c.always).map((c) => c.key),
+    ...customColKeys,
+  ]);
   const subGroupKeys = new Set([NONE, ...(config.subGroups ?? [])]);
   const str = (v: unknown, ok: Set<string>, fb: string) =>
     typeof v === "string" && ok.has(v) ? v : fb;
@@ -129,6 +148,7 @@ export function loadDisplayState<T>(config: DisplayConfig<T>): DisplayState {
     collapsed: Array.isArray(p.collapsed)
       ? p.collapsed.filter((k): k is string => typeof k === "string")
       : fallback.collapsed,
+    customColumns,
   };
 }
 
@@ -148,6 +168,7 @@ export function isDefaultDisplayState<T>(config: DisplayConfig<T>, state: Displa
     state.sortBy === d.sortBy &&
     state.sortDir === d.sortDir &&
     state.showEmpty === d.showEmpty &&
+    state.customColumns.length === 0 &&
     state.hiddenColumns.length === d.hiddenColumns.length &&
     state.hiddenColumns.every((k) => d.hiddenColumns.includes(k))
   );
@@ -165,9 +186,9 @@ export interface Section<T> {
   subsections?: Section<T>[];
 }
 
-const cmp = (a: string | number, b: string | number): number => {
+const cmp = (a: unknown, b: unknown): number => {
   if (typeof a === "number" && typeof b === "number") return a - b;
-  return String(a).localeCompare(String(b));
+  return String(a ?? "").localeCompare(String(b ?? ""));
 };
 
 /** Stable sort by the configured field; DEFAULT_ORDER keeps (or reverses) API order. */
@@ -175,6 +196,18 @@ export function sortRows<T>(rows: T[], config: DisplayConfig<T>, state: DisplayS
   const dirSign = state.sortDir === "desc" ? -1 : 1;
   if (state.sortBy === DEFAULT_ORDER) {
     return dirSign === 1 ? rows.slice() : rows.slice().reverse();
+  }
+  if (state.sortBy.startsWith("custom:")) {
+    const customPath = state.sortBy.slice(7);
+    return rows
+      .map((row, i) => ({ row, i, v: extractRowValue(row, customPath) }))
+      .sort((a, b) => {
+        if (a.v === undefined && b.v === undefined) return a.i - b.i;
+        if (a.v === undefined) return 1;
+        if (b.v === undefined) return -1;
+        return dirSign * cmp(a.v, b.v) || a.i - b.i;
+      })
+      .map((e) => e.row);
   }
   const field = config.sorts.find((s) => s.key === state.sortBy);
   if (!field) return rows.slice();
@@ -278,9 +311,15 @@ export function toggleCollapsed(state: DisplayState, key: string): DisplayState 
   return { ...state, collapsed };
 }
 
-/** Columns the table actually renders, in declared order. */
+/** Columns the table actually renders, in declared order followed by custom columns. */
 export function visibleColumns<T>(config: DisplayConfig<T>, state: DisplayState): ColumnDef[] {
-  return config.columns.filter((c) => c.always || !state.hiddenColumns.includes(c.key));
+  const dynamicCols: ColumnDef[] = (state.customColumns ?? []).map((path) => ({
+    key: path.startsWith("custom:") ? path : `custom:${path}`,
+    label: path.startsWith("custom:") ? path.slice(7) : path,
+    isCustom: true,
+  }));
+  const allCols = [...config.columns, ...dynamicCols];
+  return allCols.filter((c) => c.always || !state.hiddenColumns.includes(c.key));
 }
 
 export function toggleColumn(state: DisplayState, key: string): DisplayState {
@@ -288,6 +327,28 @@ export function toggleColumn(state: DisplayState, key: string): DisplayState {
     ? state.hiddenColumns.filter((k) => k !== key)
     : [...state.hiddenColumns, key];
   return { ...state, hiddenColumns };
+}
+
+export function addCustomColumn(state: DisplayState, path: string): DisplayState {
+  const clean = path.trim().replace(/^custom:/, "");
+  if (!clean || state.customColumns.includes(clean)) return state;
+  const colKey = `custom:${clean}`;
+  return {
+    ...state,
+    customColumns: [...state.customColumns, clean],
+    hiddenColumns: state.hiddenColumns.filter((k) => k !== colKey && k !== clean),
+  };
+}
+
+export function removeCustomColumn(state: DisplayState, path: string): DisplayState {
+  const clean = path.trim().replace(/^custom:/, "");
+  const colKey = `custom:${clean}`;
+  return {
+    ...state,
+    customColumns: state.customColumns.filter((c) => c !== clean),
+    hiddenColumns: state.hiddenColumns.filter((k) => k !== colKey && k !== clean),
+    sortBy: state.sortBy === colKey || state.sortBy === clean ? DEFAULT_ORDER : state.sortBy,
+  };
 }
 
 /**
@@ -300,6 +361,16 @@ export function cycleColumnSort<T>(
   state: DisplayState,
   columnKey: string,
 ): DisplayState {
+  if (columnKey.startsWith("custom:")) {
+    if (state.sortBy !== columnKey) {
+      return { ...state, sortBy: columnKey, sortDir: "asc" };
+    }
+    if (state.sortDir === "asc") {
+      return { ...state, sortDir: "desc" };
+    }
+    return { ...state, sortBy: DEFAULT_ORDER, sortDir: "asc" };
+  }
+
   const field = config.sorts.find((s) => s.column === columnKey);
   if (!field) return state;
   const natural = field.defaultDir ?? "asc";

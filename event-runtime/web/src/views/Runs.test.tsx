@@ -314,7 +314,7 @@ describe("Runs component harness: cross-tab reveal", () => {
         });
 
         await waitFor(() => {
-          const tab = getByRole("tab", { name: /^RUNNING/i });
+          const tab = getByRole("tab", { name: /^Active/i });
           expect(tab.getAttribute("aria-selected")).toBe("true");
         });
 
@@ -335,7 +335,7 @@ describe("Runs component harness: cross-tab reveal", () => {
 
         // Should switch to ALL tab and reveal the FAILED run
         await waitFor(() => {
-          const allTab = getByRole("tab", { name: /^ALL/i });
+          const allTab = getByRole("tab", { name: /^All/i });
           expect(allTab.getAttribute("aria-selected")).toBe("true");
           const targetCell = container.querySelector(`td[title="run_failed_target"]`);
           expect(targetCell).toBeTruthy();
@@ -457,7 +457,7 @@ describe("Runs component harness: cross-tab reveal", () => {
         });
 
         await waitFor(() => {
-          const tab = getByRole("tab", { name: /^CANCELLED/i });
+          const tab = getByRole("tab", { name: /^Cancelled/i });
           expect(tab.getAttribute("aria-selected")).toBe("true");
           expect(onFocusStateConsumed).toHaveBeenCalledTimes(1);
         });

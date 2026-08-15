@@ -140,7 +140,7 @@ export function RunFull({
             <ol className="flex min-w-0 flex-wrap items-center gap-2 list-none p-0 m-0 text-[13px]">
               <li className="shrink-0">
                 <Button onClick={onBack}>
-                  ← Runs
+                  Runs
                 </Button>
               </li>
               <li aria-hidden="true" className="text-(--text-faint) shrink-0">
@@ -168,13 +168,57 @@ export function RunFull({
             </span>
           )}
         </div>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          <Button onClick={() => copyText(runId, "run id")}>Copy id</Button>
-          <Button onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command")}>
-            Copy CLI
-          </Button>
-          <Button onClick={copyLink}>Copy link</Button>
-        </span>
+        <div className="ml-auto flex shrink-0 items-center gap-3">
+          {d && (
+            <div className="flex items-center gap-1.5">
+              {isCancellable(d.run.state) && (
+                <Button
+                  variant="danger"
+                  disabled={!connected || cancel.isPending}
+                  onClick={() => setConfirm("cancel")}
+                >
+                  Cancel <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">x</span>
+                </Button>
+              )}
+              {d.run.state === "FAILED" && (
+                attemptsExhausted ? (
+                  <Button disabled={!connected} onClick={() => setConfirm("force-retry")}>
+                    Force retry…
+                  </Button>
+                ) : (
+                  <Button
+                    disabled={!connected || retry.isPending}
+                    onClick={() => retry.mutate({ id: d.run.runId, force: false })}
+                  >
+                    Retry
+                  </Button>
+                )
+              )}
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 text-[11px] text-(--text-faint)">
+            <span>copy:</span>
+            <button
+              type="button"
+              onClick={() => copyText(runId, "run id")}
+              className="cursor-pointer hover:text-(--text)"
+            >
+              id
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${runId}`, "CLI inspect command")}
+              className="cursor-pointer hover:text-(--text)"
+            >
+              CLI
+            </button>
+            <span>·</span>
+            <button type="button" onClick={copyLink} className="cursor-pointer hover:text-(--text)">
+              link
+            </button>
+          </div>
+        </div>
       </header>
 
       {unknownRun ? (

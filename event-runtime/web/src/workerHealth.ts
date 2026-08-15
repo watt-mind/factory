@@ -1,14 +1,10 @@
 import type { Worker, WorkerState } from "./types";
+import { WORKER_HUES as UI_WORKER_HUES } from "./components/ui";
 
 export type WorkerHealth = WorkerState | "stale";
 
-/** Four mutually exclusive tokens; `stale` is the loudest because it is a lie detector. */
-export const WORKER_HUES: Record<WorkerHealth, string> = {
-  idle: "var(--hue-ok)",
-  busy: "var(--hue-warn)",
-  stopped: "var(--hue-idle)",
-  stale: "var(--hue-err)",
-};
+/** Four mutually exclusive tokens; `stale` is the loudest because it is a lie detector (re-exported from centralized ui.tsx). */
+export const WORKER_HUES: Record<WorkerHealth, string> = UI_WORKER_HUES as Record<WorkerHealth, string>;
 
 /**
  * A stale heartbeat outranks whatever the row claims: a stale busy worker is

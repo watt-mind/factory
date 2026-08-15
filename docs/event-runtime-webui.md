@@ -318,6 +318,7 @@ no shared set. Every rule below is checkable in review.
    | Glyph     | Meaning                     | Where                                            |
    | --------- | --------------------------- | ------------------------------------------------ |
    | `▶`       | collapse/expand chevron     | `GroupHeaderRow` only — 9px, `rotate-90` on open |
+   | `→`       | transition / direction      | lifecycle spans (`QUEUED → RUNNING`), feed transitions, sort orders |
    | `×`       | dismiss/remove this item    | chips and tokens only — never "failed"           |
    | `↑` / `↓` | sort direction              | `Th` header cells only                           |
    | `·`       | inline metadata separator   | footer/status lines                              |
@@ -447,12 +448,20 @@ emoji, no "sad state" art. Loading copy is `Loading <noun>…`; error copy
 names the dependency that is down. A spinner is not used anywhere — the 2 s
 poll (§6) makes staleness the honest signal, not motion.
 
-#### Accessibility for icons and glyphs
+- **Zero-count legends**: Zero-count items in a telemetry legend sit at `--text-faint`
+  (at 60% opacity) or collapse cleanly to an honest empty line (e.g. `nothing in flight`,
+  `no terminal runs`) rather than drawing empty visual noise.
+
+#### Accessibility for icons, glyphs, and telemetry meters
 
 - Decorative (has an adjacent visible label): `aria-hidden="true"`. This is
   the normal case and should be nearly the only case.
 - Meaningful (no visible label — avoid, but if it exists): `role="img"` +
   `aria-label`, and the parent control also gets `title` for sighted hover.
+- **Stacked visual meters & telemetry bars**: Visual bars (`SegmentMeter`) are
+  `aria-hidden="true"`; their associated legend items are the interactive and
+  accessible keyboard/screen-reader surface. Every interactive tick or item
+  carries a complete `aria-label` and `title`.
 - Never convey a state by icon or hue alone: the word is always present
   (`StateBadge` renders `{state}`; the group header renders `label`).
 - Motion: `animate-pulse` is the only animation and it must be wrapped so
