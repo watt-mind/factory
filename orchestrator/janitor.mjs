@@ -207,13 +207,17 @@ export async function survey(repo, { apply }, {
   let states = {};
   if (tickets.length) {
     const nums = tickets.map((t) => Number(t.split("-")[1]));
-    let nodes = [];
-    if (queryIssues) {
-      nodes = await queryIssues(repo.team, nums);
-    } else {
-      const q = `query($n:[Float!]){ issues(first:250, filter:{ number:{in:$n}, team:{key:{eq:"${repo.team}"}} }){ nodes{ identifier state{name type} } } }`;
-      nodes = (await gql(q, { n: nums }))?.issues?.nodes ?? [];
-    }
+    const queryBatch = queryIssues ?? (async (team, batch) => {
+      const q = `query($n:[Float!]){ issues(first:250, filter:{ number:{in:$n}, team:{key:{eq:"${team}"}} }){ nodes{ identifier state{name type} } } }`;
+      return (await gql(q, { n: batch }))?.issues?.nodes ?? [];
+    });
+
+    // Linear caps this connection at 250 nodes. Keep each filter at or below
+    // that cap and run the independent requests together so every worktree is
+    // resolved without turning a large checkout into a serial API crawl.
+    const batches = [];
+    for (let i = 0; i < nums.length; i += 250) batches.push(nums.slice(i, i + 250));
+    const nodes = (await Promise.all(batches.map((batch) => queryBatch(repo.team, batch)))).flat();
     states = Object.fromEntries(nodes.map((n) => [n.identifier, n.state]));
   }
 
