@@ -341,6 +341,52 @@ describe("ContextTabs", () => {
     expect(r.queryByRole("listbox")).toBeNull();
   });
 
+  test("keyboard navigation scrolls each highlighted picker option into view", () => {
+    const scrolls: Array<{ element: HTMLElement; options?: boolean | ScrollIntoViewOptions }> = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (
+      this: HTMLElement,
+      options?: boolean | ScrollIntoViewOptions,
+    ) {
+      scrolls.push({ element: this, options });
+    };
+
+    try {
+      const r = render(
+        <ContextTabs
+          repos={[repo("alpha"), repo("bravo"), repo("charlie")]}
+          reposError={false}
+          openRepos={[]}
+          active={{ kind: "all" }}
+          onSelect={() => {}}
+          onOpen={() => {}}
+          onClose={() => {}}
+        />,
+      );
+
+      act(() => {
+        fireEvent.click(r.getByRole("button", { name: "Open a repo tab" }));
+      });
+      const listbox = r.getByRole("listbox", { name: "Factory repos" });
+      const options = r.getAllByRole("option");
+      scrolls.length = 0;
+
+      for (const [key, expected] of [
+        ["ArrowDown", options[1]],
+        ["End", options[2]],
+        ["ArrowUp", options[1]],
+        ["Home", options[0]],
+      ] as const) {
+        act(() => {
+          fireEvent.keyDown(listbox, { key });
+        });
+        expect(scrolls.at(-1)).toEqual({ element: expected, options: { block: "nearest" } });
+      }
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
   test("Escape closes the repo picker and returns focus to +", () => {
     const opened: string[] = [];
     const r = render(

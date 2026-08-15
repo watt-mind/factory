@@ -198,6 +198,13 @@ export function ContextTabs({
 
   useEffect(() => {
     if (!picker) return;
+    listboxRef.current
+      ?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [picker, pickerHighlight]);
+
+  useEffect(() => {
+    if (!picker) return;
     function onDoc(e: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPicker(false);
     }
