@@ -148,7 +148,7 @@ export function Proposals({
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<"open" | "history">("open");
+  const [tab, setTab] = useState<ProposalTab>("open");
   const query = useQuery({
     queryKey: ["proposals"],
     queryFn: () => api.proposals(),
@@ -558,7 +558,7 @@ export function Proposals({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel?.id, canApprove, isOpen, connected]);
 
-  const selectTab = (t: (typeof PROPOSAL_TABS)[number]) => {
+  const selectTab = (t: ProposalTab) => {
     setTab(t);
     setExpiredOnly(false);
     onSelectProposal(null);
