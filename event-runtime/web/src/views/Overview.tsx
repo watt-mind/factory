@@ -365,10 +365,10 @@ export function Overview({
 
       {/* Promoted Doctor Deck when anomalies exist */}
       {hasAnomalies && (
-        <div className="mb-5 rounded-lg border border-[color:var(--hue-warn)] bg-[color:color-mix(in_oklch,var(--hue-warn)_8%,var(--surface-1))] p-3">
+        <div className="mb-5 rounded-lg border border-(--hue-warn) bg-[color-mix(in_oklch,var(--hue-warn)_8%,var(--surface-1))] p-3">
           <div className="mb-2 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[12px] font-semibold text-[color:var(--hue-warn)] uppercase tracking-wide">
-              <span className="size-2 rounded-full bg-[color:var(--hue-warn)] animate-pulse" />
+            <div className="flex items-center gap-2 text-[12px] font-semibold text-(--hue-warn) uppercase tracking-wide">
+              <span className="size-2 rounded-full bg-(--hue-warn) motion-safe:animate-pulse" />
               Doctor Anomaly Deck · {anomalyRows.length} active issue{anomalyRows.length === 1 ? "" : "s"}
               {feedsUnscoped ? " · factory-wide" : ""}
             </div>
@@ -380,7 +380,7 @@ export function Overview({
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0"
               >
                 {a.proposalId ? (
-                  <span className="min-w-0 flex flex-col gap-0.5 text-[12px]" style={{ color: "var(--hue-warn)" }}>
+                  <span className="min-w-0 flex flex-col gap-0.5 text-[12px] text-(--hue-warn)">
                     <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words">
                       <span>expired open proposal</span>
                       <span className="text-(--text-faint)">·</span>
@@ -674,7 +674,7 @@ export function Overview({
                     {o.published_at ? (
                       <Ago iso={o.published_at} now={now} className="mono shrink-0 text-(--text-faint)" />
                     ) : (
-                      <span className="shrink-0 text-[11px]" style={{ color: "var(--hue-warn)" }}>
+                      <span className="shrink-0 text-[11px] text-(--hue-warn)">
                         unpublished
                       </span>
                     )}

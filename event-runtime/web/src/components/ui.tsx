@@ -55,6 +55,14 @@ export const DECISION_HUES: Record<string, string> = {
   noop: "var(--hue-idle)",
 };
 
+/** Four mutually exclusive worker health tokens (webui spec §5.2 + §10.9). */
+export const WORKER_HUES: Record<string, string> = {
+  idle: "var(--hue-ok)",
+  busy: "var(--hue-warn)",
+  stopped: "var(--hue-idle)",
+  stale: "var(--hue-err)",
+};
+
 /**
  * Returns the matching theme hue for a facet value (states, statuses, decisions).
  */
@@ -1067,7 +1075,7 @@ export function Button({
     default: "border-(--border-strong) bg-(--surface-2) text-(--text) hover:bg-(--surface-3)",
     primary: "border-transparent bg-(--accent) text-(--on-accent) hover:opacity-90",
     danger:
-      "border-(--border-strong) bg-(--surface-2) hover:bg-(--surface-3) text-[color:var(--hue-err)]",
+      "border-(--border-strong) bg-(--surface-2) hover:bg-(--surface-3) text-(--hue-err)",
   }[variant];
   return (
     <button

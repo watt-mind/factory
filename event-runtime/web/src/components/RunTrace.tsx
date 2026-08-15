@@ -128,7 +128,7 @@ export function MarkdownView({
     return (
       <div className={`relative ${className}`}>
         {allowToggle && (
-          <div className="mb-1 flex justify-end gap-2 text-[10.5px]">
+          <div className="mb-1 flex justify-end gap-2 text-[11px]">
             <button type="button" onClick={() => copyText(text, "raw markdown")} className="text-(--text-faint) hover:text-(--text)">Copy</button>
             <button type="button" onClick={() => setRaw(false)} className="text-(--accent) hover:underline">Formatted view</button>
           </div>
@@ -181,7 +181,7 @@ export function MarkdownView({
         const codeText = codeBuffer.join("\n");
         blocks.push(
           <div key={`code-${i}`} className="my-1.5 overflow-hidden rounded-md border border-(--border) bg-(--surface-0)">
-            <div className="flex items-center justify-between border-b border-(--border) bg-(--surface-1) px-2.5 py-0.5 text-[10px] text-(--text-faint) mono">
+            <div className="flex items-center justify-between border-b border-(--border) bg-(--surface-1) px-2.5 py-0.5 text-[11px] text-(--text-faint) mono">
               <span>{codeLang || "code"}</span>
               <button type="button" onClick={() => copyText(codeText, "code block")} className="hover:text-(--text)">Copy</button>
             </div>
@@ -210,11 +210,11 @@ export function MarkdownView({
       const level = headingMatch[1].length;
       const content = headingMatch[2];
       if (level === 1) {
-        blocks.push(<h1 key={i} className="mb-1.5 mt-2 text-[14.5px] font-bold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h1>);
+        blocks.push(<h1 key={i} className="mb-1.5 mt-2 text-[14px] font-semibold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h1>);
       } else if (level === 2) {
-        blocks.push(<h2 key={i} className="mb-1 mt-2 text-[13.5px] font-semibold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h2>);
+        blocks.push(<h2 key={i} className="mb-1 mt-2 text-[13px] font-semibold text-(--text) border-b border-(--border) pb-0.5">{renderInlineMarkdown(content)}</h2>);
       } else if (level === 3) {
-        blocks.push(<h3 key={i} className="mb-0.5 mt-1.5 text-[12.5px] font-semibold text-(--text)">{renderInlineMarkdown(content)}</h3>);
+        blocks.push(<h3 key={i} className="mb-0.5 mt-1.5 text-[12px] font-semibold text-(--text)">{renderInlineMarkdown(content)}</h3>);
       } else {
         blocks.push(<h4 key={i} className="mb-0.5 mt-1 text-[12px] font-semibold text-(--text)">{renderInlineMarkdown(content)}</h4>);
       }
@@ -263,7 +263,7 @@ export function MarkdownView({
   return (
     <div className={`relative ${className}`}>
       {allowToggle && text.length > 50 && (
-        <div className="mb-1 flex justify-end gap-2 text-[10px]">
+        <div className="mb-1 flex justify-end gap-2 text-[11px]">
           <button type="button" onClick={() => copyText(text, "markdown text")} className="text-(--text-faint) hover:text-(--text)">Copy</button>
           <button type="button" onClick={() => setRaw(true)} className="text-(--text-faint) hover:text-(--accent)">Raw</button>
         </div>
@@ -373,7 +373,7 @@ function TraceBody({
   if (p.truncated) {
     return (
       <div className="min-w-0 flex-1">
-        <span className="text-[11px]" style={{ color: "var(--hue-warn)" }}>
+        <span className="text-[11px] text-(--hue-warn)">
           {kind} payload truncated · original {humanSize(p.originalBytes ?? 0)}
         </span>
         {p.preview && (
@@ -770,13 +770,13 @@ export function RunTrace({
               title={followLive ? "Auto-scrolling live. Click to pause." : "Auto-scroll paused. Click to follow live."}
             >
               <span
-                className={`size-1.5 rounded-full ${followLive ? "animate-pulse" : ""}`}
+                className={`size-1.5 rounded-full ${followLive ? "motion-safe:animate-pulse" : ""}`}
                 style={{ background: followLive ? "var(--hue-warn)" : "var(--text-faint)" }}
               />
               <span>{followLive ? "Follow live" : "Follow live (paused)"}</span>
             </button>
             {unreadCount > 0 && !followLive ? (
-              <span className="text-[11px] font-medium" style={{ color: "var(--hue-warn)" }}>
+              <span className="text-[11px] font-medium text-(--hue-warn)">
                 {unreadCount} new {unreadCount === 1 ? "event" : "events"}
               </span>
             ) : null}
@@ -784,7 +784,7 @@ export function RunTrace({
         ) : <div />}
 
         {tokenStats.hasTokens && (
-          <div className="flex items-center gap-1.5 rounded bg-(--surface-1) border border-(--border) px-2 py-0.5 text-[10.5px] mono text-(--text-dim)">
+          <div className="flex items-center gap-1.5 rounded bg-(--surface-1) border border-(--border) px-2 py-0.5 text-[11px] mono text-(--text-dim)">
             <span title="Cumulative token burn across trace">{tokenStats.promptTokens.toLocaleString()} in · {tokenStats.completionTokens.toLocaleString()} out</span>
             {tokenStats.totalCost > 0 && <span className="text-(--text-faint)">(${tokenStats.totalCost.toFixed(4)})</span>}
           </div>

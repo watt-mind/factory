@@ -175,7 +175,7 @@ export function RunFailureBanner({
         )}
       </div>
       {/* Full string, wrapping allowed — never truncate the one line that explains the failure. */}
-      <div className="mono mt-1 text-[12.5px] leading-relaxed break-words whitespace-pre-wrap text-(--text)">
+      <div className="mono mt-1 text-[12px] leading-relaxed break-words whitespace-pre-wrap text-(--text)">
         {reason ?? "No reason recorded on the terminal transition."}
       </div>
     </div>
@@ -267,7 +267,7 @@ export function ArtifactRow({ a }: { a: ArtifactRef }) {
         <div className="mt-2">
           {loading && <div className="text-[11px] text-(--text-faint)">Loading artifact preview…</div>}
           {error && (
-            <div className="text-[11px]" style={{ color: "var(--hue-err)" }}>
+            <div className="text-[11px] text-(--hue-err)">
               Failed to load preview: {error}
             </div>
           )}

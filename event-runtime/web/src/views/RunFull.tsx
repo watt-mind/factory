@@ -140,7 +140,7 @@ export function RunFull({
             <ol className="flex min-w-0 flex-wrap items-center gap-2 list-none p-0 m-0 text-[13px]">
               <li className="shrink-0">
                 <Button onClick={onBack}>
-                  ← Runs
+                  Runs
                 </Button>
               </li>
               <li aria-hidden="true" className="text-(--text-faint) shrink-0">

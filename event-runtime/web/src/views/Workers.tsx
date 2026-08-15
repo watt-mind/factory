@@ -237,13 +237,13 @@ function FleetStatusBanner({ banner }: { banner: FleetBanner }) {
       className="mb-3 rounded-md border p-3 text-[12px]"
       style={{
         color: hue,
-        borderColor: `color-mix(in oklch, ${hue} 55%, var(--border))`,
+        borderColor: hue,
         background: `color-mix(in oklch, ${hue} 8%, var(--surface-1))`,
       }}
     >
       <div className="flex items-center gap-2 font-semibold">
         <span
-          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "animate-pulse"}`}
+          className={`size-2 shrink-0 rounded-full ${banner.kind === "stale" ? "" : "motion-safe:animate-pulse"}`}
           style={{ background: hue }}
         />
         <span>{title}</span>

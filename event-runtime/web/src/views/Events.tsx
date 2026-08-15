@@ -671,7 +671,7 @@ export function Events({
                         <div>
                           <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
                           {e.planFailures > 0 && (
-                            <span className="ml-2 whitespace-nowrap text-[11px]" style={{ color: "var(--hue-err)" }}>
+                            <span className="ml-2 whitespace-nowrap text-[11px] text-(--hue-err)">
                               {e.planFailures} plan failure{e.planFailures === 1 ? "" : "s"}
                             </span>
                           )}

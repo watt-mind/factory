@@ -98,7 +98,7 @@ function Switch({
 
 function GroupLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mt-3 mb-1 text-[10.5px] font-medium tracking-wide text-(--text-faint) uppercase">
+    <div className="mt-3 mb-1 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
       {children}
     </div>
   );
