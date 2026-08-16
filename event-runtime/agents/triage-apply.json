@@ -82,7 +82,7 @@
   "mutating": true,
   "pins": {
     "agents/triage-apply.md": "sha256:88872839dbb90b8803b1ba0a64bd5bfdf83033c0f17311ffa2400ad2bae14639",
-    "schemas/triage-apply.input.json": "sha256:46916c8566076e33e9b487172d6460e898e53a8f13593f8136dbeb54bccb705b",
+    "schemas/triage-apply.input.json": "sha256:96c9ac46d4bbbef1818cbcd1d16fe5e0ac80804422ffa591628d68c3dd914c8d",
     "schemas/triage-applied.output.json": "sha256:5e4d4a2e59423a2aab88357521ff1e37889d50d658bee7278d599400f5dc3365"
   }
 }
