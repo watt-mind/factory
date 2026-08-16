@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { answeredIdentifiers, holdInfo, REPLY_GRACE_MS } from "./reply-detection.mjs";
+import { readFileSync } from "node:fs";
+import { answeredIdentifiers, HELD_QUERY, holdInfo, REPLY_GRACE_MS } from "./reply-detection.mjs";
 
 const LABEL_ID = "label-ai-blocked";
 const IDS = new Set([LABEL_ID]);
@@ -17,6 +18,21 @@ function issue({ id = "CLNT-1", state = "Blocked", adds = [], comments = [], add
 }
 
 describe("answeredIdentifiers", () => {
+  test("held-ticket queries request newest label history instead of truncating to oldest events", () => {
+    const digestSource = readFileSync(new URL("./digest.mjs", import.meta.url), "utf8");
+    for (const querySource of [HELD_QUERY, digestSource]) {
+      expect(querySource).toContain("history(last: 50)");
+      expect(querySource).not.toContain("history(first:");
+    }
+  });
+
+  test("a recent re-add in a long history keeps an older reply classified as unanswered", () => {
+    const oldAdds = Array.from({ length: 100 }, (_, i) => i * 60_000);
+    const recentAdd = 120 * 60_000;
+    const held = [issue({ adds: [...oldAdds, recentAdd], comments: [110 * 60_000] })];
+    expect(answeredIdentifiers(held, IDS)).toEqual(new Set());
+  });
+
   test("comment well after the label-add is answered", () => {
     const held = [issue({ adds: [0], comments: [-2000, 30 * 60_000] })];
     expect(answeredIdentifiers(held, IDS)).toEqual(new Set(["CLNT-1"]));
