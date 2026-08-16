@@ -298,17 +298,32 @@ export function ContextTabs({
   // Active state uses the accent tokens (not --surface-3) so it stays visible
   // against --surface-1 in light theme, where the two grays sit too close (WM-91).
   const tabClass = (id: string) =>
-    `flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1) ${
+    `flex h-7 shrink-0 items-center gap-1 rounded-full px-3 text-[12px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1) ${
       activeId === id
         ? "bg-(--accent-dim) text-(--text) ring-1 ring-inset ring-(--accent)"
-        : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+        : "bg-(--surface-2) text-(--text-dim) hover:bg-(--surface-3) hover:text-(--text)"
     }`;
 
+  const groupedTabClass = (id: string) =>
+    `flex h-7 shrink-0 items-center rounded-full transition-colors ${
+      activeId === id
+        ? "bg-(--accent-dim) ring-1 ring-inset ring-(--accent)"
+        : "bg-(--surface-2) hover:bg-(--surface-3)"
+    }`;
+
+  const groupedTabButtonClass = (id: string) =>
+    `flex h-7 items-center gap-1 rounded-full py-0 pl-3 pr-1 text-[12px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1) ${
+      activeId === id ? "text-(--text)" : "text-(--text-dim) group-hover:text-(--text)"
+    }`;
+
+  const closeTabClass =
+    "h-7 w-7 rounded-full text-[11px] text-(--text-faint) outline-none transition-colors hover:bg-(--surface-3) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent)";
+
   return (
-    <div className="flex h-9 shrink-0 items-stretch gap-0.5 border-b border-(--border) bg-(--surface-1) px-2">
+    <div className="flex h-10 shrink-0 items-center gap-1 border-b border-(--border) bg-(--surface-1) px-2 py-1">
       <div
         ref={stripRef}
-        className="flex min-w-0 flex-1 items-stretch gap-0.5 outline-none"
+        className="flex min-w-0 flex-1 items-center gap-1 outline-none"
         role="toolbar"
         aria-label="Context"
         onKeyDown={handleKeyDown}
@@ -342,14 +357,14 @@ export function ContextTabs({
           className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto"
         >
           {openRepos.map((name, idx) => (
-            <div key={name} role="presentation" className="flex shrink-0 items-center">
+            <div key={name} role="presentation" className={`group ${groupedTabClass(name)}`}>
               <button
                 type="button"
                 data-context-tab={name}
                 tabIndex={effectiveTabStop === name ? 0 : -1}
                 aria-pressed={!activeRunId && active.kind === "repo" && active.name === name}
                 title={idx < 9 ? `${name} (g ${idx + 1})` : name}
-                className={tabClass(name)}
+                className={groupedTabButtonClass(name)}
                 onClick={() => {
                   if (activeRunId && typeof window !== "undefined") window.location.hash = `#/runs?project=${encodeURIComponent(name)}`;
                   onSelect({ kind: "repo", name });
@@ -371,7 +386,7 @@ export function ContextTabs({
                 tabIndex={-1}
                 aria-label={`Close ${name}`}
                 title={`Close ${name}`}
-                className="rounded px-1 text-[11px] text-(--text-faint) hover:text-(--text)"
+                className={closeTabClass}
                 onClick={(e) => {
                   e.stopPropagation();
                   onClose(name);
@@ -386,13 +401,13 @@ export function ContextTabs({
             const isRunActive = activeRunId === runId;
             const tabKey = `run:${runId}`;
             return (
-              <div key={tabKey} role="presentation" className="flex shrink-0 items-center">
+              <div key={tabKey} role="presentation" className={`group ${groupedTabClass(tabKey)}`}>
                 <button
                   type="button"
                   data-context-tab={tabKey}
                   tabIndex={effectiveTabStop === tabKey ? 0 : -1}
                   aria-pressed={isRunActive}
-                  className={tabClass(tabKey)}
+                  className={groupedTabButtonClass(tabKey)}
                   onClick={() => {
                     if (typeof window !== "undefined") {
                       window.location.hash = `#/runs/${encodeURIComponent(runId)}`;
@@ -409,7 +424,7 @@ export function ContextTabs({
                   tabIndex={-1}
                   aria-label={`Close ${runId}`}
                   title={`Close ${runId}`}
-                  className="rounded px-1 text-[11px] text-(--text-faint) hover:text-(--text)"
+                  className={closeTabClass}
                   onClick={(e) => {
                     e.stopPropagation();
                     unpinRun(runId);
@@ -458,7 +473,7 @@ export function ContextTabs({
           aria-controls="repo-picker-listbox"
           aria-label="Open a repo tab"
           title="Open a repo"
-          className="rounded-md px-2 py-1 text-[14px] text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+          className="h-7 w-7 rounded-full text-[14px] text-(--text-dim) outline-none transition-colors hover:bg-(--surface-2) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent)"
           onClick={() => setPicker((open) => !open)}
           onKeyDown={handlePickerTriggerKeyDown}
         >

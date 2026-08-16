@@ -76,6 +76,37 @@ describe("ContextTabs", () => {
     expect(all.className).toContain("focus-visible:ring-2");
   });
 
+  test("gives the navbar breathing room and every context tab consistent pill geometry", () => {
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory")]}
+        reposError={false}
+        openRepos={["factory"]}
+        active={{ kind: "repo", name: "factory" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+        pinnedRuns={["run_abc"]}
+      />,
+    );
+
+    const toolbar = r.getByRole("toolbar", { name: "Context" });
+    expect(toolbar.parentElement?.className).toContain("py-1");
+    expect(toolbar.className).toContain("items-center");
+
+    for (const name of ["All", "factory", "run_abc", "In flight"]) {
+      const tab = r.getByRole("button", { name });
+      expect(tab.className).toContain("h-7");
+      expect(tab.className).toContain("rounded-full");
+    }
+
+    for (const name of ["Close factory", "Close run_abc"]) {
+      const close = r.getByRole("button", { name });
+      expect(close.className).toContain("h-7");
+      expect(close.className).toContain("rounded-full");
+    }
+  });
+
   test("focuses the remaining active context button after closing a tab when activeElement is body (Chromium recovery)", () => {
     let open = ["factory", "client"];
     const r = render(
