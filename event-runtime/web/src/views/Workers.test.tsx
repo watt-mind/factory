@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Workers,
@@ -12,6 +12,7 @@ import {
   workerDisplayState,
 } from "./Workers";
 import { api } from "../api";
+import { changeInput } from "../test-render";
 import type { Worker, WorkerCapacity, WorkerState } from "../types";
 
 afterEach(() => {
@@ -158,6 +159,36 @@ describe("Workers responsive state control (WM-163)", () => {
       fireEvent.keyDown(document.body, { key: "]" });
       await waitFor(() => expect(stateControl.value).toBe("ALL"));
       expect(getByRole("tab", { selected: true }).textContent).toContain("All");
+    });
+  });
+});
+
+describe("Workers empty tab copy (WM-162)", () => {
+  test("names an empty Stopped tab without suggesting Esc clears a filter", async () => {
+    await withWorkers([stubWorker("w_idle", "idle")], async () => {
+      const { findByText, getByRole, queryByText } = renderWorkers();
+      await findByText("w_idle");
+
+      fireEvent.click(getByRole("tab", { name: /Stopped/ }));
+
+      expect(await findByText("No stopped workers")).toBeTruthy();
+      expect(queryByText("Esc clears the filter")).toBeNull();
+    });
+  });
+
+  test("names an empty Live tab, then shows the Esc hint when text is entered", async () => {
+    await withWorkers([stubWorker("w_stopped", "stopped")], async () => {
+      const { findByText, getByRole } = renderWorkers();
+      await findByText("w_stopped");
+
+      fireEvent.click(getByRole("tab", { name: /Live/ }));
+      expect(await findByText("No live workers")).toBeTruthy();
+
+      act(() => {
+        changeInput(getByRole("combobox", { name: "Filter workers" }), "missing");
+      });
+      expect(await findByText("No workers match this filter.")).toBeTruthy();
+      expect(await findByText("Esc clears the filter")).toBeTruthy();
     });
   });
 });

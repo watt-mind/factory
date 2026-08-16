@@ -763,7 +763,7 @@ export function Workers({
               <ListEmpty
                 colSpan={cols.length}
                 query={query}
-                filtered={Boolean(focusHealth || (filter.trim() && byTab.length > 0))}
+                filtered={Boolean(focusHealth || filter.trim())}
                 onClear={
                   focusHealth || filter.trim()
                     ? () => {
@@ -773,7 +773,13 @@ export function Workers({
                     : undefined
                 }
                 noun="workers"
-                empty="No workers have registered — start one with bun event-runtime/cli.mjs work"
+                empty={
+                  tab === "LIVE"
+                    ? "No live workers"
+                    : tab === "STOPPED"
+                      ? "No stopped workers"
+                      : "No workers have registered — start one with bun event-runtime/cli.mjs work"
+                }
               />
             )}
           </tbody>
