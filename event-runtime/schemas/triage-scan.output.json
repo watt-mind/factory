@@ -28,8 +28,8 @@
           "detail": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^## (Acceptance criteria|Owned Paths|Verification)",
-            "description": "For write-detail only: additive Markdown containing only missing template sections"
+            "pattern": "^\\s*## (Acceptance criteria|Owned Paths|Verification)",
+            "description": "For write-detail only: additive Markdown containing one or more missing template sections; multiple allowed headings may appear in one detail"
           },
           "ownedPaths": {
             "type": "array",
