@@ -155,13 +155,16 @@ async function proposalFor(eventId, { agent, status = "open" } = {}) {
     const { proposals } = await client.proposals(status === "open" ? undefined : "all");
     return proposals.find((p) => {
       if (status !== "all" && p.status !== status) return false;
-      if (agent) return p.spec?.agent === agent || p.agent === agent;
-      return (
+      const eventMatches =
         p.spec?.idempotencyKey?.includes(eventId) ||
         p.reason?.includes(eventId) ||
-        p.eventId?.includes(eventId) ||
-        (p.spec?.input && JSON.stringify(p.spec.input).includes(eventId))
-      );
+        p.eventId === eventId ||
+        (p.spec?.input && JSON.stringify(p.spec.input).includes(eventId));
+      if (agent) {
+        const agentMatches = p.spec?.agent === agent || p.agent === agent;
+        return agentMatches && eventMatches;
+      }
+      return eventMatches;
     });
   });
 }
@@ -343,10 +346,18 @@ await client.approve(triageScanProposal.id);
 await runTerminal(triageScanProposal.runId, "COMPLETED");
 log(`${triageScanProposal.runId} → COMPLETED (triage-scan@1, repository workspace)`);
 
-// Follow-up triage-apply run from chain: the closed plan is auto-approved.
-const triageApplyProposal = await proposalFor(triageEventId, { agent: "triage-apply@1", status: "all" });
+// Follow-up triage-apply run from this scan's exact causal edge. Matching only
+// by agent can reuse a terminal proposal from a prior seed while the fresh edge
+// has not even been emitted yet.
+const triageApplyEventId = `chain-${triageScanProposal.runId}`;
+const triageApplyProposal = await proposalFor(triageApplyEventId, {
+  agent: "triage-apply@1",
+  status: "all",
+});
 await runTerminal(triageApplyProposal.runId, "COMPLETED");
-log(`${triageApplyProposal.runId} → COMPLETED (triage-apply@1 chain auto-approved closed plan)`);
+log(
+  `${triageApplyProposal.runId} → COMPLETED (triage-apply@1 chain auto-approved closed plan; event ${triageApplyEventId})`,
+);
 
 // 7. Duplicate delivery suppression
 const dupOutcome = await client.replay(envelope("completed", tag("ok", projectA)));

@@ -91,6 +91,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
   let port;
   let serveChild;
   let workerChild;
+  let initialTriageApplyRun;
 
   beforeAll(async () => {
     home = mkdtempSync(path.join(os.tmpdir(), "evrt-seed-test-"));
@@ -167,6 +168,10 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     expectSuccess("initial seed", seedRes);
     // The triage chain now waits for its auto-approved apply run to finish.
     expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
+    initialTriageApplyRun = seedRes.stdout.match(
+      /^seed: (\S+) → COMPLETED \(triage-apply@1 chain auto-approved/m,
+    )?.[1];
+    expect(initialTriageApplyRun).toBeTruthy();
     await waitForPublishedOutbox(port);
 
     const verifyRes = spawnSync("bun", [VERIFY, "--port", port], {
@@ -196,8 +201,14 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
     });
     expectSuccess("re-seed", seedRes);
-    // The triage chain now waits for its auto-approved apply run to finish.
+    // A fresh prefix must follow the new scan's causal edge, never reuse the
+    // prior terminal triage-apply proposal while waiting for that edge.
     expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
+    const reseedTriageApplyRun = seedRes.stdout.match(
+      /^seed: (\S+) → COMPLETED \(triage-apply@1 chain auto-approved/m,
+    )?.[1];
+    expect(reseedTriageApplyRun).toBeTruthy();
+    expect(reseedTriageApplyRun).not.toBe(initialTriageApplyRun);
     await waitForPublishedOutbox(port);
 
     const verifyRes = spawnSync("bun", [VERIFY, "--port", port], {
