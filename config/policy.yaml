@@ -105,11 +105,11 @@ models:
     strong: openai-codex/gpt-5.6-sol
     standard: openai-codex/gpt-5.6-terra
     light: openai-codex/gpt-5.6-luna
-  # agy (WM-424), Antigravity/Gemini subscription window.
+  # agy (WM-424, WM-428), Antigravity/Gemini subscription window.
   agy:
     strong: gemini-3.7-flash
     standard: gemini-3.7-flash
-    light: gemini-2.5-flash
+    light: gemini-3.7-flash
 
 limits:
   # Hard wall-clock cap the FACTORY enforces, independent of whatever the

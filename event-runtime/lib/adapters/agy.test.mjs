@@ -162,6 +162,24 @@ describe("buildAgyArgv", () => {
     expect(argv).toContain("--effort");
     expect(argv).toContain("high");
   });
+
+  test("defaults effort to low for light tier and high for strong tier (WM-428)", () => {
+    const lightArgv = buildAgyArgv({
+      def: { prompt: "agents/agy-smoke.md", model_tier: "light" },
+      model: "gemini-3.7-flash",
+      workspaceDir: "/tmp/ws",
+    });
+    expect(lightArgv).toContain("--effort");
+    expect(lightArgv[lightArgv.indexOf("--effort") + 1]).toBe("low");
+
+    const strongArgv = buildAgyArgv({
+      def: { prompt: "agents/agy-smoke.md", model_tier: "strong" },
+      model: "gemini-3.7-flash",
+      workspaceDir: "/tmp/ws",
+    });
+    expect(strongArgv).toContain("--effort");
+    expect(strongArgv[strongArgv.indexOf("--effort") + 1]).toBe("high");
+  });
 });
 
 describe("safeChildEnvironment", () => {

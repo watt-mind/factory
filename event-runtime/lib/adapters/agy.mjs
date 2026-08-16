@@ -62,7 +62,8 @@ export function buildAgyArgv({ def, model, effort, workspaceDir, timeoutMs }) {
     args.push("--model", model);
   }
 
-  const effectiveEffort = effort ?? def?.effort;
+  const tierEffort = def?.model_tier === "light" ? "low" : (def?.model_tier === "strong" ? "high" : (def?.model_tier === "standard" ? "medium" : null));
+  const effectiveEffort = effort ?? def?.effort ?? tierEffort;
   if (typeof effectiveEffort === "string" && ["low", "medium", "high"].includes(effectiveEffort.toLowerCase())) {
     args.push("--effort", effectiveEffort.toLowerCase());
   }

@@ -35,7 +35,7 @@ const PI_TIERS = {
   agy: {
     strong: "gemini-3.7-flash",
     standard: "gemini-3.7-flash",
-    light: "gemini-2.5-flash",
+    light: "gemini-3.7-flash",
   },
 };
 
