@@ -1,0 +1,28 @@
+{
+  "id": "agy-smoke",
+  "version": 1,
+  "prompt": "agents/agy-smoke.md",
+  "input_schema": "schemas/agy-smoke.input.json",
+  "output_schema": "schemas/agy-smoke.output.json",
+  "output_contract": "factory.agy-smoke/v1",
+  "model_tier": "strong",
+  "effort": "high",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": []
+  },
+  "limits": {
+    "timeout_seconds": 120,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/agy-smoke.md": "sha256:e05ff371c411a949d63cf2e7b9e6ca16888bc80945dcb8f6bcc3bfb542cd9e6e",
+    "schemas/agy-smoke.input.json": "sha256:f4b76517f30377e2612404e958c31fd9c0125fe18192b33358cf4b106cebd17c",
+    "schemas/agy-smoke.output.json": "sha256:92e08b4b666fb4777ce641aa66b1c3384d5f1305b7a2afd79dba3787e7f44809"
+  }
+}

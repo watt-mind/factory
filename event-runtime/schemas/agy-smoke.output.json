@@ -1,0 +1,13 @@
+{
+  "title": "factory.agy-smoke/v1 output artifact — the input message echoed back",
+  "type": "object",
+  "required": ["echo"],
+  "additionalProperties": false,
+  "properties": {
+    "echo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The input message, unchanged"
+    }
+  }
+}

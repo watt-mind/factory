@@ -269,5 +269,13 @@
       "inputHash"
     ],
     "proposalTtlSeconds": 1800
+  },
+  "factory.agy-smoke.requested": {
+    "agent": "agy-smoke@1",
+    "adapter": "agy",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
   }
 }

@@ -18,6 +18,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { hostname, homedir } from "node:os";
 import path from "node:path";
 import * as actions from "./lib/adapters/actions.mjs";
+import * as agy from "./lib/adapters/agy.mjs";
 import * as claude from "./lib/adapters/claude.mjs";
 import * as command from "./lib/adapters/command.mjs";
 import * as fake from "./lib/adapters/fake.mjs";
@@ -360,7 +361,7 @@ async function serve(args) {
     fail(`serve: invalid port "${rawPort}" (must be integer 1-65535)`);
   }
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
-  const adapters = { actions, claude, command, fake, pi };
+  const adapters = { actions, agy, claude, command, fake, pi };
   if (adapterOverride && !adapters[adapterOverride]) {
     fail(`serve: unknown --adapter-override "${adapterOverride}" (have: ${Object.keys(adapters).join(", ")})`);
   }
@@ -515,7 +516,7 @@ async function work(args) {
   if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
     fail("work: --poll-ms must be an integer between 25 and 5000");
   }
-  const adapters = { actions, claude, command, fake, pi };
+  const adapters = { actions, agy, claude, command, fake, pi };
   if (adapterOverride && !adapters[adapterOverride]) {
     fail(`work: unknown --adapter-override "${adapterOverride}" (have: ${Object.keys(adapters).join(", ")})`);
   }

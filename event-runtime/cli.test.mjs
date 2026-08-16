@@ -556,6 +556,87 @@ describe("cli", () => {
     expect(row?.state).toBe("COMPLETED");
   });
 
+  test("agy-smoke@1 routes end-to-end through the agy adapter via a fake shim (WM-424)", async () => {
+    const { createRun, transition } = await import("./lib/lifecycle.mjs");
+    const { canonicalJson, hashJson } = await import("./lib/canonical.mjs");
+    const { loadRegistry } = await import("./lib/registry.mjs");
+    const { claimNext, executeClaimed } = await import("./lib/worker.mjs");
+
+    const db = openDb(":memory:");
+    const registry = loadRegistry();
+
+    const input = { message: "hello from WM-424" };
+    const spec = {
+      schemaVersion: "factory.run-spec/v1",
+      runId: "run_agy_smoke_test",
+      agent: "agy-smoke@1",
+      input,
+      inputHash: hashJson(input),
+      workspace: { type: "ephemeral", retainOnFailure: true },
+      adapter: "agy",
+      model: "gemini-3.7-flash",
+      effort: "high",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.agy-smoke/v1",
+      capabilities: [],
+      timeoutSeconds: 5,
+      maxAttempts: 1,
+      idempotencyKey: "idem_agy_smoke_test",
+    };
+
+    createRun(db, {
+      runId: spec.runId,
+      idempotencyKey: spec.idempotencyKey,
+      spec,
+      specJson: canonicalJson(spec),
+      specHash: hashJson(spec),
+      actor: "test",
+      policyVersion: "test",
+      now: Date.now(),
+    });
+    transition(db, { runId: spec.runId, to: "APPROVED", actor: "test", now: Date.now() });
+    transition(db, { runId: spec.runId, to: "QUEUED", actor: "test", now: Date.now() });
+
+    let agyCalled = false;
+    const mockAdapters = {
+      agy: {
+        execute: async ({ spec: runSpec, workspaceDir }) => {
+          agyCalled = true;
+          const { readFileSync, writeFileSync } = await import("node:fs");
+          const { default: path } = await import("node:path");
+          const staged = JSON.parse(readFileSync(path.join(workspaceDir, "input.json"), "utf8"));
+          writeFileSync(
+            path.join(workspaceDir, "result.json"),
+            JSON.stringify({
+              schemaVersion: "factory.agent-result/v1",
+              terminalState: "completed",
+              reasonCode: "ok",
+              artifact: { echo: staged.message },
+              evidence: { commands: [] },
+            }),
+            "utf8",
+          );
+          return { exitCode: 0, timedOut: false };
+        },
+      },
+    };
+
+    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-agy-smoke-"));
+    const claim = claimNext(db, { owner: "w1" });
+    expect(claim).toBeTruthy();
+
+    const summary = await executeClaimed(db, registry, mockAdapters, claim, {
+      workspacesRoot: home,
+    });
+
+    expect(agyCalled).toBe(true);
+    expect(summary.terminalState).toBe("COMPLETED");
+
+    const row = db.query(`SELECT state FROM runs WHERE run_id = ?`).get("run_agy_smoke_test");
+    expect(row?.state).toBe("COMPLETED");
+  });
+
   test("tick runs notify as an isolated subsystem (WM-65): a throwing notifier step cannot break the tick", async () => {
     const { tick, TICK_SUBSYSTEMS } = await import("./cli.mjs");
     const { loadRegistry } = await import("./lib/registry.mjs");

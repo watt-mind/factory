@@ -43,7 +43,7 @@ export const DEFAULT_MODEL = "default";
 
 /** Adapters that accept a model at all. command/actions/fake take none: a
  * declared tier there resolves to null (not applicable), never an error. */
-export const MODEL_ADAPTERS = new Set(["claude", "pi"]);
+export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy"]);
 
 /**
  * Read the `models:` tier map from config/policy.yaml (same root rule as

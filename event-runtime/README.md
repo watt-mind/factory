@@ -340,7 +340,7 @@ spec (§12).
 | `lib/workspace.mjs` | ephemeral workspaces, path confinement (§7) |
 | `lib/worker.mjs` | worker loop: claim under `BEGIN IMMEDIATE`, lease, execute, verify, publish with fencing (§8) |
 | `lib/verify.mjs` | result verification + compact receipts (§9) |
-| `lib/adapters/` | adapter registry (§6): `claude` (LLM), `command` (closed argv template), `actions` (approved action list → closed registry), `fake` (tests/demo) |
+| `lib/adapters/` | adapter registry (§6): `claude` (LLM), `pi` (LLM), `agy` (LLM), `command` (closed argv template), `actions` (approved action list → closed registry), `fake` (tests/demo) |
 | `lib/artifacts.mjs` | content-addressed store: collect, stream via `GET /artifacts/:sha256`, materialize declared inputs, retention (OPS-372) |
 | `lib/schedules.mjs` `schedules.json` | clock ticks: slots, catch-up, singleton, earned auto-approval (OPS-381) |
 | `lib/workers.mjs` | worker registry, heartbeats, placement predicate (OPS-233) |

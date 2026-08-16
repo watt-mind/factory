@@ -1,0 +1,13 @@
+{
+  "title": "agy-smoke input — one message to echo back through the agy adapter",
+  "type": "object",
+  "required": ["message"],
+  "additionalProperties": false,
+  "properties": {
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Text for the agent to read and echo back, proving the agy adapter ran end-to-end"
+    }
+  }
+}
