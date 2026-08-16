@@ -137,11 +137,12 @@ describe("buildAgyArgv", () => {
   test("basic flags and stdin prompt format", () => {
     const argv = buildAgyArgv({
       def: { prompt: "agents/agy-smoke.md" },
+      prompt: "Execute smoke test",
       workspaceDir: "/tmp/ws",
       timeoutMs: 300000,
     });
     expect(argv).toContain("-p");
-    expect(argv).toContain("-");
+    expect(argv).toContain("Execute smoke test");
     expect(argv).toContain("--output-format");
     expect(argv).toContain("stream-json");
     expect(argv).toContain("--dangerously-skip-permissions");
@@ -187,12 +188,16 @@ describe("safeChildEnvironment", () => {
     const prev = { ...process.env };
     process.env.GEMINI_API_KEY = "secret-gemini";
     process.env.GOOGLE_API_KEY = "secret-google";
+    process.env.ANTIGRAVITY_AGENT = "1";
+    process.env.ANTIGRAVITY_LS_ADDRESS = "localhost:1234";
     process.env.SSH_AUTH_SOCK = "/tmp/ssh-sock";
     process.env.GITHUB_TOKEN = "gh-secret";
 
     const env = safeChildEnvironment({}, { mutating: true });
     expect(env.GEMINI_API_KEY).toBeUndefined();
     expect(env.GOOGLE_API_KEY).toBeUndefined();
+    expect(env.ANTIGRAVITY_AGENT).toBeUndefined();
+    expect(env.ANTIGRAVITY_LS_ADDRESS).toBeUndefined();
     expect(env.SSH_AUTH_SOCK).toBe("/tmp/ssh-sock");
     expect(env.GITHUB_TOKEN).toBe("gh-secret");
 

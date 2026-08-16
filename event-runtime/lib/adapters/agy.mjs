@@ -42,9 +42,8 @@ export function resolveAgyCommand({ which = Bun.which } = {}) {
  * Build argv for spawning agy.
  * The prompt itself travels on stdin via `-p -`.
  */
-export function buildAgyArgv({ def, model, effort, workspaceDir, timeoutMs }) {
+export function buildAgyArgv({ prompt, def, model, effort, workspaceDir, timeoutMs }) {
   const args = [
-    "-p", "-",
     "--output-format", "stream-json",
     "--dangerously-skip-permissions",
   ];
@@ -66,6 +65,10 @@ export function buildAgyArgv({ def, model, effort, workspaceDir, timeoutMs }) {
   const effectiveEffort = effort ?? def?.effort ?? tierEffort;
   if (typeof effectiveEffort === "string" && ["low", "medium", "high"].includes(effectiveEffort.toLowerCase())) {
     args.push("--effort", effectiveEffort.toLowerCase());
+  }
+
+  if (typeof prompt === "string" && prompt.length > 0) {
+    args.push("-p", prompt);
   }
 
   return args;
@@ -94,6 +97,12 @@ export function safeChildEnvironment(env = {}, defOrOpts = {}) {
     "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
   ]) {
     delete childEnv[key];
+  }
+
+  for (const key of Object.keys(childEnv)) {
+    if (key.startsWith("ANTIGRAVITY_")) {
+      delete childEnv[key];
+    }
   }
 
   if (!isMutating) {
@@ -202,6 +211,7 @@ export async function execute({
   const argv = [
     ...resolved.args,
     ...buildAgyArgv({
+      prompt,
       def,
       model: spec?.model,
       effort: spec?.effort ?? def?.effort,
@@ -214,12 +224,8 @@ export async function execute({
     const child = spawn(resolved.command, argv, {
       cwd: workspaceDir,
       env: childEnv,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
-
-    child.stdin.on("error", () => {});
-    child.stdin.write(prompt);
-    child.stdin.end();
 
     const transcript = createWriteStream(path.join(workspaceDir, ".transcript.json"));
     transcript.on("error", () => {});
