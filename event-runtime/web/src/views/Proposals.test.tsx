@@ -698,8 +698,7 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     const r = renderProposals({ focusProposalId: "prop_1" });
     await waitFor(() => expect(r.getByRole("button", { name: /^Reject/ })).toBeTruthy());
 
-    const dismiss = r.queryByRole("button", { name: /^Dismiss$/ });
-    if (dismiss) fireEvent.click(dismiss);
+    expect(r.queryByRole("button", { name: /^Dismiss$/ })).toBeNull();
     expect(rejectedCalls).toEqual([]);
 
     fireEvent.click(r.getByRole("button", { name: /^Reject/ }));
