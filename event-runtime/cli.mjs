@@ -1376,12 +1376,18 @@ async function sandbox(args) {
   if (sub === "doctor") {
     const report = sandboxPreflight();
     console.log(`${pad("available", 14)}${report.available ? "yes" : "no"}`);
+    if (report.cause) console.log(`${pad("cause", 14)}${report.cause}`);
     console.log(`${pad("qemu", 14)}${report.qemu ?? "-"}`);
     console.log(`${pad("node", 14)}${report.node ?? "-"}${report.nodeVersion ? `   (v${report.nodeVersion})` : ""}`);
     console.log(`${pad("sdk", 14)}${report.sdk ? "@earendil-works/gondolin installed" : "-"}`);
     if (!report.available) {
       console.log(`\n${report.reason}`);
-      process.exit(1);
+      // The exit code carries the distinction, not just the text (WM-312): a
+      // host that cannot virtualize is an ordinary fact about that machine; a
+      // missing harness is a stale checkout someone must fix. CI asserts on
+      // `install` and tolerates `host`, so runners without QEMU do not turn a
+      // real regression into noise everyone learns to skip past.
+      process.exit(report.cause === "install" ? 2 : 1);
     }
     return;
   }

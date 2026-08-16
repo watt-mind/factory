@@ -75,7 +75,7 @@ export function nodeVersionSatisfies(version) {
  * a bare boolean so `sandbox doctor` and the worker log can say what is
  * missing instead of "unavailable".
  *
- * @returns {{ available: boolean, reason: string|null, qemu: string|null, node: string|null, nodeVersion: string|null, sdk: boolean }}
+ * @returns {{ available: boolean, reason: string|null, cause: "host"|"install"|null, qemu: string|null, node: string|null, nodeVersion: string|null, sdk: boolean }}
  */
 export function preflight({
   env = process.env,
@@ -93,12 +93,24 @@ export function preflight({
   },
   sdkExists = () => existsSync(path.join(FACTORY_ROOT, "node_modules", "@earendil-works", "gondolin", "package.json")),
 } = {}) {
-  const report = { available: false, reason: null, qemu: null, node: null, nodeVersion: null, sdk: false };
+  // `cause` separates two things `available: false` used to conflate (WM-312):
+  //
+  //   "host"     this machine cannot virtualize — no QEMU, no Node, Node too
+  //              old. Expected on plenty of nodes and not a defect; the fleet
+  //              simply does not place sandboxed runs here.
+  //   "install"  the harness itself is missing. ALWAYS a defect: the dependency
+  //              is declared in package.json and resolved in bun.lock, so its
+  //              absence means the checkout never ran `bun install` after a pull.
+  //
+  // Rendering both as "available no" is what let the sandbox sit switched off
+  // fleet-wide for a day, indistinguishable from a laptop that lacks QEMU.
+  const report = { available: false, reason: null, cause: null, qemu: null, node: null, nodeVersion: null, sdk: false };
 
   const qemuBin = qemuBinaryFor();
   report.qemu = which(qemuBin);
   if (!report.qemu) {
     report.reason = `${qemuBin} is not on PATH — install QEMU (macOS: brew install qemu)`;
+    report.cause = "host";
     return report;
   }
 
@@ -107,6 +119,7 @@ export function preflight({
   const nodeBin = env.FACTORY_SANDBOX_NODE || which("node");
   if (!nodeBin) {
     report.reason = "node is not on PATH — the Gondolin SDK requires Node (see runner.mjs); set FACTORY_SANDBOX_NODE";
+    report.cause = "host";
     return report;
   }
   report.node = nodeBin;
@@ -114,12 +127,15 @@ export function preflight({
   report.nodeVersion = version ? `${version.major}.${version.minor}` : null;
   if (!nodeVersionSatisfies(version)) {
     report.reason = `node at ${nodeBin} is ${report.nodeVersion ?? "unreadable"}, need >= ${MIN_NODE_MAJOR}.${MIN_NODE_MINOR} — set FACTORY_SANDBOX_NODE to a newer Node`;
+    report.cause = "host";
     return report;
   }
 
   report.sdk = sdkExists();
   if (!report.sdk) {
-    report.reason = "@earendil-works/gondolin is not installed — run `bun install`";
+    report.reason =
+      "@earendil-works/gondolin is not installed — run `bun install`. Declared in package.json and locked, so this means the checkout is stale, not that the host is limited.";
+    report.cause = "install";
     return report;
   }
 

@@ -134,6 +134,18 @@ jobs:
         # because it includes descendants macOS /usr/bin/time does not aggregate.
         run: bun test --max-concurrency=4
 
+      # The sandbox harness must at least be installable and importable
+      # (WM-312). Asserts on `sdk`, never on `available`: a self-hosted runner
+      # legitimately may not virtualize, and conflating "this host has no QEMU"
+      # with "the dependency is missing" is exactly what let the Gondolin SDK
+      # sit uninstalled on the live stack for a day while CI stayed green.
+      - name: Sandbox harness is installed
+        run: |
+          bun event-runtime/cli.mjs sandbox doctor || true
+          bun event-runtime/cli.mjs sandbox doctor 2>&1 | grep -q "cause *install" \
+            && { echo "::error::gondolin SDK is not installed — bun install did not materialize it"; exit 1; }
+          echo "sandbox harness present (or unavailable only for host reasons)"
+
       - name: Generated tree matches shared/
         # The check that stops a rule from living in one harness and nowhere
         # else. If this fails, the fix is to move the rule into shared/ and

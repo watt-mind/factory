@@ -24,6 +24,27 @@ describe("preflight", () => {
     expect(report).toMatchObject({ available: true, reason: null, sdk: true, nodeVersion: "24.18" });
   });
 
+  test("a healthy host reports no cause — cause is set only when unavailable", () => {
+    expect(preflight(healthy).cause).toBeNull();
+  });
+
+  test("host limitations and a missing harness are different causes (WM-312)", () => {
+    // The distinction that matters operationally: "this machine cannot
+    // virtualize" is an ordinary fact about a node, while "the harness is not
+    // installed" means a checkout never ran `bun install` after a pull. Both
+    // rendered as `available: false`, which is how the sandbox stayed switched
+    // off fleet-wide for a day with nothing to signal it.
+    const noQemu = preflight({ ...healthy, which: (n) => (n.startsWith("qemu") ? null : `/usr/bin/${n}`) });
+    const oldNode = preflight({ ...healthy, runNode: () => "v22.14.0" });
+    const noNode = preflight({ ...healthy, which: () => null });
+    const noSdk = preflight({ ...healthy, sdkExists: () => false });
+
+    expect(noQemu.cause).toBe("host");
+    expect(oldNode.cause).toBe("host");
+    expect(noNode.cause).toBe("host");
+    expect(noSdk.cause).toBe("install");
+  });
+
   test("missing qemu is a named reason, not a crash", () => {
     const report = preflight({ ...healthy, which: (n) => (n.startsWith("qemu") ? null : `/usr/bin/${n}`) });
     expect(report.available).toBe(false);
