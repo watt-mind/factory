@@ -73,20 +73,25 @@ case "$ACTION" in
     # A stamp file rather than node_modules' mtime: `bun install` leaves the
     # directory untouched when nothing changes, so an mtime comparison would
     # report stale forever and install on every single start.
+    # Gated on a LOCKFILE, not on package.json: a lockfile is what makes a
+    # directory a dependency tree we own. Without one there is nothing to be
+    # stale against, and installing anyway would run `bun install` over any
+    # directory that merely happens to contain a package.json — including the
+    # synthetic fixtures bin/live-stack.test.mjs builds, whose package.json is
+    # deliberately not valid JSON.
     ensure_deps() {
       local label="$1" dir="$2"
-      [[ -f "$dir/package.json" ]] || return 0
+      local lock=""
+      for candidate in "$dir/bun.lock" "$dir/bun.lockb"; do
+        [[ -f "$candidate" ]] && { lock="$candidate"; break; }
+      done
+      [[ -n "$lock" ]] || return 0
       local stamp="$dir/node_modules/.factory-deps-stamp"
-      local fresh=0
-      if [[ -d "$dir/node_modules" && -f "$stamp" ]]; then
-        fresh=1
-        for input in "$dir/bun.lock" "$dir/bun.lockb" "$dir/package.json"; do
-          [[ -f "$input" && "$input" -nt "$stamp" ]] && fresh=0
-        done
+      if [[ -d "$dir/node_modules" && -f "$stamp" && ! "$lock" -nt "$stamp" ]]; then
+        [[ -f "$dir/package.json" && "$dir/package.json" -nt "$stamp" ]] || return 0
       fi
-      [[ "$fresh" -eq 1 ]] && return 0
       info "installing $label dependencies (lockfile newer than the last install)"
-      (cd "$dir" && bun install) || die "bun install failed in $dir — the stack would start with stale dependencies"
+      (cd "$dir" && bun install) || die "bun install failed in $dir — refusing to start on stale dependencies"
       mkdir -p "$dir/node_modules" && : > "$stamp"
     }
     ensure_deps "root" "$REPO"
