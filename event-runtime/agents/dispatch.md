@@ -43,7 +43,15 @@ steal a claim, never queue behind the holder.
    state transition, error/recovery path, responsive layout, authentication,
    payment, onboarding, or destructive action. It is skipped for isolated
    styling, copy-only/static content, icons/assets, and internal/admin-only
-   surfaces unless the ticket identifies UX risk.
+   surfaces unless the ticket identifies UX risk. A backend, infrastructure,
+   schema, or docs ticket has no user-facing surface and is skipped.
+
+   **A skipped critique reports `"status": "skipped"` with `"verdict": null`.**
+   There is no "not required" verdict and inventing one fails the output
+   contract, which discards the whole run after the work is already done — the
+   verdict enum is exactly `SHIP`, `FIX-FIRST`, `NOT-ASSESSED`, `BLOCKED`, or
+   `null`. `status` carries whether the gate applied; `verdict` carries what the
+   critic concluded, and a critic that never ran concluded nothing.
 
    Spawn the `factory-ux-critic` subagent after verification and before opening
    the PR. Its prompt must spell out `worktree: <absolute path>` plus the exact
@@ -135,6 +143,25 @@ report `outcome: "FAILED"`.
       "verdict": "SHIP",
       "evidence": ["http://127.0.0.1:7497/runs"],
       "rounds": 1,
+      "prReady": true
+    }
+  },
+  "evidence": { "commands": ["the commands this rests on"] }
+}
+```
+
+A ticket with no user-facing surface — backend, infra, schema, docs — reports
+the gate as skipped instead. This is the common case, so it gets its own
+example rather than being left to inference:
+
+```json
+{
+  "artifact": {
+    "uxCritique": {
+      "status": "skipped",
+      "verdict": null,
+      "evidence": [],
+      "rounds": 0,
       "prReady": true
     }
   },
