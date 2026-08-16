@@ -65,11 +65,10 @@ afterAll(() => {
   for (const dir of fixtures) rmSync(dir, { recursive: true, force: true });
 });
 
-function harness() {
+function harness({ adapters = { pi: fake, actions: fake } } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-triage-"));
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-triage-ws-"));
-  const adapters = { pi: fake, actions: fake };
   const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
 
   async function approveNext(agentRef) {
@@ -94,6 +93,17 @@ const triageEnvelope = (repo, eventId) => ({
   payload: { repo },
 });
 
+const triageApplyEnvelope = (repo, eventId, plan) => ({
+  schemaVersion: "factory.event/v1",
+  eventId,
+  type: "factory.triage-apply.requested",
+  source: "operator",
+  subject: repo,
+  occurredAt: "2026-08-13T09:00:00Z",
+  correlationId: eventId,
+  payload: { repo, plan },
+});
+
 describe("triage chain: scan → approved apply (OPS-229)", () => {
   test("a TRIAGE verdict proposes the concrete per-issue action list, watched", async () => {
     const { db, approveNext } = harness();
@@ -115,6 +125,22 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
     expect(applied.summary.terminalState).toBe("COMPLETED");
     const result = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(applied.runId).result_json);
     expect(result.artifact.applied).toEqual([{ issueId: "CLNT-999", action: "label-agent-ready" }]);
+  });
+
+  test("a canonical write-detail triage-apply payload is approved as run", async () => {
+    const { db } = harness();
+    admitEvent(db, registry, triageApplyEnvelope("bj29", "triage-5", [{
+      issueId: "CLNT-999",
+      action: "write-detail",
+      reason: "fake: write-detail canonical heading",
+      detail: "## Acceptance Criteria\n\n- [ ] preserve behavior in README",
+    }]));
+
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    const apply = openProposals(db, {}).find((p) => p.spec?.agent === "triage-apply@1" && p.decision === "run");
+    expect(apply).toBeTruthy();
+    expect(apply.status).toBe("open");
+    expect(apply.spec.input.plan?.[0]?.detail).toContain("Acceptance Criteria");
   });
 
   test("a clean queue converges to NOOP — nothing proposed, nothing applied", async () => {

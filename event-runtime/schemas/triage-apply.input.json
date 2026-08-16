@@ -41,7 +41,7 @@
           "detail": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^## (Acceptance criteria|Owned Paths|Verification)",
+            "pattern": "^## (Acceptance Criteria|Owned Paths|Verification)",
             "description": "For write-detail only: approved additive Markdown containing only missing template sections"
           },
           "ownedPaths": {
