@@ -528,12 +528,18 @@ export function InjectDialog({
     if (!keys.includes(e.key)) return;
     if (!(e.target instanceof HTMLElement) || e.target.getAttribute("role") !== "radio") return;
     e.preventDefault();
+    const radios = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]'));
+    const idx = radios.indexOf(e.target);
+    if (e.key === "ArrowUp" && idx === 0) {
+      searchRef.current?.focus();
+      return;
+    }
     const ids = templateIds();
-    const idx = checkedId === null ? ids.length - 1 : Math.max(ids.indexOf(checkedId), 0);
+    const selectedIdx = checkedId === null ? ids.length - 1 : Math.max(ids.indexOf(checkedId), 0);
     const delta = e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1;
-    const nextIdx = (idx + delta + ids.length) % ids.length;
+    const nextIdx = (selectedIdx + delta + ids.length) % ids.length;
     applySelection(ids[nextIdx]);
-    listRef.current?.querySelectorAll<HTMLElement>('[role="radio"]')[nextIdx]?.focus();
+    radios[nextIdx]?.focus();
   }
 
   // ---------------------------------------------------------------------------

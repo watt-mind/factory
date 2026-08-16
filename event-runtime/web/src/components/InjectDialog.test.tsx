@@ -636,6 +636,21 @@ describe("InjectDialog keyboard search (WM-80)", () => {
       expect(radios.length).toBeGreaterThan(0);
       expect(document.activeElement).toBe(radios[0]);
     }));
+
+  test("ArrowUp from the first template result returns focus to search", () =>
+    withSchemaApi(async (r) => {
+      const search = r.getByPlaceholderText(/search event types/i) as HTMLInputElement;
+      act(() => {
+        fireEvent.keyDown(search, { key: "ArrowDown" });
+      });
+      const firstRadio = r.getAllByRole("radio")[0];
+      expect(document.activeElement).toBe(firstRadio);
+
+      act(() => {
+        fireEvent.keyDown(firstRadio, { key: "ArrowUp" });
+      });
+      expect(document.activeElement === search).toBe(true);
+    }));
 });
 
 describe("InjectDialog invalid-payload confirm is distinct (WM-85)", () => {
