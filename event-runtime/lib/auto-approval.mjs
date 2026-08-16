@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+import { budgetExhausted } from "../../lib/spend.mjs";
 import { hashJson } from "./canonical.mjs";
 import { approveProposal } from "./proposals.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
@@ -95,6 +96,83 @@ export function stableChainApprovalPolicyForHash(policy) {
       ? hashJson(dispatchEvidence)
       : null,
   };
+}
+
+const ENVIRONMENT_FAILURE_REASONS = new Set([
+  "adapter_error",
+  "cli_not_found",
+  "unknown_adapter",
+]);
+
+function loadRuntimePolicy(root = reposRoot()) {
+  const file = policyPath(root);
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Shared unattended-work guard. It is evaluated immediately before every
+ * approval, so earlier approvals in the same bounded pass consume capacity.
+ */
+export function chainRuntimeGuard(
+  db,
+  {
+    root = reposRoot(),
+    runtimePolicy = loadRuntimePolicy(root),
+    budgetCheck = budgetExhausted,
+  } = {},
+) {
+  if (!runtimePolicy) return "runtime_policy_unavailable";
+
+  try {
+    if (budgetCheck(runtimePolicy)) return "budget_exhausted";
+  } catch {
+    return "budget_check_failed";
+  }
+
+  const workerCap = runtimePolicy?.workers?.max;
+  if (
+    typeof workerCap !== "number" ||
+    !Number.isInteger(workerCap) ||
+    workerCap < 1
+  ) {
+    return "worker_cap_policy_invalid";
+  }
+  const active = db
+    .query(
+      `SELECT COUNT(*) AS n FROM runs
+       WHERE state IN ('APPROVED','QUEUED','LEASED','RUNNING','VERIFYING')`,
+    )
+    .get().n;
+  if (active >= workerCap) return "worker_cap_full";
+
+  const threshold = runtimePolicy?.circuit_breaker?.consecutive_env_failures;
+  if (
+    typeof threshold !== "number" ||
+    !Number.isInteger(threshold) ||
+    threshold < 1
+  ) {
+    return "circuit_breaker_policy_invalid";
+  }
+  const recent = db
+    .query(
+      `SELECT reason_code FROM attempts
+       WHERE finished_at IS NOT NULL
+       ORDER BY rowid DESC LIMIT ?`,
+    )
+    .all(threshold);
+  const consecutive = recent.findIndex(
+    (attempt) => !ENVIRONMENT_FAILURE_REASONS.has(attempt.reason_code),
+  );
+  const failures = consecutive === -1 ? recent.length : consecutive;
+  if (failures >= threshold) return "circuit_breaker_tripped";
+
+  return null;
 }
 
 function sameJson(left, right) {
@@ -257,6 +335,8 @@ export function autoApproveChains(
     dispatchEligibility,
     dispatch = {},
     policy = loadChainAutoApprovalPolicy(),
+    runtimeGuard = chainRuntimeGuard,
+    runtimeGuardOptions = {},
   } = {},
 ) {
   const approved = [];
@@ -284,6 +364,17 @@ export function autoApproveChains(
     if (reason) {
       noteOpenReason(db, row.id, reason);
       open.push({ proposalId: row.id, reason });
+      continue;
+    }
+    let guardReason;
+    try {
+      guardReason = runtimeGuard(db, runtimeGuardOptions);
+    } catch {
+      guardReason = "runtime_guard_failed";
+    }
+    if (guardReason) {
+      noteOpenReason(db, row.id, guardReason);
+      open.push({ proposalId: row.id, reason: guardReason });
       continue;
     }
     try {

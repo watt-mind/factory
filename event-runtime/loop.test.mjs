@@ -63,7 +63,7 @@ beforeAll(() => {
       `  - name: wt29\n    path: ${repoDir}\n    github: watt-mind/wt29\n    base: develop\n` +
       `    team: WM\n    project: Factory\n    max_in_flight: 3\n` +
       `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-      `    worktree_root: ${wtRoot}\n    verify: echo verified\n`,
+      `    worktree_root: ${wtRoot}\n    verify: echo verified\n    escalate_paths: []\n`,
   );
   writeFileSync(path.join(root, "config", "policy.yaml"), `concurrency:\n  max_in_flight_per_repo: 2\n`);
 
@@ -149,7 +149,10 @@ async function dispatchTo(outcome, eventId, ticket) {
   expect(proposal).toBeTruthy();
   const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
   const summary = await runOnce(db, registry, { pi: dispatchFake(outcome) }, {
-    workspacesRoot: workspaces, owner: "w-test", policyVersion: PV,
+    workspacesRoot: workspaces,
+    owner: "w-test",
+    policyVersion: PV,
+    dispatch: openWorld,
   });
   expect(summary.terminalState).toBe("COMPLETED");
   return { db, planAll, runId: approved.runId };

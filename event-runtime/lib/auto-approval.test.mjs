@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   autoApproveChains,
+  chainRuntimeGuard,
   CHAIN_AUTO_APPROVAL_ACTOR,
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
   CHAIN_AUTO_APPROVAL_REASON,
@@ -141,6 +142,71 @@ describe("chain auto approval (WM-357)", () => {
       [...CHAIN_AUTO_APPROVAL_EVENT_TYPES].sort(),
     );
     expect(loaded.reason).toBeNull();
+  });
+
+  test("budget, worker cap, and circuit breaker each stop unattended approvals", () => {
+    const runtimePolicy = {
+      budget: { per_day_usd: 1 },
+      workers: { max: 1 },
+      circuit_breaker: { consecutive_env_failures: 2 },
+    };
+
+    const budgetDb = openDb(":memory:");
+    expect(
+      chainRuntimeGuard(budgetDb, {
+        runtimePolicy,
+        budgetCheck: () => "spent",
+      }),
+    ).toBe("budget_exhausted");
+
+    const capDb = openDb(":memory:");
+    const cap = seed(capDb, { id: "cap-active" });
+    capDb
+      .query(`UPDATE runs SET state = 'QUEUED' WHERE run_id = ?`)
+      .run(cap.runId);
+    expect(
+      chainRuntimeGuard(capDb, {
+        runtimePolicy,
+        budgetCheck: () => null,
+      }),
+    ).toBe("worker_cap_full");
+
+    const circuitDb = openDb(":memory:");
+    for (const id of ["env-1", "env-2"]) {
+      const failed = seed(circuitDb, { id });
+      circuitDb
+        .query(`UPDATE runs SET state = 'FAILED', attempts = 1 WHERE run_id = ?`)
+        .run(failed.runId);
+      circuitDb
+        .query(
+          `INSERT INTO attempts
+             (run_id, attempt, fencing_token, lease_owner, lease_expires_at,
+              finished_at, terminal_state, reason_code)
+           VALUES (?, 1, 1, 'test', ?, ?, 'FAILED', 'adapter_error')`,
+        )
+        .run(
+          failed.runId,
+          new Date(now).toISOString(),
+          new Date(now).toISOString(),
+        );
+    }
+    expect(
+      chainRuntimeGuard(circuitDb, {
+        runtimePolicy: { ...runtimePolicy, workers: { max: 3 } },
+        budgetCheck: () => null,
+      }),
+    ).toBe("circuit_breaker_tripped");
+
+    const guardedDb = openDb(":memory:");
+    const candidate = seed(guardedDb, { id: "guarded" });
+    const result = auto(guardedDb, {
+      runtimeGuard: () => "circuit_breaker_tripped",
+    });
+    expect(result.approved).toEqual([]);
+    expect(runState(guardedDb, candidate.runId)).toBe("PROPOSED");
+    expect(openProposals(guardedDb, {})[0].reason).toContain(
+      "circuit_breaker_tripped",
+    );
   });
 
   test("eligible chain work and triage proposals advance with an auditable actor and reason", () => {

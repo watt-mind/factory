@@ -51,11 +51,15 @@ beforeAll(() => {
       `  - name: wt29\n    path: ${repoDir}\n    github: watt-mind/wt29\n    base: develop\n` +
       `    team: WM\n    project: Factory\n    max_in_flight: 1\n` +
       `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-      `    worktree_root: ${wtRoot}\n    verify: echo verified\n` +
+      `    worktree_root: ${wtRoot}\n    verify: echo verified\n    escalate_paths:\n      - src/auth/**\n` +
       `  - name: watched\n    path: ${repoDir}\n    team: OPS\n    project: Watched\n    report_only: true\n` +
-      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ${wtRoot}\n` +
+      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ${wtRoot}\n    escalate_paths: []\n` +
       `  - name: uncapped\n    path: ${repoDir}\n    team: WM\n    project: Factory\n` +
-      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ${wtRoot}\n`,
+      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ${wtRoot}\n    escalate_paths: []\n` +
+      `  - name: missing-policy\n    path: ${repoDir}\n    team: WM\n    project: Factory\n` +
+      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ${wtRoot}\n` +
+      `  - name: malformed-policy\n    path: ${repoDir}\n    team: WM\n    project: Factory\n` +
+      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ${wtRoot}\n    escalate_paths: src/auth/**\n`,
   );
   writeFileSync(path.join(root, "config", "policy.yaml"), `concurrency:\n  max_in_flight_per_repo: 2\n`);
 
@@ -173,6 +177,66 @@ describe("dispatch planner refusals (WM-108, dispatch doc §§2–5)", () => {
     expect(unlabelled.outcome).toMatchObject({ decision: "noop", reason: "ticket_not_agent_ready" });
   });
 
+  test("escalated and security tickets fail closed before dispatch", () => {
+    for (const label of ["ai:escalated", "type:security"]) {
+      const refusal = worktreeDispatchGate(
+        { repo: "wt29", ticket: "WM-500" },
+        openWorld({
+          fetchTicket: () =>
+            readyTicket({
+              labels: {
+                nodes: [{ name: "ai:agent-ready" }, { name: label }],
+              },
+            }),
+        }),
+      );
+      expect(refusal?.reason).toBe(
+        label === "ai:escalated" ? "ticket_escalated" : "ticket_security",
+      );
+    }
+  });
+
+  test("sensitive Owned Paths and unverifiable escalate_paths fail closed", () => {
+    const sensitive = worktreeDispatchGate(
+      { repo: "wt29", ticket: "WM-500" },
+      openWorld({
+        fetchTicket: () =>
+          readyTicket({
+            description: "## Owned Paths\n- src/auth/session.ts\n",
+          }),
+      }),
+    );
+    expect(sensitive).toEqual({
+      decision: "noop",
+      reason: "escalate_paths_intersect",
+    });
+
+    for (const repo of ["missing-policy", "malformed-policy"]) {
+      const refusal = worktreeDispatchGate(
+        { repo, ticket: "WM-500" },
+        openWorld(),
+      );
+      expect(refusal?.decision).toBe("human_needed");
+      expect(refusal?.reason).toContain("escalate_paths_unverifiable");
+    }
+  });
+
+  test("an exhausted or unreadable budget refuses before eligibility reads", () => {
+    let fetched = false;
+    const refusal = worktreeDispatchGate(
+      { repo: "wt29", ticket: "WM-500" },
+      openWorld({
+        fetchTicket: () => {
+          fetched = true;
+          return readyTicket();
+        },
+        budgetRefusal: () => "budget_exhausted",
+      }),
+    );
+    expect(refusal).toEqual({ decision: "noop", reason: "budget_exhausted" });
+    expect(fetched).toBe(false);
+  });
+
   test("vanished ticket → human_needed ticket_not_found", () => {
     const { outcome } = plan({ repo: "wt29", ticket: "WM-500" }, openWorld({ fetchTicket: () => null }));
     expect(outcome).toMatchObject({ decision: "human_needed", reason: "ticket_not_found" });
@@ -268,7 +332,10 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
 
     const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
     const summary = await runOnce(db, registry, { pi: dispatchFake }, {
-      workspacesRoot: workspaces, owner: "w-test", policyVersion: PV,
+      workspacesRoot: workspaces,
+      owner: "w-test",
+      policyVersion: PV,
+      dispatch: openWorld(),
     });
 
     expect(summary.terminalState).toBe("COMPLETED");
@@ -285,6 +352,58 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     expect(result.artifact.verification.passed).toBe(true);
     expect(result.evidence.treeVisible).toBe(true);
     expect(JSON.parse(row.receipt_json).runId).toBe(approved.runId);
+  });
+
+  test("execution rechecks stale security eligibility before worktree and adapter", async () => {
+    const db = openDb(":memory:");
+    const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-ws-"));
+    fixtures.push(workspaces);
+    let labels = [{ name: "ai:agent-ready" }];
+    let adapterCalls = 0;
+    const world = openWorld({
+      fetchTicket: () => readyTicket({ labels: { nodes: labels } }),
+    });
+
+    admitEvent(
+      db,
+      registry,
+      dispatchEnvelope({ repo: "wt29", ticket: "WM-503" }, "d-stale-security"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV, dispatch: world });
+    const proposal = openProposals(db, {}).find(
+      (p) => p.spec?.agent === "dispatch@1",
+    );
+    approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      policyVersion: PV,
+    });
+    labels = [{ name: "ai:agent-ready" }, { name: "type:security" }];
+
+    const summary = await runOnce(
+      db,
+      registry,
+      {
+        pi: {
+          async execute() {
+            adapterCalls += 1;
+            throw new Error("adapter must not execute");
+          },
+        },
+      },
+      {
+        workspacesRoot: workspaces,
+        owner: "w-test",
+        policyVersion: PV,
+        dispatch: world,
+      },
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "ticket_security",
+    });
+    expect(adapterCalls).toBe(0);
+    expect(calls()).not.toContain("up WM-503");
   });
 
   test("a failing run without retain still tears the worktree down (down-on-failure)", async () => {
@@ -305,7 +424,10 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     db.query(`UPDATE runs SET spec_json = ? WHERE run_id = ?`).run(JSON.stringify(spec), proposal.run_id);
 
     const summary = await runOnce(db, registry, { pi: crashing }, {
-      workspacesRoot: workspaces, owner: "w-test", policyVersion: PV,
+      workspacesRoot: workspaces,
+      owner: "w-test",
+      policyVersion: PV,
+      dispatch: openWorld(),
     });
     expect(summary.terminalState).toBe("FAILED");
     expect(calls()).toContain("up WM-502");

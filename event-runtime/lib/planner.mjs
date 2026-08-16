@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { effectiveOwnedPaths, parseOwnedPaths, pathsCollide } from "../../orchestrator/owned-paths.mjs";
+import { budgetExhausted } from "../../lib/spend.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
@@ -170,13 +171,52 @@ function policyMaxInFlight(root = reposRoot()) {
 
 function loadRepoEscalatePaths(repoName, root = reposRoot()) {
   const file = reposConfigPath(root);
-  if (!existsSync(file)) return [];
-  const entry = (Bun.YAML.parse(readFileSync(file, "utf8"))?.repos ?? []).find((row) => row?.name === repoName);
-  if (!entry) return [];
+  if (!existsSync(file)) {
+    throw new RepoError(`${file}: cannot verify escalate_paths because repos.yaml is missing`);
+  }
+  let parsed;
+  try {
+    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new RepoError(`${file}: cannot verify escalate_paths: ${err.message}`);
+  }
+  const entry = (parsed?.repos ?? []).find((row) => row?.name === repoName);
+  if (!entry) {
+    throw new RepoError(`${file}: cannot verify escalate_paths for unknown repo ${repoName}`);
+  }
   const escalate = entry.escalate_paths ?? entry.escalatePaths;
-  if (escalate === undefined || escalate === null) return [];
-  if (!Array.isArray(escalate)) throw new RepoError(`${file}: repo ${repoName} has invalid escalate_paths (must be an array)`);
-  return [...new Set(escalate.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean))];
+  if (!Array.isArray(escalate)) {
+    throw new RepoError(
+      `${file}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
+    );
+  }
+  if (
+    !escalate.every(
+      (item) => typeof item === "string" && item.trim().length > 0,
+    )
+  ) {
+    throw new RepoError(
+      `${file}: repo ${repoName} has invalid escalate_paths (every glob must be a non-empty string)`,
+    );
+  }
+  return [...new Set(escalate.map((item) => item.trim()))];
+}
+
+function loadRuntimePolicy(root = reposRoot()) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultBudgetRefusal() {
+  const policy = loadRuntimePolicy();
+  if (!policy) return "budget_policy_unavailable";
+  return budgetExhausted(policy) ? "budget_exhausted" : null;
 }
 
 function sortUnique(values) {
@@ -221,6 +261,7 @@ export function worktreeDispatchAutoEligibility(payload, {
   fetchInFlight = fetchInFlightDefault,
   countLeases = (repoName) => liveWorkerLeases(repoName).length,
   maxInFlightFallback,
+  budgetRefusal = defaultBudgetRefusal,
   now = Date.now(),
 } = {}) {
   const evidence = {
@@ -231,6 +272,15 @@ export function worktreeDispatchAutoEligibility(payload, {
     inFlight: [],
     escalatePathIntersections: [],
   };
+  let budgetReason;
+  try {
+    budgetReason = budgetRefusal();
+  } catch {
+    budgetReason = "budget_check_failed";
+  }
+  if (budgetReason) return refusal(budgetReason, evidence);
+  evidence.checks.budget_available = true;
+
   let repo;
   try {
     repo = getRepo(loadRepos(), payload?.repo);
@@ -266,6 +316,17 @@ export function worktreeDispatchAutoEligibility(payload, {
   evidence.checks.ticket_todo = true;
   if (!evidence.ticket.labels.includes("ai:agent-ready")) return refusal("ticket_not_agent_ready", evidence);
   evidence.checks.ticket_agent_ready = true;
+  if (evidence.ticket.labels.includes("ai:escalated")) {
+    return refusal("ticket_escalated", evidence);
+  }
+  evidence.checks.ticket_not_escalated = true;
+  if (
+    evidence.ticket.labels.includes("type:security") ||
+    evidence.ticket.labels.some((label) => /security/i.test(label))
+  ) {
+    return refusal("ticket_security", evidence);
+  }
+  evidence.checks.ticket_not_security = true;
   if (!repo.team || !repo.project) return refusal("repo_unconfigured: team/project missing for the in-flight query", evidence, "human_needed");
   evidence.checks.repo_team_project = true;
 
@@ -276,9 +337,23 @@ export function worktreeDispatchAutoEligibility(payload, {
     return refusal("owned_paths_overlap", evidence);
   }
   evidence.checks.owned_paths_disjoint = true;
-  evidence.repo.escalatePaths = loadRepoEscalatePaths(repo.name);
-  evidence.escalatePathIntersections = evidence.repo.escalatePaths.filter((item) => pathsCollide(evidence.ticket.ownedPaths, [item]));
-  evidence.checks.escalate_paths = { configured: evidence.repo.escalatePaths.length > 0, intersect: evidence.escalatePathIntersections };
+  try {
+    evidence.repo.escalatePaths = loadRepoEscalatePaths(repo.name);
+  } catch (err) {
+    evidence.checks.escalate_paths = { verified: false };
+    return refusal(`escalate_paths_unverifiable: ${err.message}`, evidence, "human_needed");
+  }
+  evidence.escalatePathIntersections = evidence.repo.escalatePaths.filter(
+    (item) => pathsCollide(evidence.ticket.ownedPaths, [item]),
+  );
+  evidence.checks.escalate_paths = {
+    verified: true,
+    configured: evidence.repo.escalatePaths.length > 0,
+    intersect: evidence.escalatePathIntersections,
+  };
+  if (evidence.escalatePathIntersections.length > 0) {
+    return refusal("escalate_paths_intersect", evidence);
+  }
   evidence.checks.owned_paths_parsed = evidence.ticket.ownedPathsParsed;
   return { ok: true, evidence };
 }
