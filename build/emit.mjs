@@ -58,6 +58,18 @@ function splitFrontmatter(text) {
   return { fm, body: text.slice(m[0].length) };
 }
 
+/** Remove another harness's namespaced fields while preserving source bytes. */
+function withoutFrontmatterFields(text, fields) {
+  const m = text.match(/^---\n([\s\S]*?)\n---/);
+  if (!m) return text;
+  const dropped = new Set(fields);
+  const kept = m[1].split("\n").filter((line) => {
+    const key = line.match(/^([\w-]+):/)?.[1];
+    return !dropped.has(key);
+  });
+  return `---\n${kept.join("\n")}\n---${text.slice(m[0].length)}`;
+}
+
 /** Render a harness-native Markdown agent without leaking another harness's model id. */
 function markdownAgent(agent, fields = {}) {
   const frontmatter = { name: agent.name, description: agent.description, ...fields };
@@ -99,12 +111,12 @@ const agentDefinitions = agents.map((file) => {
   if (!fm.description) throw new Error(`${rel(file)}: agents require a description`);
   if (name !== path.basename(file, ".md"))
     throw new Error(`${rel(file)}: agent name must match its filename (${name})`);
-  return { file, name, description: fm.description, body };
+  return { file, name, description: fm.description, fm, body };
 });
 
 // ------------------------------------------------- Claude Code (plugin) ------
-// Frontmatter passes through unchanged: shared/ already uses Claude's keys
-// (description / argument-hint / model), which are the most expressive set.
+// Shared frontmatter uses Claude's expressive keys by default. Pi-only fields
+// are stripped so one harness's tool names cannot alter Claude's allowlist.
 const CLAUDE = path.join(ROOT, "plugins", "core");
 for (const f of commands) emit(path.join(CLAUDE, "commands", path.basename(f)), read(f));
 for (const s of skillDirs)
@@ -114,7 +126,10 @@ for (const s of skillDirs)
 // second, stale specialist registered alongside the canonical one.
 if (!CHECK) rmSync(path.join(CLAUDE, "agents"), { recursive: true, force: true });
 for (const agent of agentDefinitions)
-  emit(path.join(CLAUDE, "agents", `${agent.name}.md`), read(agent.file));
+  emit(
+    path.join(CLAUDE, "agents", `${agent.name}.md`),
+    withoutFrontmatterFields(read(agent.file), ["pi-tools", "pi-extensions"]),
+  );
 
 // ------------------------------------------------------------- Codex ---------
 // Codex uses skills for reusable workflows. Factory's shared command bodies
@@ -170,14 +185,23 @@ for (const f of commands) {
 // ------------------------------------------------------------- Pi ------------
 // dist/pi/ — skills and prompts for the Pi coding agent.
 const PI = path.join(ROOT, "dist", "pi");
+const PI_DEFAULT_AGENT_TOOLS = "read, grep, find, ls, bash";
 if (!CHECK) rmSync(path.join(PI, "agents"), { recursive: true, force: true });
-for (const agent of agentDefinitions)
-  emit(path.join(PI, "agents", `${agent.name}.md`), markdownAgent(agent, {
-    tools: "read, grep, find, ls, bash",
+for (const agent of agentDefinitions) {
+  // Pi-specific declarations live in shared frontmatter so an exceptional
+  // agent's surface is reviewable at the source. Prefixing them avoids passing
+  // Pi tool names through to Claude Code, whose `tools` field has different
+  // names and semantics. Agents without a declaration retain the byte-identical
+  // historical allowlist.
+  const piFields = {
+    tools: agent.fm["pi-tools"] || PI_DEFAULT_AGENT_TOOLS,
     systemPromptMode: "replace",
     inheritProjectContext: true,
     inheritSkills: true,
-  }));
+  };
+  if (agent.fm["pi-extensions"]) piFields.extensions = agent.fm["pi-extensions"];
+  emit(path.join(PI, "agents", `${agent.name}.md`), markdownAgent(agent, piFields));
+}
 for (const s of skillDirs)
   for (const f of listFiles(path.join(SHARED, "skills", s)))
     emit(path.join(PI, "skills", s, path.relative(path.join(SHARED, "skills", s), f)), read(f));

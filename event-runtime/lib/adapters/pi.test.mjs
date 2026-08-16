@@ -13,6 +13,7 @@ import {
   mapStreamEvent,
   PUSH_CREDENTIAL_ENV,
   MUTATING_TOOLS,
+  piExtensions,
   piTools,
   READ_ONLY_TOOLS,
   resolvePiCommand,
@@ -177,6 +178,33 @@ describe("buildPiArgv", () => {
     expect(piTools({ mutating: false })).toEqual(READ_ONLY_TOOLS);
     expect(piTools({ mutating: false, tools: "read" })).toEqual(READ_ONLY_TOOLS);
     expect(piTools(undefined)).toEqual(MUTATING_TOOLS);
+  });
+
+  test("declared extensions are loaded per run with repeatable -e flags (WM-335)", () => {
+    const argv = buildPiArgv({
+      def: {
+        mutating: false,
+        extensions: ["npm:@narumitw/pi-chrome-devtools", "./local-extension.ts"],
+      },
+      model: null,
+    });
+    expect(argv).toEqual([
+      "-p", "--mode", "json",
+      "-e", "npm:@narumitw/pi-chrome-devtools",
+      "-e", "./local-extension.ts",
+      "--tools", READ_ONLY_TOOLS.join(","),
+    ]);
+  });
+
+  test("extensions are scoped to definitions that declare them and deduplicated", () => {
+    expect(piExtensions(undefined)).toEqual([]);
+    expect(piExtensions({})).toEqual([]);
+    expect(piExtensions({ extensions: "npm:@narumitw/pi-chrome-devtools" })).toEqual([]);
+    expect(piExtensions({ extensions: ["", "  ", "npm:a", "npm:a", "npm:b"] })).toEqual([
+      "npm:a",
+      "npm:b",
+    ]);
+    expect(buildPiArgv({ def: { mutating: false }, model: null })).not.toContain("-e");
   });
 
   test("planner-pinned model → --model verbatim; default sentinel, null, or absent → no flag (WM-135)", () => {

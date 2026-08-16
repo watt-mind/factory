@@ -68,6 +68,57 @@
       "type": "string",
       "minLength": 1,
       "description": "One line an operator can act on: what shipped, what blocked, or why nothing happened"
+    },
+    "uxCritique": {
+      "type": "object",
+      "description": "UX gate result when the run reached post-verification review. Required by the dispatch prompt for PR_OPEN; optional in the schema for backward-compatible terminal outcomes produced before the gate.",
+      "required": [
+        "status",
+        "verdict",
+        "evidence",
+        "rounds",
+        "prReady"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "required",
+            "skipped",
+            "blocked"
+          ]
+        },
+        "verdict": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "SHIP",
+            "FIX-FIRST",
+            "NOT-ASSESSED",
+            "BLOCKED",
+            null
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Observed worktree page URLs or screenshot paths supporting a required verdict; empty only when skipped or unavailable"
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "prReady": {
+          "type": "boolean",
+          "description": "True only when the PR is non-draft; an evidence-backed SHIP or a skipped gate may be ready"
+        }
+      }
     }
   }
 }

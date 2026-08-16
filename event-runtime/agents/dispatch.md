@@ -38,13 +38,48 @@ steal a claim, never queue behind the holder.
    `./repo`. Never proceed past failing output; never weaken a test to get
    green. The runtime re-runs the repo's declared verify command after you —
    your report is not the evidence, the output is.
-4. **Never `sleep` to wait for anything.** Poll a condition with a real
+4. **Run the UX gate when required.** A critique is required when the change
+   introduces or materially changes a user-completable flow, interaction,
+   state transition, error/recovery path, responsive layout, authentication,
+   payment, onboarding, or destructive action. It is skipped for isolated
+   styling, copy-only/static content, icons/assets, and internal/admin-only
+   surfaces unless the ticket identifies UX risk.
+
+   Spawn the `factory-ux-critic` subagent after verification and before opening
+   the PR. Its prompt must spell out `worktree: <absolute path>` plus the exact
+   dev-server command and this worktree's port (or simulator/Electron target),
+   login route, ticket criteria, flow, and persona. The critic must use the
+   running app. A valid `SHIP` or `FIX-FIRST` report cites at least one observed
+   page URL or screenshot path; without browser evidence, treat it as
+   `NOT-ASSESSED`, never as approval.
+
+   Resolve in-scope `FIX-FIRST` findings and re-run the critic, for at most two
+   review rounds. A startup `BLOCKED - environment mismatch or unresponsive
+   shell` means the spawn prompt was defective: correct its path/launch details
+   and retry once without consuming a review round. If the retry blocks, or the
+   app cannot be driven, record that result rather than guessing.
+5. **Never `sleep` to wait for anything.** Poll a condition with a real
    command (`gh pr checks <PR> --watch --fail-fast` for CI); a fixed sleep
    wedges the run until the timeout kills it.
-5. **Push and open a PR** against the repo's base branch with
-   `Fixes <TICKET>` in the body. Post the structured `## Handoff` comment on
-   the ticket (PR link, verification command + one-line result, files
-   touched, risks), then move it to `In Review` + `ai:needs-review`, removing
+6. **Push and open a PR** against the repo's base branch with
+   `Fixes <TICKET>` in the body. For a required UX critique, create the PR as a
+   draft first. Run `gh pr ready <PR>` only after an evidence-backed `SHIP`
+   verdict (including a `FIX-FIRST` resolved to `SHIP`). Leave `FIX-FIRST`,
+   `NOT-ASSESSED`, and `BLOCKED` PRs in draft for review; skipped critiques may
+   open ready normally. Include `UX critique: <status>` in the PR body.
+
+   Post the structured `## Handoff` comment on the ticket before transitioning:
+
+   ```
+   ## Handoff
+   - PR: <url>
+   - Verification: `<exact command>` — pass, <one-line result>
+   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, <reason> | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
+   - Files: <n> changed, all within Owned Paths
+   - Risks: <reviewer focus, or "none known">
+   ```
+
+   Then move the ticket to `In Review` + `ai:needs-review`, removing
    `ai:in-progress`.
 
 **The paved road for pushing is `gh` over HTTPS.** Authenticate through the
@@ -94,7 +129,14 @@ report `outcome: "FAILED"`.
       "passed": true,
       "output": "the last lines of the verification run"
     },
-    "summary": "one line an operator can act on"
+    "summary": "one line an operator can act on",
+    "uxCritique": {
+      "status": "required",
+      "verdict": "SHIP",
+      "evidence": ["http://127.0.0.1:7497/runs"],
+      "rounds": 1,
+      "prReady": true
+    }
   },
   "evidence": { "commands": ["the commands this rests on"] }
 }

@@ -126,6 +126,10 @@ export function buildPiArgv({ def, model }) {
   if (typeof model === "string" && model !== "" && model !== "default") {
     args.push("--model", model);
   }
+  // Extensions are definition-scoped and loaded explicitly for this process.
+  // Never `pi install` here: that writes global settings and would expose an
+  // extension's tools to unrelated agents (WM-335).
+  for (const extension of piExtensions(def)) args.push("-e", extension);
   // Always allowlist (WM-336). Omitting `--tools` does not mean "no tools", it
   // means "every tool pi currently ships" — a set that grows without review.
   args.push("--tools", piTools(def).join(","));
@@ -146,6 +150,19 @@ export function piTools(def) {
   const base = def?.mutating === false ? READ_ONLY_TOOLS : MUTATING_TOOLS;
   const extra = Array.isArray(def?.tools) ? def.tools : [];
   return [...new Set([...base, ...extra])];
+}
+
+/** Repeatable `-e` sources declared by this definition, normalized for argv. */
+export function piExtensions(def) {
+  if (!Array.isArray(def?.extensions)) return [];
+  return [
+    ...new Set(
+      def.extensions
+        .filter((extension) => typeof extension === "string")
+        .map((extension) => extension.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 export const BASE_INHERITED_ENV = [
