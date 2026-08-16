@@ -381,11 +381,58 @@ await client.replay({
   payload: {
     repo: primaryProject,
     github: "watt-mind/factory",
-    plan: [{ pr: 42, headSha: fixtureSha, ticket: "WM-400", action: "merge_pr" }],
+    base: "develop",
+    deployBranch: "master",
+    plan: [
+      {
+        pr: 42,
+        headSha: fixtureSha,
+        baseSha: "b".repeat(40),
+        headRef: "feat/WM-400",
+        ticket: "WM-400",
+        action: "merge_pr",
+        reason: "demo: independently reviewed ordinary develop PR",
+        checksGreen: true,
+        mergeable: true,
+        ownedPathsValid: true,
+        handoffValid: true,
+        testsFalsifiable: true,
+        policySafe: true,
+        sensitive: false,
+        ambiguous: false,
+      },
+    ],
   },
 });
-const mergeWatched = await openProposalFor(mergeEventId, { agent: "merge-apply@1" });
-log(`${mergeWatched.id} left open (merge-apply@1 watched)`);
+const mergeWatched = await openProposalFor(mergeEventId, { agent: "merge-apply@2" });
+log(`${mergeWatched.id} left open (merge-apply@2 watched)`);
+
+const mergeLandedEventId = `${prefix}-merge-landed`;
+await replay({
+  schemaVersion: "factory.event/v1",
+  eventId: mergeLandedEventId,
+  type: "factory.merge-landed",
+  source: "demo-seed",
+  subject: primaryProject,
+  occurredAt: new Date().toISOString(),
+  correlationId: mergeLandedEventId,
+  payload: {
+    repo: primaryProject,
+    github: "watt-mind/factory",
+    base: "develop",
+    pr: 42,
+    ticket: "WM-400",
+    headSha: fixtureSha,
+    headRef: "feat/WM-400",
+    mergeCommitSha: "c".repeat(40),
+  },
+});
+const mergeVerifyProposal = await openProposalFor(mergeLandedEventId, {
+  agent: "merge-verify@1",
+});
+await client.approve(mergeVerifyProposal.id);
+await runTerminal(mergeVerifyProposal.runId, "COMPLETED");
+log(`${mergeVerifyProposal.runId} → COMPLETED (merge-verify@1 exact landed lifecycle)`);
 
 const shipEventId = `${prefix}-ship-watched`;
 await client.replay({
