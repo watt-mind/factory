@@ -68,6 +68,8 @@ case "$cmd" in
   next)         run_bun orchestrator/next.mjs "$@" ;;
   state)        run_bun orchestrator/state.mjs "$@" ;;
   status)       run_bun orchestrator/status.mjs "$@" ;;
+  pulse)        run_bun orchestrator/pulse.mjs "$@" ;;
+  watchdog)     run_bun orchestrator/watchdog.mjs "$@" ;;
   ps)           run_bun orchestrator/ps.mjs "$@" ;;
   workers)      run_bun orchestrator/workers.mjs "$@" ;;
   friction)     run_bun orchestrator/friction.mjs "$@" ;;
@@ -239,6 +241,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   next          orchestrator/next.mjs
   state         orchestrator/state.mjs
   status        orchestrator/status.mjs (repo, deployment, and factory snapshot)
+  pulse         orchestrator/pulse.mjs (composite stack, worker, supply, and PR pulse)
+  watchdog      orchestrator/watchdog.mjs (health monitor, wedged run detector, and circuit breaker)
   ps            orchestrator/ps.mjs (factory processes, ports, workers, and agents)
   workers       orchestrator/workers.mjs (remote worker fleet and version skew)
   friction      orchestrator/friction.mjs

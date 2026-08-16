@@ -174,3 +174,29 @@ test("factory inject delegates to event-runtime/cli.mjs", () => {
   expect(result.exitCode).toBe(1);
   expect(result.stderr.toString()).toContain("usage: inject <envelope.json|->");
 });
+
+test("factory pulse executes via CLI", () => {
+  const result = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "pulse", "--json"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  const json = JSON.parse(result.stdout.toString());
+  expect(json).toHaveProperty("stack");
+  expect(json).toHaveProperty("supply");
+  expect(json).toHaveProperty("workspace");
+});
+
+test("factory watchdog executes via CLI", () => {
+  const result = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "watchdog", "--json", "--once"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.stdout.toString().length).toBeGreaterThan(0);
+  const json = JSON.parse(result.stdout.toString());
+  expect(json).toHaveProperty("ok");
+  expect(json).toHaveProperty("issues");
+  expect(json).toHaveProperty("metrics");
+});
