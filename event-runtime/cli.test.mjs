@@ -27,6 +27,22 @@ function runCli(args, env = {}) {
   return { ...result, all: `${result.stdout}${result.stderr}` };
 }
 
+/** Wait for both durable writes made after an async notifier process exits. */
+async function awaitNotifierDelivery(db, target, { timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const row = db.query(
+      `SELECT i.delivery_json, n.exit_code
+       FROM inbox_items i JOIN notify_log n ON n.inbox_item_id = i.id
+       WHERE n.target = ?`,
+    ).get(target);
+    const delivery = JSON.parse(row?.delivery_json ?? "{}");
+    if (delivery.telegram && row?.exit_code === 0) return delivery.telegram;
+    await Bun.sleep(10);
+  }
+  throw new Error(`notifier delivery for ${target} did not settle within ${timeoutMs}ms`);
+}
+
 describe("cli", () => {
   test("no command → usage text listing all verbs, non-zero exit", () => {
     const r = runCli([]);
@@ -454,12 +470,14 @@ describe("cli", () => {
   test("tick with FACTORY_EVENT_NOTIFY=1 pushes a human_needed park through the stub notifier exactly once", async () => {
     const { tick } = await import("./cli.mjs");
     const { loadRegistry } = await import("./lib/registry.mjs");
-    const { chmodSync, readFileSync, writeFileSync, existsSync } = await import("node:fs");
+    const { chmodSync, readFileSync, writeFileSync } = await import("node:fs");
 
     const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-tick-notify-"));
     const outFile = path.join(dir, "pushes.txt");
     const stub = path.join(dir, "notify-stub.sh");
-    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${outFile}\n`);
+    // The write is visible before process exit, reproducing the former race:
+    // observing this file is not proof that inbox persistence has completed.
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${outFile}\nsleep 1\n`);
     chmodSync(stub, 0o755);
 
     const db = openDb(path.join(dir, "runtime.db"));
@@ -477,21 +495,25 @@ describe("cli", () => {
     process.env.FACTORY_EVENT_NOTIFY = "1";
     process.env.FACTORY_EVENT_NOTIFY_CMD = stub;
     const logs = [];
+    let deliveryStarted = false;
+    let deliverySettled = false;
     try {
       await tick({ db, registry: loadRegistry(), policyVersion: "git:test", log: (l) => logs.push(l) });
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline && !existsSync(outFile)) {
-        await Bun.sleep(50);
-      }
+      deliveryStarted = true;
+      const delivery = await awaitNotifierDelivery(db, "test/evt-tick");
+      deliverySettled = true;
+      expect(delivery.error).toBeNull();
       expect(readFileSync(outFile, "utf8").trim()).toBe(
         "BLOCKED linear.ticket.agent_ready evt-tick: no_worktree_scripts",
       );
       expect(logs.some((l) => l.includes("notify human_needed test/evt-tick"))).toBe(true);
       // A second tick pushes nothing new.
       await tick({ db, registry: loadRegistry(), policyVersion: "git:test", log: () => {} });
-      await Bun.sleep(200);
       expect(readFileSync(outFile, "utf8").trim().split("\n")).toHaveLength(1);
     } finally {
+      // A failed assertion must not close the SQLite handle while the notifier
+      // continuation is still persisting delivery_json and notify_log.
+      if (deliveryStarted && !deliverySettled) await awaitNotifierDelivery(db, "test/evt-tick");
       if (saved.N === undefined) delete process.env.FACTORY_EVENT_NOTIFY;
       else process.env.FACTORY_EVENT_NOTIFY = saved.N;
       if (saved.C === undefined) delete process.env.FACTORY_EVENT_NOTIFY_CMD;
