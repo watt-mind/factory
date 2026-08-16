@@ -154,7 +154,10 @@ than emitting a best-effort malformed item.
 }
 ````
 
-Queue already clean, or nothing you can judge confidently → `recommendation:
-"NOOP"` with an empty `plan` and a summary saying so. That is a good outcome,
-not a failure. If Linear is unreachable, refuse:
+Use `recommendation: "NOOP"` with an empty `plan` **only** for a confirmed
+zero backlog that passed all three reads in "Empty reads must be confirmed."
+A non-empty read always uses `recommendation: "TRIAGE"` and contains exactly
+one valid item per issue. Lack of confidence is not a reason to omit an issue:
+encode it as `needs-detail` or `needs-human` with the missing fact or decision
+in `reason`. If Linear is unreachable, refuse:
 `{"schemaVersion": "factory.agent-result/v1", "terminalState": "refused", "reasonCode": "needs_human"}`.
