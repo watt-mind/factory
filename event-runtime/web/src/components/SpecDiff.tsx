@@ -142,7 +142,7 @@ export function SpecDiff({ before, after }: { before: unknown; after: unknown })
       {linesBelow > 0 && (
         <>
           <div
-            className="pointer-events-none sticky bottom-0 -mt-8 h-8 bg-linear-to-t from-(--surface-0) to-transparent"
+            className="pointer-events-none sticky bottom-0 -mt-8 h-8 bg-linear-to-t from-(--surface-3) to-transparent"
             aria-hidden
           />
           <div className="sticky bottom-0 bg-(--surface-0) px-3 pb-2 pt-0.5 text-center text-[10px] text-(--text-faint)">
