@@ -113,13 +113,18 @@ export const api = {
   workers: () => call<{ workers: Worker[] }>("GET", "/workers"),
   // The schedule registry: recurring loops, cadence, timing, and health.
   schedules: () => call<{ schedules: ScheduleItem[] }>("GET", "/schedules"),
-  // Trigger an ad-hoc run of a registered schedule loop.
-  triggerSchedule: (loop: string) =>
-    call<TriggerOutcome>("POST", `/schedules/${encodeURIComponent(loop)}/run`, {}),
+  // Trigger an ad-hoc run. Explicit PR numbers are accepted only by merge schedules.
+  triggerSchedule: (loop: string, prNumbers?: number[]) =>
+    call<TriggerOutcome>(
+      "POST",
+      `/schedules/${encodeURIComponent(loop)}/run`,
+      prNumbers === undefined ? {} : { prNumbers },
+    ),
 };
 
 export interface ScheduleItem {
   loop: string;
+  repo: string | null;
   every: string;
   cadenceSeconds: number | null;
   eventType: string;

@@ -347,6 +347,26 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
   });
 });
 
+describe("merge-scan selected PR contract (WM-426)", () => {
+  test("the input schema declares an optional nonempty list of positive PR numbers", () => {
+    const prNumbers = registry.agents.get("merge-scan@2").inputSchema.properties.prNumbers;
+    expect(prNumbers.type).toBe("array");
+    expect(prNumbers.minItems).toBe(1);
+    expect(prNumbers.items).toEqual({ type: "integer", minimum: 1 });
+    expect(registry.agents.get("merge-scan@2").inputSchema.required).not.toContain("prNumbers");
+  });
+
+  test("the prompt scopes selected scans exactly and fails invalid targets closed", () => {
+    const prompt = readFileSync(registry.agents.get("merge-scan@2").promptPath, "utf8");
+    expect(prompt).toContain("`prNumbers` is absent");
+    expect(prompt).toContain("exactly those PR numbers");
+    expect(prompt).toMatch(/missing, closed, draft, or targets a\s+base other than/);
+    expect(prompt).toContain('"terminalState": "refused"');
+    expect(prompt).toMatch(/evidence clearly naming every invalid\s+selected PR/);
+    expect(prompt).toMatch(/Do not\s+emit a merge-plan artifact/);
+  });
+});
+
 describe("merge-scan repository workspace and result contract (WM-425)", () => {
   test("the definition and prompt declare the pinned repository contract", () => {
     const def = registry.agents.get("merge-scan@2");

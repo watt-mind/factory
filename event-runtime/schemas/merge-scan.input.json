@@ -35,6 +35,12 @@
         }
       }
     },
+    "prNumbers": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Optional explicit PR numbers for a manual scan. When omitted, review all open PRs targeting the configured base.",
+      "items": { "type": "integer", "minimum": 1 }
+    },
     "loop": { "type": "string", "minLength": 1 },
     "slot": { "type": "string", "minLength": 1 },
     "cadenceSeconds": { "type": "integer", "minimum": 1 },

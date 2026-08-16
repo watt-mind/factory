@@ -329,7 +329,17 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
     })),
     workers: mock(async (): Promise<{ workers: Worker[] }> => ({ workers: [] })),
     schedules: mock(async (): Promise<{ schedules: any[] }> => ({ schedules: [] })),
-    triggerSchedule: mock(async (_loop: string) => ({ triggered: true, runId: "run_mock_1" })),
+    triggerSchedule: mock(async (_loop: string, _prNumbers?: number[]) => ({
+      admitted: true,
+      duplicate: false,
+      eventId: "manual:fixture",
+      proposalId: null,
+      runId: "run_mock_1",
+      decision: "run",
+      reason: null,
+      disabled: false,
+      loop: _loop,
+    })),
   };
 }
 

@@ -178,10 +178,14 @@ export function Schedules({
   }, [sel, allEvents]);
 
   const [confirmLoop, setConfirmLoop] = useState<ScheduleItem | null>(null);
+  const [prNumbersInput, setPrNumbersInput] = useState("");
+  const [triggerInputError, setTriggerInputError] = useState<string | null>(null);
 
   const triggerMut = useMutation({
-    mutationFn: (loop: string) => api.triggerSchedule(loop),
-    onSuccess: (outcome, loop) => {
+    mutationFn: ({ loop, prNumbers }: { loop: string; prNumbers?: number[] }) =>
+      api.triggerSchedule(loop, prNumbers),
+    onSuccess: (outcome, request) => {
+      const { loop } = request;
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
       queryClient.invalidateQueries({ queryKey: ["events"] });
       queryClient.invalidateQueries({ queryKey: ["proposals"] });
@@ -199,12 +203,47 @@ export function Schedules({
   });
 
   useEffect(() => {
+    setPrNumbersInput("");
+    setTriggerInputError(null);
+  }, [confirmLoop]);
+
+  useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex, rejumpEpoch]);
 
   useEffect(() => {
     if (focusScheduleLoop) setFilter("");
   }, [focusScheduleLoop]);
+
+  const submitTrigger = () => {
+    if (!confirmLoop) return;
+    if (confirmLoop.eventType !== "factory.merge.requested") {
+      triggerMut.mutate({ loop: confirmLoop.loop });
+      return;
+    }
+
+    const raw = prNumbersInput.trim();
+    if (raw === "") {
+      triggerMut.mutate({ loop: confirmLoop.loop });
+      return;
+    }
+    const tokens = raw.split(/[\s,]+/);
+    if (tokens.some((token) => !/^\d+$/.test(token))) {
+      setTriggerInputError("Enter positive PR numbers separated by commas or spaces.");
+      return;
+    }
+    const prNumbers = tokens.map(Number);
+    if (prNumbers.some((number) => !Number.isSafeInteger(number) || number <= 0)) {
+      setTriggerInputError("Enter positive PR numbers separated by commas or spaces.");
+      return;
+    }
+    if (new Set(prNumbers).size !== prNumbers.length) {
+      setTriggerInputError("Each PR number may be entered only once.");
+      return;
+    }
+    setTriggerInputError(null);
+    triggerMut.mutate({ loop: confirmLoop.loop, prNumbers });
+  };
 
   const pendingC = useRef<number>(0);
 
@@ -690,8 +729,58 @@ export function Schedules({
               <code className="mono rounded bg-(--surface-2) px-1 py-0.5 text-(--text)">
                 operator
               </code>
-              . It creates an open proposal for review and does not alter the schedule&apos;s normal slot timer.
+              . It {confirmLoop.approval === "watched"
+                ? "creates an open proposal for review"
+                : "uses the schedule’s auto-approval policy"} and does not alter the schedule&apos;s normal slot timer.
             </p>
+
+            {confirmLoop.eventType === "factory.merge.requested" && (
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="schedule-pr-numbers"
+                  className="block text-[12px] font-medium text-(--text)"
+                >
+                  PR numbers (optional)
+                </label>
+                <input
+                  id="schedule-pr-numbers"
+                  type="text"
+                  autoFocus
+                  inputMode="numeric"
+                  value={prNumbersInput}
+                  aria-invalid={triggerInputError ? true : undefined}
+                  aria-describedby={`schedule-pr-numbers-help${triggerInputError ? " schedule-pr-numbers-error" : ""}`}
+                  onChange={(event) => {
+                    setPrNumbersInput(event.target.value);
+                    setTriggerInputError(null);
+                  }}
+                  placeholder="411, 426"
+                  className="mono w-full rounded-md border border-(--border) bg-(--surface-1) px-2.5 py-1.5 text-[13px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
+                />
+                <p id="schedule-pr-numbers-help" className="text-[11px] text-(--text-faint)">
+                  Enter unique positive PR numbers separated by commas or spaces. Leave blank to review all open PRs in {confirmLoop.repo ?? "the configured repository"}.
+                </p>
+                {triggerInputError && (
+                  <div
+                    id="schedule-pr-numbers-error"
+                    role="alert"
+                    className="text-[12px] text-(--hue-err)"
+                  >
+                    {triggerInputError}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {confirmLoop.eventType === "factory.merge.requested" && (
+              <div className="rounded-md border border-(--hue-warn) bg-[color-mix(in_oklch,var(--hue-warn)_10%,var(--surface-1))] p-3 text-[12px]">
+                <div className="font-semibold text-(--hue-warn)">Autonomous merge automation</div>
+                <p className="mt-1 text-(--text-dim)">
+                  The scanner is read-only, but a MERGE or FIX recommendation can launch mutating downstream automation without another confirmation.
+                  {confirmLoop.approval === "auto" && " This schedule is auto-approved, so the scan starts unattended."}
+                </p>
+              </div>
+            )}
 
             {confirmLoop && (
               <div className="rounded-md border border-(--border) bg-(--surface-2) p-3 space-y-2">
@@ -754,7 +843,7 @@ export function Schedules({
               <Button
                 variant="primary"
                 disabled={triggerMut.isPending || connected === false}
-                onClick={() => triggerMut.mutate(confirmLoop.loop)}
+                onClick={submitTrigger}
               >
                 {triggerMut.isPending ? "Triggering…" : "Trigger Run"}
               </Button>

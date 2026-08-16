@@ -5,9 +5,23 @@ run. `./input.json` names a configured repo and contains a planner-injected
 `repoPin` with the exact commit SHA materialized for this run. The repo is
 checked out read-only at `./repo` at that SHA. Read
 `./repo/config/repos.yaml` and `./repo/config/policy.yaml` from that pinned
-snapshot, then enumerate **all** open PRs and classify every base-targeting,
-non-draft PR as exactly MERGE, FIX, or ESCALATE. Never modify the checkout,
-GitHub, or Linear. Write only `./result.json` in the workspace root.
+snapshot. When `prNumbers` is absent, enumerate **all** open PRs and classify
+every base-targeting, non-draft PR as exactly MERGE, FIX, or ESCALATE. When
+`prNumbers` is present, review exactly those PR numbers in the listed repo — do
+not add newer, related, or otherwise open PRs to the scan.
+
+Resolve every selected number directly, including numbers absent from an
+open-PR listing. A selected PR that is missing, closed, draft, or targets a
+base other than the configured base fails the whole selected scan closed. Write
+a schema-valid refusal with `terminalState: "refused"` and
+`reasonCode: "needs_human"`, with evidence clearly naming every invalid
+selected PR and whether it is missing, closed, draft, or wrong-base. Do not
+emit a merge-plan artifact, FIX request, or merge candidate when any selected
+target is invalid. This whole-run refusal is the explicit human escalation;
+never silently skip an invalid selected number.
+
+Never modify the checkout, GitHub, or Linear. Write only `./result.json` in the
+workspace root.
 
 If either pinned config file is missing or unreadable, or the named repo's
 configuration is missing or malformed, fail closed with this complete result
@@ -97,8 +111,9 @@ review):
 Do not place `recommendation`, `repo`, `github`, `base`, `deployBranch`,
 `plan`, `fix`, `escalate`, `summary`, or `noopReason` beside `schemaVersion`;
 all merge-plan fields belong inside `artifact`. Never omit `terminalState`.
-For any refusal, use the complete fail-closed wrapper shown above rather than
-writing a partial merge plan.
+For any refusal, use the fail-closed wrapper shown above rather than writing a
+partial merge plan. A selected-target refusal must additionally include the
+evidence required above.
 
 After producing the artifact, do nothing else. In particular, never approve,
 merge, push, mark Done, or delete a branch.
