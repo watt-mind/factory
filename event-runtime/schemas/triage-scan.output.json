@@ -15,9 +15,43 @@
         "properties": {
           "issueId": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
           "action": {
-            "enum": ["label-agent-ready", "move-to-todo", "needs-detail", "mark-duplicate", "needs-human"]
+            "enum": [
+              "label-agent-ready",
+              "move-to-todo",
+              "write-detail",
+              "needs-detail",
+              "mark-duplicate",
+              "needs-human"
+            ]
           },
-          "reason": { "type": "string", "minLength": 1 }
+          "reason": { "type": "string", "minLength": 1 },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^## (Acceptance criteria|Owned Paths|Verification)",
+            "description": "For write-detail only: additive Markdown containing only missing template sections"
+          },
+          "ownedPaths": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Concrete existing files authored into Owned Paths; glob metacharacters are refused by schema",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^*?\\[\\]{}\\r\\n]+$"
+            }
+          },
+          "verificationCommand": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact authored command after every referenced path, target, and package script was found in the pinned checkout"
+          },
+          "acceptanceCriteria": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Only repository-derivable criteria authored into the missing Acceptance criteria section"
+          }
         }
       }
     },

@@ -13,10 +13,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": [
-      "linear:read",
-      "repo:read"
-    ]
+    "services": ["linear:read", "repo:read"]
   },
   "limits": {
     "timeout_seconds": 900,
@@ -24,8 +21,8 @@
   },
   "mutating": false,
   "pins": {
-    "agents/triage-scan.md": "sha256:f78451d1e543ee57bc18c514770a9082af58052a27b0bcf5ee78409a3a67fa89",
+    "agents/triage-scan.md": "sha256:4331934a385d2fb711f6ab8572f9d7a0938e7bf82f3be776a39c60801bb54f4d",
     "schemas/triage-scan.input.json": "sha256:893c6ada3445fdcf2c5507319fe4933618ca6104298493b6339677ab2e295614",
-    "schemas/triage-scan.output.json": "sha256:27f7e5bbe5e109561f2a3f055dd7801ef263f6750b84936105e6d54070efba97"
+    "schemas/triage-scan.output.json": "sha256:ceba80c94dcb5aa64201c63e0d0c322bcf9e57072349c07b898a24a19f7e1d77"
   }
 }
