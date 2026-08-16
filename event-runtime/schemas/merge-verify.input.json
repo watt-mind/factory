@@ -1,0 +1,25 @@
+{
+  "title": "exact merge landing verification",
+  "type": "object",
+  "required": [
+    "repo",
+    "github",
+    "base",
+    "pr",
+    "ticket",
+    "headSha",
+    "headRef",
+    "mergeCommitSha"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+    "github": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+    "base": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+    "pr": { "type": "integer", "minimum": 1 },
+    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+    "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+    "mergeCommitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+  }
+}

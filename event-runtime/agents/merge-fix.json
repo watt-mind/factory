@@ -1,0 +1,41 @@
+{
+  "id": "merge-fix",
+  "version": 1,
+  "prompt": "agents/merge-fix.md",
+  "input_schema": "schemas/merge-fix.input.json",
+  "output_schema": "schemas/merge-fix.output.json",
+  "output_contract": "factory.merge-fix-result/v1",
+  "model_tier": "strong",
+  "workspace": {
+    "type": "worktree",
+    "checkoutDir": "repo",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [
+      "linear:write",
+      "repo:write",
+      "github:write"
+    ],
+    "tools": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob"
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 2700,
+    "attempts": 1,
+    "budget_usd": 15
+  },
+  "mutating": true,
+  "pins": {
+    "agents/merge-fix.md": "sha256:ff834ffe712fc62389ab890d14ea08f1a92b9c5b99ad6dc688315680a3be220f",
+    "schemas/merge-fix.input.json": "sha256:71a8c16d52dfc908972bf3f9ca6d942c93ab6b0213588298a1cd2715e265aa6c",
+    "schemas/merge-fix.output.json": "sha256:0aa6ba59514abbb6609ef53c124f627c7e5ab09eca655696c99aa4e38e34ce46"
+  }
+}

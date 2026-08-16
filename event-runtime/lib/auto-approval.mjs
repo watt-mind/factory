@@ -22,13 +22,25 @@ export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
   "factory.triage.requested",
   "factory.triage-apply.requested",
   "factory.dispatch.requested",
+  "factory.merge.requested",
+  "factory.merge-fix.requested",
+  "factory.merge-apply.requested",
+  "factory.merge-landed",
+  "factory.merge-verify.requested",
+  "factory.merge-escalate.requested",
+]);
+
+const MERGE_EVENT_TYPES = new Set([
+  "factory.merge.requested",
+  "factory.merge-fix.requested",
+  "factory.merge-apply.requested",
+  "factory.merge-landed",
+  "factory.merge-verify.requested",
+  "factory.merge-escalate.requested",
 ]);
 export const CHAIN_AUTO_APPROVAL_REASON = "auto_approved:chain-policy@1";
 export const CHAIN_AUTO_APPROVAL_ACTOR = "chain-auto-approval";
-const NEVER_AUTO_APPROVE = new Set([
-  "factory.merge-apply.requested",
-  "factory.ship-apply.requested",
-]);
+const NEVER_AUTO_APPROVE = new Set(["factory.ship-apply.requested"]);
 
 function policyPath(root = reposRoot()) {
   return path.join(root, "config", "policy.yaml");
@@ -57,7 +69,34 @@ export function loadChainAutoApprovalPolicy({ root = reposRoot() } = {}) {
     ) {
       return { allowed: new Set(), reason: "policy_contains_forbidden_event" };
     }
-    return { allowed: new Set(allowed), reason: null };
+    const merge = parsed?.merge;
+    const escalation = parsed?.escalation;
+    const mergeAllowed = allowed.some((eventType) => MERGE_EVENT_TYPES.has(eventType));
+    const maxFixRounds = merge?.max_fix_rounds ?? 0;
+    const autoMergeBase = escalation?.auto_merge_base ?? [];
+    const autoMergeOwners = escalation?.auto_merge_owners ?? [];
+    if (
+      (mergeAllowed && (!Number.isInteger(maxFixRounds) || maxFixRounds < 0)) ||
+      !Array.isArray(autoMergeBase) ||
+      !autoMergeBase.every((value) => typeof value === "string") ||
+      !Array.isArray(autoMergeOwners) ||
+      !autoMergeOwners.every((value) => typeof value === "string")
+    ) {
+      return {
+        allowed: new Set(),
+        reason: "merge_policy_invalid",
+        maxFixRounds: 0,
+        autoMergeBase: new Set(),
+        autoMergeOwners: new Set(),
+      };
+    }
+    return {
+      allowed: new Set(allowed),
+      reason: null,
+      maxFixRounds,
+      autoMergeBase: new Set(autoMergeBase),
+      autoMergeOwners: new Set(autoMergeOwners),
+    };
   } catch {
     return { allowed: new Set(), reason: "policy_invalid" };
   }
@@ -256,7 +295,116 @@ function dispatchSafe(envelope, approvalPolicy, dispatchEligibility, dispatch) {
   return null;
 }
 
+function mergeBarrierReason(db, candidate) {
+  const active = db
+    .query(
+      `SELECT run_id FROM runs
+     WHERE run_id != ?
+       AND state NOT IN ('PROPOSED','COMPLETED','REFUSED','FAILED','TIMED_OUT','CANCELLED')
+       AND json_extract(spec_json, '$.agent') IN ('merge-apply@2','merge-verify@1')
+     LIMIT 1`,
+    )
+    .get(candidate.run_id);
+  if (active) return `merge_barrier_active:${active.run_id}`;
+
+  // A landed event owns the global barrier until its exact verifier completes.
+  // FAILED verification intentionally remains a hold: CI/smoke red must stop
+  // every later merge rather than letting the next schedule tick race ahead.
+  const unverified = db
+    .query(
+      `SELECT e.event_id FROM events e
+     WHERE e.type = 'factory.merge-landed'
+       AND NOT EXISTS (
+         SELECT 1 FROM proposals p JOIN runs r ON r.run_id = p.run_id
+         WHERE p.event_source = e.source AND p.event_id = e.event_id
+           AND json_extract(r.spec_json, '$.agent') = 'merge-verify@1'
+           AND r.state = 'COMPLETED'
+       )
+     LIMIT 1`,
+    )
+    .get();
+  if (unverified) return `merge_barrier_unverified:${unverified.event_id}`;
+
+  // An apply that failed after its last deterministic precheck is uncertain:
+  // the merge may have landed before event admission. Keep the barrier closed
+  // until an operator recovers that durable evidence.
+  const uncertain = db
+    .query(
+      `SELECT run_id FROM runs
+     WHERE state IN ('FAILED','TIMED_OUT')
+       AND json_extract(spec_json, '$.agent') = 'merge-apply@2'
+     LIMIT 1`,
+    )
+    .get();
+  return uncertain ? `merge_barrier_uncertain:${uncertain.run_id}` : null;
+}
+
+function mergeEligibility(db, candidate, envelope, policy) {
+  if (!MERGE_EVENT_TYPES.has(envelope.type)) return null;
+  const input = envelope.payload ?? {};
+
+  if (
+    envelope.type === "factory.merge.requested" ||
+    envelope.type === "factory.merge-escalate.requested"
+  ) {
+    return null;
+  }
+  if (envelope.type === "factory.merge-fix.requested") {
+    const owner = String(input.github ?? "").split("/")[0];
+    if (!policy.autoMergeOwners?.has(owner) || !policy.autoMergeBase?.has(input.base))
+      return "merge_fix_repo_not_allowed";
+    if (input.mechanical !== true || input.withinOwnedPaths !== true)
+      return "merge_fix_not_mechanical_or_in_scope";
+    if (
+      !Number.isInteger(input.round) ||
+      input.round < 1 ||
+      input.round > (policy.maxFixRounds ?? 0)
+    ) {
+      return "merge_fix_round_exhausted";
+    }
+    if (!Array.isArray(input.ownedPaths) || input.ownedPaths.length === 0)
+      return "merge_fix_owned_paths_missing";
+    return null;
+  }
+
+  const owner = String(input.github ?? "").split("/")[0];
+  if (!policy.autoMergeOwners?.has(owner)) return "merge_owner_not_allowed";
+  if (
+    !policy.autoMergeBase?.has(input.base) ||
+    ["main", "master", input.deployBranch].filter(Boolean).includes(input.base)
+  ) {
+    return "merge_base_not_allowed";
+  }
+
+  if (envelope.type === "factory.merge-apply.requested") {
+    const plan = input.plan;
+    if (!Array.isArray(plan) || plan.length !== 1)
+      return "merge_plan_must_name_one_pr";
+    const item = plan[0];
+    if (
+      item?.action !== "merge_pr" ||
+      item.policySafe !== true ||
+      item.checksGreen !== true ||
+      item.mergeable !== true ||
+      item.ownedPathsValid !== true ||
+      item.handoffValid !== true ||
+      item.testsFalsifiable !== true ||
+      item.sensitive !== false ||
+      item.ambiguous !== false
+    )
+      return "merge_review_not_policy_safe";
+    return mergeBarrierReason(db, candidate);
+  }
+
+  // merge-landed / merge-verify are allowed only for the exact immutable
+  // landing identity; schema validation checks each 40-hex pin.
+  return mergeBarrierReason(db, candidate)?.startsWith("merge_barrier_active:")
+    ? mergeBarrierReason(db, candidate)
+    : null;
+}
+
 function eligible(
+  db,
   candidate,
   registry,
   policy,
@@ -290,6 +438,9 @@ function eligible(
     return "run_approval_policy_event_mismatch";
   if (!policy.allowed.has(candidate.event_type))
     return policy.reason ?? "policy_unknown";
+
+  const mergeReason = mergeEligibility(db, candidate, envelope, policy);
+  if (mergeReason) return mergeReason;
 
   const mapping = getEventType(registry, envelope.type);
   if (!mapping || mapping.humanApprovalOnly) return "event_human_approval_only";
@@ -344,7 +495,7 @@ export function autoApproveChains(
   const errors = [];
   const rows = db
     .query(
-      `SELECT p.id, p.event_source, p.event_id, p.spec_json AS proposal_spec_json, p.spec_hash AS proposal_spec_hash,
+      `SELECT p.id, p.run_id, p.event_source, p.event_id, p.spec_json AS proposal_spec_json, p.spec_hash AS proposal_spec_hash,
             p.created_at, p.ttl_seconds, e.type AS event_type, e.envelope_json,
             r.spec_json AS run_spec_json, r.spec_hash AS run_spec_hash
        FROM proposals p
@@ -360,7 +511,10 @@ export function autoApproveChains(
     const reason =
       age > row.ttl_seconds * 1000
         ? "proposal_expired"
-        : eligible(row, registry, policy, { dispatchEligibility, dispatch });
+        : eligible(db, row, registry, policy, {
+            dispatchEligibility,
+            dispatch,
+          });
     if (reason) {
       noteOpenReason(db, row.id, reason);
       open.push({ proposalId: row.id, reason });

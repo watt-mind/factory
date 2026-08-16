@@ -1,28 +1,19 @@
-# merge-apply — closed action-list executor for the approved merge plan
+# merge-apply — deterministic one-PR landing
 
-Not a prompt: this definition applies an **approved per-PR action list** via
-the deterministic actions adapter in item-list mode
-(`lib/adapters/actions.mjs`). No model runs.
+This is a closed action definition, not a model prompt. Its input contains
+exactly one schema-validated `merge_pr` item from an independent cold scan.
+Immediately before merging, the fixed command re-reads the PR head and base
+SHA, exact branch names, open/draft/mergeable state, GitHub and Linear holds,
+and real required CI. Any stale, missing, red, unknown, or ambiguous fact
+fails closed; moved head/base evidence emits a durable fresh merge scan.
 
-Registered actions — each resolves to one fixed argv:
+Only `develop` is accepted. Policy auto-approval separately requires an
+allowed owner/base and rejects main/master, deploy branches, sensitive or
+ambiguous reviews. The command uses `--match-head-commit`, never deletes the
+branch, never tears down a worktree, and never marks Linear Done.
 
-| action id | effect |
-| :--- | :--- |
-| `merge_pr` | probe, then `gh pr merge <pr> --repo <owner/name> --squash --delete-branch` |
-| `ticket_done` | `tools/linear.mjs state {ticket} "Done" --remove ai:needs-review --remove ai:escalated --remove ai:blocked` — the full merge-protocol Done transition |
-| `notify_escalate` | `factory notify "ESCALATED PR#{pr} ({ticket}): {reason}"` — the notification protocol's ESCALATED push, same invocation shape as ci-notify |
-
-`merge_pr` probes before it merges, the way disk-remediate probes `df`: it
-reads the PR's **current** head (`gh pr view --json headRefOid`) and compares
-it to the plan's pinned `headSha`. A moved head is a **refusal** (the item
-exits 1, the attempt fails, nothing later in the plan runs) — never a
-re-review; a fresh scan produces a fresh pin. The probe and the merge live in
-one fixed `sh` template whose only substitutions are trailing positional
-arguments (`$1`=pr, `$2`=github slug, `$3`=headSha), each anchored by the
-input schema — values are never spliced into the script text.
-
-An action ID outside this table refuses before applying anything — including
-the legitimate items alongside it. Deploy-branch-targeting PRs never reach
-this agent: merge-scan refuses them at scan time, and the deploy-branch merge
-belongs permanently to the ship chain's human approval (WM-111,
-docs/event-runtime-dispatch.md §7).
+After GitHub proves the PR is MERGED, the command reads its exact merge commit
+and injects one idempotent `factory.merge-landed` event. That event is the only
+path to merge verification. A failure after the merge but before durable event
+admission is reported as uncertain and must be recovered before another merge;
+it is never treated as success.

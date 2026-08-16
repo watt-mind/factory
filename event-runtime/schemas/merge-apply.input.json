@@ -1,51 +1,56 @@
 {
-  "title": "merge-apply input — the approved, head-SHA-pinned per-PR action list",
+  "title": "merge-apply input — exactly one independently reviewed PR",
   "type": "object",
-  "required": ["repo", "github", "plan"],
+  "required": ["repo", "github", "base", "deployBranch", "plan"],
   "additionalProperties": false,
   "properties": {
-    "repo": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Short repo name as configured in config/repos.yaml — not the GitHub owner/name slug"
-    },
-    "github": {
-      "type": "string",
-      "pattern": "^[^/\\s]+/[^/\\s]+$",
-      "description": "GitHub owner/name slug the merge commands run against — anchored so it substitutes safely into the closed argv templates"
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+    "github": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+    "base": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+    "deployBranch": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._/-]+$"
     },
     "plan": {
       "type": "array",
       "minItems": 1,
-      "description": "Approved per-PR actions from the merge-scan proposal, applied in order",
+      "maxItems": 1,
       "items": {
         "type": "object",
-        "required": ["pr", "headSha", "ticket", "action"],
+        "required": [
+          "pr",
+          "headSha",
+          "baseSha",
+          "headRef",
+          "ticket",
+          "action",
+          "reason",
+          "checksGreen",
+          "mergeable",
+          "ownedPathsValid",
+          "handoffValid",
+          "testsFalsifiable",
+          "policySafe",
+          "sensitive",
+          "ambiguous"
+        ],
         "additionalProperties": false,
         "properties": {
-          "pr": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "GitHub pull request number the action applies to"
-          },
-          "headSha": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{40}$",
-            "description": "PR head commit the scan reviewed — merge_pr probes the live head and refuses if it moved"
-          },
-          "ticket": {
-            "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
-            "description": "Linear ticket the PR fixes (the item key in the applied record)"
-          },
-          "action": {
-            "enum": ["merge_pr", "ticket_done", "notify_escalate"],
-            "description": "Closed-registry action to apply — anything else refuses the whole plan before executing any item"
-          },
-          "reason": {
-            "type": "string",
-            "description": "One-line justification kept for the audit trail; notify_escalate substitutes it into the push and refuses without it"
-          }
+          "pr": { "type": "integer", "minimum": 1 },
+          "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "action": { "const": "merge_pr" },
+          "reason": { "type": "string", "minLength": 1 },
+          "checksGreen": { "const": true },
+          "mergeable": { "const": true },
+          "ownedPathsValid": { "const": true },
+          "handoffValid": { "const": true },
+          "testsFalsifiable": { "const": true },
+          "policySafe": { "const": true },
+          "sensitive": { "const": false },
+          "ambiguous": { "const": false }
         }
       }
     }

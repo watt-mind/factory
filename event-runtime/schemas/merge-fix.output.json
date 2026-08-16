@@ -1,0 +1,23 @@
+{
+  "title": "merge fix result",
+  "type": "object",
+  "required": [
+    "outcome",
+    "repo",
+    "ticket",
+    "pr",
+    "headSha",
+    "round",
+    "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "outcome": { "enum": ["UPDATED", "BLOCKED"] },
+    "repo": { "type": "string", "minLength": 1 },
+    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+    "pr": { "type": "integer", "minimum": 1 },
+    "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "round": { "type": "integer", "minimum": 1, "maximum": 2 },
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}

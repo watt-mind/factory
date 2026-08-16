@@ -279,7 +279,7 @@ describe("chain auto approval (WM-357)", () => {
     expect(db.query(`SELECT state FROM runs`).get().state).toBe("QUEUED");
   });
 
-  test("operator proposals and merge/ship proposals remain watched", () => {
+  test("operator proposals and protected or incomplete merge/ship proposals remain watched", () => {
     const db = openDb(":memory:");
     const manual = seed(db, { id: "manual", source: "operator" });
     const merge = seed(db, {
@@ -305,7 +305,7 @@ describe("chain auto approval (WM-357)", () => {
     ).toEqual([manual.id, merge.id, ship.id].sort());
     expect(
       openProposals(db, {}).find((proposal) => proposal.id === merge.id).reason,
-    ).toContain("run_approval_policy_watched");
+    ).toContain("merge_owner_not_allowed");
   });
 
   test("closed triage apply is approved, while unknown actions remain visible and watched", () => {

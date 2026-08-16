@@ -1,10 +1,10 @@
 {
   "id": "merge-apply",
-  "version": 1,
+  "version": 2,
   "prompt": "agents/merge-apply.md",
   "input_schema": "schemas/merge-apply.input.json",
   "output_schema": "schemas/merge-applied.output.json",
-  "output_contract": "factory.merge-applied/v1",
+  "output_contract": "factory.merge-applied/v2",
   "itemsField": "plan",
   "itemKey": "ticket",
   "actionRegistry": {
@@ -12,33 +12,17 @@
       "argv": [
         "sh",
         "-c",
-        "set -eu\nactual=\"$(gh pr view \"$1\" --repo \"$2\" --json headRefOid -q .headRefOid)\"\nif [ \"$actual\" != \"$3\" ]; then\n  echo \"refusing PR #$1: head $actual is not the reviewed $3 — a moved head needs a fresh scan, not a merge\" >&2\n  exit 1\nfi\nexec gh pr merge \"$1\" --repo \"$2\" --squash --delete-branch",
+        "set -eu\npr=$1; github=$2; expected_head=$3; expected_base=$4; expected_ref=$5; ticket=$6; repo=$7; base=$8; root=$9\nrefresh() {\n  actual_head=${actual_head:-$expected_head}; actual_base=${actual_base:-$expected_base}\n  REPO=$repo PR=$pr HEAD=$actual_head BASESHA=$actual_base ROOT=$root bun -e 'const e={schemaVersion:\"factory.event/v1\",eventId:`merge-refresh:${process.env.REPO}:${process.env.PR}:${process.env.HEAD}:${process.env.BASESHA}`,type:\"factory.merge.requested\",source:\"chain\",subject:process.env.REPO,occurredAt:new Date().toISOString(),correlationId:`merge-refresh:${process.env.REPO}:${process.env.PR}`,causationId:null,payload:{repo:process.env.REPO}}; console.log(JSON.stringify(e))' | bun \"$root/event-runtime/cli.mjs\" inject - >/dev/null || true\n}\nview=$(gh pr view \"$pr\" --repo \"$github\" --json state,isDraft,mergeable,headRefOid,headRefName,baseRefName,labels)\nactual_head=$(printf '%s' \"$view\" | jq -r .headRefOid)\nactual_base=$(gh api \"repos/$github/git/ref/heads/$base\" --jq .object.sha)\nif [ \"$actual_head\" != \"$expected_head\" ] || [ \"$actual_base\" != \"$expected_base\" ]; then refresh; echo \"stale reviewed SHA; fresh scan emitted\" >&2; exit 0; fi\n[ \"$(printf '%s' \"$view\" | jq -r .state)\" = OPEN ] || { echo \"PR is not open\" >&2; exit 1; }\n[ \"$(printf '%s' \"$view\" | jq -r .isDraft)\" = false ] || { echo \"PR is draft\" >&2; exit 1; }\n[ \"$(printf '%s' \"$view\" | jq -r .mergeable)\" = MERGEABLE ] || { refresh; echo \"PR is not definitely mergeable\" >&2; exit 0; }\n[ \"$(printf '%s' \"$view\" | jq -r .headRefName)\" = \"$expected_ref\" ] || { refresh; echo \"head branch moved\" >&2; exit 0; }\n[ \"$(printf '%s' \"$view\" | jq -r .baseRefName)\" = \"$base\" ] || { echo \"base branch changed\" >&2; exit 1; }\n[ \"$base\" = develop ] || { echo \"only develop is auto-mergeable\" >&2; exit 1; }\n! printf '%s' \"$view\" | jq -e '[.labels[].name|ascii_downcase] | any(. == \"escalated\" or . == \"ai:escalated\")' >/dev/null || { echo \"escalation hold present\" >&2; exit 1; }\n! factory linear get \"$ticket\" | rg -qi 'ai:escalated|type:security|state[[:space:]]+Blocked' || { echo \"Linear escalation/block hold present\" >&2; exit 1; }\nchecks=$(gh pr checks \"$pr\" --repo \"$github\" --required --json bucket)\nprintf '%s' \"$checks\" | jq -e 'length > 0 and all(.[]; .bucket == \"pass\" or .bucket == \"skipping\")' >/dev/null || { refresh; echo \"required CI missing, pending, or red\" >&2; exit 0; }\ngh pr merge \"$pr\" --repo \"$github\" --squash --match-head-commit \"$expected_head\"\nlanded=$(gh pr view \"$pr\" --repo \"$github\" --json state,mergeCommit --jq 'select(.state == \"MERGED\") | .mergeCommit.oid')\n[ -n \"$landed\" ] || { echo \"merge outcome uncertain\" >&2; exit 1; }\nREPO=$repo GITHUB=$github PR=$pr TICKET=$ticket HEAD=$expected_head HEADREF=$expected_ref BASE=$base MERGE=$landed ROOT=$root bun -e 'const p=process.env; const id=`merge-landed:${p.GITHUB}:${p.PR}:${p.MERGE}`; console.log(JSON.stringify({schemaVersion:\"factory.event/v1\",eventId:id,type:\"factory.merge-landed\",source:\"chain\",subject:p.REPO,occurredAt:new Date().toISOString(),correlationId:id,causationId:null,payload:{repo:p.REPO,github:p.GITHUB,base:p.BASE,pr:Number(p.PR),ticket:p.TICKET,headSha:p.HEAD,headRef:p.HEADREF,mergeCommitSha:p.MERGE}}))' | bun \"$root/event-runtime/cli.mjs\" inject -",
         "merge_pr",
         "{pr}",
         "{github}",
-        "{headSha}"
-      ]
-    },
-    "ticket_done": {
-      "argv": [
-        "bun",
-        "{factoryRoot}/tools/linear.mjs",
-        "state",
+        "{headSha}",
+        "{baseSha}",
+        "{headRef}",
         "{ticket}",
-        "Done",
-        "--remove",
-        "ai:needs-review",
-        "--remove",
-        "ai:escalated",
-        "--remove",
-        "ai:blocked"
-      ]
-    },
-    "notify_escalate": {
-      "argv": [
-        "factory",
-        "notify",
-        "ESCALATED PR#{pr} ({ticket}): {reason}"
+        "{repo}",
+        "{base}",
+        "{factoryRoot}"
       ]
     }
   },
@@ -50,8 +34,8 @@
     "filesystem": "workspace-only",
     "services": [
       "gh:write",
-      "linear:write",
-      "notify:telegram"
+      "linear:read",
+      "event-runtime:write"
     ]
   },
   "limits": {
@@ -60,8 +44,8 @@
   },
   "mutating": true,
   "pins": {
-    "agents/merge-apply.md": "sha256:3f4a7b02c8cf0d492536b2c21cfbda136aa3d8fcd773ee835158b6f7569eb116",
-    "schemas/merge-apply.input.json": "sha256:299af3cd5b0c171805345ddf81a2663a28c33a1a402b09082a7b78fb443913cc",
+    "agents/merge-apply.md": "sha256:e9a98a9549e125c89b3aae1ef219da46902b79b57c43ba07b42662ba051c13df",
+    "schemas/merge-apply.input.json": "sha256:333ba9da7476ee2fda41b15615d9f1d0ef3b347561bfbda66ffa41f356380160",
     "schemas/merge-applied.output.json": "sha256:799c2d6cbd896720bcb78c3987e7499761ec4368016fa2841f631448d038a066"
   }
 }

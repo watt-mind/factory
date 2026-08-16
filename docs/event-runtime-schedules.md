@@ -366,3 +366,12 @@ Ship is the same shape on a weekly clock, with one permanent difference: the
 `ship-apply` approval is structurally human-only (WM-111) — that watched
 approval *is* the master-merge decision, and no schedule, chain, or earned
 policy can ever make it `auto`.
+
+## Merge-loop exception (WM-398)
+
+`merge-<repo>` schedules are intentionally enabled with `approval: auto`; this
+approves only the read-only cold scan. Mutating follow-ups remain constrained
+by git-owned policy, schema proofs, immediate live rechecks, and the global
+one-merge barrier. Slot event IDs, singleton planning, SHA pins, and the
+unverified-landing barrier make restart replay idempotent. Work and ship loops
+remain disabled/watched, and deploy/main/master decisions remain human-only.

@@ -1,314 +1,383 @@
-/**
- * Merge chain (WM-109): merge-scan@1 reviews a repo's open PRs cold and emits
- * a typed, head-SHA-pinned plan; merge-apply@1 executes the approved plan via
- * the closed actions registry; ESCALATE routes to the merge-notify push.
- * Follows the triage-scan → triage-apply precedent (OPS-229) and the
- * ci-doctor verdict edges (OPS-223).
- */
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import * as fake from "./lib/adapters/fake.mjs";
+
 import { resolveChains } from "./lib/chain.mjs";
+import { canonicalJson } from "./lib/canonical.mjs";
 import { openDb } from "./lib/db.mjs";
 import { admitEvent } from "./lib/intake.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
-import { approveProposal, openProposals } from "./lib/proposals.mjs";
+import { openProposals } from "./lib/proposals.mjs";
 import { loadRegistry } from "./lib/registry.mjs";
-import { runOnce } from "./lib/worker.mjs";
 
 const registry = loadRegistry();
+const SHA = "a".repeat(40);
+const BASE_SHA = "b".repeat(40);
+const MERGE_SHA = "c".repeat(40);
+const FINDING_HASH = "d".repeat(64);
+const PV = "git:test";
 
-const PINNED_SHA = "a".repeat(40);
-const MOVED_SHA = "b".repeat(40);
+const candidate = (pr = 42, ticket = "WM-500") => ({
+  pr,
+  headSha: SHA,
+  baseSha: BASE_SHA,
+  headRef: `feat/${ticket}`,
+  ticket,
+  action: "merge_pr",
+  reason: "cold review passed",
+  checksGreen: true,
+  mergeable: true,
+  ownedPathsValid: true,
+  handoffValid: true,
+  testsFalsifiable: true,
+  policySafe: true,
+  sensitive: false,
+  ambiguous: false,
+});
 
-/**
- * Run the REAL merge-apply@1 registry definition against shimmed `gh` and
- * `factory` binaries: the probe → merge flow executes exactly the registered
- * templates, but nothing reaches GitHub or Telegram. The adapter's spawnSync
- * inherits the calling process's environ (not mutated process.env), so the
- * adapter runs in a `bun` child whose env carries the shim PATH. The shim's
- * `pr view` answers with $FAKE_HEAD_SHA; every mutating call is appended to
- * $SHIM_LOG.
- */
-async function runApply(plan, { headSha = PINNED_SHA } = {}) {
-  const shims = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-shims-"));
-  const log = path.join(shims, "shim.log");
-  writeFileSync(
-    path.join(shims, "gh"),
-    `#!/bin/sh\nif [ "$1 $2" = "pr view" ]; then echo "$FAKE_HEAD_SHA"; else echo "gh $*" >> "$SHIM_LOG"; fi\n`,
-  );
-  writeFileSync(path.join(shims, "factory"), `#!/bin/sh\necho "factory $*" >> "$SHIM_LOG"\n`);
-  chmodSync(path.join(shims, "gh"), 0o755);
-  chmodSync(path.join(shims, "factory"), 0o755);
+const applyPayload = (pr = 42, ticket = "WM-500") => ({
+  repo: "factory",
+  github: "watt-mind/factory",
+  base: "develop",
+  deployBranch: "master",
+  plan: [candidate(pr, ticket)],
+});
 
-  const runtimeRoot = path.dirname(fileURLToPath(import.meta.url));
-  const driver = path.join(shims, "driver.mjs");
-  writeFileSync(
-    driver,
-    `import * as actions from ${JSON.stringify(path.join(runtimeRoot, "lib", "adapters", "actions.mjs"))};\n` +
-      `import { loadRegistry } from ${JSON.stringify(path.join(runtimeRoot, "lib", "registry.mjs"))};\n` +
-      `const outcome = await actions.execute({\n` +
-      `  spec: { input: JSON.parse(process.argv[2]) },\n` +
-      `  def: loadRegistry().agents.get("merge-apply@1"),\n` +
-      `  workspaceDir: process.argv[3],\n` +
-      `  timeoutMs: 10_000,\n` +
-      `});\n` +
-      `console.log(JSON.stringify(outcome));\n`,
-  );
-
-  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-ws-"));
-  const input = { repo: "bj29", github: "watt-mind/bj29", plan };
-  const proc = spawnSync("bun", [driver, JSON.stringify(input), workspaceDir], {
-    encoding: "utf8",
-    env: { ...process.env, PATH: `${shims}:${process.env.PATH}`, FAKE_HEAD_SHA: headSha, SHIM_LOG: log },
-  });
-  expect(proc.status).toBe(0);
-  return { outcome: JSON.parse(proc.stdout.trim().split("\n").at(-1)), workspaceDir, log };
+function envelope(type, payload, id) {
+  return {
+    schemaVersion: "factory.event/v1",
+    eventId: id,
+    type,
+    source: "chain",
+    subject: payload.repo,
+    occurredAt: "2026-08-16T12:00:00.000Z",
+    correlationId: id,
+    causationId: "parent-run",
+    payload,
+  };
 }
 
-describe("merge-scan registration (WM-109)", () => {
-  test("merge-scan@1 is a read-only pi agent with no repository workspace", () => {
-    const def = registry.agents.get("merge-scan@1");
-    expect(def.mutating).toBe(false);
-    // It reads PRs via gh, not a source tree — ephemeral, like the other
-    // pure-CLI readers (factory-status-report), never a repository checkout.
-    expect(def.workspace.type).toBe("ephemeral");
-    expect(def.output_contract).toBe("factory.merge-plan/v1");
-    expect(def.capabilities.services).toContain("gh:read");
-  });
-
-  test("factory.merge.requested maps to merge-scan@1 on the pi adapter, deduped by inputHash", () => {
-    const mapping = registry.eventTypes["factory.merge.requested"];
-    expect(mapping).toEqual({
-      agent: "merge-scan@1",
-      adapter: "pi",
-      idempotencyScope: ["inputHash"],
-      proposalTtlSeconds: 1800,
-    });
-  });
-
-  test("the plan item shape pins {pr, headSha, ticket} — a moved head is detectable at apply time", () => {
-    const item = registry.agents.get("merge-scan@1").outputSchema.properties.plan.items;
-    expect(item.required).toEqual(["pr", "headSha", "ticket", "action", "reason"]);
-    expect(item.properties.headSha.pattern).toBe("^[0-9a-f]{40}$");
-    expect(item.properties.action.enum).toEqual(["merge_pr", "ticket_done", "notify_escalate"]);
-  });
-});
-
-describe("merge-apply is closed by construction (WM-109)", () => {
-  test("the registry admits merge-apply@1 as an item-list definition with exactly the three closed actions", () => {
-    const def = registry.agents.get("merge-apply@1");
-    expect(def.mutating).toBe(true);
-    expect(def.itemsField).toBe("plan");
-    expect(def.itemKey).toBe("ticket");
-    expect(Object.keys(def.actionRegistry).sort()).toEqual(["merge_pr", "notify_escalate", "ticket_done"]);
-    // ticket_done is the fixed merge-protocol Done transition, nothing else.
-    expect(def.actionRegistry.ticket_done.argv).toEqual([
-      "bun", "{factoryRoot}/tools/linear.mjs", "state", "{ticket}", "Done",
-      "--remove", "ai:needs-review", "--remove", "ai:escalated", "--remove", "ai:blocked",
-    ]);
-    // notify_escalate follows ci-notify's `factory notify` invocation form.
-    expect(def.actionRegistry.notify_escalate.argv).toEqual([
-      "factory", "notify", "ESCALATED PR#{pr} ({ticket}): {reason}",
-    ]);
-    // merge_pr substitutes only trailing positional args — never into the script.
-    expect(def.actionRegistry.merge_pr.argv.slice(-3)).toEqual(["{pr}", "{github}", "{headSha}"]);
-  });
-
-  test("factory.merge-apply.requested maps to merge-apply@1 on the actions adapter, deduped by inputHash", () => {
-    expect(registry.eventTypes["factory.merge-apply.requested"]).toEqual({
-      agent: "merge-apply@1",
-      adapter: "actions",
-      idempotencyScope: ["inputHash"],
-      proposalTtlSeconds: 1800,
-    });
-  });
-
-  test("merge_pr probes the live head first and merges when it matches the pin", async () => {
-    const { outcome, workspaceDir, log } = await runApply([
-      { pr: 101, headSha: PINNED_SHA, ticket: "WM-500", action: "merge_pr", reason: "clean review" },
-      { pr: 102, headSha: PINNED_SHA, ticket: "WM-501", action: "notify_escalate", reason: "touches auth" },
-    ]);
-    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
-    const shimLog = readFileSync(log, "utf8");
-    expect(shimLog).toContain("gh pr merge 101 --repo watt-mind/bj29 --squash --delete-branch");
-    expect(shimLog).toContain("factory notify ESCALATED PR#102 (WM-501): touches auth");
-    const result = JSON.parse(readFileSync(path.join(workspaceDir, "result.json"), "utf8"));
-    expect(result.artifact).toEqual({
-      repo: "bj29",
-      applied: [
-        { issueId: "WM-500", action: "merge_pr" },
-        { issueId: "WM-501", action: "notify_escalate" },
-      ],
-    });
-  });
-
-  test("a moved head is a refusal, not a re-review: the merge never executes", async () => {
-    const { outcome, workspaceDir, log } = await runApply(
-      [{ pr: 101, headSha: PINNED_SHA, ticket: "WM-500", action: "merge_pr", reason: "clean review" }],
-      { headSha: MOVED_SHA },
-    );
-    expect(outcome.exitCode).toBe(1);
-    expect(existsSync(log)).toBe(false); // no mutating call ever reached the shim
-    expect(readFileSync(path.join(workspaceDir, ".actions.log"), "utf8")).toContain("refusing PR #101");
-  });
-
-  test("an unregistered action refuses before applying ANY item — including the valid ones", async () => {
-    const { outcome, workspaceDir, log } = await runApply([
-      { pr: 101, headSha: PINNED_SHA, ticket: "WM-500", action: "merge_pr", reason: "clean review" },
-      { pr: 102, headSha: PINNED_SHA, ticket: "WM-501", action: "delete-everything", reason: "nope" },
-    ]);
-    expect(outcome.exitCode).toBe(1);
-    expect(existsSync(log)).toBe(false); // the valid merge_pr beside it never ran
-    expect(readFileSync(path.join(workspaceDir, ".actions.log"), "utf8")).toContain(
-      "not in the closed action registry",
-    );
-  });
-});
-
-function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-"));
-  const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-e2e-ws-"));
-  const adapters = { pi: fake, actions: fake, command: fake };
-  const workerOpts = { workspacesRoot: workspaces, owner: "w-test", policyVersion: PV };
-
-  async function approveNext(agentRef) {
-    planAdmittedEvents(db, registry, { policyVersion: PV });
-    const proposal = openProposals(db, {}).find((p) => p.spec?.agent === agentRef);
-    expect(proposal).toBeTruthy();
-    const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
-    const summary = await runOnce(db, registry, adapters, workerOpts);
-    return { proposal, runId: approved.runId, summary };
-  }
-  return { db, approveNext };
+function seedCompleted(db, { runId, agent, input, artifact }) {
+  const now = "2026-08-16T12:00:00.000Z";
+  const eventId = `event-${runId}`;
+  db.query(
+    `INSERT INTO events (source,event_id,type,subject,occurred_at,received_at,correlation_id,envelope_json,payload_hash,status,admitted_at)
+     VALUES ('operator',?,'test.event','test',?,?,?,?,'hash','planned',?)`,
+  ).run(eventId, now, now, eventId, canonicalJson({ payload: input }), now);
+  db.query(
+    `INSERT INTO runs (run_id,idempotency_key,spec_json,spec_hash,state,attempts,created_at,updated_at)
+     VALUES (?,?,?,'hash','COMPLETED',1,?,?)`,
+  ).run(runId, `idem-${runId}`, canonicalJson({ agent, input }), now, now);
+  db.query(
+    `INSERT INTO proposals (id,event_source,event_id,run_id,decision,spec_json,status,created_at,ttl_seconds)
+     VALUES (?,'operator',?,?,'run',?,'approved',?,1800)`,
+  ).run(
+    `proposal-${runId}`,
+    eventId,
+    runId,
+    canonicalJson({ agent, input }),
+    now,
+  );
+  db.query(
+    `INSERT INTO results (run_id,attempt,result_json,artifact_hash,verification_json,receipt_json,accepted_at)
+     VALUES (?,1,?,'hash','{}','{}',?)`,
+  ).run(runId, canonicalJson({ artifact }), now);
 }
 
-const PV = "git:test-pv";
+describe("durable autonomous merge registry (WM-398/WM-403)", () => {
+  test("central mappings register scan, bounded fix, deterministic apply, landed verify, and explicit verify", () => {
+    expect(registry.eventTypes["factory.merge.requested"].agent).toBe(
+      "merge-scan@2",
+    );
+    expect(registry.eventTypes["factory.merge-fix.requested"].agent).toBe(
+      "merge-fix@1",
+    );
+    expect(registry.eventTypes["factory.merge-apply.requested"].agent).toBe(
+      "merge-apply@2",
+    );
+    expect(registry.eventTypes["factory.merge-landed"].agent).toBe(
+      "merge-verify@1",
+    );
+    expect(registry.eventTypes["factory.merge-verify.requested"].agent).toBe(
+      "merge-verify@1",
+    );
+    expect(
+      registry.agents.get("merge-fix@1").inputSchema.properties.round.maximum,
+    ).toBe(2);
+  });
 
-const mergeEnvelope = (repo, eventId) => ({
-  schemaVersion: "factory.event/v1",
-  eventId,
-  type: "factory.merge.requested",
-  source: "operator",
-  subject: repo,
-  occurredAt: "2026-08-14T09:00:00Z",
-  correlationId: eventId,
-  payload: { repo },
+  test("cold plan pins head and base, permits one PR, and records every policy proof", () => {
+    const plan =
+      registry.agents.get("merge-scan@2").outputSchema.properties.plan;
+    expect(plan.maxItems).toBe(1);
+    expect(plan.items.required).toContain("baseSha");
+    expect(plan.items.required).toContain("testsFalsifiable");
+    expect(plan.items.properties.sensitive.const).toBe(false);
+    expect(plan.items.properties.ambiguous.const).toBe(false);
+  });
+
+  test("apply has one action and cannot mark Done or delete a branch", () => {
+    const def = registry.agents.get("merge-apply@2");
+    expect(Object.keys(def.actionRegistry)).toEqual(["merge_pr"]);
+    const script = def.actionRegistry.merge_pr.argv[2];
+    expect(script).toContain("--match-head-commit");
+    expect(script).toContain("actual_base");
+    expect(script).toContain("isDraft");
+    expect(script).toContain("--required --json bucket");
+    expect(script).toContain("factory.merge-landed");
+    expect(script).not.toContain("--delete-branch");
+    expect(script).not.toContain(" Done ");
+  });
+
+  test("verify waits on exact merge SHA, blocks and notifies red, then performs exact cleanup and Done", () => {
+    const script = registry.agents.get("merge-verify@1").command[2];
+    expect(script).toContain("commits/$merge/check-runs");
+    expect(script).toContain('--commit "$merge"');
+    expect(script).toContain("CI RED");
+    expect(script).toContain("SMOKE RED");
+    expect(script).toContain("git/ref/heads/$headref");
+    expect(script).toContain("HTTP 404"); // exact prior cleanup is replay-safe
+    expect(script).toContain('linear state "$ticket" Done');
+    expect(script.indexOf('linear state "$ticket" Done')).toBeGreaterThan(
+      script.indexOf("check-runs"),
+    );
+  });
+
+  test("all enabled merge schedules are singleton autonomous cold scans", () => {
+    const schedules = Object.entries(registry.schedules).filter(([name]) =>
+      name.startsWith("merge-"),
+    );
+    expect(schedules.length).toBeGreaterThan(0);
+    for (const [, schedule] of schedules) {
+      expect(schedule).toMatchObject({
+        eventType: "factory.merge.requested",
+        singleton: true,
+        approval: "auto",
+        enabled: true,
+      });
+    }
+  });
 });
 
-describe("merge chain: scan → approved apply (WM-109)", () => {
-  test("a MERGE recommendation chains the pinned plan into a watched merge-apply proposal", async () => {
-    const { db, approveNext } = harness();
-    admitEvent(db, registry, mergeEnvelope("bj29", "merge-1"));
-
-    const scan = await approveNext("merge-scan@1");
-    expect(scan.summary.terminalState).toBe("COMPLETED");
-
-    expect(resolveChains(db, registry).emitted).toBe(1);
-    const chainEvent = db
-      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
-      .get(`chain-${scan.runId}`);
-    expect(chainEvent.type).toBe("factory.merge-apply.requested");
-    expect(chainEvent.correlation_id).toBe("merge-1");
-    expect(chainEvent.causation_id).toBe(scan.runId);
-
-    planAdmittedEvents(db, registry, { policyVersion: PV });
-    const apply = openProposals(db, {}).find((p) => p.spec?.agent === "merge-apply@1");
-    expect(apply.status).toBe("open"); // never applied without approval
-    expect(apply.spec.input).toEqual({
-      repo: "bj29",
-      github: "watt-mind/bj29",
-      plan: [
-        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
-        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
-      ],
+describe("merge transition chains", () => {
+  test("MERGE emits one SHA-pinned apply event", () => {
+    const db = openDb(":memory:");
+    seedCompleted(db, {
+      runId: "scan-merge",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: {
+        recommendation: "MERGE",
+        ...applyPayload(),
+        fix: [],
+        escalate: [],
+        summary: "one merge",
+      },
     });
-
-    const applied = await approveNext("merge-apply@1");
-    expect(applied.summary.terminalState).toBe("COMPLETED");
-    const row = db.query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`).get(applied.runId);
-    expect(JSON.parse(row.result_json).artifact.applied).toEqual([
-      { issueId: "CLNT-777", action: "merge_pr" },
-      { issueId: "CLNT-777", action: "ticket_done" },
-    ]);
-    expect(JSON.parse(row.receipt_json).runId).toBe(applied.runId); // accepted with a receipt
-  });
-
-  test("a MERGE recommendation with escalations includes notify_escalate in the plan and applies both", async () => {
-    const { db, approveNext } = harness();
-    admitEvent(db, registry, mergeEnvelope("wm-merge-esc", "merge-1b"));
-
-    const scan = await approveNext("merge-scan@1");
-    expect(scan.summary.terminalState).toBe("COMPLETED");
-
-    expect(resolveChains(db, registry).emitted).toBe(1);
-    const chainEvent = db
-      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
-      .get(`chain-${scan.runId}`);
-    expect(chainEvent.type).toBe("factory.merge-apply.requested");
-
-    planAdmittedEvents(db, registry, { policyVersion: PV });
-    const apply = openProposals(db, {}).find((p) => p.spec?.agent === "merge-apply@1");
-    expect(apply.status).toBe("open");
-    expect(apply.spec.input).toEqual({
-      repo: "wm-merge-esc",
-      github: "watt-mind/wm-merge-esc",
-      plan: [
-        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "merge_pr", reason: "fake: clean review" },
-        { pr: 42, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-777", action: "ticket_done", reason: "fake: clean review" },
-        { pr: 44, headSha: fake.FAKE_PLAN_SHA, ticket: "CLNT-778", action: "notify_escalate", reason: "fake: touches auth" },
-      ],
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
     });
-
-    const applied = await approveNext("merge-apply@1");
-    expect(applied.summary.terminalState).toBe("COMPLETED");
-    const row = db.query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`).get(applied.runId);
-    expect(JSON.parse(row.result_json).artifact.applied).toEqual([
-      { issueId: "CLNT-777", action: "merge_pr" },
-      { issueId: "CLNT-777", action: "ticket_done" },
-      { issueId: "CLNT-778", action: "notify_escalate" },
-    ]);
+    const payload = JSON.parse(
+      db.query(`SELECT envelope_json FROM events WHERE source='chain'`).get()
+        .envelope_json,
+    ).payload;
+    expect(payload).toEqual(applyPayload());
   });
 
-  test("an ESCALATE recommendation routes to the merge-notify push, watched", async () => {
-    const { db, approveNext } = harness();
-    admitEvent(db, registry, mergeEnvelope("wm-esc", "merge-2"));
-    await approveNext("merge-scan@1");
+  test("FIX fans out one durable request per PR with round and finding hash", () => {
+    const db = openDb(":memory:");
+    const fix = ["WM-501", "WM-502"].map((ticket, index) => ({
+      pr: 50 + index,
+      headSha: SHA,
+      baseSha: BASE_SHA,
+      headRef: `feat/${ticket}`,
+      ticket,
+      finding: `mechanical ${index}`,
+      findingHash: FINDING_HASH,
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: [`src/${index}.mjs`],
+    }));
+    seedCompleted(db, {
+      runId: "scan-fix",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: {
+        recommendation: "FIX",
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        deployBranch: "master",
+        plan: [],
+        fix,
+        escalate: [],
+        summary: "two fixes",
+      },
+    });
+    expect(resolveChains(db, registry).emitted).toBe(2);
+    const rows = db
+      .query(
+        `SELECT envelope_json FROM events WHERE source='chain' ORDER BY event_id`,
+      )
+      .all();
+    expect(
+      rows.map((row) => JSON.parse(row.envelope_json).payload.ticket),
+    ).toEqual(["WM-501", "WM-502"]);
+    expect(JSON.parse(rows[0].envelope_json).payload).toMatchObject({
+      round: 1,
+      findingHash: FINDING_HASH,
+      mechanical: true,
+    });
+  });
 
+  test("a fixer can only request a fresh independent scan, never apply", () => {
+    const db = openDb(":memory:");
+    seedCompleted(db, {
+      runId: "fix-done",
+      agent: "merge-fix@1",
+      input: { repo: "factory" },
+      artifact: {
+        outcome: "UPDATED",
+        repo: "factory",
+        ticket: "WM-501",
+        pr: 50,
+        headSha: SHA,
+        round: 1,
+        summary: "pushed",
+      },
+    });
     expect(resolveChains(db, registry).emitted).toBe(1);
-    planAdmittedEvents(db, registry, { policyVersion: PV });
-    const notify = openProposals(db, {}).find((p) => p.spec?.agent === "merge-notify@1");
-    expect(notify.status).toBe("open");
-    expect(notify.spec.adapter).toBe("command");
-    expect(notify.spec.input).toEqual({ repo: "wm-esc", summary: "fake: PR #44 on wm-esc changes auth behavior" });
+    const row = db
+      .query(`SELECT type,envelope_json FROM events WHERE source='chain'`)
+      .get();
+    expect(row.type).toBe("factory.merge.requested");
+    expect(JSON.parse(row.envelope_json).payload).toEqual({ repo: "factory" });
+  });
+});
 
-    const pushed = await approveNext("merge-notify@1");
-    expect(pushed.summary.terminalState).toBe("COMPLETED");
+describe("policy approval and global merge barrier", () => {
+  test("an ordinary policy-safe develop apply auto-queues, while main and sensitive plans remain open", () => {
+    const db = openDb(":memory:");
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-apply.requested", applyPayload(), "safe"),
+    );
+    admitEvent(
+      db,
+      registry,
+      envelope(
+        "factory.merge-apply.requested",
+        { ...applyPayload(43, "WM-503"), base: "main" },
+        "main",
+      ),
+    );
+    admitEvent(
+      db,
+      registry,
+      envelope(
+        "factory.merge-apply.requested",
+        {
+          ...applyPayload(44, "WM-504"),
+          plan: [
+            { ...candidate(44, "WM-504"), sensitive: true, policySafe: false },
+          ],
+        },
+        "sensitive",
+      ),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(
+      db
+        .query(
+          `SELECT state FROM runs WHERE json_extract(spec_json,'$.input.plan[0].pr')=42`,
+        )
+        .get().state,
+    ).toBe("QUEUED");
+    const reasons = openProposals(db, {})
+      .map((p) => p.reason)
+      .join(" ");
+    expect(reasons).toContain("merge_base_not_allowed");
+    expect(reasons).toContain("invalid_input");
   });
 
-  test("FIX chains to NOTHING in v1 — the findings stay in the scan artifact for a human", async () => {
-    const { db, approveNext } = harness();
-    admitEvent(db, registry, mergeEnvelope("wm-fix", "merge-3"));
-    const scan = await approveNext("merge-scan@1");
-    const result = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(scan.runId).result_json);
-    expect(result.artifact.fix).toHaveLength(1);
-
-    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+  test("only one merge apply queues globally; a second remains durably watched", () => {
+    const db = openDb(":memory:");
+    admitEvent(
+      db,
+      registry,
+      envelope(
+        "factory.merge-apply.requested",
+        applyPayload(60, "WM-560"),
+        "first",
+      ),
+    );
+    admitEvent(
+      db,
+      registry,
+      envelope(
+        "factory.merge-apply.requested",
+        applyPayload(61, "WM-561"),
+        "second",
+      ),
+    );
     planAdmittedEvents(db, registry, { policyVersion: PV });
-    expect(openProposals(db, {}).find((p) => ["merge-apply@1", "merge-notify@1"].includes(p.spec?.agent))).toBeUndefined();
+    expect(
+      db.query(`SELECT COUNT(*) n FROM runs WHERE state='QUEUED'`).get().n,
+    ).toBe(1);
+    expect(openProposals(db, {})).toHaveLength(1);
+    expect(openProposals(db, {})[0].reason).toContain("merge_barrier_active");
   });
 
-  test("an empty queue converges to NOOP — nothing proposed, nothing applied", async () => {
-    const { db, approveNext } = harness();
-    admitEvent(db, registry, mergeEnvelope("clean", "merge-4"));
-    await approveNext("merge-scan@1");
-    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+  test("a landed event queues deterministic verification, and failed verification holds every next merge", () => {
+    const db = openDb(":memory:");
+    const landed = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 70,
+      ticket: "WM-570",
+      headSha: SHA,
+      headRef: "feat/WM-570",
+      mergeCommitSha: MERGE_SHA,
+    };
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-landed", landed, "landed"),
+    );
     planAdmittedEvents(db, registry, { policyVersion: PV });
-    expect(openProposals(db, {}).find((p) => ["merge-apply@1", "merge-notify@1"].includes(p.spec?.agent))).toBeUndefined();
+    const verify = db
+      .query(
+        `SELECT run_id,state FROM runs WHERE json_extract(spec_json,'$.agent')='merge-verify@1'`,
+      )
+      .get();
+    expect(verify.state).toBe("QUEUED");
+    db.query(`UPDATE runs SET state='FAILED' WHERE run_id=?`).run(
+      verify.run_id,
+    );
+
+    admitEvent(
+      db,
+      registry,
+      envelope(
+        "factory.merge-apply.requested",
+        applyPayload(71, "WM-571"),
+        "after-red",
+      ),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    const proposal = openProposals(db, {}).find(
+      (p) => p.spec?.agent === "merge-apply@2",
+    );
+    expect(proposal.reason).toContain("merge_barrier_unverified");
+  });
+
+  test("mechanical fix rounds are bounded and exhausted rounds fail schema/policy closed", () => {
+    const schema = registry.agents.get("merge-fix@1").inputSchema;
+    expect(schema.properties.round.maximum).toBe(2);
+    const prompt = registry.agents.get("merge-fix@1").promptPath;
+    expect(prompt).toContain("merge-fix.md");
   });
 });

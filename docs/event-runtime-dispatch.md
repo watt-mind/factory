@@ -352,3 +352,17 @@ Recorded, not silently decided:
   answer. Raising event-side parallelism, or scheduling LLM loops beyond
   singletons, waits on the unattended-stage answer §3 already demands — it
   is not unlocked by anything here.
+
+## Autonomous develop merge lifecycle (WM-398)
+
+Merge control is a durable runtime chain, not an interactive-orchestrator
+procedure: an enabled singleton schedule runs an independent cold scan;
+mechanical in-scope fixes are SHA/finding-hash pinned and bounded to two rounds;
+a policy-safe plan contains exactly one PR; and deterministic apply rechecks
+head/base SHA, CI, draft, mergeability, and holds immediately before landing.
+Apply never marks Done or deletes the branch. A proven landing emits an exact
+merge-commit event whose deterministic verifier waits boundedly for base CI and
+configured smoke. Only green landing evidence permits exact worktree/head
+cleanup, Done, barrier release, and the next scan. CI RED, SMOKE RED, or
+uncertainty blocks and preserves recovery state. Main/master, deploy branches,
+sensitive behavior, and ambiguous reviews remain human-only.

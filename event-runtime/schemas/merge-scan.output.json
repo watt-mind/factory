@@ -1,118 +1,121 @@
 {
-  "title": "factory.merge-plan/v1 output artifact — per-PR MERGE/FIX/ESCALATE verdicts with a head-SHA-pinned merge plan",
+  "title": "factory.merge-plan/v2 — cold per-PR verdicts pinned to both head and base",
   "type": "object",
-  "required": ["recommendation", "repo", "github", "plan", "fix", "escalate", "summary"],
+  "required": [
+    "recommendation",
+    "repo",
+    "github",
+    "base",
+    "deployBranch",
+    "plan",
+    "fix",
+    "escalate",
+    "summary"
+  ],
   "additionalProperties": false,
   "properties": {
-    "recommendation": {
-      "enum": ["MERGE", "FIX", "ESCALATE", "NOOP"],
-      "description": "MERGE when at least one PR qualifies (plan is non-empty); else ESCALATE when at least one PR needs the human; else FIX when only fixable findings remain; else NOOP"
-    },
-    "repo": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Echo of the short repo name from the input"
-    },
-    "github": {
-      "type": "string",
-      "pattern": "^[^/\\s]+/[^/\\s]+$",
-      "description": "GitHub owner/name slug resolved from config/repos.yaml — the repository the apply actions run against"
+    "recommendation": { "enum": ["MERGE", "FIX", "ESCALATE", "NOOP"] },
+    "repo": { "type": "string", "minLength": 1 },
+    "github": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+    "base": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+    "deployBranch": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._/-]+$"
     },
     "plan": {
       "type": "array",
-      "description": "Merge actions for qualifying PRs (merge_pr, then ticket_done) and notify_escalate items when recommendation is MERGE alongside escalations, each pinned to the reviewed head SHA. Never a deploy-branch-targeting PR: those are the ship chain's (WM-111), refused at scan time",
+      "maxItems": 1,
       "items": {
         "type": "object",
-        "required": ["pr", "headSha", "ticket", "action", "reason"],
+        "required": [
+          "pr",
+          "headSha",
+          "baseSha",
+          "headRef",
+          "ticket",
+          "action",
+          "reason",
+          "checksGreen",
+          "mergeable",
+          "ownedPathsValid",
+          "handoffValid",
+          "testsFalsifiable",
+          "policySafe",
+          "sensitive",
+          "ambiguous"
+        ],
         "additionalProperties": false,
         "properties": {
-          "pr": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "GitHub pull request number"
-          },
-          "headSha": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{40}$",
-            "description": "PR head commit the verdict was reviewed at — merge-apply refuses the item if the head has moved"
-          },
-          "ticket": {
-            "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
-            "description": "Linear ticket the PR fixes, from its Fixes line"
-          },
-          "action": {
-            "enum": ["merge_pr", "ticket_done", "notify_escalate"],
-            "description": "Closed merge-apply action id this item resolves to"
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 1,
-            "description": "One-line justification kept for the audit trail"
-          }
+          "pr": { "type": "integer", "minimum": 1 },
+          "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "action": { "const": "merge_pr" },
+          "reason": { "type": "string", "minLength": 1 },
+          "checksGreen": { "const": true },
+          "mergeable": { "const": true },
+          "ownedPathsValid": { "const": true },
+          "handoffValid": { "const": true },
+          "testsFalsifiable": { "const": true },
+          "policySafe": { "const": true },
+          "sensitive": { "const": false },
+          "ambiguous": { "const": false }
         }
       }
     },
     "fix": {
       "type": "array",
-      "description": "Per-PR FIX findings — red CI, conflicts, or blocking-but-mechanical review findings. v1 chains these to nothing: they stay in this artifact for a human, never an autonomous fix loop",
       "items": {
         "type": "object",
-        "required": ["pr", "finding"],
+        "required": [
+          "pr",
+          "headSha",
+          "baseSha",
+          "headRef",
+          "ticket",
+          "finding",
+          "findingHash",
+          "round",
+          "mechanical",
+          "withinOwnedPaths",
+          "ownedPaths"
+        ],
         "additionalProperties": false,
         "properties": {
-          "pr": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "GitHub pull request number the finding is about"
-          },
-          "ticket": {
-            "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
-            "description": "Linear ticket the PR fixes, when its body names one"
-          },
-          "finding": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Specific enough that the caller can act without re-reading the diff"
+          "pr": { "type": "integer", "minimum": 1 },
+          "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "finding": { "type": "string", "minLength": 1 },
+          "findingHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "round": { "type": "integer", "minimum": 1 },
+          "mechanical": { "type": "boolean" },
+          "withinOwnedPaths": { "type": "boolean" },
+          "ownedPaths": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
           }
         }
       }
     },
     "escalate": {
       "type": "array",
-      "description": "Per-PR ESCALATE reasons — security-relevant behavior changes, escalate_paths matches, or genuinely ambiguous diffs that need the human decision",
       "items": {
         "type": "object",
-        "required": ["pr", "reason"],
+        "required": ["pr", "headSha", "ticket", "reason"],
         "additionalProperties": false,
         "properties": {
-          "pr": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "GitHub pull request number being escalated"
-          },
-          "ticket": {
-            "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
-            "description": "Linear ticket the PR fixes, when its body names one"
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 1,
-            "description": "The exact behavior change or ambiguity that triggers the escalation"
-          }
+          "pr": { "type": "integer", "minimum": 1 },
+          "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "reason": { "type": "string", "minLength": 1 }
         }
       }
     },
-    "summary": {
-      "type": "string",
-      "minLength": 1,
-      "description": "One line an operator can act on"
-    },
-    "noopReason": {
-      "enum": ["no_open_prs", "all_prs_held"],
-      "description": "Typed reason accompanying a NOOP — the repo has no open base-targeting PRs, or every open PR is an existing hold (draft, or already carrying the escalated label)"
-    }
+    "summary": { "type": "string", "minLength": 1 },
+    "noopReason": { "enum": ["no_open_prs", "all_prs_held"] }
   }
 }

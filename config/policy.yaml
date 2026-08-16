@@ -9,6 +9,16 @@ chain_auto_approval:
     - factory.triage.requested
     - factory.triage-apply.requested
     - factory.dispatch.requested
+    # Autonomous merge lifecycle. Mutating stages are independently rechecked.
+    - factory.merge.requested
+    - factory.merge-fix.requested
+    - factory.merge-apply.requested
+    - factory.merge-landed
+    - factory.merge-verify.requested
+    - factory.merge-escalate.requested
+
+merge:
+  max_fix_rounds: 2
 
 concurrency:
   # Per-repo admission ceiling. Actual execution remains bounded by worker

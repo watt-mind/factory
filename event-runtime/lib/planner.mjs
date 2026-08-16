@@ -432,6 +432,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
       // it repo_not_allowed before anything else happens.
       if (
         preDef?.workspace?.type === "worktree" &&
+        preDef?.ref !== "merge-fix@1" &&
         typeof preEnvelope.payload?.repo === "string" &&
         typeof preEnvelope.payload?.ticket === "string" &&
         !repoNotAllowed(preDef, preEnvelope.payload)
@@ -494,7 +495,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     // WM-108), computed above outside this transaction. Refusals are typed
     // and carry their reason; a null verdict means every check passed at the
     // moment of the read — the doc's execute-time re-check owns the TTL gap.
-    if (def.workspace?.type === "worktree" && worktreeRefusal) {
+    if (def.workspace?.type === "worktree" && def.ref !== "merge-fix@1" && worktreeRefusal) {
       if (worktreeRefusal.decision === "human_needed") {
         return humanNeeded(db, event, worktreeRefusal.reason, at, ttlSeconds);
       }
