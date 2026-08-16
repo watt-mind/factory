@@ -66,6 +66,31 @@ describe("lsof parser", () => {
     expect(ports[2].host).toBe("*");
   });
 
+  test("parseLsof handles process names containing spaces", () => {
+    const ports = parseLsof(`
+COMMAND          PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Google Chrome   1234 hdkiller   42u  IPv4 0x3ef0e58c7a3caa5c      0t0  TCP 127.0.0.1:9222 (LISTEN)
+Electron Helper 5678 hdkiller   18u  IPv6 0x2e2a667e702cda4a      0t0  TCP *:5173 (LISTEN)
+`);
+
+    expect(ports).toEqual([
+      {
+        command: "Google Chrome",
+        pid: 1234,
+        port: 9222,
+        host: "127.0.0.1",
+        raw: "Google Chrome   1234 hdkiller   42u  IPv4 0x3ef0e58c7a3caa5c      0t0  TCP 127.0.0.1:9222 (LISTEN)",
+      },
+      {
+        command: "Electron Helper",
+        pid: 5678,
+        port: 5173,
+        host: "*",
+        raw: "Electron Helper 5678 hdkiller   18u  IPv6 0x2e2a667e702cda4a      0t0  TCP *:5173 (LISTEN)",
+      },
+    ]);
+  });
+
   test("parseLsof handles empty input", () => {
     expect(parseLsof("")).toEqual([]);
     expect(parseLsof(null)).toEqual([]);
