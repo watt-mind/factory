@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { resolveTemplate } from "./lib/adapters/command.mjs";
 import { resolveChains } from "./lib/chain.mjs";
 import { canonicalJson } from "./lib/canonical.mjs";
 import { openDb } from "./lib/db.mjs";
@@ -125,6 +126,24 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
     expect(script).toContain("factory.merge-landed");
     expect(script).not.toContain("--delete-branch");
     expect(script).not.toContain(" Done ");
+  });
+
+  test("merge verifier command loads and resolves only declared input templates", () => {
+    const def = registry.agents.get("merge-verify@1");
+    expect(def).toBeTruthy();
+    expect([...def.command[2].matchAll(/\{([A-Za-z0-9_]+)\}/g)]).toEqual([]);
+    expect(
+      resolveTemplate(def.command, {
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr: 398,
+        ticket: "WM-398",
+        headSha: SHA,
+        headRef: "feat/WM-398",
+        mergeCommitSha: MERGE_SHA,
+      }),
+    ).toHaveLength(def.command.length);
   });
 
   test("verify waits on exact merge SHA, blocks and notifies red, then performs exact cleanup and Done", () => {
