@@ -272,15 +272,6 @@ export function worktreeDispatchAutoEligibility(payload, {
     inFlight: [],
     escalatePathIntersections: [],
   };
-  let budgetReason;
-  try {
-    budgetReason = budgetRefusal();
-  } catch {
-    budgetReason = "budget_check_failed";
-  }
-  if (budgetReason) return refusal(budgetReason, evidence);
-  evidence.checks.budget_available = true;
-
   let repo;
   try {
     repo = getRepo(loadRepos(), payload?.repo);
@@ -303,6 +294,16 @@ export function worktreeDispatchAutoEligibility(payload, {
   evidence.checks.repo_is_dispatchable = true;
   if (!repo.worktreeUp || !repo.worktreeDown || !repo.worktreeRoot) return refusal("no_worktree_scripts", evidence, "human_needed");
   evidence.checks.worktree_scripts_configured = true;
+
+  let budgetReason;
+  try {
+    budgetReason = budgetRefusal();
+  } catch {
+    budgetReason = "budget_check_failed";
+  }
+  if (budgetReason) return refusal(budgetReason, evidence);
+  evidence.checks.budget_available = true;
+
   if (live >= cap) return refusal("capacity_full", evidence);
   evidence.checks.cap_available = true;
 
