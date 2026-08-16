@@ -1,6 +1,15 @@
 # Limits the dispatcher enforces. Changing these changes how much autonomy the
 # factory has, so they live in git and move by PR — not by editing a running box.
 
+chain_auto_approval:
+  # Only internally admitted chain events in this closed set may be approved
+  # unattended. Every other proposal remains watched by default.
+  allowed_event_types:
+    - factory.work.requested
+    - factory.triage.requested
+    - factory.triage-apply.requested
+    - factory.dispatch.requested
+
 concurrency:
   # Per-repo admission ceiling. Actual execution remains bounded by worker
   # availability, ticket claims, and Owned Paths collision checks.

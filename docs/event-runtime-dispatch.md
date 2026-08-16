@@ -279,6 +279,26 @@ validator, not a paragraph.
 
 ---
 
+### Chain auto-approval (WM-357)
+
+`config/policy.yaml` is the only allowlist for unattended chain proposals. Its
+closed set covers `factory.work.requested`, `factory.triage.requested`,
+`factory.triage-apply.requested`, and `factory.dispatch.requested`; missing or
+malformed policy means watched. The event must have been admitted with source
+`chain`, and the normal proposal, lifecycle, journal, budget, and worker gates
+remain in force.
+
+Dispatch is re-read immediately before approval: it must still be Todo,
+unassigned, `ai:agent-ready`, inside its lease cap, and disjoint from active
+Owned Paths. `ai:escalated`, security classification, and a ticket path that
+intersects the repo's `escalate_paths` leave the proposal open with a typed
+reason. Triage apply additionally revalidates its schema and closed action
+registry. Proposal/run-spec mismatches and expired proposals fail closed.
+
+`merge-apply` and `ship-apply` are not allowlistable by this path. In
+particular, their watched/human-only controls remain structurally unchanged;
+this policy does not implement autonomous merge work.
+
 ## 8. The §3 boundary, restated item by item
 
 Moved by this design — permitted only through §§2–7 above:

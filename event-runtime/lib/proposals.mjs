@@ -99,7 +99,7 @@ function approveRun(db, proposal, envelope, { actor, now, policyVersion, reason 
  * @returns {{ approved: true, runId: string }
  *         | { approved: false, replanned: true, proposal: object }}
  */
-export function approveProposal(db, registry, id, { actor, now = Date.now(), policyVersion = "unknown", adapterOverride } = {}) {
+export function approveProposal(db, registry, id, { actor, now = Date.now(), policyVersion = "unknown", adapterOverride, reason } = {}) {
   return tx(db, () => {
     const proposal = db.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
     if (!proposal) throw new Error(`unknown proposal ${id}`);
@@ -122,7 +122,7 @@ export function approveProposal(db, registry, id, { actor, now = Date.now(), pol
       throw err;
     }
     if (!isExpired(proposal, now)) {
-      return approveRun(db, proposal, envelope, { actor, now, policyVersion, reason: "approved" });
+      return approveRun(db, proposal, envelope, { actor, now, policyVersion, reason: reason ?? "approved" });
     }
 
     // Expired: re-plan against current registry state, reusing the runId.
