@@ -787,6 +787,49 @@ describe("buildAnomalyRows (WM-205)", () => {
     expect(rows[6]!.text).toMatch(/4 queued runs and no live worker/);
   });
 
+  test("maps stopped and late schedules, piling proposals, and configuration warnings", () => {
+    const onNavigate = mock((_path: string) => {});
+    const anomalies: StatusView["anomalies"] = {
+      ...baseStatus().anomalies,
+      stoppedSchedules: [
+        {
+          loop: "nightly",
+          every: "1h",
+          lastSlot: "2026-08-16T08:00:00.000Z",
+          intervalsLate: 3,
+          error: null,
+        },
+        {
+          loop: "reaper",
+          every: "5m",
+          lastSlot: "2026-08-16T10:00:00.000Z",
+          intervalsLate: 0,
+          error: "tick failed",
+        },
+      ],
+      proposalsPilingUp: [{ loop: "reconcile-bj29", count: 4, threshold: 3 }],
+      configuration: ["policyVersion is unknown"],
+    };
+
+    const rows = buildAnomalyRows(anomalies, new Map(), { ...callbacks, onNavigate });
+
+    expect(rows.map((row) => [row.kind, row.text])).toEqual([
+      ["schedule", "stopped schedule nightly: 3 intervals late"],
+      ["schedule", "stopped schedule reaper: error: tick failed"],
+      [
+        "proposal",
+        "proposals piling up for schedule reconcile-bj29: 4 open proposals (threshold 3)",
+      ],
+      ["configuration", "configuration: policyVersion is unknown"],
+    ]);
+
+    rows[0]!.links[0]!.go();
+    rows[2]!.links[0]!.go();
+    expect(rows[0]!.links[0]!.label).toBe("View schedules");
+    expect(rows[2]!.links[0]!.label).toBe("View proposals");
+    expect(onNavigate.mock.calls.map((call) => call[0])).toEqual(["schedules", "proposals"]);
+  });
+
   test("returns empty array for undefined anomalies", () => {
     expect(buildAnomalyRows(undefined, new Map(), callbacks)).toEqual([]);
   });

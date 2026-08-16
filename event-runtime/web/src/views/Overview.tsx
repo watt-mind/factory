@@ -243,7 +243,9 @@ export type AnomalyKind =
   | "lease"
   | "outbox"
   | "capacity"
-  | "ambiguous";
+  | "ambiguous"
+  | "schedule"
+  | "configuration";
 
 export interface AnomalyRow {
   kind: AnomalyKind;
@@ -273,6 +275,28 @@ export function buildAnomalyRows(
 ): AnomalyRow[] {
   const rows: AnomalyRow[] = [];
   if (!anomalies) return rows;
+
+  for (const schedule of anomalies.stoppedSchedules ?? []) {
+    rows.push({
+      kind: "schedule",
+      text: `stopped schedule ${schedule.loop}: ${schedule.error ? `error: ${schedule.error}` : `${schedule.intervalsLate} intervals late`}`,
+      links: [{ label: "View schedules", go: () => callbacks.onNavigate("schedules") }],
+    });
+  }
+  for (const proposal of anomalies.proposalsPilingUp ?? []) {
+    rows.push({
+      kind: "proposal",
+      text: `proposals piling up for schedule ${proposal.loop}: ${proposal.count} open proposals (threshold ${proposal.threshold})`,
+      links: [{ label: "View proposals", go: () => callbacks.onNavigate("proposals") }],
+    });
+  }
+  for (const warning of anomalies.configuration ?? []) {
+    rows.push({
+      kind: "configuration",
+      text: `configuration: ${warning}`,
+      links: [],
+    });
+  }
 
   for (const id of anomalies.expiredOpenProposals) {
     rows.push({
@@ -361,6 +385,8 @@ function CategoryPill({ kind }: { kind: AnomalyKind }) {
     outbox: "outbox",
     capacity: "capacity",
     ambiguous: "ambiguous",
+    schedule: "schedule",
+    configuration: "configuration",
   };
   return (
     <span className="shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-(--text-dim)">
