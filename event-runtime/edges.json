@@ -48,26 +48,6 @@
       }
     }
   },
-  "merge-scan@1": {
-    "recommendationField": "recommendation",
-    "edges": {
-      "MERGE": {
-        "eventType": "factory.merge-apply.requested",
-        "input": {
-          "repo": "$.artifact.repo",
-          "github": "$.artifact.github",
-          "plan": "$.artifact.plan"
-        }
-      },
-      "ESCALATE": {
-        "eventType": "factory.merge-escalate.requested",
-        "input": {
-          "repo": "$.artifact.repo",
-          "summary": "$.artifact.summary"
-        }
-      }
-    }
-  },
   "ship-scan@1": {
     "recommendationField": "recommendation",
     "edges": {
@@ -152,6 +132,62 @@
           "repo": "$.input.repo",
           "runId": "$.input.runId",
           "summary": "$.artifact.summary"
+        }
+      }
+    }
+  },
+  "merge-scan@2": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "MERGE": {
+        "eventType": "factory.merge-apply.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "base": "$.artifact.base",
+          "deployBranch": "$.artifact.deployBranch",
+          "plan": "$.artifact.plan"
+        }
+      },
+      "FIX": {
+        "eventType": "factory.merge-fix.requested",
+        "itemsField": "fix",
+        "itemKey": "ticket",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "base": "$.artifact.base"
+        },
+        "perItem": {
+          "pr": "$.item.pr",
+          "headSha": "$.item.headSha",
+          "baseSha": "$.item.baseSha",
+          "headRef": "$.item.headRef",
+          "ticket": "$.item.ticket",
+          "finding": "$.item.finding",
+          "findingHash": "$.item.findingHash",
+          "round": "$.item.round",
+          "mechanical": "$.item.mechanical",
+          "withinOwnedPaths": "$.item.withinOwnedPaths",
+          "ownedPaths": "$.item.ownedPaths"
+        }
+      },
+      "ESCALATE": {
+        "eventType": "factory.merge-escalate.requested",
+        "input": {
+          "repo": "$.artifact.repo",
+          "summary": "$.artifact.summary"
+        }
+      }
+    }
+  },
+  "merge-fix@1": {
+    "recommendationField": "outcome",
+    "edges": {
+      "UPDATED": {
+        "eventType": "factory.merge.requested",
+        "input": {
+          "repo": "$.artifact.repo"
         }
       }
     }

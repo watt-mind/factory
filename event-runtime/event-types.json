@@ -154,7 +154,7 @@
     "proposalTtlSeconds": 1800
   },
   "factory.merge.requested": {
-    "agent": "merge-scan@1",
+    "agent": "merge-scan@2",
     "adapter": "pi",
     "idempotencyScope": [
       "inputHash"
@@ -162,7 +162,7 @@
     "proposalTtlSeconds": 1800
   },
   "factory.merge-apply.requested": {
-    "agent": "merge-apply@1",
+    "agent": "merge-apply@2",
     "adapter": "actions",
     "idempotencyScope": [
       "inputHash"
@@ -176,6 +176,30 @@
       "inputHash"
     ],
     "proposalTtlSeconds": 1800
+  },
+  "factory.merge-fix.requested": {
+    "agent": "merge-fix@1",
+    "adapter": "pi",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 1800
+  },
+  "factory.merge-landed": {
+    "agent": "merge-verify@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 7200
+  },
+  "factory.merge-verify.requested": {
+    "agent": "merge-verify@1",
+    "adapter": "command",
+    "idempotencyScope": [
+      "inputHash"
+    ],
+    "proposalTtlSeconds": 7200
   },
   "factory.unblock-digest.requested": {
     "agent": "unblock-digest@1",
