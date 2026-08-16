@@ -2,11 +2,10 @@
 # factory has, so they live in git and move by PR — not by editing a running box.
 
 concurrency:
-  # Per repo, not global. The ceiling isn't tooling, it's dependency structure:
-  # when ticket B needs A's output you cannot parallelize it, and that's most
-  # real work. 3-5 genuinely independent streams is realistic.
+  # Per-repo admission ceiling. Actual execution remains bounded by worker
+  # availability, ticket claims, and Owned Paths collision checks.
   # This is the FALLBACK; a repo's own max_in_flight in repos.yaml wins.
-  max_in_flight_per_repo: 3
+  max_in_flight_per_repo: 50
   # Merging is never parallel. Two PRs landing in one base within seconds
   # produce a base-CI failure that belongs to neither.
   max_concurrent_merges: 1
