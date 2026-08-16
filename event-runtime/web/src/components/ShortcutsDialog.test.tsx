@@ -81,6 +81,21 @@ describe("ShortcutsDialog", () => {
     expect(actions.textContent).toContain("switch status tab");
   });
 
+  test("documents Projects dispatch and GitHub chords (WM-294)", () => {
+    const r = render(<ShortcutsDialog onClose={() => {}} />);
+    const actions = r.getByRole("region", { name: "Actions" });
+    const content = actions.textContent ?? "";
+
+    expect(content).toContain("d t");
+    expect(content).toContain("dispatch triage scan (Projects)");
+    expect(content).toContain("d s");
+    expect(content).toContain("dispatch status report (Projects)");
+    expect(content).toContain("d j");
+    expect(content).toContain("dispatch janitor scan (Projects)");
+    expect(content).toContain("g h");
+    expect(content).toContain("open repository on GitHub (Projects)");
+  });
+
   test("documents view-specific actions and dialog hotkeys (WM-236)", () => {
     const r = render(<ShortcutsDialog onClose={() => {}} />);
     const actionsSection = r.getByRole("region", { name: "Actions" });

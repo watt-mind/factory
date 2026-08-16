@@ -171,6 +171,8 @@ export function Projects({
   }, [focusRepoName]);
 
   const pendingC = useRef<number>(0);
+  const pendingDispatch = useRef<number>(0);
+  const pendingGitHub = useRef<number>(0);
 
   useListKeys({
     count: visible.length,
@@ -245,6 +247,58 @@ export function Projects({
       notify(`Dispatch failed: ${err.message}`, "err");
     },
   });
+
+  useEffect(() => {
+    function onChord(e: KeyboardEvent) {
+      if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+      const now = Date.now();
+
+      if (pendingGitHub.current > 0 && now - pendingGitHub.current < 800 && e.key === "h") {
+        pendingGitHub.current = 0;
+        if (!sel?.github) return;
+        e.preventDefault();
+        e.stopPropagation();
+        window.open(`https://github.com/${sel.github}`, "_blank");
+        return;
+      }
+
+      if (pendingDispatch.current > 0 && now - pendingDispatch.current < 800) {
+        pendingDispatch.current = 0;
+        if (!sel || !connected || quickDispatchMutation.isPending) return;
+        const dispatch = {
+          t: {
+            type: "factory.triage.requested",
+            payload: { repo: sel.name },
+            label: `Triage Scan on ${sel.name}`,
+            repo: sel.name,
+          },
+          s: {
+            type: "factory.status-report.requested",
+            payload: { repos: [sel.name] },
+            label: `Status Report for ${sel.name}`,
+            repo: sel.name,
+          },
+          j: {
+            type: "factory.janitor-scan.requested",
+            payload: { repo: sel.name },
+            label: `Janitor Scan on ${sel.name}`,
+            repo: sel.name,
+          },
+        }[e.key];
+        if (!dispatch) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setDispatchConfirm(dispatch);
+        return;
+      }
+
+      pendingDispatch.current = e.key === "d" && sel ? now : 0;
+      pendingGitHub.current = e.key === "g" && sel?.github ? now : 0;
+    }
+
+    window.addEventListener("keydown", onChord, { capture: true });
+    return () => window.removeEventListener("keydown", onChord, { capture: true });
+  }, [connected, quickDispatchMutation.isPending, sel]);
 
   // Context actions for ⌘K palette
   useEffect(() => {
@@ -465,6 +519,9 @@ export function Projects({
                 className="rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 py-1 text-[12px] font-medium text-(--text) transition-colors hover:bg-(--surface-3)"
               >
                 GitHub
+                <span aria-hidden="true" className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70">
+                  g h
+                </span>
               </a>
             ) : null
           }
@@ -498,6 +555,9 @@ export function Projects({
                   }
                 >
                   Triage Scan
+                  <span aria-hidden="true" className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70">
+                    d t
+                  </span>
                 </Button>
                 <Button
                   disabled={!connected || quickDispatchMutation.isPending}
@@ -511,6 +571,9 @@ export function Projects({
                   }
                 >
                   Status Report
+                  <span aria-hidden="true" className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70">
+                    d s
+                  </span>
                 </Button>
                 <Button
                   disabled={!connected || quickDispatchMutation.isPending}
@@ -524,6 +587,9 @@ export function Projects({
                   }
                 >
                   Janitor Scan
+                  <span aria-hidden="true" className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70">
+                    d j
+                  </span>
                 </Button>
               </div>
               <div className="mt-1.5 text-[11px] text-(--text-faint)">
