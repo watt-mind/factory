@@ -18,11 +18,13 @@ function issue({ id = "CLNT-1", state = "Blocked", adds = [], comments = [], add
 }
 
 describe("answeredIdentifiers", () => {
-  test("held-ticket queries request newest label history instead of truncating to oldest events", () => {
+  test("held-ticket queries request newest history and comments instead of truncating long timelines", () => {
     const digestSource = readFileSync(new URL("./digest.mjs", import.meta.url), "utf8");
     for (const querySource of [HELD_QUERY, digestSource]) {
       expect(querySource).toContain("history(last: 50)");
       expect(querySource).not.toContain("history(first:");
+      expect(querySource).toContain("comments(last: 100)");
+      expect(querySource).not.toContain("comments(first:");
     }
   });
 

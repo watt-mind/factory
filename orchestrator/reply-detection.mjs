@@ -38,7 +38,7 @@ export const HELD_QUERY = `
       nodes {
         identifier
         state { name }
-        comments(first: 100) { nodes { createdAt } }
+        comments(last: 100) { nodes { createdAt } }
         history(last: 50) { nodes { createdAt addedLabelIds } }
       }
     }

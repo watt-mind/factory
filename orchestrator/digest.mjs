@@ -55,7 +55,7 @@ const DIGEST_QUERY = `
       nodes {
         identifier title url
         state { name }
-        comments(first: 100) { nodes { createdAt body } }
+        comments(last: 100) { nodes { createdAt body } }
         history(last: 50) { nodes { createdAt addedLabelIds } }
       }
     }
