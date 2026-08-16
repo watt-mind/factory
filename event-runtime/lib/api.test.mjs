@@ -947,7 +947,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     mkdirSync(path.join(root, "config"), { recursive: true });
     writeFileSync(
       path.join(root, "config", "repos.yaml"),
-      `repos:\n  - name: dispatchable\n    path: ~/Develop/dispatchable\n    github: watt-mind/dispatchable\n    team: CLNT\n    base: develop\n    deploy_branch: master\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ~/Develop/.worktrees/dispatchable\n    max_in_flight: 20\n    escalate_paths:\n      - src/auth/**\n  - name: watched\n    path: ~/Develop/watched\n    team: OPS\n    report_only: true\n`,
+      `repos:\n  - name: dispatchable\n    path: ~/Develop/dispatchable\n    github: watt-mind/dispatchable\n    team: CLNT\n    base: develop\n    deploy_branch: master\n    worktree_down: bin/worktree-down.sh\n    worktree_root: ~/Develop/.worktrees/dispatchable\n    max_in_flight: 20\n    merge_ci:\n      workflow: CI\n      required_checks:\n        - Shadow runner fleet available\n        - Verify\n    escalate_paths:\n      - src/auth/**\n  - name: watched\n    path: ~/Develop/watched\n    team: OPS\n    report_only: true\n`,
     );
     const { server, port, close } = await makeServer({ repos: () => loadRepos({ root }) });
     const client = apiClient({ port });
@@ -965,13 +965,17 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         reportOnly: false,
         maxInFlight: 20,
         smokeDeadlineSeconds: null,
+        mergeCi: {
+          workflow: "CI",
+          requiredChecks: ["Shadow runner fleet available", "Verify"],
+        },
         worktreeRoot: path.join(process.env.HOME ?? "", "Develop/.worktrees/dispatchable"),
         hasWorktreeUp: false,
         hasWorktreeDown: true,
         hasWorktreeWarm: false,
         verify: null,
       });
-      expect(rows[1]).toMatchObject({ reportOnly: true, maxInFlight: null, hasWorktreeDown: false });
+      expect(rows[1]).toMatchObject({ reportOnly: true, maxInFlight: null, mergeCi: null, hasWorktreeDown: false });
       // Merge-policy paths are config, not registry: the wire never carries them.
       expect(JSON.stringify(rows)).not.toContain("src/auth");
     } finally {
