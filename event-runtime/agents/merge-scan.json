@@ -7,14 +7,16 @@
   "output_contract": "factory.merge-plan/v2",
   "model_tier": "strong",
   "workspace": {
-    "type": "ephemeral",
+    "type": "repository",
+    "checkoutDir": "repo",
     "retainOnFailure": true
   },
   "capabilities": {
     "filesystem": "workspace-only",
     "services": [
       "gh:read",
-      "linear:read"
+      "linear:read",
+      "repo:read"
     ]
   },
   "limits": {
@@ -23,8 +25,8 @@
   },
   "mutating": false,
   "pins": {
-    "agents/merge-scan.md": "sha256:b51b2498ee7ec6b267d2074e595fc54e1b75ae9dccd8013e7e2881461fb03f52",
-    "schemas/merge-scan.input.json": "sha256:f41fcfbbaee8423923b9ee5c213bfa92d03ce711d271c5a65a893f08b5af873e",
+    "agents/merge-scan.md": "sha256:83a184eea1f0071471f4e8c1669f3c88082c6504b7e3d8891a4fac51376728ce",
+    "schemas/merge-scan.input.json": "sha256:5ea3b9702df503b438fb11f6bd566161fcb4d5bafcf298070e1535ecfa4737a5",
     "schemas/merge-scan.output.json": "sha256:84791d0fcfe80716ffda27b1432cb8be7a003d1c7c967d4dc9445ae182b236a2"
   }
 }

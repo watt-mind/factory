@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { substituteArgv } from "./lib/adapters/actions.mjs";
 import { resolveTemplate } from "./lib/adapters/command.mjs";
@@ -8,8 +18,9 @@ import { canonicalJson } from "./lib/canonical.mjs";
 import { openDb } from "./lib/db.mjs";
 import { admitEvent as persistEvent } from "./lib/intake.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
-import { openProposals } from "./lib/proposals.mjs";
+import { approveProposal, openProposals } from "./lib/proposals.mjs";
 import { loadRegistry } from "./lib/registry.mjs";
+import { runOnce } from "./lib/worker.mjs";
 import {
   commandFixture,
   runCommand,
@@ -332,6 +343,167 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
         approval: "auto",
         enabled: true,
       });
+    }
+  });
+});
+
+describe("merge-scan repository workspace and result contract (WM-425)", () => {
+  test("the definition and prompt declare the pinned repository contract", () => {
+    const def = registry.agents.get("merge-scan@2");
+    expect(def.workspace).toEqual({
+      type: "repository",
+      checkoutDir: "repo",
+      retainOnFailure: true,
+    });
+    expect(def.capabilities.services).toContain("repo:read");
+    expect(def.inputSchema.properties.repoPin.required).toEqual(["repo", "sha"]);
+    expect(def.inputSchema.properties.repoPin.properties.sha.pattern).toBe(
+      "^[0-9a-f]{40}$",
+    );
+
+    const prompt = readFileSync(def.promptPath, "utf8");
+    expect(prompt).toContain("./repo/config/repos.yaml");
+    expect(prompt).toContain("./repo/config/policy.yaml");
+    expect(prompt).toContain('"terminalState": "completed"');
+    expect(prompt).toContain('"artifact": {');
+    expect(prompt).toContain('"terminalState": "refused"');
+  });
+
+  test("a planned scan reads pinned config and a schema-valid fail-closed result is refused, not contract-invalid", async () => {
+    const fixture = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-scan-"));
+    const source = path.join(fixture, "source");
+    const eventHome = path.join(fixture, "event-home");
+    const workspaces = path.join(fixture, "workspaces");
+    const previousReposRoot = process.env.FACTORY_REPOS_ROOT;
+    const previousEventHome = process.env.FACTORY_EVENT_HOME;
+    const git = (args) =>
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "commit.gpgsign=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "commit.template=",
+          ...args,
+        ],
+        { cwd: source, encoding: "utf8" },
+      ).trim();
+
+    try {
+      mkdirSync(path.join(source, "config"), { recursive: true });
+      mkdirSync(eventHome, { recursive: true });
+      mkdirSync(workspaces, { recursive: true });
+      git(["init", "--quiet", "--initial-branch=develop"]);
+      git(["config", "user.email", "test@example.com"]);
+      git(["config", "user.name", "Test"]);
+      writeFileSync(
+        path.join(source, "config", "repos.yaml"),
+        `repos:\n  - name: mergefixture\n    path: ${source}\n    github: watt-mind/mergefixture\n    base: develop\n    deploy_branch: master\n`,
+      );
+      writeFileSync(
+        path.join(source, "config", "policy.yaml"),
+        "merge_fixture_policy: pinned\n",
+      );
+      git(["add", "config"]);
+      git(["commit", "--quiet", "-m", "pinned config"]);
+      const pinnedSha = git(["rev-parse", "HEAD"]);
+
+      process.env.FACTORY_REPOS_ROOT = source;
+      process.env.FACTORY_EVENT_HOME = eventHome;
+
+      const db = openDb(path.join(fixture, "runtime.db"));
+      persistEvent(
+        db,
+        registry,
+        envelope(
+          "factory.merge.requested",
+          { repo: "mergefixture" },
+          "merge-scan-workspace",
+        ),
+      );
+      planAdmittedEvents(db, registry, { policyVersion: PV });
+      const proposal = openProposals(db, {})[0];
+
+      expect(registry.agents.get("merge-scan@2").workspace).toEqual({
+        type: "repository",
+        checkoutDir: "repo",
+        retainOnFailure: true,
+      });
+      expect(proposal.spec.input.repoPin).toEqual({
+        repo: "mergefixture",
+        ref: "develop",
+        sha: pinnedSha,
+        github: "watt-mind/mergefixture",
+      });
+
+      writeFileSync(
+        path.join(source, "config", "policy.yaml"),
+        "merge_fixture_policy: moved\n",
+      );
+      git(["add", "config/policy.yaml"]);
+      git(["commit", "--quiet", "-m", "move config after planning"]);
+
+      approveProposal(db, registry, proposal.id, {
+        actor: "operator",
+        policyVersion: PV,
+      });
+      let observed = null;
+      const adapter = {
+        async execute({ workspaceDir }) {
+          observed = {
+            repos: readFileSync(
+              path.join(workspaceDir, "repo", "config", "repos.yaml"),
+              "utf8",
+            ),
+            policy: readFileSync(
+              path.join(workspaceDir, "repo", "config", "policy.yaml"),
+              "utf8",
+            ),
+          };
+          writeFileSync(
+            path.join(workspaceDir, "result.json"),
+            `${JSON.stringify({
+              schemaVersion: "factory.agent-result/v1",
+              terminalState: "refused",
+              reasonCode: "needs_human",
+            })}\n`,
+          );
+          return { exitCode: 0, timedOut: false };
+        },
+      };
+      const summary = await runOnce(
+        db,
+        registry,
+        { pi: adapter },
+        { workspacesRoot: workspaces, owner: "merge-test", policyVersion: PV },
+      );
+
+      expect(observed.repos).toContain("name: mergefixture");
+      expect(observed.policy).toBe("merge_fixture_policy: pinned\n");
+      expect(summary).toMatchObject({
+        terminalState: "REFUSED",
+        reasonCode: "needs_human",
+      });
+      expect(
+        JSON.parse(
+          db
+            .query("SELECT result_json FROM results WHERE run_id = ?")
+            .get(proposal.run_id).result_json,
+        ),
+      ).toMatchObject({
+        terminalState: "refused",
+        reasonCode: "needs_human",
+        verification: { status: "passed", checks: ["schema_valid"] },
+      });
+      db.close();
+    } finally {
+      if (previousReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
+      if (previousEventHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousEventHome;
+      rmSync(fixture, { recursive: true, force: true });
     }
   });
 });

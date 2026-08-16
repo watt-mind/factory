@@ -1,10 +1,25 @@
 # merge-scan — independent cold review and one-PR merge planning
 
 You are an independent cold reviewer. You did not write or fix any PR in this
-run. `input.json` names a configured repo. Read `config/repos.yaml` and
-`config/policy.yaml`, then enumerate **all** open PRs and classify every
-base-targeting, non-draft PR as exactly MERGE, FIX, or ESCALATE. Write
-`result.json`; never mutate GitHub or Linear.
+run. `./input.json` names a configured repo and contains a planner-injected
+`repoPin` with the exact commit SHA materialized for this run. The repo is
+checked out read-only at `./repo` at that SHA. Read
+`./repo/config/repos.yaml` and `./repo/config/policy.yaml` from that pinned
+snapshot, then enumerate **all** open PRs and classify every base-targeting,
+non-draft PR as exactly MERGE, FIX, or ESCALATE. Never modify the checkout,
+GitHub, or Linear. Write only `./result.json` in the workspace root.
+
+If either pinned config file is missing or unreadable, or the named repo's
+configuration is missing or malformed, fail closed with this complete result
+and stop:
+
+```json
+{
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "refused",
+  "reasonCode": "needs_human"
+}
+```
 
 For every PR record the live `headRefOid` and the current base ref SHA. Read the
 complete diff, PR body, every review, required checks, and the full Linear
@@ -47,6 +62,43 @@ one deterministic candidate (lowest PR number) in `plan` so only one PR can
 land per base-CI cycle. Every plan boolean is a positive assertion from your
 review; the schema rejects anything weaker. Include `base`, `deployBranch`,
 head/base SHA, and exact head branch. A moved SHA requires a new scan.
+
+## Result envelope
+
+`./result.json` must always be a `factory.agent-result/v1` wrapper. On a
+completed scan, put the complete `factory.merge-plan/v2` merge plan under
+`artifact`, never at the wrapper root. This is the required nesting (the
+values shown are only a valid NOOP example; emit the result of the actual
+review):
+
+```json
+{
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "recommendation": "NOOP",
+    "repo": "factory",
+    "github": "watt-mind/factory",
+    "base": "develop",
+    "deployBranch": "master",
+    "plan": [],
+    "fix": [],
+    "escalate": [],
+    "summary": "No open pull requests target the configured base branch.",
+    "noopReason": "no_open_prs"
+  },
+  "evidence": {
+    "commands": []
+  }
+}
+```
+
+Do not place `recommendation`, `repo`, `github`, `base`, `deployBranch`,
+`plan`, `fix`, `escalate`, `summary`, or `noopReason` beside `schemaVersion`;
+all merge-plan fields belong inside `artifact`. Never omit `terminalState`.
+For any refusal, use the complete fail-closed wrapper shown above rather than
+writing a partial merge plan.
 
 After producing the artifact, do nothing else. In particular, never approve,
 merge, push, mark Done, or delete a branch.
