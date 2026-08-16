@@ -1429,8 +1429,9 @@ export function Dialog({
   onCloseRef.current = onClose;
   useEffect(() => {
     modal.depth += 1;
+    const depth = modal.depth;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCloseRef.current();
+      if (e.key === "Escape" && depth === modal.depth) onCloseRef.current();
       else if (e.key === "Tab" && panelRef.current) tabCycle(panelRef.current, e);
     };
     window.addEventListener("keydown", onKey);

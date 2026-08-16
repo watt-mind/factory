@@ -2,8 +2,9 @@ import "../test-dom";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { Button, clearToasts, CopyActions, Countdown, DetailPane, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
+import { Button, clearToasts, CopyActions, Countdown, DetailPane, Dialog, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
 import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
+import { modal } from "../hooks";
 import { changeInput, typeText } from "../test-render";
 
 function stackOf(r: ReturnType<typeof render>): HTMLElement {
@@ -703,6 +704,38 @@ describe("SuggestInput popover (WM-79)", () => {
     expect(r.getByRole("listbox")).toBeTruthy();
     fireEvent.keyDown(input, { key: "Escape" });
     expect(r.queryByRole("listbox")).toBeNull();
+  });
+});
+
+describe("Dialog (WM-270)", () => {
+  test("Escape closes only the topmost stacked dialog", () => {
+    function StackedDialogs() {
+      const [parentOpen, setParentOpen] = useState(true);
+      const [confirmationOpen, setConfirmationOpen] = useState(true);
+      return (
+        <>
+          {parentOpen && (
+            <Dialog title="Parent dialog" onClose={() => setParentOpen(false)}>
+              Parent content
+            </Dialog>
+          )}
+          {confirmationOpen && (
+            <Dialog title="Confirmation dialog" onClose={() => setConfirmationOpen(false)}>
+              Confirmation content
+            </Dialog>
+          )}
+        </>
+      );
+    }
+
+    const r = render(<StackedDialogs />);
+    expect(modal.depth).toBe(2);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(r.queryByRole("dialog", { name: "Confirmation dialog" })).toBeNull();
+    expect(r.getByRole("dialog", { name: "Parent dialog" })).toBeTruthy();
+    expect(modal.depth).toBe(1);
   });
 });
 
