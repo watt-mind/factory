@@ -12,6 +12,7 @@ const VERIFY = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const TRIAGE_SCAN_OUTPUT_SCHEMA = JSON.parse(
   readFileSync(fileURLToPath(new URL("../schemas/triage-scan.output.json", import.meta.url)), "utf8"),
 );
+const SEED_TIMEOUT_MS = 10_000;
 
 const redact = (text) => String(text ?? "")
   .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
@@ -24,6 +25,19 @@ function expectSuccess(label, result) {
     `stderr:\n${redact(result.stderr)}`,
   ].join("\n");
   expect(result.status, diagnostic).toBe(0);
+}
+
+async function waitForPublishedOutbox(port) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/status`);
+      const status = await response.json();
+      if (response.ok && status.anomalies?.unpublishedOutbox === 0) return;
+    } catch {}
+    await Bun.sleep(50);
+  }
+  expect.fail("seeded runtime did not publish its outbox within 5 seconds");
 }
 
 describe("triage-scan write-detail contract (WM-352)", () => {
@@ -144,14 +158,16 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     }
   });
 
-  test("initial seed succeeds and verify passes", () => {
+  test("initial seed succeeds and verify passes", async () => {
     const t0 = Date.now();
     const seedRes = spawnSync("bun", [SEED, "--port", port, "--prefix", "t1", "--poll-ms", "40"], {
       encoding: "utf8",
       env: { ...process.env, FACTORY_EVENT_HOME: home },
     });
     expectSuccess("initial seed", seedRes);
-    expect(Date.now() - t0).toBeLessThan(8_000);
+    // The triage chain now waits for its auto-approved apply run to finish.
+    expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
+    await waitForPublishedOutbox(port);
 
     const verifyRes = spawnSync("bun", [VERIFY, "--port", port], {
       encoding: "utf8",
@@ -173,14 +189,16 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     expect(output).toContain("duplicate prefix \"t1\"");
   }, 10_000);
 
-  test("re-seeding with a NEW prefix cleans up hang runs and allows verify to pass", () => {
+  test("re-seeding with a NEW prefix cleans up hang runs and allows verify to pass", async () => {
     const t0 = Date.now();
     const seedRes = spawnSync("bun", [SEED, "--port", port, "--prefix", "t2", "--poll-ms", "40"], {
       encoding: "utf8",
       env: { ...process.env, FACTORY_EVENT_HOME: home },
     });
     expectSuccess("re-seed", seedRes);
-    expect(Date.now() - t0).toBeLessThan(8_000);
+    // The triage chain now waits for its auto-approved apply run to finish.
+    expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
+    await waitForPublishedOutbox(port);
 
     const verifyRes = spawnSync("bun", [VERIFY, "--port", port], {
       encoding: "utf8",

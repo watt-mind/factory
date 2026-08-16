@@ -166,9 +166,11 @@ if (ciRerunRun) {
   check("ci-rerun@1 output contract is factory.command-result/v1", ciRerunView.run?.spec?.outputContract === "factory.command-result/v1");
 }
 
-// 7. Triage scenario (repository workspace with pinned repoPin)
+// 7. Triage scenario (repository workspace with pinned repoPin and auto-approved apply)
 const triageScanRun = completedRuns.find((r) => r.agent === "triage-scan@1");
+const triageApplyRun = completedRuns.find((r) => r.agent === "triage-apply@1" && r.eventSource === "chain");
 check("triage scenario: triage-scan@1 run present", Boolean(triageScanRun));
+check("triage scenario: chain triage-apply@1 run auto-approved and completed", Boolean(triageApplyRun));
 let triageScanView = null;
 if (triageScanRun) {
   triageScanView = await client.run(triageScanRun.runId);
@@ -231,6 +233,26 @@ check("≥1 open TTL-expired proposal (p.expired === true)", expiredProposals.le
 
 const { proposals: allProposals } = await client.proposals("all");
 check("GET /proposals?status=all returns proposal history", allProposals.length > openProposals.length);
+const autoApprovedTriageApply = allProposals.find(
+  (p) => p.agent === "triage-apply@1" && p.eventSource === "chain",
+);
+check(
+  "chain triage-apply proposal is approved by chain auto-approval",
+  autoApprovedTriageApply?.status === "approved" && autoApprovedTriageApply?.decided_by === "chain-auto-approval",
+  autoApprovedTriageApply ? `${autoApprovedTriageApply.status} by ${autoApprovedTriageApply.decided_by}` : "missing",
+);
+const operatorProposal = allProposals.find(
+  (p) => p.agent === "factory-status-report@1" && p.eventSource === "operator" && p.status === "open",
+);
+check("direct operator proposal remains open/watched", Boolean(operatorProposal));
+const mergeWatchedProposal = allProposals.find(
+  (p) => p.agent === "merge-apply@1" && p.eventSource === "operator" && p.status === "open",
+);
+check("merge-apply proposal remains open/watched", Boolean(mergeWatchedProposal));
+const shipWatchedProposal = allProposals.find(
+  (p) => p.agent === "ship-apply@1" && p.eventSource === "operator" && p.status === "open",
+);
+check("ship-apply proposal remains open/human watched", Boolean(shipWatchedProposal));
 
 // 9. Events verification
 const { events } = await client.events();

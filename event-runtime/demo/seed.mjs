@@ -26,12 +26,13 @@
  *
  *   Triage Chain (repository workspace with repoPin):
  *     COMPLETED triage-scan@1                             repository workspace, pinned sha
+ *     COMPLETED triage-apply@1                            chain auto-approved closed plan
  *
- *   Open proposals:
- *     - open approvable (`run`)
- *     - open human_needed (empty repos fails schema minItems)
- *     - open TTL-expired proposal
- *     - open triage-apply@1 from chain
+ *   Open watched proposals:
+ *     - direct operator approvable (`run`)
+ *     - merge-apply and ship-apply (human watched)
+ *     - human_needed (empty repos fails schema minItems)
+ *     - TTL-expired proposal
  *
  *   Admitted & anomaly events:
  *     - dead-lettered event (lastPlanError present)
@@ -93,12 +94,12 @@ async function projectNames() {
 /** repos[0] must stay the fake adapter's mode — the project name only trails it. */
 const tag = (mode, project) => (project ? [mode, project] : [mode]);
 
-function envelope(id, repos, type = "factory.status-report.requested") {
+function envelope(id, repos, type = "factory.status-report.requested", source = "demo-seed") {
   return {
     schemaVersion: "factory.event/v1",
     eventId: `${prefix}-${id}`,
     type,
-    source: "demo-seed",
+    source,
     subject: "factory",
     occurredAt: new Date().toISOString(),
     correlationId: `${prefix}-${id}`,
@@ -149,11 +150,11 @@ async function until(what, fn, { timeoutMs = 30_000, everyMs = pollMs } = {}) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-async function openProposalFor(eventId, { agent } = {}) {
+async function proposalFor(eventId, { agent, status = "open" } = {}) {
   return until(`proposal for ${agent ?? eventId}`, async () => {
-    const { proposals } = await client.proposals();
+    const { proposals } = await client.proposals(status === "open" ? undefined : "all");
     return proposals.find((p) => {
-      if (p.status !== "open") return false;
+      if (status !== "all" && p.status !== status) return false;
       if (agent) return p.spec?.agent === agent || p.agent === agent;
       return (
         p.spec?.idempotencyKey?.includes(eventId) ||
@@ -163,6 +164,10 @@ async function openProposalFor(eventId, { agent } = {}) {
       );
     });
   });
+}
+
+async function openProposalFor(eventId, options = {}) {
+  return proposalFor(eventId, { ...options, status: "open" });
 }
 
 /** human_needed proposals carry no spec — match via their admitted event. */
@@ -338,18 +343,61 @@ await client.approve(triageScanProposal.id);
 await runTerminal(triageScanProposal.runId, "COMPLETED");
 log(`${triageScanProposal.runId} → COMPLETED (triage-scan@1, repository workspace)`);
 
-// Follow-up triage-apply proposal from chain
-const triageApplyProposal = await openProposalFor(triageEventId, { agent: "triage-apply@1" });
-log(`${triageApplyProposal.id} left open (triage-apply@1 chain recommendation)`);
+// Follow-up triage-apply run from chain: the closed plan is auto-approved.
+const triageApplyProposal = await proposalFor(triageEventId, { agent: "triage-apply@1", status: "all" });
+await runTerminal(triageApplyProposal.runId, "COMPLETED");
+log(`${triageApplyProposal.runId} → COMPLETED (triage-apply@1 chain auto-approved closed plan)`);
 
 // 7. Duplicate delivery suppression
 const dupOutcome = await client.replay(envelope("completed", tag("ok", projectA)));
 log(`duplicate admission test: duplicate=${dupOutcome.duplicate}`);
 
-// 8. Open proposals: approvable (`run`), human_needed, and TTL-expired
-await replay(envelope("open", tag("ok", projectA)));
+// 8. Open watched proposals: direct/operator, merge/ship, human_needed, and TTL-expired
+await replay(envelope("open", tag("ok", projectA), undefined, "operator"));
 const open = await openProposalFor(`${prefix}-open`);
-log(`${open.id} left open (approvable → instant COMPLETED)`);
+log(`${open.id} left open (direct operator approvable → instant COMPLETED)`);
+
+const fixtureSha = "a".repeat(40);
+const mergeEventId = `${prefix}-merge-watched`;
+await client.replay({
+  schemaVersion: "factory.event/v1",
+  eventId: mergeEventId,
+  type: "factory.merge-apply.requested",
+  source: "operator",
+  subject: primaryProject,
+  occurredAt: new Date().toISOString(),
+  correlationId: mergeEventId,
+  payload: {
+    repo: primaryProject,
+    github: "watt-mind/factory",
+    plan: [{ pr: 42, headSha: fixtureSha, ticket: "WM-400", action: "merge_pr" }],
+  },
+});
+const mergeWatched = await openProposalFor(mergeEventId, { agent: "merge-apply@1" });
+log(`${mergeWatched.id} left open (merge-apply@1 watched)`);
+
+const shipEventId = `${prefix}-ship-watched`;
+await client.replay({
+  schemaVersion: "factory.event/v1",
+  eventId: shipEventId,
+  type: "factory.ship-apply.requested",
+  source: "operator",
+  subject: primaryProject,
+  occurredAt: new Date().toISOString(),
+  correlationId: shipEventId,
+  payload: {
+    repo: primaryProject,
+    github: "watt-mind/factory",
+    base: "develop",
+    deployBranch: "main",
+    headSha: fixtureSha,
+    deployHeadSha: fixtureSha,
+    changelog: [{ sha: fixtureSha, subject: "fixture release", ticket: "WM-400" }],
+    plan: [{ action: "open_rc_pr" }],
+  },
+});
+const shipWatched = await openProposalFor(shipEventId, { agent: "ship-apply@1" });
+log(`${shipWatched.id} left open (ship-apply@1 human watched)`);
 
 await replay(envelope("human-needed", []));
 const human = await humanNeededProposal(`${prefix}-human-needed`);
