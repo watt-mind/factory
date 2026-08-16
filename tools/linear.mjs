@@ -6,6 +6,7 @@
  *   bun tools/linear.mjs comments CLNT-616
  *   bun tools/linear.mjs claim CLNT-616 --agent claude
  *   bun tools/linear.mjs comment CLNT-616 "verified: 42 tests pass"
+ *   bun tools/linear.mjs detail CLNT-616 "## Acceptance criteria\n- [ ] ..."
  *   bun tools/linear.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/linear.mjs state CLNT-616 "In Review" --add ai:needs-review
  *   bun tools/linear.mjs file --team CLNT --title "..." --body "..." --type bug
@@ -164,6 +165,18 @@ export function formatComments(nodesOrIssue) {
   return nodes.map(formatComment).join("\n\n---\n\n");
 }
 
+/** Build an idempotent description update for the `detail` verb. */
+export function appendIssueDetail(currentDescription, rawDetail) {
+  const detail = String(rawDetail ?? "").trim();
+  if (!detail) throw new Error("detail must not be empty");
+
+  const current = currentDescription ?? "";
+  if (current.includes(detail)) return { description: current, appended: false };
+
+  const separator = current.length === 0 || current.endsWith("\n\n") ? "" : current.endsWith("\n") ? "\n" : "\n\n";
+  return { description: `${current}${separator}${detail}\n`, appended: true };
+}
+
 // --------------------------------------------------------------- helpers ---
 const ISSUE_FIELDS = `id identifier title url description
   state{ id name type } assignee{ id name }
@@ -299,6 +312,22 @@ const VERBS = {
     await gql(`mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
       { in: { issueId: issue.id, body: stampRun(body) } });
     out({ ok: true, identifier: key }, `commented on ${key}`);
+  },
+
+  async detail() {
+    const key = positional[0];
+    const rawDetail = positional[1];
+    if (!key || !rawDetail) throw new Error(`usage: detail <ISSUE-ID> "<markdown>"`);
+    const issue = await issueByKey(key);
+    const { description, appended } = appendIssueDetail(issue.description, rawDetail);
+    if (!appended) {
+      out({ ok: true, identifier: key, appended: false }, `${key} detail already present`);
+      return;
+    }
+    const updated = await gql(`mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
+      { id: issue.id, in: { description } });
+    if (!updated?.issueUpdate?.success) throw new Error(`failed to append detail to ${key}`);
+    out({ ok: true, identifier: key, appended: true }, `${key} detail appended`);
   },
 
   async labels() {

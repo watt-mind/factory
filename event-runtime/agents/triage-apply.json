@@ -31,8 +31,8 @@
     "write-detail": {
       "argv": [
         "bun",
-        "-e",
-        "import { gql } from './orchestrator/reaper.mjs'; const [identifier, rawDetail] = process.argv.slice(1); if (!identifier || !rawDetail) throw new Error('write-detail requires issueId and detail'); const found = await gql('query($id:String!){ issue(id:$id){ id description } }', { id: identifier }); const issue = found?.issue; if (!issue) throw new Error(`issue not found: ${identifier}`); const detail = rawDetail.trim(); const current = issue.description ?? ''; if (current.includes(detail)) { console.log(`${identifier} detail already present`); process.exit(0); } const separator = current.length === 0 || current.endsWith('\\n\\n') ? '' : current.endsWith('\\n') ? '\\n' : '\\n\\n'; const description = `${current}${separator}${detail}\\n`; const updated = await gql('mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }', { id: issue.id, in: { description } }); if (!updated?.issueUpdate?.success) throw new Error(`failed to append detail to ${identifier}`); console.log(`${identifier} detail appended`);",
+        "{factoryRoot}/tools/linear.mjs",
+        "detail",
         "{issueId}",
         "{detail}"
       ]
@@ -71,7 +71,9 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write"]
+    "services": [
+      "linear:write"
+    ]
   },
   "limits": {
     "timeout_seconds": 600,
@@ -79,7 +81,7 @@
   },
   "mutating": true,
   "pins": {
-    "agents/triage-apply.md": "sha256:e4d6bcb46316cd1d606d902b80a3ee77c43348b477b784c96a4d9fd9d250770b",
+    "agents/triage-apply.md": "sha256:88872839dbb90b8803b1ba0a64bd5bfdf83033c0f17311ffa2400ad2bae14639",
     "schemas/triage-apply.input.json": "sha256:012ae75d96534db28ea8c7c8856d247ee3fbe2e2bbec83bbf90e4e664d2011e1",
     "schemas/triage-applied.output.json": "sha256:5e4d4a2e59423a2aab88357521ff1e37889d50d658bee7278d599400f5dc3365"
   }

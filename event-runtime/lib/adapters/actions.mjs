@@ -106,6 +106,11 @@ export function probeBytes(raw) {
 
 /** Substitute {field} placeholders across an argv template (item-list mode). */
 export function substituteArgv(argv, context) {
+  for (const element of argv) {
+    if (/\$\{[A-Za-z0-9_]+\}/.test(element)) {
+      throw new Error('argv template element contains "${", which collides with argv placeholder syntax');
+    }
+  }
   return argv.map((element) =>
     element.replace(/\{([A-Za-z0-9_]+)\}/g, (_, field) => {
       const value = context?.[field];

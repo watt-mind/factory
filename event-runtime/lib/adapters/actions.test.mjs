@@ -10,8 +10,20 @@ import {
 import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { appendIssueDetail } from "../../../tools/linear.mjs";
 
 const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+
+describe("appendIssueDetail (WM-343)", () => {
+  test("appends the same detail only once", () => {
+    const first = appendIssueDetail("Existing description", "## Verification\n\nRun the exact command.");
+    const second = appendIssueDetail(first.description, "## Verification\n\nRun the exact command.");
+
+    expect(first.appended).toBe(true);
+    expect(second).toEqual({ description: first.description, appended: false });
+    expect(first.description.match(/## Verification/g)).toHaveLength(1);
+  });
+});
 
 describe("buildArgv (OPS-410)", () => {
   test("replaces {target} and {remote} in exec template", () => {
@@ -137,6 +149,12 @@ describe("substituteArgv", () => {
 
   test("throws on missing or non-primitive fields", () => {
     expect(() => substituteArgv(["echo", "{missing}"], {})).toThrow(/missing\/non-primitive/);
+  });
+
+  test("rejects JavaScript template interpolation that collides with argv placeholders", () => {
+    expect(() => substituteArgv(["bun", "-e", "console.log(`${identifier}`)"], {})).toThrow(
+      /contains "\$\{".*collides with argv placeholder syntax/,
+    );
   });
 });
 
