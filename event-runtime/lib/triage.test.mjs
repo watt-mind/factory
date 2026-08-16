@@ -100,16 +100,43 @@ function harness({ adapters = { pi: fake, actions: fake } } = {}) {
   return { db, approveNext };
 }
 
-const triageApplyEnvelope = (repo, eventId, plan) => ({
-  schemaVersion: "factory.event/v1",
-  eventId,
-  type: "factory.triage-apply.requested",
-  source: "operator",
-  subject: repo,
-  occurredAt: "2026-08-13T09:00:00Z",
-  correlationId: eventId,
-  payload: { repo, plan },
-});
+function triageScanAdapterWithCanonicalDetail(detail) {
+  return {
+    async execute({ spec, workspaceDir, ...rest }) {
+      if (spec.outputContract === "factory.triage-plan/v1") {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          `${JSON.stringify(
+            {
+              schemaVersion: "factory.agent-result/v1",
+              terminalState: "completed",
+              reasonCode: "ok",
+              artifact: {
+                recommendation: "TRIAGE",
+                repo: spec.input?.repo,
+                plan: [
+                  {
+                    issueId: "CLNT-999",
+                    action: "write-detail",
+                    reason: "fake: canonical multi-section detail",
+                    detail,
+                  },
+                ],
+                summary: `fake triage for ${spec.input?.repo}`,
+              },
+              evidence: { commands: ["fake"], issuesSeen: 1 },
+            },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+        return { exitCode: 0, timedOut: false };
+      }
+      return fake.execute({ spec, workspaceDir, ...rest });
+    },
+  };
+}
 
 const triageEnvelope = (repo, eventId) => ({
   schemaVersion: "factory.event/v1",
@@ -145,24 +172,22 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
     expect(result.artifact.applied).toEqual([{ issueId: "CLNT-999", action: "label-agent-ready" }]);
   });
 
-  test("a canonical write-detail triage-apply payload is approved as run", async () => {
-    const { db } = harness();
-    admitEvent(
-      db,
-      registry,
-      triageApplyEnvelope("bj29", "triage-5", [
-        {
-          issueId: "CLNT-999",
-          action: "write-detail",
-          reason: "fake: canonical multi-section detail",
-          detail: canonicalWriteDetail,
-        },
-      ]),
-    );
+  test("a canonical multi-section triage-scan artifact plans run triage-apply with leading whitespace", async () => {
+    const { db, approveNext } = harness({
+      adapters: {
+        pi: triageScanAdapterWithCanonicalDetail(canonicalWriteDetail),
+        actions: fake,
+      },
+    });
 
+    admitEvent(db, registry, triageEnvelope("bj29", "triage-5"));
+    const scan = await approveNext("triage-scan@1");
+    expect(scan.summary.terminalState).toBe("COMPLETED");
+
+    expect(resolveChains(db, registry).emitted).toBe(1);
     planAdmittedEvents(db, registry, { policyVersion: PV });
     const apply = openProposals(db, {}).find((p) => p.spec?.agent === "triage-apply@1");
-    expect(apply).toBeTruthy();
+    expect(apply.decision).toBe("run");
     expect(apply.status).toBe("open");
     expect(apply.spec.input.plan?.[0]?.detail).toEqual(canonicalWriteDetail);
   });

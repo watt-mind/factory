@@ -28,7 +28,7 @@
           "detail": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^\\s*## (Acceptance criteria|Owned Paths|Verification)",
+            "pattern": "^\\s*## (Acceptance Criteria|Owned Paths|Verification)",
             "description": "For write-detail only: additive Markdown containing one or more missing template sections; multiple allowed headings may appear in one detail"
           },
           "ownedPaths": {
