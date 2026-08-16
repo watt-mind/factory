@@ -1,7 +1,7 @@
 // Line diff for two RunSpecs — the §12 replan path must show the operator
 // exactly what changed before they approve the re-planned spec.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, copyText } from "./ui";
 
 export type DiffLine = { type: "same" | "del" | "add"; text: string };
@@ -53,9 +53,11 @@ function countLinesBelowViewport(scroller: HTMLElement): number {
 }
 
 export function SpecDiff({ before, after }: { before: unknown; after: unknown }) {
-  const lines = diffLines(
-    JSON.stringify(before, null, 2).split("\n"),
-    JSON.stringify(after, null, 2).split("\n"),
+  const beforeJson = JSON.stringify(before, null, 2);
+  const afterJson = JSON.stringify(after, null, 2);
+  const lines = useMemo(
+    () => diffLines(beforeJson.split("\n"), afterJson.split("\n")),
+    [beforeJson, afterJson],
   );
   const changed = lines.filter((l) => l.type !== "same").length;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -140,15 +142,9 @@ export function SpecDiff({ before, after }: { before: unknown; after: unknown })
         ))}
       </div>
       {linesBelow > 0 && (
-        <>
-          <div
-            className="pointer-events-none sticky bottom-0 -mt-8 h-8 bg-linear-to-t from-(--surface-3) to-transparent"
-            aria-hidden
-          />
-          <div className="sticky bottom-0 bg-(--surface-0) px-3 pb-2 pt-0.5 text-center text-[10px] text-(--text-faint)">
-            {`${linesBelow} more line${linesBelow === 1 ? "" : "s"} below`}
-          </div>
-        </>
+        <div className="pointer-events-none sticky bottom-0 -mt-10 flex h-10 items-end justify-center bg-linear-to-t from-(--surface-3) to-transparent px-3 pb-2 text-center text-[10px] text-(--text-faint)">
+          {`${linesBelow} more line${linesBelow === 1 ? "" : "s"} below`}
+        </div>
       )}
     </div>
   );

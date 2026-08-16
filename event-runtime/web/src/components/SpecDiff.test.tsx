@@ -86,6 +86,42 @@ describe("SpecDiff component", () => {
     Object.defineProperty(scroller, "scrollTop", { configurable: true, value: scrollTop, writable: true });
   }
 
+  test("does not re-subscribe the overflow observer when props are unchanged", () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let observerCount = 0;
+    let disconnectCount = 0;
+
+    class TrackingResizeObserver {
+      constructor(_callback: ResizeObserverCallback) {
+        observerCount++;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        disconnectCount++;
+      }
+    }
+
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: TrackingResizeObserver,
+    });
+
+    const before = { maxAttempts: 3 };
+    const after = { maxAttempts: 5 };
+    const r = render(<SpecDiff before={before} after={after} />);
+
+    r.rerender(<SpecDiff before={before} after={after} />);
+
+    expect(observerCount).toBe(1);
+    expect(disconnectCount).toBe(0);
+
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: originalResizeObserver,
+    });
+  });
+
   test("does not show overflow affordance when diff fits within max height", () => {
     const before = { maxAttempts: 3 };
     const after = { maxAttempts: 5 };
@@ -114,7 +150,14 @@ describe("SpecDiff component", () => {
       fireEvent.scroll(scroller);
     });
 
-    expect(r.getByText(/\d+ more lines below/)).toBeDefined();
+    const hint = r.getByText(/\d+ more lines below/);
+    expect(hint).toBeDefined();
+
+    const stickyBottomNodes = [...scroller.querySelectorAll(".sticky.bottom-0")];
+    expect(stickyBottomNodes).toHaveLength(1);
+    expect(stickyBottomNodes[0]?.contains(hint)).toBe(true);
+    expect(stickyBottomNodes[0]?.className).toContain("-mt-10");
+    expect(stickyBottomNodes[0]?.className).toContain("h-10");
   });
 
   test("preserves JSON indent after dropping pre (whitespace-pre-wrap on body)", () => {
