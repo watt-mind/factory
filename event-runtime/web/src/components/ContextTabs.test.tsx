@@ -257,6 +257,29 @@ describe("ContextTabs", () => {
     expect(selected).toEqual([{ kind: "inflight" }]);
   });
 
+  test("unpinning the active run preserves the project-scoped hash", () => {
+    window.location.hash = "#/runs?project=factory";
+    const r = render(
+      <ContextTabs
+        repos={[repo("factory")]}
+        reposError={false}
+        openRepos={["factory"]}
+        active={{ kind: "repo", name: "factory" }}
+        onSelect={() => {}}
+        onOpen={() => {}}
+        onClose={() => {}}
+        pinnedRuns={["run_abc"]}
+      />,
+    );
+
+    // App navigation uses replaceState, which does not emit hashchange; unpinRun
+    // must read the live hash rather than relying on its last rendered state.
+    window.history.replaceState(null, "", "#/runs/run_abc?project=factory");
+    fireEvent.click(r.getByRole("button", { name: "Close run_abc" }));
+
+    expect(window.location.hash).toBe("#/runs?project=factory");
+  });
+
   test("Enter on All and Space on a pinned run activate those tabs", () => {
     const selected: OperatorContext[] = [];
     const r = render(

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OperatorContext } from "../context";
 import { INFLIGHT, toggleInflight } from "../context";
+import { hashProject, withProject } from "../hash";
 import { CONTEXT_TABS_ATTR } from "../hooks";
 import type { RepoItem } from "../types";
 
@@ -127,8 +128,8 @@ export function ContextTabs({
       setInternalPinned(next);
       savePinnedRuns(next);
     }
-    if (activeRunId === runId && typeof window !== "undefined") {
-      window.location.hash = "#/runs";
+    if (typeof window !== "undefined" && getHashRunId() === runId) {
+      window.location.hash = `#/${withProject("runs", hashProject(window.location.hash))}`;
     }
   };
 
