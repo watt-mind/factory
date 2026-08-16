@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { openDb } from "./db.mjs";
-import { admitEvent, verifyWebhook } from "./intake.mjs";
+import { admitEvent, admitExternalEvent, verifyWebhook } from "./intake.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const registry = loadRegistry();
@@ -129,6 +129,23 @@ describe("admitEvent", () => {
     expect(second).toEqual({ admitted: false, duplicate: true, event: first.event });
     const rows = db.query(`SELECT COUNT(*) AS n FROM events`).get();
     expect(rows.n).toBe(1);
+  });
+
+  test("external admission rejects reserved chain provenance before persistence", () => {
+    const db = openDb(":memory:");
+    const result = admitExternalEvent(
+      db,
+      registry,
+      envelope({ source: "chain", causationId: "forged-parent" }),
+      { now: NOW },
+    );
+
+    expect(result).toEqual({
+      admitted: false,
+      duplicate: false,
+      errors: ['source: reserved internal provenance "chain"'],
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
   });
 
   test("schema-invalid envelope returns errors and writes no row", () => {

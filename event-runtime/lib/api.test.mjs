@@ -258,6 +258,58 @@ describe("webhook intake (§14)", () => {
     expect(none.events).toEqual([]);
   });
 
+  test("signed webhook and replay cannot forge reserved chain provenance", async () => {
+    const forged = envelope({
+      eventId: "forged-chain",
+      type: "factory.triage-apply.requested",
+      source: "chain",
+      causationId: "forged-parent-run",
+      payload: {
+        repo: "factory",
+        plan: [{ issueId: "WM-409", action: "label-agent-ready" }],
+      },
+    });
+    const body = JSON.stringify(forged);
+    const ts = String(Date.now());
+    const webhook = await fetch(s.url("/events"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-timestamp": ts,
+        "x-factory-signature": sign(body, ts),
+      },
+      body,
+    });
+    expect(webhook.status).toBe(422);
+    expect((await webhook.json()).errors).toContain(
+      'source: reserved internal provenance "chain"',
+    );
+
+    const replay = await fetch(s.url("/replay"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(replay.status).toBe(422);
+    expect((await replay.json()).errors).toContain(
+      'source: reserved internal provenance "chain"',
+    );
+
+    expect(
+      s.db.query(`SELECT COUNT(*) AS n FROM events WHERE event_id = ?`).get(
+        forged.eventId,
+      ).n,
+    ).toBe(0);
+    expect(planAdmittedEvents(s.db, registry, { policyVersion: PV })).toEqual({
+      planned: 1,
+      failed: 0,
+      deadLettered: 0,
+    });
+    expect(
+      s.db.query(`SELECT COUNT(*) AS n FROM runs WHERE state IN ('APPROVED', 'QUEUED')`).get().n,
+    ).toBe(0);
+  });
+
   test("envelope schema failure → 422 with errors, no admission", async () => {
     const body = JSON.stringify({ schemaVersion: "factory.event/v1", eventId: "bad" });
     const ts = String(Date.now());

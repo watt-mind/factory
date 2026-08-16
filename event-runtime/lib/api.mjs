@@ -17,7 +17,7 @@ import path from "node:path";
 import { findArtifact, listArtifacts, pruneArtifacts, storeStats } from "./artifacts.mjs";
 import { API_HOST, DEFAULT_PORT, artifactsRoot, environmentName, runtimeHome, webhookSecret } from "./config.mjs";
 import { runUsage, usageSpend } from "./db.mjs";
-import { admitEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
+import { admitEvent, admitExternalEvent, githubWebhookSecret, translateGitHubEvent, verifyGitHubWebhook, verifyWebhook } from "./intake.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import {
   ackInboxItem,
@@ -652,7 +652,7 @@ export { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 function admit(db, registry, res, buffer, nowMs, onEvent) {
   const parsed = parseJson(buffer);
   if (parsed.error) return send(res, 422, { errors: [parsed.error] });
-  const outcome = admitEvent(db, registry, parsed.value, { now: nowMs });
+  const outcome = admitExternalEvent(db, registry, parsed.value, { now: nowMs });
   if (!outcome.admitted && !outcome.duplicate) return send(res, 422, { errors: outcome.errors });
   if (outcome.admitted) onEvent("admitted");
   return send(res, 200, {
@@ -830,7 +830,7 @@ export function createApi({
           if (translated.ignored) return send(res, 200, { admitted: false, ignored: true, reason: translated.reason });
           return send(res, 422, { errors: [translated.reason] });
         }
-        const outcome = admitEvent(db, registry, translated.envelope, { now: nowMs });
+        const outcome = admitExternalEvent(db, registry, translated.envelope, { now: nowMs });
         if (!outcome.admitted && !outcome.duplicate) return send(res, 422, { errors: outcome.errors });
         if (outcome.admitted) onEvent("admitted");
         return send(res, 200, {

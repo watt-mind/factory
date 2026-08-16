@@ -197,6 +197,35 @@ export function translateGitHubEvent({ event, deliveryId, payload, repos, now = 
  *         | { admitted: false, duplicate: true, event: object }
  *         | { admitted: false, duplicate: false, errors: string[] }}
  */
+export const RESERVED_INTERNAL_SOURCES = new Set(["chain"]);
+
+/**
+ * Persist an envelope supplied by a public/operator boundary. Reserved runtime
+ * provenance is never caller-selectable: rejecting it before persistence keeps
+ * `events.source = "chain"` as durable proof that the chain resolver created
+ * the event, rather than untrusted envelope text.
+ */
+export function admitExternalEvent(db, registry, envelope, options = {}) {
+  if (
+    envelope &&
+    typeof envelope === "object" &&
+    !Array.isArray(envelope) &&
+    RESERVED_INTERNAL_SOURCES.has(envelope.source)
+  ) {
+    return {
+      admitted: false,
+      duplicate: false,
+      errors: [`source: reserved internal provenance "${envelope.source}"`],
+    };
+  }
+  return admitEvent(db, registry, envelope, options);
+}
+
+/**
+ * Trusted in-process persistence primitive. Public HTTP/replay boundaries must
+ * call admitExternalEvent; internal producers use narrow wrappers such as
+ * admitChainEvent instead of accepting a caller-selected source.
+ */
 export function admitEvent(db, registry, envelope, { now = Date.now() } = {}) {
   if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) {
     return { admitted: false, duplicate: false, errors: ["$: envelope must be an object"] };

@@ -20,6 +20,15 @@ import { admitEvent } from "./intake.mjs";
 
 export const CHAIN_SOURCE = "chain";
 
+/**
+ * The only chain-provenance admission path. The source is assigned here after
+ * the resolver has derived the edge; no envelope supplied by a caller can
+ * select it through the public API.
+ */
+export function admitChainEvent(db, registry, envelope, options = {}) {
+  return admitEvent(db, registry, { ...envelope, source: CHAIN_SOURCE }, options);
+}
+
 /** Resolve a "$.input.x" / "$.artifact.x.y" path against the chain context. */
 function resolvePath(expr, context) {
   if (typeof expr !== "string" || !expr.startsWith("$.")) return expr; // literal
@@ -173,7 +182,7 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
             causationId: row.run_id,
             payload: itemPayload,
           };
-          const admitted = admitEvent(db, registry, envelope, { now });
+          const admitted = admitChainEvent(db, registry, envelope, { now });
           if (admitted.admitted) outcome.emitted += 1;
           else if (admitted.duplicate) outcome.skipped += 1;
           else outcome.errors.push(`${eventId}: ${admitted.errors.join("; ")}`);
@@ -196,7 +205,7 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
             artifactHash,
           }),
         };
-        const admitted = admitEvent(db, registry, envelope, { now });
+        const admitted = admitChainEvent(db, registry, envelope, { now });
         if (admitted.admitted) outcome.emitted += 1;
         else if (admitted.duplicate) outcome.skipped += 1;
         else outcome.errors.push(`${eventId}: ${admitted.errors.join("; ")}`);
