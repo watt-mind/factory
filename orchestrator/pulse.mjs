@@ -33,6 +33,23 @@ function sh(args, cwd = ROOT) {
   }
 }
 
+function hasLinearKey() {
+  if (process.env.LINEAR_API_KEY) return true;
+  const envPaths = [
+    path.join(homedir(), "Develop/hdkiller/.env"),
+    path.join(process.cwd(), ".env"),
+  ];
+  for (const envPath of envPaths) {
+    if (existsSync(envPath)) {
+      try {
+        const content = readFileSync(envPath, "utf8");
+        if (content.includes("LINEAR_API_KEY=")) return true;
+      } catch {}
+    }
+  }
+  return false;
+}
+
 export async function gatherPulse({
   port = 7381,
   host = "127.0.0.1",
@@ -122,27 +139,31 @@ export async function gatherPulse({
       } catch {}
       pulse.supply.team = team;
 
-      const d = await gql(
-        `query($t:String!){
-          issues(first:100, filter:{ team:{key:{eq:$t}}, state:{type:{nin:["completed","canceled"]}} }){
-            nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }
-          }
-        }`,
-        { t: team },
-      );
+      if (!hasLinearKey()) {
+        pulse.supply.error = "LINEAR_API_KEY not configured";
+      } else {
+        const d = await gql(
+          `query($t:String!){
+            issues(first:100, filter:{ team:{key:{eq:$t}}, state:{type:{nin:["completed","canceled"]}} }){
+              nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }
+            }
+          }`,
+          { t: team },
+        );
 
-      const nodes = d?.issues?.nodes ?? [];
-      const ready = nodes.filter(
-        (i) =>
-          i.state?.name === "Todo" &&
-          !i.assignee &&
-          (i.labels?.nodes ?? []).some((l) => l.name === "ai:agent-ready"),
-      );
-      const triage = nodes.filter((i) => i.state?.name === "Triage");
+        const nodes = d?.issues?.nodes ?? [];
+        const ready = nodes.filter(
+          (i) =>
+            i.state?.name === "Todo" &&
+            !i.assignee &&
+            (i.labels?.nodes ?? []).some((l) => l.name === "ai:agent-ready"),
+        );
+        const triage = nodes.filter((i) => i.state?.name === "Triage");
 
-      pulse.supply.dispatchable = ready.length;
-      pulse.supply.triage = triage.length;
-      pulse.supply.tickets = ready.slice(0, 5).map((i) => ({ identifier: i.identifier, title: i.title }));
+        pulse.supply.dispatchable = ready.length;
+        pulse.supply.triage = triage.length;
+        pulse.supply.tickets = ready.slice(0, 5).map((i) => ({ identifier: i.identifier, title: i.title }));
+      }
     } catch (err) {
       pulse.supply.error = err.message;
     }
