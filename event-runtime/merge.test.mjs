@@ -161,10 +161,10 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
   });
 
   test("all enabled merge schedules are singleton autonomous cold scans", () => {
-    const schedules = Object.entries(registry.schedules).filter(([name]) =>
-      name.startsWith("merge-"),
+    const schedules = Object.entries(registry.schedules).filter(
+      ([name, schedule]) => name.startsWith("merge-") && schedule.enabled,
     );
-    expect(schedules.length).toBeGreaterThan(0);
+    expect(schedules.map(([name]) => name)).toEqual(["merge-factory"]);
     for (const [, schedule] of schedules) {
       expect(schedule).toMatchObject({
         eventType: "factory.merge.requested",
