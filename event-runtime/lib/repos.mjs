@@ -49,6 +49,7 @@ export function expandHome(p) {
  * @returns {Map<string, {name: string, path: string, github: string|null, base: string,
  *                        deployBranch: string|null, team: string|null, project: string|null,
  *                        reportOnly: boolean, maxInFlight: number|null, smokeDeadlineSeconds: number|null,
+ *                        mergeCi: {workflow: string, requiredChecks: string[]}|null,
  *                        worktreeRoot: string|null, worktreeUp: string|null, worktreeDown: string|null,
  *                        worktreeWarm: string|null, verify: string|null}>}
  */
@@ -84,6 +85,23 @@ export function loadRepos({ root = reposRoot() } = {}) {
       }
       smokeDeadlineSeconds = rawSmokeDeadline;
     }
+    let mergeCi = null;
+    if (entry.merge_ci !== undefined && entry.merge_ci !== null) {
+      const workflow = entry.merge_ci?.workflow;
+      const requiredChecks = entry.merge_ci?.required_checks;
+      const validWorkflow = typeof workflow === "string" && workflow.trim().length > 0;
+      const validChecks =
+        Array.isArray(requiredChecks) &&
+        requiredChecks.length > 0 &&
+        requiredChecks.every((check) => typeof check === "string" && check.trim().length > 0) &&
+        new Set(requiredChecks).size === requiredChecks.length;
+      if (!validWorkflow || !validChecks) {
+        throw new RepoError(
+          `${file}: repo ${entry.name} merge_ci requires a nonempty workflow and unique nonempty required_checks`,
+        );
+      }
+      mergeCi = { workflow, requiredChecks: [...requiredChecks] };
+    }
     repos.set(entry.name, {
       name: entry.name,
       path: expandHome(entry.path),
@@ -100,6 +118,7 @@ export function loadRepos({ root = reposRoot() } = {}) {
       // inventing a number here would state a limit this file never set.
       maxInFlight,
       smokeDeadlineSeconds,
+      mergeCi,
       worktreeRoot: entry.worktree_root ? expandHome(entry.worktree_root) : null,
       worktreeUp: entry.worktree_up ?? null,
       worktreeDown: entry.worktree_down ?? null,
@@ -136,6 +155,7 @@ export function reposView(repos) {
     reportOnly: repo.reportOnly,
     maxInFlight: repo.maxInFlight,
     smokeDeadlineSeconds: repo.smokeDeadlineSeconds,
+    mergeCi: repo.mergeCi,
     worktreeRoot: repo.worktreeRoot,
     hasWorktreeUp: repo.worktreeUp !== null,
     hasWorktreeDown: repo.worktreeDown !== null,
@@ -152,4 +172,70 @@ export function getRepo(repos, name) {
     );
   }
   return repo;
+}
+
+/**
+ * Select the merge gate without treating an empty branch-protection response
+ * as green. GitHub-owned required contexts win whenever they are nonempty;
+ * the repo-owned declaration is the only permitted fallback.
+ */
+export function selectMergeCheckGate(repo, githubRequiredContexts) {
+  if (!Array.isArray(githubRequiredContexts)) {
+    throw new RepoError("GitHub required contexts are unavailable");
+  }
+  const valid = githubRequiredContexts.every(
+    (name) => typeof name === "string" && name.trim().length > 0,
+  );
+  if (!valid || new Set(githubRequiredContexts).size !== githubRequiredContexts.length) {
+    throw new RepoError("GitHub required contexts are malformed or ambiguous");
+  }
+  if (githubRequiredContexts.length > 0) {
+    return {
+      source: "github",
+      workflow: null,
+      requiredChecks: [...githubRequiredContexts],
+    };
+  }
+  if (!repo?.mergeCi) {
+    throw new RepoError("GitHub required contexts are empty and no merge_ci fallback is configured");
+  }
+  return {
+    source: "config",
+    workflow: repo.mergeCi.workflow,
+    requiredChecks: [...repo.mergeCi.requiredChecks],
+  };
+}
+
+/**
+ * Prove one completed-success record for every named gate at one exact SHA.
+ * Duplicate matching records are ambiguous rather than "one of them passed".
+ * Unnamed extra checks are irrelevant: the selected gate is deliberately an
+ * exact allow-list, not a snapshot of whatever happened to be visible first.
+ */
+export function proveMergeChecks({ expectedChecks, actualChecks, expectedSha, workflow = null }) {
+  if (
+    !Array.isArray(expectedChecks) ||
+    expectedChecks.length === 0 ||
+    !Array.isArray(actualChecks) ||
+    typeof expectedSha !== "string" ||
+    expectedSha.length === 0
+  ) {
+    throw new RepoError("merge check evidence is empty or malformed");
+  }
+  for (const name of expectedChecks) {
+    const matches = actualChecks.filter((check) => check?.name === name);
+    if (matches.length !== 1) {
+      throw new RepoError(`required check ${JSON.stringify(name)} is missing or ambiguous`);
+    }
+    const check = matches[0];
+    if (
+      check.headSha !== expectedSha ||
+      check.status !== "completed" ||
+      check.conclusion !== "success" ||
+      (workflow !== null && check.workflow !== workflow)
+    ) {
+      throw new RepoError(`required check ${JSON.stringify(name)} is not green at the exact SHA`);
+    }
+  }
+  return true;
 }

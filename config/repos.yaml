@@ -397,6 +397,15 @@ repos:
 
     verify: bun test && bun build/emit.mjs --check
 
+    # Git-owned fallback for autonomous develop merges. GitHub branch-protection
+    # required contexts remain preferred when present; this exact workflow/job
+    # set is used only because Factory intentionally has no required contexts.
+    merge_ci:
+      workflow: CI
+      required_checks:
+        - Shadow runner fleet available
+        - Verify
+
     # The control plane holds no client data and serves no traffic. Its risky
     # surfaces (policy.yaml, the merge stage) are what a human reviews on every
     # factory PR anyway, so a path list adds nothing here (WM-47).

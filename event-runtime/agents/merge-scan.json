@@ -23,7 +23,7 @@
   },
   "mutating": false,
   "pins": {
-    "agents/merge-scan.md": "sha256:a2ab03b7c0b23d4f09d8db0a166b71c1f9e3221e3d30026eec352db4ab2b4dd2",
+    "agents/merge-scan.md": "sha256:b51b2498ee7ec6b267d2074e595fc54e1b75ae9dccd8013e7e2881461fb03f52",
     "schemas/merge-scan.input.json": "sha256:f41fcfbbaee8423923b9ee5c213bfa92d03ce711d271c5a65a893f08b5af873e",
     "schemas/merge-scan.output.json": "sha256:84791d0fcfe80716ffda27b1432cb8be7a003d1c7c967d4dc9445ae182b236a2"
   }

@@ -9,9 +9,23 @@ base-targeting, non-draft PR as exactly MERGE, FIX, or ESCALATE. Write
 For every PR record the live `headRefOid` and the current base ref SHA. Read the
 complete diff, PR body, every review, required checks, and the full Linear
 ticket plus comments. Require a valid structured Handoff, diff containment in
-Owned Paths, mergeability, non-draft state, real required CI (an empty check
-set is not green), behavior correctness, and falsifiable regression tests.
-Green CI alone is never MERGE.
+Owned Paths, mergeability, non-draft state, real required CI, behavior
+correctness, and falsifiable regression tests. Green CI alone is never MERGE.
+
+Resolve the CI gate mechanically for each pinned head SHA. First query GitHub's
+branch-protection required contexts. When that result is a nonempty array of
+unique nonempty names, it is authoritative. When and only when it is a valid
+empty array, load `merge_ci.workflow` and the unique nonempty
+`merge_ci.required_checks` from this repo's `config/repos.yaml` entry. Missing
+or malformed config is ESCALATE, never an empty green set. For the configured
+fallback, locate the one unambiguous pull-request run of that exact workflow at
+`headRefOid`, inspect its jobs, and prove exactly one job with each configured
+name is `completed` / `success`. For GitHub-owned contexts, prove exactly one
+check with each required name is green on that same `headRefOid`. Re-read the
+head SHA after collecting evidence. Empty, missing, duplicate, pending,
+neutral, skipped, cancelled, stale-SHA, wrong-workflow, API-error, or otherwise
+ambiguous evidence fails closed. Never substitute all currently visible checks
+for either authoritative set; that recreates the early auxiliary-check race.
 
 ESCALATE auth/authz, money movement, credentials/secrets, destructive
 migrations, production infrastructure, CLNT security behavior, any

@@ -98,20 +98,43 @@ function installMergeCommandFakes(fixture) {
       '  *"pr view"*"state,isDraft,mergeable,headRefOid,headRefName,baseRefName,labels"*)',
       "    printf '{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"headRefOid\":\"%s\",\"headRefName\":\"%s\",\"baseRefName\":\"develop\",\"labels\":[]}\\n' \"$FAKE_HEAD_SHA\" \"$FAKE_HEAD_REF\" ;;",
       "  *\"git/ref/heads/develop\"*) printf '%s\\n' \"$FAKE_BASE_SHA\" ;;",
-      "  *\"pr checks\"*\"--required --json bucket\"*) printf '[{\"bucket\":\"pass\"}]\\n' ;;",
+      '  *"pr checks"*"--required --json name,bucket,state"*)',
+      '    case "${FAKE_REQUIRED_MODE:-empty}" in',
+      "      green) printf '[{\"name\":\"Protected Verify\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]\\n' ;;",
+      "      pending) printf '[{\"name\":\"Protected Verify\",\"bucket\":\"pending\",\"state\":\"PENDING\"}]\\n' ;;",
+      "      duplicate) printf '[{\"name\":\"Protected Verify\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"},{\"name\":\"Protected Verify\",\"bucket\":\"pass\",\"state\":\"SUCCESS\"}]\\n' ;;",
+      "      *) printf '[]\\n' ;;",
+      '    esac ;;',
       '  *"pr merge"*) : ;;',
+      "  *\"pr view\"*\"--json headRefOid --jq .headRefOid\"*) printf '%s\\n' \"$FAKE_HEAD_SHA\" ;;",
       "  *\"pr view\"*\"select(.state\"*) printf '%s\\n' \"$FAKE_MERGE_SHA\" ;;",
       "  *\"pr view\"*\"@tsv\"*) printf 'MERGED\\t%s\\n' \"$FAKE_MERGE_SHA\" ;;",
       "  *\"pr view\"*\"--jq .state\"*) printf 'MERGED\\n' ;;",
       "  *\"pr view\"*\"--jq .mergeCommit.oid\"*) printf '%s\\n' \"$FAKE_MERGE_SHA\" ;;",
       "  *\"pr checks\"*\"--json name,bucket,state,workflow\"*) printf '[{\"name\":\"Shadow runner fleet available\",\"bucket\":\"pass\",\"state\":\"SUCCESS\",\"workflow\":\"CI\"},{\"name\":\"Verify\",\"bucket\":\"pass\",\"state\":\"SUCCESS\",\"workflow\":\"CI\"}]\\n' ;;",
-      '  *"run list"*"--workflow CI"*)',
-      "    if [ \"${FAKE_CI_MODE:-success}\" = auxiliary ]; then printf '[]\\n'; else printf '[{\"databaseId\":91,\"status\":\"completed\",\"conclusion\":\"success\",\"workflowName\":\"CI\"}]\\n'; fi ;;",
-      "  *\"run view 91\"*) printf '[{\"name\":\"Shadow runner fleet available\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"Verify\",\"status\":\"completed\",\"conclusion\":\"success\"}]\\n' ;;",
+      '  *"run list"*"--workflow CI"*"--event pull_request"*)',
+      "    printf '[{\"databaseId\":81,\"status\":\"completed\",\"conclusion\":\"success\",\"headSha\":\"%s\",\"workflowName\":\"CI\"}]\\n' \"$FAKE_HEAD_SHA\" ;;",
+      '  *"run list"*"--workflow CI"*"--event push"*)',
+      "    if [ \"${FAKE_CI_MODE:-success}\" = auxiliary ]; then printf '[]\\n'; else printf '[{\"databaseId\":91,\"status\":\"completed\",\"conclusion\":\"success\",\"headSha\":\"%s\",\"workflowName\":\"CI\"}]\\n' \"$FAKE_MERGE_SHA\"; fi ;;",
+      '  *"run view 81"*|*"run view 91"*)',
+      "    if [ \"${FAKE_CI_MODE:-success}\" = shadow-only ]; then printf '[{\"name\":\"Shadow runner fleet available\",\"status\":\"completed\",\"conclusion\":\"success\"}]\\n'; else printf '[{\"name\":\"Shadow runner fleet available\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"Verify\",\"status\":\"completed\",\"conclusion\":\"success\"}]\\n'; fi ;;",
       "  *\"commits/\"*\"/check-runs\"*) printf '[[\"completed\",\"success\"]]\\n' ;;",
       "  *\"git/ref/heads/\"*) printf '%s\\n' \"$FAKE_HEAD_SHA\" ;;",
       '  *"git/refs/heads/"*) : ;;',
       '  *) echo "unexpected gh command: $*" >&2; exit 64 ;;',
+      'esac',
+    ].join("\n"),
+  );
+}
+
+function installBunGateFake(fixture) {
+  writeExecutable(
+    fixture.bin,
+    "bun",
+    [
+      'case "$*" in',
+      '  *"r.mergeCi"*) printf \'{"workflow":"CI","requiredChecks":["Shadow runner fleet available","Verify"]}\' ;;',
+      '  *) exit 0 ;;',
       'esac',
     ].join("\n"),
   );
@@ -257,7 +280,8 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
     expect(script).toContain("--match-head-commit");
     expect(script).toContain("actual_base");
     expect(script).toContain("isDraft");
-    expect(script).toContain("--required --json bucket");
+    expect(script).toContain("--required --json name,bucket,state");
+    expect(script).toContain("mergeCi");
     expect(script).toContain("factory.merge-landed");
     expect(script).not.toContain("--delete-branch");
     expect(script).not.toContain(" Done ");
@@ -328,6 +352,40 @@ describe("executable merge command safety (WM-412)", () => {
     }
   });
 
+  test("merge-apply executes the configured fallback and requires every exact workflow job", () => {
+    for (const [mode, shouldMerge] of [["success", true], ["shadow-only", false]]) {
+      const fixture = commandFixture(`merge-apply-config-${mode}-`);
+      installMergeCommandFakes(fixture);
+      installBunGateFake(fixture);
+      const result = runCommand(
+        applyCommand(applyPayload()),
+        fixture,
+        commandEnv({ FAKE_CI_MODE: mode }),
+      );
+      expect(result.status, `${mode}: ${result.stderr}`).toBe(0);
+      const log = readFileSync(fixture.log, "utf8");
+      expect(log).toContain("--event pull_request");
+      expect(log.includes("gh pr merge")).toBe(shouldMerge);
+    }
+  });
+
+  test("merge-apply prefers nonempty GitHub required contexts and rejects pending ones", () => {
+    for (const [mode, shouldMerge] of [["green", true], ["pending", false], ["duplicate", false]]) {
+      const fixture = commandFixture(`merge-apply-required-${mode}-`);
+      installMergeCommandFakes(fixture);
+      installBunGateFake(fixture);
+      const result = runCommand(
+        applyCommand(applyPayload()),
+        fixture,
+        commandEnv({ FAKE_REQUIRED_MODE: mode, FAKE_CI_MODE: "auxiliary" }),
+      );
+      expect(result.status, `${mode}: ${result.stderr}`).toBe(0);
+      const log = readFileSync(fixture.log, "utf8");
+      expect(log.includes("gh pr merge")).toBe(shouldMerge);
+      expect(log).not.toContain("--event pull_request");
+    }
+  });
+
   test("real merge-apply command causally admits landed state that queues exact verification", () => {
     const fixture = commandFixture("merge-apply-causal-");
     installMergeCommandFakes(fixture);
@@ -390,7 +448,7 @@ describe("executable merge command safety (WM-412)", () => {
   test("merge-verify compares state and exact SHA separately and executes the configured CI workflow jobs", () => {
     const fixture = commandFixture("merge-verify-success-");
     installMergeCommandFakes(fixture);
-    writeExecutable(fixture.bin, "bun", "exit 0");
+    installBunGateFake(fixture);
     const result = runCommand(
       verifyCommand({
         repo: "factory",
@@ -417,7 +475,7 @@ describe("executable merge command safety (WM-412)", () => {
   test("an auxiliary check without the configured base-push workflow never passes verification", () => {
     const fixture = commandFixture("merge-verify-auxiliary-");
     installMergeCommandFakes(fixture);
-    writeExecutable(fixture.bin, "bun", "exit 0");
+    installBunGateFake(fixture);
     const result = runCommand(
       verifyCommand({
         repo: "factory",
@@ -437,6 +495,30 @@ describe("executable merge command safety (WM-412)", () => {
     expect(log).toContain("run list");
     expect(log).not.toContain("linear state WM-500 Done");
   });
+
+  test("merge-verify cannot pass the early Shadow-only window before Verify appears and succeeds", () => {
+    const fixture = commandFixture("merge-verify-shadow-only-");
+    installMergeCommandFakes(fixture);
+    installBunGateFake(fixture);
+    const result = runCommand(
+      verifyCommand({
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr: 42,
+        ticket: "WM-500",
+        headSha: SHA,
+        headRef: "feat/WM-500",
+        mergeCommitSha: MERGE_SHA,
+      }),
+      fixture,
+      commandEnv({ FAKE_CI_MODE: "shadow-only" }),
+    );
+    expect(result.status).not.toBe(0);
+    const log = readFileSync(fixture.log, "utf8");
+    expect(log).toContain("run view 91");
+    expect(log).not.toContain("linear state WM-500 Done");
+  }, 15_000);
 
   test("factory branch-guard rejects protected refs and another open PR holder", () => {
     const fixture = commandFixture("branch-guard-");
