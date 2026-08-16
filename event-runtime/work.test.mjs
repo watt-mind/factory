@@ -70,17 +70,18 @@ beforeAll(() => {
     );
   }
 
+  writeFileSync(path.join(root, "config", "policy.yaml"), "{}\n");
   writeFileSync(
     path.join(root, "config", "repos.yaml"),
     `repos:\n` +
       `  - name: wm29\n    path: ${wm29}\n    github: watt-mind/wm29\n    base: develop\n` +
       `    team: WM\n    project: Factory\n    max_in_flight: 3\n` +
       `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-      `    worktree_root: ${wtRoot}\n    verify: echo verified\n` +
+      `    worktree_root: ${wtRoot}\n    verify: echo verified\n    escalate_paths: []\n` +
       `  - name: clean\n    path: ${clean}\n    github: watt-mind/clean\n    base: develop\n` +
       `    team: WM\n    project: Factory\n    max_in_flight: 3\n` +
       `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-      `    worktree_root: ${wtRoot}\n`,
+      `    worktree_root: ${wtRoot}\n    escalate_paths: []\n`,
   );
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;

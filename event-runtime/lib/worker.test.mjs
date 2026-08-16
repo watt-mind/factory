@@ -1009,17 +1009,18 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     );
 
     mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+    writeFileSync(path.join(factoryRoot, "config", "policy.yaml"), "{}\n");
     writeFileSync(
       path.join(factoryRoot, "config", "repos.yaml"),
       `repos:\n` +
         `  - name: wt-worker\n    path: ${repoDir}\n    github: watt-mind/wt-worker\n    base: develop\n` +
         `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
         `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo repo_verified\n` +
+        `    worktree_root: ${wtRoot}\n    verify: echo repo_verified\n    escalate_paths: []\n` +
         `  - name: wt-failing-verify\n    path: ${repoDir}\n    github: watt-mind/wt-failing-verify\n    base: develop\n` +
         `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
         `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: exit 42\n`,
+        `    worktree_root: ${wtRoot}\n    verify: exit 42\n    escalate_paths: []\n`,
     );
     previousReposRoot = process.env.FACTORY_REPOS_ROOT;
     process.env.FACTORY_REPOS_ROOT = factoryRoot;
