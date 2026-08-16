@@ -818,6 +818,13 @@ the serve log, never thrown — the notify step is an isolated tick subsystem
 like GC and chains (OPS-412). Routine flow (admissions, approvals, clean
 completions) never notifies; a channel that pings on everything gets muted.
 
+**Decisions, not just approvals (WM-383).** Approving a spec is one shape of
+human input; the other is answering the question an agent stopped on. The
+inbox ledger (WM-285) carries typed decision requests and responses for that —
+agent-authored within a closed vocabulary, rendered generically, applied
+through runtime-owned effects. Design of record:
+[event-runtime-inbox.md](event-runtime-inbox.md).
+
 **What the operator sees.** The full `RunSpec`, plus the planner's evidence:
 the admitted event, the authoritative-state read that produced the proposal and
 its age, the capabilities requested, the timeout, and the attempt budget. The
