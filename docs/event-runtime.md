@@ -846,6 +846,12 @@ the serve log, never thrown — the notify step is an isolated tick subsystem
 like GC and chains (OPS-412). Routine flow (admissions, approvals, clean
 completions) never notifies; a channel that pings on everything gets muted.
 
+**Readable output (WM-452).** The artifact verification accepts is the chain's
+truth; how a person reads it is a separate, closed contract — a schema-derived
+view per agent, plus an optional agent-emitted presentation whose values point
+back into the artifact. Design of record:
+[event-runtime-artifact-views.md](event-runtime-artifact-views.md).
+
 **Decisions, not just approvals (WM-383).** Approving a spec is one shape of
 human input; the other is answering the question an agent stopped on. The
 inbox ledger (WM-285) carries typed decision requests and responses for that —
