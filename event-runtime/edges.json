@@ -138,9 +138,12 @@
   },
   "merge-scan@2": {
     "recommendationField": "recommendation",
+    "independent": true,
     "edges": {
       "MERGE": {
         "eventType": "factory.merge-apply.requested",
+        "whenItemsField": "plan",
+        "mixedEventId": "chain-${runId}-merge",
         "input": {
           "repo": "$.artifact.repo",
           "github": "$.artifact.github",
@@ -151,6 +154,8 @@
       },
       "FIX": {
         "eventType": "factory.merge-fix.requested",
+        "whenItemsField": "fix",
+        "mixedEventId": "chain-${runId}-fix-${item.pr}-${item.findingHash}",
         "itemsField": "fix",
         "itemKey": "ticket",
         "input": {
@@ -174,6 +179,8 @@
       },
       "ESCALATE": {
         "eventType": "factory.merge-escalate.requested",
+        "whenItemsField": "escalate",
+        "mixedEventId": "chain-${runId}-escalate",
         "input": {
           "repo": "$.artifact.repo",
           "summary": "$.artifact.summary"

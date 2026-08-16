@@ -373,9 +373,42 @@ describe("chain auto approval (WM-357)", () => {
   test("operator proposals and protected or incomplete merge/ship proposals remain watched", () => {
     const db = openDb(":memory:");
     const manual = seed(db, { id: "manual", source: "operator" });
+    const mergeInput = {
+      repo: "factory",
+      github: "untrusted-owner/factory",
+      base: "develop",
+      deployBranch: "master",
+      plan: [
+        {
+          pr: 430,
+          headSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+          headRef: "feat/WM-430",
+          ticket: "WM-430",
+          action: "merge_pr",
+          reason: "fixture reaches repository policy",
+          checksGreen: true,
+          mergeable: true,
+          ownedPathsValid: true,
+          handoffValid: true,
+          testsFalsifiable: true,
+          policySafe: true,
+          sensitive: false,
+          ambiguous: false,
+        },
+      ],
+    };
     const merge = seed(db, {
       id: "merge",
       type: "factory.merge-apply.requested",
+      input: mergeInput,
+      predecessorArtifact: {
+        recommendation: "MERGE",
+        ...mergeInput,
+        fix: [],
+        escalate: [],
+        summary: "one selected merge",
+      },
     });
     const ship = seed(db, { id: "ship", type: "factory.ship-apply.requested" });
 

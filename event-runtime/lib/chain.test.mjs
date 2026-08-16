@@ -226,6 +226,44 @@ describe("registry gates (OPS-223)", () => {
       JSON.stringify({ "ci-doctor@2": { recommendationField: "verdict", edges: { FLAKE: { eventType: "factory.ci-rerun.requested", input: { x: "$.secrets.key" } } } } }),
     );
     expect(() => loadRegistry({ root })).toThrow("only $.input.*, $.artifact.* and $.artifactHash.*");
+
+    const independentRule = (edge) => ({
+      "ci-doctor@2": {
+        recommendationField: "verdict",
+        independent: true,
+        edges: { FLAKE: edge },
+      },
+    });
+    writeFileSync(
+      path.join(root, "edges.json"),
+      JSON.stringify(independentRule({ eventType: "factory.ci-rerun.requested", input: {} })),
+    );
+    expect(() => loadRegistry({ root })).toThrow("independent edge has no whenItemsField");
+
+    writeFileSync(
+      path.join(root, "edges.json"),
+      JSON.stringify(
+        independentRule({
+          eventType: "factory.ci-rerun.requested",
+          whenItemsField: "signals",
+          input: {},
+        }),
+      ),
+    );
+    expect(() => loadRegistry({ root })).toThrow("independent edge needs a mixedEventId containing ${runId}");
+
+    writeFileSync(
+      path.join(root, "edges.json"),
+      JSON.stringify(
+        independentRule({
+          eventType: "factory.ci-rerun.requested",
+          whenItemsField: "signals",
+          mixedEventId: "chain-${runId}-flake",
+          input: {},
+        }),
+      ),
+    );
+    expect(() => loadRegistry({ root })).not.toThrow();
   });
 });
 

@@ -250,7 +250,30 @@ export function loadRegistry({ root = RUNTIME_ROOT, modelTiers = loadModelTierMa
       if (typeof rule.recommendationField !== "string" || !rule.recommendationField) {
         throw new RegistryError(`edges.json: ${agentRef} has no recommendationField`);
       }
+      if (rule.independent !== undefined && rule.independent !== true) {
+        throw new RegistryError(`edges.json: ${agentRef}.independent must be true when present`);
+      }
       for (const [value, edge] of Object.entries(rule.edges ?? {})) {
+        if (rule.independent === true) {
+          if (typeof edge.whenItemsField !== "string" || !edge.whenItemsField) {
+            throw new RegistryError(`edges.json: ${agentRef}.${value} independent edge has no whenItemsField`);
+          }
+          if (typeof edge.mixedEventId !== "string" || !edge.mixedEventId.includes("${runId}")) {
+            throw new RegistryError(
+              `edges.json: ${agentRef}.${value} independent edge needs a mixedEventId containing \${runId}`,
+            );
+          }
+          if (edge.itemsField !== undefined && !edge.mixedEventId.includes("${item.")) {
+            throw new RegistryError(
+              `edges.json: ${agentRef}.${value} independent multi edge needs an item placeholder in mixedEventId`,
+            );
+          }
+        }
+        for (const field of ["eventId", "mixedEventId"]) {
+          if (edge[field] !== undefined && (typeof edge[field] !== "string" || edge[field].trim() === "")) {
+            throw new RegistryError(`edges.json: ${agentRef}.${value} ${field} must be a non-empty string`);
+          }
+        }
         if (!eventTypes[edge.eventType]) {
           throw new RegistryError(`edges.json: ${agentRef}.${value} targets unregistered event type ${edge.eventType}`);
         }

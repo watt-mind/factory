@@ -93,12 +93,16 @@ round and SHA-256 hash of the exact finding. Exhausted, outside-scope,
 security, or ambiguous findings are ESCALATE, never FIX.
 
 Fail closed if GitHub, Linear, config, mergeability, base SHA, or checks are
-uncertain. Use recommendation precedence ESCALATE, then FIX, then MERGE, then
-NOOP. FIX emits every fix item; ESCALATE emits no merge; MERGE emits exactly
-one deterministic candidate (lowest PR number) in `plan` so only one PR can
-land per base-CI cycle. Every plan boolean is a positive assertion from your
-review; the schema rejects anything weaker. Include `base`, `deployBranch`,
-head/base SHA, and exact head branch. A moved SHA requires a new scan.
+uncertain. Populate `escalate`, `fix`, and `plan` independently per PR: an
+escalated or held PR appears in `escalate` but suppresses only itself, never an
+eligible fix or safe merge for another PR. Include every eligible mechanical
+fix in `fix`, and put exactly one deterministic safe candidate (lowest PR
+number) in `plan` so only one PR can land per base-CI cycle. The legacy
+`recommendation` remains a batch summary using precedence ESCALATE, then FIX,
+then MERGE, then NOOP; it does not suppress any populated action array. Every
+plan boolean is a positive assertion from your review; the schema rejects
+anything weaker. Include `base`, `deployBranch`, head/base SHA, and exact head
+branch. A moved SHA requires a new scan.
 
 ## Result envelope
 

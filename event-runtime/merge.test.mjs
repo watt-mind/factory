@@ -209,15 +209,41 @@ function admitEvent(db, registryForAdmission, env) {
         : env.type === "factory.merge-fix.requested"
           ? "FIX"
           : "UPDATED";
+    let artifact;
+    if (recommendation === "MERGE") {
+      artifact = {
+        recommendation,
+        ...env.payload,
+        fix: [],
+        escalate: [],
+        summary: "one selected merge",
+      };
+    } else if (recommendation === "FIX") {
+      const { repo, github, base, deployBranch = "master", ...fixItem } =
+        env.payload;
+      artifact = {
+        recommendation,
+        repo,
+        github,
+        base,
+        deployBranch,
+        plan: [],
+        fix: [fixItem],
+        escalate: [],
+        summary: "one selected fix",
+      };
+    } else {
+      artifact = {
+        recommendation,
+        outcome: recommendation,
+        repo: env.payload.repo,
+      };
+    }
     seedCompleted(db, {
       runId: parent,
       agent: recommendation === "UPDATED" ? "merge-fix@1" : "merge-scan@2",
       input: env.payload,
-      artifact: {
-        recommendation,
-        outcome: recommendation,
-        repo: env.payload.repo,
-      },
+      artifact,
     });
   }
   return persistEvent(
@@ -848,11 +874,11 @@ describe("merge transition chains", () => {
       skipped: 0,
       errors: [],
     });
-    const payload = JSON.parse(
-      db.query(`SELECT envelope_json FROM events WHERE source='chain'`).get()
-        .envelope_json,
-    ).payload;
-    expect(payload).toEqual(applyPayload());
+    const event = db
+      .query(`SELECT event_id,envelope_json FROM events WHERE source='chain'`)
+      .get();
+    expect(event.event_id).toBe("chain-scan-merge");
+    expect(JSON.parse(event.envelope_json).payload).toEqual(applyPayload());
   });
 
   test("FIX fans out one durable request per PR with round and finding hash", () => {
@@ -889,9 +915,13 @@ describe("merge transition chains", () => {
     expect(resolveChains(db, registry).emitted).toBe(2);
     const rows = db
       .query(
-        `SELECT envelope_json FROM events WHERE source='chain' ORDER BY event_id`,
+        `SELECT event_id,envelope_json FROM events WHERE source='chain' ORDER BY event_id`,
       )
       .all();
+    expect(rows.map((row) => row.event_id)).toEqual([
+      "chain-scan-fix-WM-501",
+      "chain-scan-fix-WM-502",
+    ]);
     expect(
       rows.map((row) => JSON.parse(row.envelope_json).payload.ticket),
     ).toEqual(["WM-501", "WM-502"]);
@@ -899,6 +929,185 @@ describe("merge transition chains", () => {
       round: 1,
       findingHash: FINDING_HASH,
       mechanical: true,
+    });
+  });
+
+  test("duplicate fix tickets still derive one stable event per accepted item", () => {
+    const db = openDb(":memory:");
+    const fix = [61, 62].map((pr, index) => ({
+      pr,
+      headSha: SHA,
+      baseSha: BASE_SHA,
+      headRef: `feat/WM-560-${index}`,
+      ticket: "WM-560",
+      finding: `mechanical ${index}`,
+      findingHash: String(index + 1).repeat(64),
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: [`src/${index}.mjs`],
+    }));
+    seedCompleted(db, {
+      runId: "scan-duplicate-fix-ticket",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: {
+        recommendation: "FIX",
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        deployBranch: "master",
+        plan: [],
+        fix,
+        escalate: [],
+        summary: "two fixes share one ticket",
+      },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 2,
+      skipped: 0,
+      errors: [],
+    });
+    expect(
+      db
+        .query(`SELECT event_id FROM events WHERE source='chain' ORDER BY event_id`)
+        .all()
+        .map((row) => row.event_id),
+    ).toEqual([
+      `chain-scan-duplicate-fix-ticket-fix-61-${"1".repeat(64)}`,
+      `chain-scan-duplicate-fix-ticket-fix-62-${"2".repeat(64)}`,
+    ]);
+  });
+
+  test("a legacy aggregate event prevents stale mixed-action backfill after routing changes", () => {
+    const db = openDb(":memory:");
+    seedCompleted(db, {
+      runId: "scan-historical-mixed",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: {
+        recommendation: "ESCALATE",
+        ...applyPayload(63, "WM-563"),
+        fix: [],
+        escalate: [
+          {
+            pr: 64,
+            headSha: SHA,
+            ticket: "WM-564",
+            reason: "historical hold",
+          },
+        ],
+        summary: "historical aggregate escalation",
+      },
+    });
+    expect(
+      persistEvent(db, registry, {
+        schemaVersion: "factory.event/v1",
+        eventId: "chain-scan-historical-mixed",
+        type: "factory.merge-escalate.requested",
+        source: "chain",
+        subject: "merge-scan@2",
+        occurredAt: "2026-08-16T12:00:00.000Z",
+        correlationId: "historical-mixed",
+        causationId: "scan-historical-mixed",
+        payload: {
+          repo: "factory",
+          summary: "historical aggregate escalation",
+        },
+      }).admitted,
+    ).toBe(true);
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM events WHERE source='chain'`).get().n,
+    ).toBe(1);
+  });
+
+  test("a mixed scan independently emits escalation, bounded fixes, and one globally serialized merge", () => {
+    const db = openDb(":memory:");
+    const fix = ["WM-511", "WM-512"].map((ticket, index) => ({
+      pr: 51 + index,
+      headSha: SHA,
+      baseSha: BASE_SHA,
+      headRef: `feat/${ticket}`,
+      ticket,
+      finding: `mechanical ${index}`,
+      findingHash: FINDING_HASH,
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: [`src/${index}.mjs`],
+    }));
+    seedCompleted(db, {
+      runId: "scan-mixed",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: {
+        recommendation: "ESCALATE",
+        ...applyPayload(53, "WM-513"),
+        fix,
+        escalate: [
+          {
+            pr: 54,
+            headSha: SHA,
+            ticket: "WM-514",
+            reason: "draft hold remains visible",
+          },
+        ],
+        summary: "one hold, two mechanical fixes, and one safe merge",
+      },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 4,
+      skipped: 0,
+      errors: [],
+    });
+    const events = db
+      .query(`SELECT event_id,type FROM events WHERE source='chain' ORDER BY event_id`)
+      .all();
+    expect(events.map((event) => event.type).sort()).toEqual([
+      "factory.merge-apply.requested",
+      "factory.merge-escalate.requested",
+      "factory.merge-fix.requested",
+      "factory.merge-fix.requested",
+    ]);
+    expect(events.map((event) => event.event_id)).toEqual([
+      "chain-scan-mixed-escalate",
+      `chain-scan-mixed-fix-51-${FINDING_HASH}`,
+      `chain-scan-mixed-fix-52-${FINDING_HASH}`,
+      "chain-scan-mixed-merge",
+    ]);
+
+    // A process interruption after one admission must not suppress the other
+    // three actions when the same accepted result is resolved again.
+    db.query(
+      `DELETE FROM events WHERE source='chain' AND event_id != 'chain-scan-mixed-escalate'`,
+    ).run();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 3,
+      skipped: 0,
+      errors: [],
+    });
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM events WHERE source='chain'`).get().n,
+    ).toBe(4);
+
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(
+      db.query(
+        `SELECT COUNT(*) AS n FROM runs WHERE state='QUEUED' AND json_extract(spec_json,'$.agent')='merge-apply@2'`,
+      ).get().n,
+    ).toBe(1);
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
     });
   });
 
