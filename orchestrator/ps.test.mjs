@@ -91,6 +91,23 @@ Electron Helper 5678 hdkiller   18u  IPv6 0x2e2a667e702cda4a      0t0  TCP *:517
     ]);
   });
 
+  test("parseLsof preserves numeric words in command names and still picks PID", () => {
+    const ports = parseLsof(`
+COMMAND          PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Google 2024 Chrome 1234 hdkiller   42u  IPv4 0x3ef0e58c7a3caa5c      0t0  TCP 127.0.0.1:9222 (LISTEN)
+`);
+
+    expect(ports).toEqual([
+      {
+        command: "Google 2024 Chrome",
+        pid: 1234,
+        port: 9222,
+        host: "127.0.0.1",
+        raw: "Google 2024 Chrome 1234 hdkiller   42u  IPv4 0x3ef0e58c7a3caa5c      0t0  TCP 127.0.0.1:9222 (LISTEN)",
+      },
+    ]);
+  });
+
   test("parseLsof handles empty input", () => {
     expect(parseLsof("")).toEqual([]);
     expect(parseLsof(null)).toEqual([]);
