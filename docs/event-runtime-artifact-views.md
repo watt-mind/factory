@@ -2,7 +2,7 @@
 
 Status: **design — operator-ratified, nothing built**. Tracking: WM-452
 (epic); WM-453 (this document); implementation lands through the ticket map in
-§9. Companion to [event-runtime.md](event-runtime.md) §9 (verification — the
+§6. Companion to [event-runtime.md](event-runtime.md) §9 (verification — the
 artifact this renders is the one that verification accepted) and to
 [event-runtime-inbox.md](event-runtime-inbox.md), whose decision requests use
 the same principle and, later, the same block vocabulary.
@@ -324,7 +324,7 @@ Presentation is worth tokens only on **human-facing terminal outputs**: scans
 chain, not by people; they do not emit one. It is optional everywhere and
 opt-in per brief.
 
-The pilot is `triage-scan` alone (§9). After a week of real runs, compare the
+The pilot is `triage-scan` alone (§6). After a week of real runs, compare the
 Layer B summary against the Layer A table on the same runs and decide whether
 to roll the brief section to the other scans. The measure is blunt and
 honest: does the operator open the raw view less.
