@@ -1,13 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { validate } from "../lib/schema.mjs";
 
 const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
 const SEED = fileURLToPath(new URL("./seed.mjs", import.meta.url));
 const VERIFY = fileURLToPath(new URL("./verify.mjs", import.meta.url));
+const TRIAGE_SCAN_OUTPUT_SCHEMA = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../schemas/triage-scan.output.json", import.meta.url)), "utf8"),
+);
 
 const redact = (text) => String(text ?? "")
   .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
@@ -21,6 +25,52 @@ function expectSuccess(label, result) {
   ].join("\n");
   expect(result.status, diagnostic).toBe(0);
 }
+
+describe("triage-scan write-detail contract (WM-352)", () => {
+  const artifactWithDetail = (detail) => ({
+    recommendation: "TRIAGE",
+    repo: "factory",
+    plan: [{ issueId: "WM-352", action: "write-detail", reason: "fixture", detail }],
+    summary: "fixture",
+  });
+
+  test("accepts canonical multi-section detail and rejects unrelated headings", () => {
+    const canonical = [
+      "## Acceptance Criteria",
+      "",
+      "- The behavior is covered.",
+      "",
+      "## Owned Paths",
+      "",
+      "- `event-runtime/demo/seed.test.mjs`",
+      "",
+      "## Verification",
+      "",
+      "```",
+      "bun test event-runtime/demo/seed.test.mjs",
+      "```",
+    ].join("\n");
+
+    expect(validate(TRIAGE_SCAN_OUTPUT_SCHEMA, artifactWithDetail(canonical))).toEqual({ valid: true, errors: [] });
+    expect(validate(TRIAGE_SCAN_OUTPUT_SCHEMA, artifactWithDetail("## Rollout\n\n- Deploy globally."))).toEqual({
+      valid: false,
+      errors: [
+        "$.plan[0].detail: does not match pattern ^\\s*## (Acceptance Criteria|Owned Paths|Verification)",
+      ],
+    });
+  });
+
+  test("continues to accept Owned Paths and Verification as the first section", () => {
+    expect(validate(TRIAGE_SCAN_OUTPUT_SCHEMA, artifactWithDetail("## Owned Paths\n\n- `README.md`"))).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(validate(TRIAGE_SCAN_OUTPUT_SCHEMA, artifactWithDetail("## Verification\n\n```\nbun test\n```"))).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+});
 
 describe("seed & re-seed deduplication (OPS-464)", () => {
   let home;

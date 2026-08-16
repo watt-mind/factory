@@ -89,7 +89,7 @@ same issue in one scan.
 For a `write-detail` item:
 
 - Set `detail` to ready-to-append Markdown containing one or more missing `##
-Acceptance criteria`, `## Owned Paths`, or `## Verification` sections.
+Acceptance Criteria`, `## Owned Paths`, or `## Verification` sections.
   Combine all repository-derivable missing sections for that issue into this
   one item, in the canonical order shown above. A common item therefore contains
   both Owned Paths and Verification. Preserve everything already written; do
