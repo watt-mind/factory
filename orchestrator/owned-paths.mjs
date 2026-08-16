@@ -17,13 +17,16 @@
  */
 
 /**
- * Extract the `## Owned Paths` bullet list from a Linear issue description.
+ * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
  * Returns [] when the section is missing or fails to parse — for dispatch,
  * use `effectiveOwnedPaths`, which turns that into "collides with
  * everything" rather than "not dispatchable".
  */
 export function parseOwnedPaths(description = "") {
-  const section = description.split(/^##\s+/m).find((s) => /^Owned Paths/i.test(s));
+  const section = description.split(/^#{2,4}\s+/m).find((s) => {
+    const heading = s.split("\n")[0];
+    return /\bOwned Paths\b/i.test(heading);
+  });
   if (!section) return [];
 
   // Real tickets write this section three different ways — bullet lists, fenced

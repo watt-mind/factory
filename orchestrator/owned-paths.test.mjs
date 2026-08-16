@@ -149,3 +149,47 @@ test("a trailing change-kind annotation doesn't sink the path (CLNT-765/768/764 
     "src/analytics/kpis/existing.ts",
   ]);
 });
+
+test("supports level 3 numbered headers (### 2. Owned Paths) and colons", () => {
+  const desc = `## 1. Problem & Context
+
+Some background.
+
+### 2. Owned Paths:
+
+- \`orchestrator/owned-paths.mjs\`
+- \`orchestrator/owned-paths.test.mjs\`
+
+### 3. Verification Command
+
+    bun test`;
+  expectEqual(parseOwnedPaths(desc), [
+    "orchestrator/owned-paths.mjs",
+    "orchestrator/owned-paths.test.mjs",
+  ]);
+});
+
+test("supports level 2 numbered header (## 2. Owned Paths)", () => {
+  const desc = `## 2. Owned Paths
+
+- \`orchestrator/owned-paths.mjs\``;
+  expectEqual(parseOwnedPaths(desc), ["orchestrator/owned-paths.mjs"]);
+});
+
+test("supports colon in level 2 header (## Owned Paths:)", () => {
+  const desc = `## Owned Paths:
+
+- \`app/services/api.ts\`
+- \`app/services/auth.ts\``;
+  expectEqual(parseOwnedPaths(desc), [
+    "app/services/api.ts",
+    "app/services/auth.ts",
+  ]);
+});
+
+test("supports level 4 numbered headers (#### 4. Owned Paths)", () => {
+  const desc = `#### 4. Owned Paths
+
+- \`event-runtime/cli.mjs\``;
+  expectEqual(parseOwnedPaths(desc), ["event-runtime/cli.mjs"]);
+});

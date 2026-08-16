@@ -31,10 +31,10 @@ import { parseOwnedPaths } from "./owned-paths.mjs";
 
 const AI_AGENT_READY = "ai:agent-ready";
 
-/** Split `## Heading` sections, keyed by heading text and trimmed body. */
+/** Split markdown heading sections (levels 2-4), keyed by heading text and trimmed body. */
 function sections(description = "") {
   return description
-    .split(/^##\s+/m)
+    .split(/^#{2,4}\s+/m)
     .slice(1)
     .map((s) => {
       const nl = s.indexOf("\n");
@@ -83,7 +83,7 @@ export function templateGaps(description = "") {
   // A non-code ticket (deploy/env-var/business change) legitimately has no
   // repo paths -- linear.md's non-code exception applies here too. Accept an
   // explicit "not applicable" declaration in the section body.
-  const owned = secs.find((s) => s.heading.toLowerCase().includes("owned paths"));
+  const owned = secs.find((s) => /\bowned\s+paths\b/i.test(s.heading));
   const ownedNA = owned && NOT_APPLICABLE.test(owned.body);
   if (!parseOwnedPaths(description).length && !ownedNA) gaps.push("Owned Paths");
 
@@ -93,8 +93,10 @@ export function templateGaps(description = "") {
   // "## Production evidence" (proof the bug is real) is not a verification
   // method and must not satisfy this.
   const verified = secs.some((s) => {
-    const h = s.heading.toLowerCase();
-    return (h.includes("verification command") || /\bevidence\b.*\b(required|line)\b/.test(h)) && s.body.length > 0;
+    return (
+      (/\bverification\s+command\b/i.test(s.heading) || /\bevidence\b.*\b(required|line)\b/i.test(s.heading)) &&
+      s.body.length > 0
+    );
   });
   if (!verified) gaps.push("Verification Command");
 

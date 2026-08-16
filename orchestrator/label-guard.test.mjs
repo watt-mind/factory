@@ -134,3 +134,51 @@ Some prose that isn't a path list and gives no real answer either way.
 test("empty description fails both", () => {
   expect(templateGaps("")).toEqual(["Owned Paths", "Verification Command"]);
 });
+
+test("supports level 3 numbered headers (### 2. Owned Paths, ### 3. Verification Command) and colons", () => {
+  const desc = `## 1. Problem & Context
+
+Something is broken.
+
+### 2. Owned Paths:
+
+- \`orchestrator/owned-paths.mjs\`
+
+### 3. Verification Command:
+
+    bun test orchestrator/owned-paths.test.mjs`;
+  expect(templateGaps(desc)).toEqual([]);
+});
+
+test("supports level 4 headers (#### 4. Owned Paths)", () => {
+  const desc = `#### 1. Problem & Context
+
+Something is broken.
+
+#### 2. Owned Paths
+
+- \`orchestrator/owned-paths.mjs\`
+
+#### 3. Verification Command
+
+    bun test`;
+  expect(templateGaps(desc)).toEqual([]);
+});
+
+test("supports level 2 numbered headers with colons (## 2. Owned Paths:, ## 3. Verification Command:)", () => {
+  const desc = `## 2. Owned Paths:
+
+- \`orchestrator/owned-paths.mjs\`
+
+## 3. Verification Command:
+
+    bun test`;
+  expect(templateGaps(desc)).toEqual([]);
+});
+
+test("detects missing Verification Command even with level 3 numbered Owned Paths", () => {
+  const desc = `### 2. Owned Paths
+
+- \`orchestrator/owned-paths.mjs\``;
+  expect(templateGaps(desc)).toEqual(["Verification Command"]);
+});
