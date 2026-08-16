@@ -167,7 +167,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     });
     expectSuccess("initial seed", seedRes);
     expect(seedRes.stdout).toContain("merge-apply@2 watched");
-    expect(seedRes.stdout).toContain("merge-verify@1 exact landed lifecycle");
+    expect(seedRes.stdout).not.toContain("merge-verify@1 exact landed lifecycle");
     // The triage chain now waits for its auto-approved apply run to finish.
     expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
     initialTriageApplyRun = seedRes.stdout.match(
@@ -204,7 +204,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     });
     expectSuccess("re-seed", seedRes);
     expect(seedRes.stdout).toContain("merge-apply@2 watched");
-    expect(seedRes.stdout).toContain("merge-verify@1 exact landed lifecycle");
+    expect(seedRes.stdout).not.toContain("merge-verify@1 exact landed lifecycle");
     // A fresh prefix must follow the new scan's causal edge, never reuse the
     // prior terminal triage-apply proposal while waiting for that edge.
     expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);

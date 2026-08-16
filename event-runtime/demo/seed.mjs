@@ -407,32 +407,9 @@ await client.replay({
 const mergeWatched = await openProposalFor(mergeEventId, { agent: "merge-apply@2" });
 log(`${mergeWatched.id} left open (merge-apply@2 watched)`);
 
-const mergeLandedEventId = `${prefix}-merge-landed`;
-await replay({
-  schemaVersion: "factory.event/v1",
-  eventId: mergeLandedEventId,
-  type: "factory.merge-landed",
-  source: "demo-seed",
-  subject: primaryProject,
-  occurredAt: new Date().toISOString(),
-  correlationId: mergeLandedEventId,
-  payload: {
-    repo: primaryProject,
-    github: "watt-mind/factory",
-    base: "develop",
-    pr: 42,
-    ticket: "WM-400",
-    headSha: fixtureSha,
-    headRef: "feat/WM-400",
-    mergeCommitSha: "c".repeat(40),
-  },
-});
-const mergeVerifyProposal = await openProposalFor(mergeLandedEventId, {
-  agent: "merge-verify@1",
-});
-await client.approve(mergeVerifyProposal.id);
-await runTerminal(mergeVerifyProposal.runId, "COMPLETED");
-log(`${mergeVerifyProposal.runId} → COMPLETED (merge-verify@1 exact landed lifecycle)`);
+// A landed event is deliberately not fabricated by the demo. The executable
+// WM-412 command fixture covers the real apply → internally admitted landed →
+// verify path; this seed keeps only the watched pre-merge proposal.
 
 const shipEventId = `${prefix}-ship-watched`;
 await client.replay({

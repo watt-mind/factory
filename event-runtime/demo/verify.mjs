@@ -166,17 +166,8 @@ if (ciRerunRun) {
   check("ci-rerun@1 output contract is factory.command-result/v1", ciRerunView.run?.spec?.outputContract === "factory.command-result/v1");
 }
 
-// 7. Merge v2 landing scenario (watched apply, exact landing verify)
-const mergeVerifyRun = completedRuns.find((r) => r.agent === "merge-verify@1" && r.eventSource === "demo-seed");
-check("merge v2 lifecycle: landed merge-verify@1 run completed", Boolean(mergeVerifyRun));
-if (mergeVerifyRun) {
-  const mergeVerifyView = await client.run(mergeVerifyRun.runId);
-  check("merge verifier is pinned to develop", mergeVerifyView.run?.spec?.input?.base === "develop");
-  check(
-    "merge verifier carries exact 40-character landing SHA",
-    /^[0-9a-f]{40}$/.test(mergeVerifyView.run?.spec?.input?.mergeCommitSha ?? ""),
-  );
-}
+// 7. Merge apply remains watched. Landed state is never fabricated by the
+// demo; the executable WM-412 command regression drives that causal path.
 
 // 8. Triage scenario (repository workspace with pinned repoPin and auto-approved apply)
 const triageScanRun = completedRuns.find((r) => r.agent === "triage-scan@1");
@@ -261,13 +252,6 @@ const mergeWatchedProposal = allProposals.find(
   (p) => p.agent === "merge-apply@2" && p.eventSource === "operator" && p.status === "open",
 );
 check("merge-apply@2 proposal remains open/watched", Boolean(mergeWatchedProposal));
-const landedMergeVerify = allProposals.find(
-  (p) => p.agent === "merge-verify@1" && p.eventSource === "demo-seed",
-);
-check(
-  "landed merge-verify@1 proposal is approved for exact verification",
-  landedMergeVerify?.status === "approved",
-);
 const shipWatchedProposal = allProposals.find(
   (p) => p.agent === "ship-apply@1" && p.eventSource === "operator" && p.status === "open",
 );

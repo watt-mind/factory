@@ -34,10 +34,54 @@ function seed(
     proposalSpec = null,
     runSpec = null,
     approvalPolicy = null,
+    trustedPredecessor = source === "chain",
   } = {},
 ) {
   const mapping = registry.eventTypes[type];
   const eventId = `event-${id}`;
+  const predecessor = Object.entries(registry.edges)
+    .flatMap(([agent, rule]) =>
+      Object.entries(rule.edges).map(([recommendation, edge]) => ({
+        agent,
+        rule,
+        recommendation,
+        edge,
+      })),
+    )
+    .find((entry) => entry.edge.eventType === type);
+  const parentRunId = `parent-${id}`;
+  if (trustedPredecessor) {
+    if (!predecessor)
+      throw new Error(`test fixture has no registered predecessor for ${type}`);
+    const parentEventId = `parent-event-${id}`;
+    const parentSpec = { agent: predecessor.agent, input };
+    const parentResult = {
+      artifact: {
+        [predecessor.rule.recommendationField]: predecessor.recommendation,
+      },
+    };
+    const at = new Date(now).toISOString();
+    db.query(
+      `INSERT INTO events
+         (source,event_id,type,subject,occurred_at,received_at,correlation_id,envelope_json,payload_hash,status,admitted_at)
+       VALUES ('operator',?,'test.parent','test',?,?,?,?,'hash','planned',?)`,
+    ).run(parentEventId, at, at, parentEventId, canonicalJson({ payload: input }), at);
+    db.query(
+      `INSERT INTO runs
+         (run_id,idempotency_key,spec_json,spec_hash,state,attempts,created_at,updated_at)
+       VALUES (?,?,?,'hash','COMPLETED',1,?,?)`,
+    ).run(parentRunId, `parent-idem-${id}`, canonicalJson(parentSpec), at, at);
+    db.query(
+      `INSERT INTO proposals
+         (id,event_source,event_id,run_id,decision,spec_json,status,created_at,ttl_seconds)
+       VALUES (?,'operator',?,?,'run',?,'approved',?,1800)`,
+    ).run(`parent-proposal-${id}`, parentEventId, parentRunId, canonicalJson(parentSpec), at);
+    db.query(
+      `INSERT INTO results
+         (run_id,attempt,result_json,artifact_hash,verification_json,receipt_json,accepted_at)
+       VALUES (?,1,?,'hash','{}','{}',?)`,
+    ).run(parentRunId, canonicalJson(parentResult), at);
+  }
   const envelope = {
     schemaVersion: "factory.event/v1",
     eventId,
@@ -47,7 +91,7 @@ function seed(
     occurredAt: new Date(now).toISOString(),
     receivedAt: new Date(now).toISOString(),
     correlationId: `corr-${id}`,
-    causationId: "parent-run",
+    causationId: trustedPredecessor ? parentRunId : "forged-parent-run",
     payload: input,
   };
   const defaultApprovalPolicy =
@@ -212,7 +256,14 @@ describe("chain auto approval (WM-357)", () => {
   test("eligible chain work and triage proposals advance with an auditable actor and reason", () => {
     const db = openDb(":memory:");
     const work = seed(db, { id: "work", type: "factory.work.requested" });
-    const triage = seed(db, { id: "triage", type: "factory.triage.requested" });
+    const triage = seed(db, {
+      id: "triage",
+      type: "factory.triage-apply.requested",
+      input: {
+        repo: "factory",
+        plan: [{ issueId: "WM-10", action: "label-agent-ready" }],
+      },
+    });
 
     expect(
       auto(db)
@@ -231,7 +282,7 @@ describe("chain auto approval (WM-357)", () => {
     }
   });
 
-  test("the planner's bounded pass advances a newly planned chain proposal", () => {
+  test("the planner's bounded pass leaves a caller-fabricated chain proposal watched", () => {
     const db = openDb(":memory:");
     const synthetic = {
       ...registry,
@@ -275,8 +326,11 @@ describe("chain auto approval (WM-357)", () => {
 
     expect(event.admitted).toBe(true);
     planAdmittedEvents(db, synthetic, { now, policyVersion: "git:test" });
-    expect(openProposals(db, {})).toEqual([]);
-    expect(db.query(`SELECT state FROM runs`).get().state).toBe("QUEUED");
+    expect(openProposals(db, {})).toHaveLength(1);
+    expect(openProposals(db, {})[0].reason).toContain(
+      "chain_predecessor_or_result_missing",
+    );
+    expect(db.query(`SELECT state FROM runs`).get().state).toBe("PROPOSED");
   });
 
   test("operator proposals and protected or incomplete merge/ship proposals remain watched", () => {
@@ -390,6 +444,21 @@ describe("chain auto approval (WM-357)", () => {
       .join(" ");
     expect(reasons).toContain("escalated_or_security");
     expect(reasons).toContain("escalate_paths_intersect");
+  });
+
+  test("a spoofed chain event without a durable registered predecessor remains watched", () => {
+    const db = openDb(":memory:");
+    const spoofed = seed(db, {
+      id: "spoofed",
+      type: "factory.work.requested",
+      trustedPredecessor: false,
+    });
+
+    expect(auto(db).approved).toEqual([]);
+    expect(runState(db, spoofed.runId)).toBe("PROPOSED");
+    expect(openProposals(db, {})[0].reason).toContain(
+      "chain_predecessor_or_result_missing",
+    );
   });
 
   test("a tampered proposal fails closed and duplicate passes do not double-approve", () => {

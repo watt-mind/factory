@@ -339,6 +339,124 @@ function mergeBarrierReason(db, candidate) {
   return uncertain ? `merge_barrier_uncertain:${uncertain.run_id}` : null;
 }
 
+const REGISTERED_COMMAND_EDGES = {
+  "merge-apply@2": new Set([
+    "factory.merge.requested",
+    "factory.merge-landed",
+  ]),
+  "merge-verify@1": new Set(["factory.merge.requested"]),
+};
+
+/**
+ * `source=chain` is necessary provenance, not sufficient authorization. The
+ * predecessor/result and registered edge are re-read from the durable ledger
+ * immediately before approval so a forged row, stale proposal, or caller-made
+ * causation id remains watched.
+ */
+function chainPredecessorReason(db, registry, candidate, envelope) {
+  const causationId = envelope.causationId;
+  if (typeof causationId !== "string" || causationId === "")
+    return "chain_causation_missing";
+
+  const predecessor = db
+    .query(
+      `SELECT r.state, r.spec_json, res.result_json
+       FROM runs r
+       JOIN results res ON res.run_id = r.run_id AND res.attempt = r.attempts
+       WHERE r.run_id = ?
+         AND EXISTS (
+           SELECT 1 FROM proposals p
+           WHERE p.run_id = r.run_id AND p.decision = 'run'
+         )`,
+    )
+    .get(causationId);
+  if (!predecessor) return "chain_predecessor_or_result_missing";
+  if (predecessor.state !== "COMPLETED")
+    return "chain_predecessor_not_completed";
+
+  let spec;
+  let result;
+  try {
+    spec = JSON.parse(predecessor.spec_json);
+    result = JSON.parse(predecessor.result_json);
+  } catch {
+    return "chain_predecessor_unparseable";
+  }
+
+  const rule = registry.edges?.[spec.agent];
+  const recommendation = rule
+    ? result.artifact?.[rule.recommendationField]
+    : undefined;
+  const declaredEdge = rule?.edges?.[recommendation];
+  const commandEdge = REGISTERED_COMMAND_EDGES[spec.agent]?.has(envelope.type);
+  if (declaredEdge?.eventType !== envelope.type && !commandEdge)
+    return "chain_edge_not_registered";
+
+  // Registered command edges carry immutable identity from their predecessor.
+  // Recheck those pins here instead of trusting event payload text.
+  if (spec.agent === "merge-apply@2") {
+    const source = spec.input ?? {};
+    const item = source.plan?.[0];
+    if (envelope.type === "factory.merge-landed") {
+      const payload = envelope.payload ?? {};
+      if (
+        payload.repo !== source.repo ||
+        payload.github !== source.github ||
+        payload.base !== source.base ||
+        payload.pr !== item?.pr ||
+        payload.ticket !== item?.ticket ||
+        payload.headSha !== item?.headSha ||
+        payload.headRef !== item?.headRef
+      ) {
+        return "chain_command_edge_payload_mismatch";
+      }
+    } else if (envelope.payload?.repo !== source.repo) {
+      return "chain_command_edge_payload_mismatch";
+    }
+  }
+  if (
+    spec.agent === "merge-verify@1" &&
+    envelope.payload?.repo !== spec.input?.repo
+  ) {
+    return "chain_command_edge_payload_mismatch";
+  }
+  return null;
+}
+
+function durableFixRoundReason(db, candidate, input, policy) {
+  const cap = policy.maxFixRounds ?? 0;
+  const rows = db
+    .query(
+      `SELECT event_id, envelope_json FROM events
+       WHERE source = 'chain'
+         AND type = 'factory.merge-fix.requested'
+         AND event_id != ?`,
+    )
+    .all(candidate.event_id);
+  const priorRounds = [];
+  for (const row of rows) {
+    let payload;
+    try {
+      payload = JSON.parse(row.envelope_json)?.payload;
+    } catch {
+      return "merge_fix_history_unparseable";
+    }
+    if (
+      payload?.repo === input.repo &&
+      payload?.github === input.github &&
+      payload?.pr === input.pr
+    ) {
+      if (!Number.isInteger(payload.round) || payload.round < 1)
+        return "merge_fix_history_invalid";
+      priorRounds.push(payload.round);
+    }
+  }
+  const durableRound = (priorRounds.length ? Math.max(...priorRounds) : 0) + 1;
+  if (durableRound > cap || input.round !== durableRound)
+    return "merge_fix_round_not_durable";
+  return null;
+}
+
 function mergeEligibility(db, candidate, envelope, policy) {
   if (!MERGE_EVENT_TYPES.has(envelope.type)) return null;
   const input = envelope.payload ?? {};
@@ -364,7 +482,7 @@ function mergeEligibility(db, candidate, envelope, policy) {
     }
     if (!Array.isArray(input.ownedPaths) || input.ownedPaths.length === 0)
       return "merge_fix_owned_paths_missing";
-    return null;
+    return durableFixRoundReason(db, candidate, input, policy);
   }
 
   const owner = String(input.github ?? "").split("/")[0];
@@ -438,6 +556,14 @@ function eligible(
     return "run_approval_policy_event_mismatch";
   if (!policy.allowed.has(candidate.event_type))
     return policy.reason ?? "policy_unknown";
+
+  const predecessorReason = chainPredecessorReason(
+    db,
+    registry,
+    candidate,
+    envelope,
+  );
+  if (predecessorReason) return predecessorReason;
 
   const mergeReason = mergeEligibility(db, candidate, envelope, policy);
   if (mergeReason) return mergeReason;
