@@ -27,8 +27,16 @@ const registry = loadRegistry();
 const PV = "git:test-pv";
 // See repository.test.mjs: neutralise the operator's global git config so a
 // signing key or a global hooks path cannot hang the fixture (OPS-441).
-const HERMETIC = ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "commit.template="];
-const git = (args, cwd) => execFileSync("git", [...HERMETIC, ...args], { cwd, encoding: "utf8" }).trim();
+const HERMETIC = [
+  "-c",
+  "commit.gpgsign=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "commit.template=",
+];
+const git = (args, cwd) =>
+  execFileSync("git", [...HERMETIC, ...args], { cwd, encoding: "utf8" }).trim();
 
 // Hermetic fixtures: a real git repo (the chained work-scan's repository
 // workspace pins a SHA) that also carries the worktree scripts the dispatch
@@ -53,8 +61,14 @@ beforeAll(() => {
   git(["commit", "--quiet", "-m", "init"], repoDir);
 
   mkdirSync(path.join(repoDir, "bin"), { recursive: true });
-  writeFileSync(path.join(repoDir, "bin", "worktree-up.sh"), `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\n`);
-  writeFileSync(path.join(repoDir, "bin", "worktree-down.sh"), `#!/bin/bash\nset -e\nrm -rf "${wtRoot}/$1"\n`);
+  writeFileSync(
+    path.join(repoDir, "bin", "worktree-up.sh"),
+    `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\n`,
+  );
+  writeFileSync(
+    path.join(repoDir, "bin", "worktree-down.sh"),
+    `#!/bin/bash\nset -e\nrm -rf "${wtRoot}/$1"\n`,
+  );
 
   mkdirSync(path.join(root, "config"), { recursive: true });
   writeFileSync(
@@ -65,12 +79,17 @@ beforeAll(() => {
       `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
       `    worktree_root: ${wtRoot}\n    verify: echo verified\n    escalate_paths: []\n`,
   );
-  writeFileSync(path.join(root, "config", "policy.yaml"), `concurrency:\n  max_in_flight_per_repo: 2\n`);
+  writeFileSync(
+    path.join(root, "config", "policy.yaml"),
+    `concurrency:\n  max_in_flight_per_repo: 2\n`,
+  );
 
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;
   previousEventHome = process.env.FACTORY_EVENT_HOME;
-  process.env.FACTORY_EVENT_HOME = mkdtempSync(path.join(os.tmpdir(), "evrt-loop-home-"));
+  process.env.FACTORY_EVENT_HOME = mkdtempSync(
+    path.join(os.tmpdir(), "evrt-loop-home-"),
+  );
   fixtures.push(process.env.FACTORY_EVENT_HOME);
 });
 
@@ -101,7 +120,8 @@ const dispatchArtifact = (outcome, { repo, ticket }) => ({
   outcome,
   repo,
   ticket,
-  prUrl: outcome === "PR_OPEN" ? "https://github.com/watt-mind/wt29/pull/42" : null,
+  prUrl:
+    outcome === "PR_OPEN" ? "https://github.com/watt-mind/wt29/pull/42" : null,
   verification:
     outcome === "PR_OPEN"
       ? { command: "echo verified", passed: true, output: "verified" }
@@ -113,13 +133,17 @@ const dispatchFake = (outcome) => ({
   async execute({ spec, workspaceDir }) {
     writeFileSync(
       path.join(workspaceDir, "result.json"),
-      `${JSON.stringify({
-        schemaVersion: "factory.agent-result/v1",
-        terminalState: "completed",
-        reasonCode: "ok",
-        artifact: dispatchArtifact(outcome, spec.input),
-        evidence: { commands: ["fake"] },
-      }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          reasonCode: "ok",
+          artifact: dispatchArtifact(outcome, spec.input),
+          evidence: { commands: ["fake"] },
+        },
+        null,
+        2,
+      )}\n`,
       "utf8",
     );
     return { exitCode: 0, timedOut: false };
@@ -128,10 +152,19 @@ const dispatchFake = (outcome) => ({
 
 /** Admit → plan → approve → execute one dispatch run ending in `outcome`. */
 async function dispatchTo(outcome, eventId, ticket) {
-  const db = openDb(path.join(mkdtempSync(path.join(os.tmpdir(), "evrt-loop-db-")), "runtime.db"));
+  const db = openDb(
+    path.join(
+      mkdtempSync(path.join(os.tmpdir(), "evrt-loop-db-")),
+      "runtime.db",
+    ),
+  );
   const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-loop-ws-"));
   fixtures.push(workspaces);
-  const planAll = () => planAdmittedEvents(db, registry, { policyVersion: PV, dispatch: openWorld });
+  const planAll = () =>
+    planAdmittedEvents(db, registry, {
+      policyVersion: PV,
+      dispatch: openWorld,
+    });
 
   admitEvent(db, registry, {
     schemaVersion: "factory.event/v1",
@@ -145,15 +178,25 @@ async function dispatchTo(outcome, eventId, ticket) {
     payload: { repo: "wt29", ticket },
   });
   planAll();
-  const proposal = openProposals(db, {}).find((p) => p.spec?.agent === "dispatch@1");
+  const proposal = openProposals(db, {}).find(
+    (p) => p.spec?.agent === "dispatch@1",
+  );
   expect(proposal).toBeTruthy();
-  const approved = approveProposal(db, registry, proposal.id, { actor: "operator", policyVersion: PV });
-  const summary = await runOnce(db, registry, { pi: dispatchFake(outcome) }, {
-    workspacesRoot: workspaces,
-    owner: "w-test",
+  const approved = approveProposal(db, registry, proposal.id, {
+    actor: "operator",
     policyVersion: PV,
-    dispatch: openWorld,
   });
+  const summary = await runOnce(
+    db,
+    registry,
+    { pi: dispatchFake(outcome) },
+    {
+      workspacesRoot: workspaces,
+      owner: "w-test",
+      policyVersion: PV,
+      dispatch: openWorld,
+    },
+  );
   expect(summary.terminalState).toBe("COMPLETED");
   return { db, planAll, runId: approved.runId };
 }
@@ -163,8 +206,14 @@ describe("dispatch-completion edge registration (WM-112)", () => {
     expect(registry.edges["dispatch@1"]).toEqual({
       recommendationField: "outcome",
       edges: {
-        PR_OPEN: { eventType: "factory.work.requested", input: { repo: "$.input.repo" } },
-        NOT_CLAIMED: { eventType: "factory.work.requested", input: { repo: "$.input.repo" } },
+        PR_OPEN: {
+          eventType: "factory.work.requested",
+          input: { repo: "$.input.repo" },
+        },
+        NOT_CLAIMED: {
+          eventType: "factory.work.requested",
+          input: { repo: "$.input.repo" },
+        },
       },
     });
   });
@@ -172,38 +221,64 @@ describe("dispatch-completion edge registration (WM-112)", () => {
 
 describe("dispatch-completion edge: a finished dispatch re-fires the work-scan (WM-112)", () => {
   test("PR_OPEN chains to work.requested with inherited correlation — and plans a fresh watched scan", async () => {
-    const { db, planAll, runId } = await dispatchTo("PR_OPEN", "loop-pr-open", "WM-601");
+    const { db, planAll, runId } = await dispatchTo(
+      "PR_OPEN",
+      "loop-pr-open",
+      "WM-601",
+    );
 
-    expect(resolveChains(db, registry)).toEqual({ emitted: 1, skipped: 0, errors: [] });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
     const chainEvent = db
       .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
       .get(`chain-${runId}`);
     expect(chainEvent.type).toBe("factory.work.requested");
     expect(chainEvent.correlation_id).toBe("loop-pr-open"); // inherited from the dispatch's event
     expect(chainEvent.causation_id).toBe(runId);
-    expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({ repo: "wt29" });
+    expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({
+      repo: "wt29",
+    });
 
     // The latency half of rolling dispatch: the freed slot is re-scanned NOW,
     // through the ordinary planner, as a watched proposal — never auto.
     planAll();
-    const scan = openProposals(db, {}).find((p) => p.spec?.agent === "work-scan@1");
+    const scan = openProposals(db, {}).find(
+      (p) => p.spec?.agent === "work-scan@1",
+    );
     expect(scan).toBeTruthy();
     expect(scan.status).toBe("open");
 
     // One chain event per run, ever.
-    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 0, errors: [] });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
   });
 
   test("NOT_CLAIMED chains the same way — a lost claim frees the slot just as a PR does", async () => {
-    const { db, runId } = await dispatchTo("NOT_CLAIMED", "loop-not-claimed", "WM-602");
+    const { db, runId } = await dispatchTo(
+      "NOT_CLAIMED",
+      "loop-not-claimed",
+      "WM-602",
+    );
 
-    expect(resolveChains(db, registry)).toEqual({ emitted: 1, skipped: 0, errors: [] });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
     const chainEvent = db
       .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
       .get(`chain-${runId}`);
     expect(chainEvent.type).toBe("factory.work.requested");
     expect(chainEvent.correlation_id).toBe("loop-not-claimed");
-    expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({ repo: "wt29" });
+    expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({
+      repo: "wt29",
+    });
   });
 
   test("FAILED and BLOCKED terminate: no chain, no work.requested, no scanner spin", async () => {
@@ -212,29 +287,42 @@ describe("dispatch-completion edge: a finished dispatch re-fires the work-scan (
       ["BLOCKED", "loop-blocked", "WM-604"],
     ]) {
       const { db, planAll } = await dispatchTo(outcome, eventId, ticket);
-      expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+      expect(resolveChains(db, registry)).toEqual({
+        emitted: 0,
+        skipped: 1,
+        errors: [],
+      });
       planAll();
-      expect(db.query(`SELECT COUNT(*) AS n FROM events WHERE type = 'factory.work.requested'`).get().n).toBe(0);
-      expect(openProposals(db, {}).find((p) => p.spec?.agent === "work-scan@1")).toBeUndefined();
+      expect(
+        db
+          .query(
+            `SELECT COUNT(*) AS n FROM events WHERE type = 'factory.work.requested'`,
+          )
+          .get().n,
+      ).toBe(0);
+      expect(
+        openProposals(db, {}).find((p) => p.spec?.agent === "work-scan@1"),
+      ).toBeUndefined();
     }
   });
 });
 
 // ---------------------------------------------------------------------------
 // The heartbeat half (WM-112): work/merge/ship loop schedules per dispatchable
-// repo, every one shipped disabled — switching a loop on stays a deliberate
-// operator act, and `approval: auto` appears nowhere (WM-107 §7).
+// repo, work and ship stay disabled. WM-417 deliberately limits autonomous
+// merge discovery to Factory while the new merge loop proves itself live.
 // ---------------------------------------------------------------------------
 
-/** The repos in config/repos.yaml that are NOT report_only, enumerated by hand
- *  from the actual file — dispatch doc §5: report_only repos are never loop
- *  targets. coach-wattz, watts-mobile, proxies, hdkiller and eslint-config
- *  are report_only. factory is dispatchable since OPS-463 but its loop
- *  schedules are deliberate follow-up scope, so it is asserted absent below
- *  alongside the report_only set rather than listed here. */
+/** Product repos that remain configured for watched/manual loops. Factory is
+ *  the sole autonomous merge target during the bootstrap period (WM-417). */
 const DISPATCHABLE = ["bj29", "wm-home", "legalease", "cashsaas"];
 
-const loopEntry = (eventType, repo, every, { approval = "watched", enabled = false } = {}) => ({
+const loopEntry = (
+  eventType,
+  repo,
+  every,
+  { approval = "watched", enabled = false } = {},
+) => ({
   every,
   eventType,
   payload: { repo },
@@ -244,28 +332,55 @@ const loopEntry = (eventType, repo, every, { approval = "watched", enabled = fal
   enabled,
 });
 
-describe("loop schedules ship disabled (WM-112)", () => {
-  test("merge discovery is durable and autonomous while work and ship remain watched and disabled", () => {
+describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
+  test("Factory alone has autonomous merge discovery while every other loop remains watched and disabled", () => {
     for (const repo of DISPATCHABLE) {
-      expect(registry.schedules[`work-${repo}`]).toEqual(loopEntry("factory.work.requested", repo, "30m"));
-      expect(registry.schedules[`merge-${repo}`]).toEqual(
-        loopEntry("factory.merge.requested", repo, "30m", { approval: "auto", enabled: true }),
+      expect(registry.schedules[`work-${repo}`]).toEqual(
+        loopEntry("factory.work.requested", repo, "30m"),
       );
-      expect(registry.schedules[`ship-${repo}`]).toEqual(loopEntry("factory.ship.requested", repo, "7d"));
+      expect(registry.schedules[`merge-${repo}`]).toEqual(
+        loopEntry("factory.merge.requested", repo, "30m"),
+      );
+      expect(registry.schedules[`ship-${repo}`]).toEqual(
+        loopEntry("factory.ship.requested", repo, "7d"),
+      );
     }
+    expect(registry.schedules["merge-factory"]).toEqual(
+      loopEntry("factory.merge.requested", "factory", "30m", {
+        approval: "auto",
+        enabled: true,
+      }),
+    );
   });
 
-  test("no loop targets a report_only repo (nor factory), and only merge scans are autonomous", () => {
-    for (const repo of ["coach-wattz", "watts-mobile", "proxies", "hdkiller", "eslint-config", "factory"]) {
+  test("the exact enabled autonomous merge set is merge-factory", () => {
+    for (const repo of [
+      "coach-wattz",
+      "watts-mobile",
+      "proxies",
+      "hdkiller",
+      "eslint-config",
+    ]) {
       expect(registry.schedules[`work-${repo}`]).toBeUndefined();
       expect(registry.schedules[`merge-${repo}`]).toBeUndefined();
       expect(registry.schedules[`ship-${repo}`]).toBeUndefined();
     }
+    expect(registry.schedules["work-factory"]).toBeUndefined();
+    expect(registry.schedules["ship-factory"]).toBeUndefined();
+
+    const enabledAutonomous = Object.entries(registry.schedules)
+      .filter(
+        ([, schedule]) => schedule.enabled && schedule.approval === "auto",
+      )
+      .map(([loop]) => loop);
+    expect(enabledAutonomous).toEqual(["merge-factory"]);
+
     for (const [loop, schedule] of Object.entries(registry.schedules)) {
-      if (loop.startsWith("merge-")) {
-        expect({ approval: schedule.approval, enabled: schedule.enabled }).toEqual({ approval: "auto", enabled: true });
-      } else {
-        expect({ approval: schedule.approval, enabled: schedule.enabled }).toEqual({ approval: "watched", enabled: false });
+      if (loop !== "merge-factory") {
+        expect({
+          approval: schedule.approval,
+          enabled: schedule.enabled,
+        }).toEqual({ approval: "watched", enabled: false });
       }
     }
   });
@@ -278,8 +393,13 @@ describe("loop schedules ship disabled (WM-112)", () => {
     ];
     for (const [loop, eventType, repo] of cases) {
       const db = openDb(":memory:");
-      const fixture = { ...registry, schedules: { [loop]: { ...registry.schedules[loop], enabled: true } } };
-      const outcome = emitDueTicks(db, fixture, { now: Date.parse("2026-08-14T10:05:00Z") });
+      const fixture = {
+        ...registry,
+        schedules: { [loop]: { ...registry.schedules[loop], enabled: true } },
+      };
+      const outcome = emitDueTicks(db, fixture, {
+        now: Date.parse("2026-08-14T10:05:00Z"),
+      });
       expect(outcome.errors).toEqual([]);
       expect(outcome.emitted).toHaveLength(1);
       expect(outcome.emitted[0].loop).toBe(loop);
@@ -297,11 +417,11 @@ describe("loop schedules ship disabled (WM-112)", () => {
     // below proves each tick now plans a real run.
   });
 
-  test("the shipped clock fires only autonomous merge discovery", () => {
+  test("the shipped clock fires only Factory merge discovery", () => {
     const db = openDb(":memory:");
     const emitted = emitDueTicks(db, registry, { now: Date.now() }).emitted;
-    expect(emitted.map((row) => row.loop).sort()).toEqual(DISPATCHABLE.map((repo) => `merge-${repo}`).sort());
-    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(DISPATCHABLE.length);
+    expect(emitted.map((row) => row.loop)).toEqual(["merge-factory"]);
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(1);
     db.close();
   });
 });
@@ -320,8 +440,13 @@ describe("an enabled loop's tick plans a real scan run (WM-123)", () => {
     ...registry,
     schedules: {
       [loop]: {
-        every: "30m", eventType, payload: { repo: "wt29" },
-        catchUp: "none", singleton: true, approval: "watched", enabled: true,
+        every: "30m",
+        eventType,
+        payload: { repo: "wt29" },
+        catchUp: "none",
+        singleton: true,
+        approval: "watched",
+        enabled: true,
       },
     },
   });
@@ -336,20 +461,38 @@ describe("an enabled loop's tick plans a real scan run (WM-123)", () => {
     test(`${eventType} tick carries {repo, loop, slot, cadenceSeconds, skippedSlots} and plans a watched ${agent} run`, () => {
       const db = openDb(":memory:");
       const fixture = oneLoop(loop, eventType);
-      const ticks = emitDueTicks(db, fixture, { now: Date.parse("2026-08-14T10:05:00Z") });
+      const ticks = emitDueTicks(db, fixture, {
+        now: Date.parse("2026-08-14T10:05:00Z"),
+      });
       expect(ticks.errors).toEqual([]);
       expect(ticks.emitted).toHaveLength(1);
 
       // Pin the payload shape to what the scheduler actually emits — if
       // emitDueTicks ever grows a field, this fails before the schema does.
-      const envelope = JSON.parse(db.query(`SELECT envelope_json FROM events`).get().envelope_json);
-      expect(Object.keys(envelope.payload).sort()).toEqual(["cadenceSeconds", "loop", "repo", "skippedSlots", "slot"]);
+      const envelope = JSON.parse(
+        db.query(`SELECT envelope_json FROM events`).get().envelope_json,
+      );
+      expect(Object.keys(envelope.payload).sort()).toEqual([
+        "cadenceSeconds",
+        "loop",
+        "repo",
+        "skippedSlots",
+        "slot",
+      ]);
 
-      expect(planAdmittedEvents(db, fixture, { policyVersion: PV })).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
-      const proposal = openProposals(db, {}).find((p) => p.spec?.agent === agent);
+      expect(planAdmittedEvents(db, fixture, { policyVersion: PV })).toEqual({
+        planned: 1,
+        failed: 0,
+        deadLettered: 0,
+      });
+      const proposal = openProposals(db, {}).find(
+        (p) => p.spec?.agent === agent,
+      );
       expect(proposal).toBeTruthy();
       expect(proposal.decision).toBe("run");
-      expect(db.query(`SELECT status FROM events`).get().status).toBe("planned");
+      expect(db.query(`SELECT status FROM events`).get().status).toBe(
+        "planned",
+      );
       db.close();
     });
   }
@@ -368,8 +511,14 @@ describe("an enabled loop's tick plans a real scan run (WM-123)", () => {
         causationId: null,
         payload: { repo: "wt29" },
       });
-      expect(planAdmittedEvents(db, registry, { policyVersion: PV })).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
-      const proposal = openProposals(db, {}).find((p) => p.spec?.agent === agent);
+      expect(planAdmittedEvents(db, registry, { policyVersion: PV })).toEqual({
+        planned: 1,
+        failed: 0,
+        deadLettered: 0,
+      });
+      const proposal = openProposals(db, {}).find(
+        (p) => p.spec?.agent === agent,
+      );
       expect(proposal).toBeTruthy();
       expect(proposal.decision).toBe("run");
       db.close();

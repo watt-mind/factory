@@ -58,8 +58,8 @@
     "payload": { "repo": "bj29" },
     "catchUp": "none",
     "singleton": true,
-    "approval": "auto",
-    "enabled": true
+    "approval": "watched",
+    "enabled": false
   },
   "ship-bj29": {
     "every": "7d",
@@ -85,8 +85,8 @@
     "payload": { "repo": "wm-home" },
     "catchUp": "none",
     "singleton": true,
-    "approval": "auto",
-    "enabled": true
+    "approval": "watched",
+    "enabled": false
   },
   "ship-wm-home": {
     "every": "7d",
@@ -112,8 +112,8 @@
     "payload": { "repo": "legalease" },
     "catchUp": "none",
     "singleton": true,
-    "approval": "auto",
-    "enabled": true
+    "approval": "watched",
+    "enabled": false
   },
   "ship-legalease": {
     "every": "7d",
@@ -137,6 +137,15 @@
     "every": "30m",
     "eventType": "factory.merge.requested",
     "payload": { "repo": "cashsaas" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "watched",
+    "enabled": false
+  },
+  "merge-factory": {
+    "every": "30m",
+    "eventType": "factory.merge.requested",
+    "payload": { "repo": "factory" },
     "catchUp": "none",
     "singleton": true,
     "approval": "auto",
