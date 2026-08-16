@@ -102,6 +102,93 @@ export function copyLink() {
   copyText(window.location.href, "link");
 }
 
+type CopyActionButtonProps = {
+  label: string;
+  chord: string;
+  onClick: () => void;
+  children: ReactNode;
+};
+
+function CopyActionButton({ label, chord, onClick, children }: CopyActionButtonProps) {
+  return (
+    <button
+      type="button"
+      title={`${label} · ${chord}`}
+      aria-label={`${label} (${chord})`}
+      onClick={onClick}
+      className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1)"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Compact, accessible copy/share actions shared by every detail surface. */
+export function CopyActions({
+  id,
+  idLabel,
+  idChord = "c",
+  cli,
+  cliLabel = "CLI command",
+}: {
+  id: string;
+  idLabel: string;
+  idChord?: string;
+  cli?: string;
+  cliLabel?: string;
+}) {
+  return (
+    <div className="inline-flex items-center gap-1" role="group" aria-label="Copy actions">
+      <CopyActionButton label={`Copy ${idLabel}`} chord={idChord} onClick={() => copyText(id, idLabel)}>
+        <svg
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          aria-hidden="true"
+          className="size-3.5"
+        >
+          <path d="M5 2.5 4 11.5M10 2.5 9 11.5M2.5 5.5h9M2 8.5h9" />
+        </svg>
+      </CopyActionButton>
+      {cli !== undefined && (
+        <CopyActionButton label={`Copy ${cliLabel}`} chord="c i" onClick={() => copyText(cli, cliLabel)}>
+          <svg
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            className="size-3.5"
+          >
+            <polyline points="2.5,3.5 5.5,6.5 2.5,9.5" />
+            <line x1="7" y1="10" x2="11.5" y2="10" />
+          </svg>
+        </CopyActionButton>
+      )}
+      <CopyActionButton label="Copy link" chord="c l" onClick={copyLink}>
+        <svg
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className="size-3.5"
+        >
+          <path d="M5.2 9.8 4 11a2.1 2.1 0 0 1-3-3l2.1-2.1a2.1 2.1 0 0 1 3-.1" />
+          <path d="m8.8 4.2 1.2-1.2a2.1 2.1 0 1 1 3 3l-2.1 2.1a2.1 2.1 0 0 1-3 .1" />
+          <line x1="5" y1="9" x2="9" y2="5" />
+        </svg>
+      </CopyActionButton>
+    </div>
+  );
+}
+
 /**
  * One active token, as a dismissible chip (UX doc Proposal 4). The whole chip
  * is the remove target: a token is one word in the query box, so there is

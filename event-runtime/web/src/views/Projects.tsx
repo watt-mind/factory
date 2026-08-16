@@ -23,6 +23,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 import {
   Button,
+  CopyActions,
   DetailPane,
   Dialog,
   FilterInput,
@@ -467,26 +468,7 @@ export function Projects({
               </a>
             ) : null
           }
-          utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.path, "repo path")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                path <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c p</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
-          }
+          utility={<CopyActions id={sel.path} idLabel="repo path" idChord="c p" />}
           close={<Button onClick={() => onSelectRepo(null)}>Close</Button>}
         >
           <div className="space-y-4">

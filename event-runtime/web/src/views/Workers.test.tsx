@@ -266,13 +266,12 @@ describe("Workers copy chords and hints (WM-233)", () => {
       const r = renderWithClient(
         <Workers context={{ kind: "all" }} focusWorkerId="worker-copy-test" onSelectWorker={noop} />,
       );
-      await r.findByText("copy:");
+      const idBtn = await r.findByRole("button", { name: "Copy worker id (c)" });
 
-      // Verify utility hint badges
-      const idBtn = r.getByRole("button", { name: "id" });
-      expect(idBtn.textContent).toContain("c");
-      const linkBtn = r.getByRole("button", { name: "link" });
-      expect(linkBtn.textContent).toContain("c l");
+      // Verify icon-action tooltips preserve shortcut discoverability.
+      expect(idBtn.getAttribute("title")).toBe("Copy worker id · c");
+      const linkBtn = r.getByRole("button", { name: "Copy link (c l)" });
+      expect(linkBtn.getAttribute("title")).toBe("Copy link · c l");
 
       // 1. Press 'c' -> copies workerId
       fireEvent.keyDown(document.body, { key: "c" });

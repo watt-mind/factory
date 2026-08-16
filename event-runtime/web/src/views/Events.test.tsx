@@ -710,13 +710,12 @@ describe("Events copy chords and hints (WM-233)", () => {
       },
       async () => {
         const r = renderEvents({ focusEvent: { source: "github", eventId } });
-        await r.findByText("copy:");
+        const idBtn = await r.findByRole("button", { name: "Copy event id (c)" });
 
-        // Verify utility hint badges
-        const idBtn = r.getByRole("button", { name: "id" });
-        expect(idBtn.textContent).toContain("c");
-        const linkBtn = r.getByRole("button", { name: "link" });
-        expect(linkBtn.textContent).toContain("c l");
+        // Verify icon-action tooltips preserve shortcut discoverability.
+        expect(idBtn.getAttribute("title")).toBe("Copy event id · c");
+        const linkBtn = r.getByRole("button", { name: "Copy link (c l)" });
+        expect(linkBtn.getAttribute("title")).toBe("Copy link · c l");
 
         // 1. Press 'c' -> copies eventId
         fireEvent.keyDown(document.body, { key: "c" });

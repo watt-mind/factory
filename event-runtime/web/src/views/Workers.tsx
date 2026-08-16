@@ -30,6 +30,7 @@ import { ScopeCaption } from "../components/ContextTabs";
 import {
   Ago,
   Button,
+  CopyActions,
   DetailPane,
   FilterInput,
   JsonBlock,
@@ -797,26 +798,7 @@ export function Workers({
               </Button>
             ) : undefined
           }
-          utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.workerId, "worker id")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
-          }
+          utility={<CopyActions id={sel.workerId} idLabel="worker id" />}
           close={<Button onClick={() => onSelectWorker(null)}>Close</Button>}
         >
           {selHeartbeat.kind === "stale" && (

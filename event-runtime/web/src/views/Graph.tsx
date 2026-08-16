@@ -23,6 +23,7 @@ import type { OperatorContext } from "../context";
 import {
   Ago,
   Button,
+  CopyActions,
   DECISION_HUES,
   DetailPane,
   JsonBlock,
@@ -488,24 +489,10 @@ export function Graph({
           title={selected.label}
           actions={<Button onClick={revealSelected}>Show on canvas</Button>}
           utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(selected.label, selected.kind === "agent" ? "agent ref" : "id")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                {selected.kind === "agent" ? "ref" : "id"} <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
+            <CopyActions
+              id={selected.label}
+              idLabel={selected.kind === "agent" ? "agent ref" : "id"}
+            />
           }
           close={<Button onClick={() => onSelectNode(null)}>Close</Button>}
         >

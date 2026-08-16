@@ -333,13 +333,12 @@ describe("Schedules copy chords and hints (WM-233)", () => {
       focusScheduleLoop: "loop-enabled-running",
     });
 
-    await r.findByText("copy:");
+    const loopBtn = await r.findByRole("button", { name: "Copy schedule loop (c)" });
 
-    // Verify utility hint badges
-    const loopBtn = r.getByRole("button", { name: "loop" });
-    expect(loopBtn.textContent).toContain("c");
-    const linkBtn = r.getByRole("button", { name: "link" });
-    expect(linkBtn.textContent).toContain("c l");
+    // Verify icon-action tooltips preserve shortcut discoverability.
+    expect(loopBtn.getAttribute("title")).toBe("Copy schedule loop · c");
+    const linkBtn = r.getByRole("button", { name: "Copy link (c l)" });
+    expect(linkBtn.getAttribute("title")).toBe("Copy link · c l");
 
     // 1. Press 'c' -> copies loop
     fireEvent.keyDown(document.body, { key: "c" });

@@ -15,6 +15,7 @@ import { ScopeCaption } from "../components/ContextTabs";
 import {
   Ago,
   Button,
+  CopyActions,
   Countdown,
   DetailPane,
   Dialog,
@@ -465,26 +466,7 @@ export function Schedules({
               Run now… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">r</span>
             </Button>
           }
-          utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.loop, "schedule loop")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                loop <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
-          }
+          utility={<CopyActions id={sel.loop} idLabel="schedule loop" />}
           close={<Button onClick={() => onSelectSchedule(null)}>Close</Button>}
         >
           <div className="space-y-6">

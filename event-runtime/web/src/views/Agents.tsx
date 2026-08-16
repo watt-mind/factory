@@ -18,6 +18,7 @@ import type { AgentDef, AgentEventRoute } from "../types";
 import type { OperatorContext } from "../context";
 import {
   Button,
+  CopyActions,
   DetailPane,
   Disclosure,
   FilterInput,
@@ -439,26 +440,7 @@ export function Agents({
               {sel.ref}
             </span>
           }
-          utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.ref, "agent ref")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                ref <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
-          }
+          utility={<CopyActions id={sel.ref} idLabel="agent ref" />}
           close={<Button onClick={() => onSelectAgent(null)}>Close</Button>}
         >
 

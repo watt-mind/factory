@@ -37,6 +37,7 @@ import type { RunListItem, RunState } from "../types";
 import {
   Ago,
   Button,
+  CopyActions,
   Dialog,
   FilterInput,
   ListPane,
@@ -874,28 +875,12 @@ export function Runs({
             </>
           }
           utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.runId, "run id")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={() => copyText(`bun event-runtime/cli.mjs inspect ${sel.runId}`, "CLI inspect command")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                CLI <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c i</span>
-              </button>
-              <span>·</span>
-              <button type="button" onClick={copyLink} className="cursor-pointer hover:text-(--text)">
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
+            <CopyActions
+              id={sel.runId}
+              idLabel="run id"
+              cli={`bun event-runtime/cli.mjs inspect ${sel.runId}`}
+              cliLabel="CLI inspect command"
+            />
           }
           close={<Button onClick={() => onSelectRun(null)}>Close</Button>}
         >

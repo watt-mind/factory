@@ -599,15 +599,14 @@ describe("Runs copy chords and hints (WM-233)", () => {
       },
       async () => {
         const r = renderRuns({ focusRunId: runId });
-        await r.findByText("copy:");
+        const idBtn = await r.findByRole("button", { name: "Copy run id (c)" });
 
-        // Verify utility hint badges
-        const idBtn = r.getByRole("button", { name: "id" });
-        expect(idBtn.textContent).toContain("c");
-        const cliBtn = r.getByRole("button", { name: "CLI" });
-        expect(cliBtn.textContent).toContain("c i");
-        const linkBtn = r.getByRole("button", { name: "link" });
-        expect(linkBtn.textContent).toContain("c l");
+        // Verify icon-action tooltips preserve shortcut discoverability.
+        expect(idBtn.getAttribute("title")).toBe("Copy run id · c");
+        const cliBtn = r.getByRole("button", { name: "Copy CLI inspect command (c i)" });
+        expect(cliBtn.getAttribute("title")).toBe("Copy CLI inspect command · c i");
+        const linkBtn = r.getByRole("button", { name: "Copy link (c l)" });
+        expect(linkBtn.getAttribute("title")).toBe("Copy link · c l");
 
         // 1. Press 'c' -> copies runId
         fireEvent.keyDown(document.body, { key: "c" });

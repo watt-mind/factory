@@ -27,6 +27,7 @@ import {
   Ago,
   BulkActionBar,
   Button,
+  CopyActions,
   Countdown,
   DECISION_HUES,
   Dialog,
@@ -952,26 +953,7 @@ export function Proposals({
               </div>
             ) : null
           }
-          utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.id, "proposal id")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
-          }
+          utility={<CopyActions id={sel.id} idLabel="proposal id" />}
           close={<Button onClick={() => onSelectProposal(null)}>Close</Button>}
         >
 

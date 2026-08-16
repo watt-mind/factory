@@ -6,6 +6,7 @@ import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
 import {
   Button,
+  CopyActions,
   Dialog,
   JumpLink,
   StateBadge,
@@ -285,40 +286,12 @@ export function RunFull({
                 ))}
             </div>
           )}
-          <Button onClick={() => copyText(runId, "run id")}>
-            <span>Copy id</span>
-            <span
-              aria-hidden="true"
-              className="mono ml-1 text-(--text-faint) text-[10px]"
-            >
-              c
-            </span>
-          </Button>
-          <Button
-            onClick={() =>
-              copyText(
-                `bun event-runtime/cli.mjs inspect ${runId}`,
-                "CLI inspect command",
-              )
-            }
-          >
-            <span>Copy CLI</span>
-            <span
-              aria-hidden="true"
-              className="mono ml-1 text-(--text-faint) text-[10px]"
-            >
-              c i
-            </span>
-          </Button>
-          <Button onClick={copyLink}>
-            <span>Copy link</span>
-            <span
-              aria-hidden="true"
-              className="mono ml-1 text-(--text-faint) text-[10px]"
-            >
-              c l
-            </span>
-          </Button>
+          <CopyActions
+            id={runId}
+            idLabel="run id"
+            cli={`bun event-runtime/cli.mjs inspect ${runId}`}
+            cliLabel="CLI inspect command"
+          />
         </div>
       </header>
 

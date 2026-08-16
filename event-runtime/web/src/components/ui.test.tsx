@@ -2,7 +2,7 @@ import "../test-dom";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { Button, clearToasts, Countdown, DetailPane, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
+import { Button, clearToasts, CopyActions, Countdown, DetailPane, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
 import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
 import { changeInput, typeText } from "../test-render";
 
@@ -41,6 +41,62 @@ describe("shortId (WM-96)", () => {
   test("returns ids without a prefix unchanged", () => {
     expect(shortId("plainid-with-no-underscore")).toBe("plainid-with-no-underscore");
     expect(shortId("")).toBe("");
+  });
+});
+
+describe("CopyActions (WM-302)", () => {
+  test("renders icon-only actions with accessible labels and shortcut tooltips", () => {
+    const r = render(
+      <CopyActions
+        id="run_123"
+        idLabel="run id"
+        cli="bun event-runtime/cli.mjs inspect run_123"
+        cliLabel="CLI inspect command"
+      />,
+    );
+
+    const id = r.getByRole("button", { name: "Copy run id (c)" });
+    const cli = r.getByRole("button", { name: "Copy CLI inspect command (c i)" });
+    const link = r.getByRole("button", { name: "Copy link (c l)" });
+    expect(id.getAttribute("title")).toBe("Copy run id · c");
+    expect(cli.getAttribute("title")).toBe("Copy CLI inspect command · c i");
+    expect(link.getAttribute("title")).toBe("Copy link · c l");
+    expect(id.textContent).toBe("");
+    expect(cli.textContent).toBe("");
+    expect(link.textContent).toBe("");
+  });
+
+  test("omits the CLI action when no CLI value is provided", () => {
+    const r = render(<CopyActions id="event_123" idLabel="event id" />);
+
+    expect(r.getAllByRole("button")).toHaveLength(2);
+    expect(r.queryByRole("button", { name: /CLI/ })).toBeNull();
+  });
+
+  test("copies the id, CLI command, and current link through the shared handlers", () => {
+    const writes: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (value: string) => writes.push(value) },
+    });
+    const r = render(
+      <CopyActions
+        id="run_123"
+        idLabel="run id"
+        cli="bun event-runtime/cli.mjs inspect run_123"
+        cliLabel="CLI inspect command"
+      />,
+    );
+
+    fireEvent.click(r.getByRole("button", { name: "Copy run id (c)" }));
+    fireEvent.click(r.getByRole("button", { name: "Copy CLI inspect command (c i)" }));
+    fireEvent.click(r.getByRole("button", { name: "Copy link (c l)" }));
+
+    expect(writes).toEqual([
+      "run_123",
+      "bun event-runtime/cli.mjs inspect run_123",
+      window.location.href,
+    ]);
   });
 });
 

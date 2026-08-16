@@ -103,7 +103,7 @@ describe("RunFull cancel dialog (WM-144)", () => {
 });
 
 describe("RunFull header copy verbs and hints (WM-218)", () => {
-  test("renders trailing keyboard hints on ← Runs, Copy id, Copy CLI, Copy link", async () => {
+  test("renders shortcut tooltips on the back and copy icon actions", async () => {
     const runId = "run_header_hints";
     const detail = createRunDetailFixture({
       run: { runId, state: "RUNNING" } as RunDetail["run"],
@@ -122,15 +122,15 @@ describe("RunFull header copy verbs and hints (WM-218)", () => {
         expect(getByRole("button", { name: /← Runs/ }).textContent).toContain(
           "Esc",
         );
-        expect(getByRole("button", { name: /Copy id/ }).textContent).toContain(
-          "c",
+        expect(getByRole("button", { name: "Copy run id (c)" }).getAttribute("title")).toBe(
+          "Copy run id · c",
         );
-        expect(getByRole("button", { name: /Copy CLI/ }).textContent).toContain(
-          "c i",
+        expect(getByRole("button", { name: "Copy CLI inspect command (c i)" }).getAttribute("title")).toBe(
+          "Copy CLI inspect command · c i",
         );
-        expect(
-          getByRole("button", { name: /Copy link/ }).textContent,
-        ).toContain("c l");
+        expect(getByRole("button", { name: "Copy link (c l)" }).getAttribute("title")).toBe(
+          "Copy link · c l",
+        );
       },
     );
   });
@@ -161,7 +161,7 @@ describe("RunFull header copy verbs and hints (WM-218)", () => {
       },
       async () => {
         const { getByRole } = renderRunFull(runId);
-        await waitFor(() => getByRole("button", { name: /Copy id/ }));
+        await waitFor(() => getByRole("button", { name: "Copy run id (c)" }));
 
         // Single 'c' copies run ID
         document.body.dispatchEvent(

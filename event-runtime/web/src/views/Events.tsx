@@ -27,6 +27,7 @@ import { decideRevealFilters, formatRevealNotification } from "../reveal";
 import {
   Ago,
   Button,
+  CopyActions,
   Dialog,
   Disclosure,
   EVENT_STATUS_HUES,
@@ -872,26 +873,7 @@ export function Events({
               </div>
             </>
           }
-          utility={
-            <>
-              <span>copy:</span>
-              <button
-                type="button"
-                onClick={() => copyText(sel.eventId, "event id")}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                id <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c</span>
-              </button>
-              <span>·</span>
-              <button
-                type="button"
-                onClick={copyLink}
-                className="cursor-pointer hover:text-(--text)"
-              >
-                link <span aria-hidden="true" className="mono ml-0.5 text-(--text-faint) text-[10px]">c l</span>
-              </button>
-            </>
-          }
+          utility={<CopyActions id={sel.eventId} idLabel="event id" />}
           close={<Button onClick={() => onSelectEvent(null)}>Close</Button>}
         >
 

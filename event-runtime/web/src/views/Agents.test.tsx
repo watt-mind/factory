@@ -253,13 +253,12 @@ describe("Agents copy chords and hints (WM-233)", () => {
     const agent = stubAgent("test-agent");
     await withAgents([agent], async () => {
       const r = renderAgents(agent.ref);
-      await r.findByText("copy:");
+      const refBtn = await r.findByRole("button", { name: "Copy agent ref (c)" });
 
-      // Verify utility hint badges
-      const refBtn = r.getByRole("button", { name: "ref" });
-      expect(refBtn.textContent).toContain("c");
-      const linkBtn = r.getByRole("button", { name: "link" });
-      expect(linkBtn.textContent).toContain("c l");
+      // Verify icon-action tooltips preserve shortcut discoverability.
+      expect(refBtn.getAttribute("title")).toBe("Copy agent ref · c");
+      const linkBtn = r.getByRole("button", { name: "Copy link (c l)" });
+      expect(linkBtn.getAttribute("title")).toBe("Copy link · c l");
 
       // 1. Press 'c' -> copies agent.ref
       fireEvent.keyDown(document.body, { key: "c" });

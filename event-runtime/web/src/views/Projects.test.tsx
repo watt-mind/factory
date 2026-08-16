@@ -236,13 +236,12 @@ describe("Projects copy chords and hints (WM-233)", () => {
       },
       async () => {
         const r = renderProjects("factory");
-        await r.findByText("copy:");
+        const pathBtn = await r.findByRole("button", { name: "Copy repo path (c p)" });
 
-        // Verify utility hint badges
-        const pathBtn = r.getByRole("button", { name: "path" });
-        expect(pathBtn.textContent).toContain("c p");
-        const linkBtn = r.getByRole("button", { name: "link" });
-        expect(linkBtn.textContent).toContain("c l");
+        // Verify icon-action tooltips preserve shortcut discoverability.
+        expect(pathBtn.getAttribute("title")).toBe("Copy repo path · c p");
+        const linkBtn = r.getByRole("button", { name: "Copy link (c l)" });
+        expect(linkBtn.getAttribute("title")).toBe("Copy link · c l");
 
         // 1. Press 'c' -> copies repo name
         fireEvent.keyDown(document.body, { key: "c" });
