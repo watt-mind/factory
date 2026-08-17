@@ -99,7 +99,15 @@ function vendorChunk(id: string): string | undefined {
 // is a lazy chunk) took the entry to 550.29 kB. Vendor split verified: xyflow
 // still 197.04 kB, elk still its own chunk. Slack ~25 kB (4.5%). If the next
 // raise buys less than this, split Overview's stage cards instead.
-const ENTRY_CHUNK_BUDGET_BYTES = 575 * 1000;
+//
+// WM-563 re-baselined to 600 kB on 2026-08-17. The table windowing work took
+// the entry to 574.99 kB — 10 bytes of slack — so the review fixes on top of it
+// (the sub-header ancestry walk in `hooks.ts`, the footer key guard in
+// `ui.tsx`) tipped it to 575.10 kB. Vendor split verified unchanged: xyflow
+// still 197.04 kB, elk still its own chunk. Slack ~25 kB (4.3%), the same
+// proportion as the WM-286 and WM-483 raises. If the next raise buys less than
+// this, split Overview's stage cards instead.
+const ENTRY_CHUNK_BUDGET_BYTES = 600 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {
