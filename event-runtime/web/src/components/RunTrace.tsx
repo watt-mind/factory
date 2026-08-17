@@ -1,15 +1,41 @@
 import { useQuery } from "@tanstack/react-query";
+import { ArrowDownIcon, CodeIcon, CopyIcon, FileTextIcon } from "@radix-ui/react-icons";
 import { Fragment, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { goPrefixActive } from "../goSequence";
 import { keyGuard } from "../hooks";
 import type { RunState, TraceEntry, TracePayload } from "../types";
-import { humanSize, JsonBlock, Section, notify } from "./ui";
+import { DisclosureChevron, humanSize, JsonBlock, Section, notify } from "./ui";
 
 function copyText(text: string, label: string = "text") {
   navigator.clipboard.writeText(text);
   notify(`Copied ${label} to clipboard`, "info");
 }
+
+function TraceIconButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="inline-flex size-6 items-center justify-center rounded text-(--text-faint) transition-colors hover:bg-(--surface-2) hover:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent)"
+    >
+      {children}
+    </button>
+  );
+}
+
+const TRACE_QUIET_BUTTON =
+  "inline-flex h-7 items-center gap-1.5 rounded border border-(--border) bg-(--surface-0) px-2 text-[11px] font-medium text-(--text-faint) transition-colors hover:bg-(--surface-1) hover:text-(--text-dim)";
 
 /** States in which the trace is still being written — poll incrementally. */
 export const LIVE_STATES: readonly RunState[] = ["LEASED", "RUNNING", "VERIFYING"];
@@ -135,9 +161,13 @@ export function MarkdownView({
     return (
       <div className={`relative ${className}`}>
         {allowToggle && (
-          <div className="mb-1 flex justify-end gap-2 text-[11px]">
-            <button type="button" onClick={() => copyText(text, "raw markdown")} className="text-(--text-faint) hover:text-(--text)">Copy</button>
-            <button type="button" onClick={() => setRaw(false)} className="text-(--accent) hover:underline">Formatted view</button>
+          <div className="mb-1 flex justify-end gap-1" role="group" aria-label="Markdown actions">
+            <TraceIconButton label="Copy raw markdown" onClick={() => copyText(text, "raw markdown")}>
+              <CopyIcon className="size-3.5" />
+            </TraceIconButton>
+            <TraceIconButton label="Show formatted view" onClick={() => setRaw(false)}>
+              <FileTextIcon className="size-3.5" />
+            </TraceIconButton>
           </div>
         )}
         <pre className="mono overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap text-(--text-dim)">
@@ -190,7 +220,9 @@ export function MarkdownView({
           <div key={`code-${i}`} className="my-1.5 overflow-hidden rounded-md border border-(--border) bg-(--surface-0)">
             <div className="flex items-center justify-between border-b border-(--border) bg-(--surface-1) px-2.5 py-0.5 text-[11px] text-(--text-faint) mono">
               <span>{codeLang || "code"}</span>
-              <button type="button" onClick={() => copyText(codeText, "code block")} className="hover:text-(--text)">Copy</button>
+              <TraceIconButton label="Copy code block" onClick={() => copyText(codeText, "code block")}>
+                <CopyIcon className="size-3.5" />
+              </TraceIconButton>
             </div>
             <pre className="mono overflow-auto p-2.5 text-[11px] leading-relaxed whitespace-pre-wrap text-(--text)">
               {codeText}
@@ -270,14 +302,45 @@ export function MarkdownView({
   return (
     <div className={`relative ${className}`}>
       {allowToggle && text.length > 50 && (
-        <div className="mb-1 flex justify-end gap-2 text-[11px]">
-          <button type="button" onClick={() => copyText(text, "markdown text")} className="text-(--text-faint) hover:text-(--text)">Copy</button>
-          <button type="button" onClick={() => setRaw(true)} className="text-(--text-faint) hover:text-(--accent)">Raw</button>
+        <div className="mb-1 flex justify-end gap-1" role="group" aria-label="Markdown actions">
+          <TraceIconButton label="Copy markdown text" onClick={() => copyText(text, "markdown text")}>
+            <CopyIcon className="size-3.5" />
+          </TraceIconButton>
+          <TraceIconButton label="Show raw markdown" onClick={() => setRaw(true)}>
+            <CodeIcon className="size-3.5" />
+          </TraceIconButton>
         </div>
       )}
       <div className="space-y-0.5">{blocks}</div>
     </div>
   );
+}
+
+const ERROR_PREVIEW_LENGTH = 96;
+
+function errorText(content: unknown): string {
+  if (typeof content === "string") return content;
+  try {
+    return JSON.stringify(content ?? "");
+  } catch {
+    return String(content ?? "");
+  }
+}
+
+/** Stable collapsed-row label: tool name plus one bounded line of error output. */
+export function formatErrorRowLabel(
+  toolName: string | undefined,
+  content: unknown,
+): { label: string; title: string } {
+  const tool = toolName?.trim() || "unknown tool";
+  const firstLine = errorText(content).split(/\r?\n/, 1)[0].trim() || "No error message";
+  const preview = firstLine.length > ERROR_PREVIEW_LENGTH
+    ? `${firstLine.slice(0, ERROR_PREVIEW_LENGTH - 1)}…`
+    : firstLine;
+  return {
+    label: `${tool} · ${preview}`,
+    title: `${tool} · ${firstLine}`,
+  };
 }
 
 function ContentBlock({ content }: { content: unknown }) {
@@ -352,8 +415,12 @@ function Disclosure({
   };
 
   return (
-    <details open={open} onToggle={onToggle} className="mb-1.5">
-      <summary className="cursor-pointer text-[11px] text-(--text-faint) select-none hover:text-(--text-dim)">
+    <details open={open} onToggle={onToggle} className="mb-1.5 list-none">
+      <summary
+        aria-expanded={open}
+        className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] text-(--text-faint) select-none hover:text-(--text-dim) [&::-webkit-details-marker]:hidden"
+      >
+        <DisclosureChevron open={open} />
         {label}
       </summary>
       {rendered && <div className="mt-1.5">{children}</div>}
@@ -368,12 +435,14 @@ function TraceBody({
   forceOpen,
   durationMs,
   maxMs,
+  originatingCall,
 }: {
   kind: string;
   p: TracePayload;
   forceOpen?: boolean;
   durationMs?: number | null;
   maxMs?: number;
+  originatingCall?: TracePayload;
 }) {
   // Oversize payload clipped in place: whatever the kind was, only the
   // preview survives — say so rather than rendering half a payload silently.
@@ -427,18 +496,31 @@ function TraceBody({
     );
   }
   if (kind === "tool_result") {
+    const errorLabel = p.isError
+      ? formatErrorRowLabel(originatingCall?.name ?? p.name, p.content)
+      : null;
     return (
       <div className="min-w-0 flex-1">
         <Disclosure
           forceOpen={forceOpen}
           label={
-            p.isError ? (
-              <span style={{ color: "var(--hue-err)" }}>tool result — error</span>
+            errorLabel ? (
+              <span className="block max-w-full truncate" style={{ color: "var(--hue-err)" }} title={errorLabel.title}>
+                {errorLabel.label}
+              </span>
             ) : (
               "tool result"
             )
           }
         >
+          {originatingCall?.input !== undefined && (
+            <div className="mb-2">
+              <div className="mb-1 text-[10px] font-medium tracking-wide text-(--text-faint) uppercase">
+                Originating call · {originatingCall.name ?? "unknown tool"}
+              </div>
+              <JsonBlock value={originatingCall.input} />
+            </div>
+          )}
           <ContentBlock content={p.content} />
         </Disclosure>
       </div>
@@ -542,6 +624,27 @@ export function RunTrace({
   }, [entries]);
 
   const allErrorEntries = useMemo(() => entries.filter(isErrorKind), [entries]);
+
+  // Results carry a correlation id but the Errors filter hides their calls.
+  // Pair against the complete feed before filtering; adapters without ids fall
+  // back to the nearest preceding call in the same attempt.
+  const originatingCalls = useMemo(() => {
+    const byId = new Map<string, TracePayload>();
+    const latestByAttempt = new Map<number, TracePayload>();
+    const byResultSeq = new Map<number, TracePayload>();
+    for (const entry of entries) {
+      const payload = entry.payload ?? {};
+      if (entry.kind === "tool_use") {
+        if (payload.id != null) byId.set(String(payload.id), payload);
+        latestByAttempt.set(entry.attempt, payload);
+      } else if (entry.kind === "tool_result") {
+        const exact = payload.toolUseId != null ? byId.get(String(payload.toolUseId)) : undefined;
+        const call = exact ?? latestByAttempt.get(entry.attempt);
+        if (call) byResultSeq.set(entry.seq, call);
+      }
+    }
+    return byResultSeq;
+  }, [entries]);
 
   const tokenStats = useMemo(() => {
     let promptTokens = 0;
@@ -835,10 +938,8 @@ export function RunTrace({
                   jumpToLatest();
                 }
               }}
-              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-                followLive
-                  ? "border-(--border-strong) bg-(--surface-2) text-(--text)"
-                  : "border-(--border) bg-(--surface-0) text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text-dim)"
+              className={`${TRACE_QUIET_BUTTON} ${
+                followLive ? "border-(--border-strong) bg-(--surface-2) text-(--text)" : ""
               }`}
               title={followLive ? "Auto-scrolling live (l). Click to pause." : "Auto-scroll paused (l). Click to follow live."}
             >
@@ -899,20 +1000,15 @@ export function RunTrace({
               <button
                 type="button"
                 onClick={handleJumpToError}
-                className="flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium transition-colors hover:opacity-80"
-                style={{
-                  borderColor: "var(--hue-err)",
-                  color: "var(--hue-err)",
-                  background: "color-mix(in oklch, var(--hue-err) 10%, transparent)",
-                }}
+                className={TRACE_QUIET_BUTTON}
+                style={{ color: "var(--hue-err)" }}
                 title="Jump to next error entry (.)"
               >
-                <span>{counts.errors === 1 ? "1 error" : `${counts.errors} errors`}</span>
-                {activeErrorIdx !== null && (
-                  <span className="mono text-[10px] opacity-75">
-                    ({(activeErrorIdx % counts.errors) + 1}/{counts.errors})
-                  </span>
-                )}
+                <ArrowDownIcon aria-hidden="true" className="size-3" />
+                <span>next error</span>
+                <span className="mono text-[10px] opacity-75">
+                  {activeErrorIdx === null ? 0 : (activeErrorIdx % counts.errors) + 1}/{counts.errors}
+                </span>
                 <span aria-hidden="true" className="mono ml-0.5 opacity-75 text-[10px]">.</span>
               </button>
             )}
@@ -981,7 +1077,7 @@ export function RunTrace({
                 setExpandAll((v) => !v);
                 if (expandAll) setExpandedSeqs(new Set());
               }}
-              className="flex items-center gap-1 text-[11px] text-(--text-faint) hover:text-(--text-dim)"
+              className={TRACE_QUIET_BUTTON}
               title="Toggle expand/collapse details (e)"
             >
               <span>{expandAll ? "Collapse details" : "Expand details"}</span>
@@ -1038,8 +1134,8 @@ export function RunTrace({
                             : ""
                     }`}
                   >
-                    <span className="mono w-[64px] shrink-0 text-(--text-faint)" title={e.ts}>
-                      {new Date(e.ts).toLocaleTimeString([], { hour12: false })}
+                    <span className="mono w-[72px] shrink-0 text-(--text-faint)" title={e.ts}>
+                      {new Date(e.ts).toLocaleTimeString([], { hour12: false })} ·
                     </span>
                     <TraceBody
                       kind={e.kind}
@@ -1047,6 +1143,7 @@ export function RunTrace({
                       forceOpen={expandAll || expandedSeqs.has(e.seq)}
                       durationMs={durations.get(e.seq)}
                       maxMs={maxDurationMs}
+                      originatingCall={originatingCalls.get(e.seq)}
                     />
                   </div>
                 </Fragment>
