@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Triage plan",
+  "summary": "/summary",
+  "status": {
+    "path": "/recommendation",
+    "tone": { "TRIAGE": "ok", "NOOP": "neutral" }
+  },
+  "sections": [
+    {
+      "path": "/plan",
+      "as": "table",
+      "label": "Plan",
+      "columns": ["issueId", "action", "reason"],
+      "groupBy": "action",
+      "formats": { "issueId": "issue" },
+      "tone": {
+        "action": {
+          "label-agent-ready": "ok",
+          "move-to-todo": "ok",
+          "write-detail": "neutral",
+          "needs-detail": "warn",
+          "mark-duplicate": "muted",
+          "needs-human": "warn"
+        }
+      },
+      "expand": ["detail", "ownedPaths", "verificationCommand", "acceptanceCriteria"]
+    },
+    {
+      "path": "/repo",
+      "as": "keyvalue",
+      "label": "Repo",
+      "formats": { "": "repo" }
+    }
+  ]
+}

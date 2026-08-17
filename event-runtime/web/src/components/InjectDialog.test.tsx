@@ -377,6 +377,23 @@ describe("InjectDialog schema-driven Form view (WM-76)", () => {
     }));
 });
 
+describe("InjectDialog template picker readiness (WM-555)", () => {
+  test("blank envelope reports syntactically valid JSON as missing its event type", () =>
+    withSchemaApi(async (r) => {
+      const status = await r.findByText("JSON ok · type missing");
+      expect(status).toBeTruthy();
+      expect(r.queryByText("Valid JSON")).toBeNull();
+    }));
+
+  test("template param hints expose the full truncated value in a title", () =>
+    withSchemaApi(async (r) => {
+      const template = await r.findByRole("radio", { name: /disk\.diagnose/i });
+      const hint = template.querySelector('[title="host, mount, usedPct, alertId"]');
+      expect(hint).toBeTruthy();
+      expect(hint?.className).toContain("truncate");
+    }));
+});
+
 describe("InjectDialog template selection sync (OPS-344)", () => {
   test("clicking highlighted fallback blank chip does not wipe envelope textarea", async () => {
     // Mock api.agents to return sample templates

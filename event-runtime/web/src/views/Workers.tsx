@@ -39,9 +39,11 @@ import {
   KV,
   ListEmpty,
   ListPane,
+  ModelCell,
   GroupHeaderRow,
   Section,
   StateBadge,
+  StatCard,
   Th,
   copyLink,
   copyText,
@@ -196,7 +198,7 @@ const WORKERS_DISPLAY: DisplayConfig<EnrichedWorker> = {
     { key: "state", label: "State", get: workerDisplayState, column: "state" },
     { key: "agent", label: "Agent", get: (w) => w.activeAgent, column: "agent" },
     { key: "target", label: "Target", get: (w) => w.activeTarget, column: "target" },
-    { key: "activeModel", label: "Active Model", get: (w) => w.activeModel, column: "activeModel" },
+    { key: "activeModel", label: "Model", get: (w) => w.activeModel, column: "activeModel" },
     { key: "labels", label: "Labels", get: (w) => labelText(w.labels), column: "labels" },
     { key: "adapters", label: "Adapters", get: (w) => w.adapters.join(", "), column: "adapters" },
     { key: "run", label: "Current run", get: (w) => w.currentRun ?? "", column: "run" },
@@ -205,15 +207,15 @@ const WORKERS_DISPLAY: DisplayConfig<EnrichedWorker> = {
   ],
   columns: [
     { key: "worker", label: "Worker", always: true },
-    { key: "host", label: "Host" },
-    { key: "pid", label: "PID" },
+    { key: "host", label: "Host", defaultHidden: true },
+    { key: "pid", label: "PID", defaultHidden: true },
     { key: "state", label: "State" },
     { key: "agent", label: "Agent" },
     { key: "target", label: "Target" },
-    { key: "activeModel", label: "Active Model" },
+    { key: "activeModel", label: "Model" },
     { key: "run", label: "Current run" },
-    { key: "adapters", label: "Adapters" },
-    { key: "labels", label: "Labels" },
+    { key: "adapters", label: "Adapters", defaultHidden: true },
+    { key: "labels", label: "Labels", defaultHidden: true },
     { key: "uptime", label: "Uptime" },
     { key: "heartbeat", label: "Heartbeat" },
   ],
@@ -309,33 +311,34 @@ const openRun = (runId: string) => {
 };
 
 export function CapacityBand({ capacity }: { capacity: WorkerCapacity }) {
-  const constrained = capacity.queued > 0 && capacity.limitingFactor;
-  const hue = constrained ? "var(--hue-warn)" : "var(--hue-ok)";
+  const constrained = capacity.queued > 0 && Boolean(capacity.limitingFactor);
+  const runningHue =
+    capacity.supervisor === "stopped"
+      ? WORKER_HUES.stale
+      : constrained
+        ? WORKER_HUES.busy
+        : WORKER_HUES.idle;
+  const targetCaption =
+    capacity.source === "worker-policy"
+      ? "supervisor active"
+      : `${capacity.supervisor === "stopped" ? "supervisor stopped · " : ""}live-worker fallback${capacity.max != null ? ` · policy max ${capacity.max}` : ""}`;
   return (
-    <section
-      aria-label="Worker pool capacity"
-      className="mb-3 rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-3"
-    >
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1.5">
-        <div className="flex items-baseline gap-2">
-          <span className="display text-xl font-semibold tabular-nums" style={{ color: hue }}>
-            {capacity.running} running / {capacity.capacity} capacity
-          </span>
-          <span className="mono text-[12px] text-(--text-dim)">
-            {capacity.queued} queued run{capacity.queued === 1 ? "" : "s"}
-          </span>
-        </div>
-        <span className="text-[11px] text-(--text-faint)">
-          {capacity.live} live · {capacity.idle} idle
-          {capacity.draining > 0 ? ` · ${capacity.draining} draining` : ""}
-          {capacity.source === "worker-policy"
-            ? ` · target ${capacity.target} · supervisor active`
-            : ` · ${capacity.supervisor === "stopped" ? "supervisor stopped · " : ""}live-worker fallback${capacity.max != null ? ` · policy max ${capacity.max}` : ""}`}
-        </span>
+    <section aria-label="Worker pool capacity" className="mb-3">
+      <div className="grid grid-cols-4 gap-2">
+        <StatCard
+          compact
+          label="Running"
+          value={capacity.running}
+          suffix={<span className="text-(--text-dim)"> / {capacity.capacity}</span>}
+          hue={runningHue}
+        />
+        <StatCard compact label="Queued" value={capacity.queued} />
+        <StatCard compact label="Idle" value={capacity.idle} />
+        <StatCard compact label="Target" value={capacity.target} caption={targetCaption} />
       </div>
       {constrained && (
-        <div className="mt-2 flex items-center gap-2 text-[12px]" style={{ color: hue }}>
-          <span className="size-1.5 rounded-full" style={{ background: hue }} />
+        <div className="mt-2 flex items-center gap-2 text-[12px]" style={{ color: WORKER_HUES.busy }}>
+          <span className="size-1.5 rounded-full" style={{ background: WORKER_HUES.busy }} />
           <span>
             Queue is waiting: <strong>{capacity.limitingFactor}</strong>
           </span>
@@ -759,31 +762,16 @@ export function Workers({
                     </td>
                   )}
                   {show.has("activeModel") && (
-                    <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
-                      title={w.activeModel !== "-" ? w.activeModel : undefined}
-                    >
-                      {w.activeModel !== "-" ? (
-                        <span>{w.activeModel}</span>
-                      ) : (
-                        <span className="text-(--text-faint)">-</span>
-                      )}
+                    <td className="max-w-40 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <ModelCell model={w.activeModel} className="text-(--text-faint)" />
                     </td>
                   )}
                   {show.has("run") && (
                     <td className="mono max-w-56 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)">
                       {w.currentRun ? (
-                        <div className="flex items-baseline gap-1.5 truncate whitespace-nowrap">
-                          {w.runItem?.agent && (
-                            <span className="truncate text-(--text-dim) text-[11px]" title={`Agent: ${w.runItem.agent}`}>
-                              {w.runItem.agent}
-                            </span>
-                          )}
-                          {w.runItem?.agent && <span className="text-(--text-faint)">·</span>}
-                          <JumpLink onClick={() => openRun(w.currentRun!)} title={`Open ${w.currentRun}`}>
-                            {shortId(w.currentRun)}
-                          </JumpLink>
-                        </div>
+                        <JumpLink onClick={() => openRun(w.currentRun!)} title={`Open ${w.currentRun}`}>
+                          {shortId(w.currentRun)}
+                        </JumpLink>
                       ) : (
                         "-"
                       )}
@@ -794,7 +782,9 @@ export function Workers({
                       className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={w.adapters.length > 0 ? w.adapters.join(", ") : undefined}
                     >
-                      {w.adapters.join(", ") || "-"}
+                      {w.adapters.length > 0
+                        ? `${w.adapters.length} adapter${w.adapters.length === 1 ? "" : "s"}`
+                        : "-"}
                     </td>
                   )}
                   {show.has("labels") && (
@@ -931,7 +921,7 @@ export function Workers({
               {sel.runItem && (
                 <KV
                   k="model"
-                  v={<span className="mono">{pinnedModelText(sel.runItem.adapter, sel.runItem.model)}</span>}
+                  v={<ModelCell model={pinnedModelText(sel.runItem.adapter, sel.runItem.model)} />}
                 />
               )}
               {sel.runItem && <KV k="adapter" v={<span className="mono">{sel.runItem.adapter}</span>} />}

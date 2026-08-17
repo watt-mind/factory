@@ -316,6 +316,55 @@ export interface AgentEventRoute {
   resolvedModel: string | null;
 }
 
+/**
+ * `factory.artifact-view/v1` — the sidecar rendering hints an agent may ship
+ * beside its output schema (docs/event-runtime-artifact-views.md §2.2). The
+ * closed vocabularies mirror `SECTION_KINDS` / `FORMATS` / `TONES` in
+ * `event-runtime/lib/artifact-view.mjs`; per-`as` key applicability is
+ * enforced there at registry load, so the web renderer trusts the shape.
+ */
+export type ArtifactTone = "ok" | "warn" | "error" | "muted" | "neutral";
+export type ArtifactFormat =
+  | "issue"
+  | "pr"
+  | "url"
+  | "sha"
+  | "repo"
+  | "run"
+  | "duration"
+  | "datetime"
+  | "state"
+  | "bytes"
+  | "count";
+export type ArtifactSectionKind = "table" | "keyvalue" | "list" | "badge" | "code" | "prose";
+export interface ArtifactViewSection {
+  /** RFC 6901 pointer into the artifact; `""` is the whole document. */
+  path: string;
+  as: ArtifactSectionKind;
+  label?: string;
+  /** table */
+  columns?: string[];
+  groupBy?: string;
+  expand?: string[];
+  /** keyvalue */
+  keys?: string[];
+  /** list */
+  itemLabel?: string;
+  /** code */
+  language?: string;
+  /** column/key (or `""` for the section value itself) → format */
+  formats?: Record<string, ArtifactFormat>;
+  /** table/keyvalue/list: column/key → (value → tone); badge: value → tone */
+  tone?: Record<string, ArtifactTone | Record<string, ArtifactTone>>;
+}
+export interface ArtifactView {
+  schemaVersion: "factory.artifact-view/v1";
+  title?: string;
+  summary?: string;
+  status?: { path: string; tone: Record<string, ArtifactTone> };
+  sections: ArtifactViewSection[];
+}
+
 /** One registered agent, fully readable: definition, prompt, schemas, pins. */
 export interface AgentDef {
   ref: string;
@@ -332,6 +381,9 @@ export interface AgentDef {
   inputSchema: unknown;
   outputSchemaFile: string;
   outputSchema: unknown;
+  /** Artifact-view sidecar (WM-454), null when the agent ships none. */
+  outputViewFile?: string | null;
+  outputView?: ArtifactView | null;
   pins: Record<string, string>;
   /** Closed-execution shape: fixed argv (command adapter) or action registry. */
   command: string[] | null;
@@ -467,6 +519,8 @@ export interface StatusView {
   workers: { live: number; busy: number; stale: number };
   /** Absent only when the UI is talking to a pre-WM-228 control API. */
   capacity?: WorkerCapacity;
+  /** Human inbox counts (WM-285); absent on a pre-inbox control API. */
+  inbox?: { open: number; acked: number; byKind?: Record<string, number> };
   /** Artifact store rollup; `orphans` counts files no result references. Cached ~10s server-side (`at` = when computed). */
   artifacts: { files: number; bytes: number; orphans: number; orphanBytes: number; at?: string };
   anomalies: {
@@ -539,3 +593,50 @@ export interface JanitorResult {
   skippedApplyReason?: string;
 }
 
+
+/** The kinds the inbox ledger accepts (lib/inbox.mjs INBOX_KINDS). */
+export type InboxKind =
+  | "BLOCKED"
+  | "ESCALATED"
+  | "CI RED"
+  | "SMOKE RED"
+  | "CIRCUIT BREAKER"
+  | "RC READY"
+  | "human_needed"
+  | "decision_needed"
+  | "proposal_expired";
+
+export type InboxStatus = "open" | "acked" | "resolved" | "all";
+
+/** Cross-references an inbox item carries; each is a jump target. */
+export interface InboxRefs {
+  runId?: string;
+  proposalId?: string;
+  eventSource?: string;
+  eventId?: string;
+  issue?: string;
+  pr?: string;
+  repo?: string;
+}
+
+/** Telegram projection record written by deliverInboxItem; absent = not attempted. */
+export interface InboxDelivery {
+  telegram?: { sent_at: string; exit_code: number | null; error: string | null };
+}
+
+/** One row of the human inbox ledger (GET /inbox). */
+export interface InboxItem {
+  id: string;
+  kind: InboxKind | string;
+  severity: string;
+  title: string;
+  body: string | null;
+  refs: InboxRefs;
+  /** `cli`, `serve:notify`, or `agent:<runId>`. */
+  source: string;
+  createdAt: string;
+  ackedAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  delivery: InboxDelivery;
+}

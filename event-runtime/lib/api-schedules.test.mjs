@@ -142,7 +142,11 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
   });
 
   test("omitted merge selection preserves all-open behavior", async () => {
-    const mergeServer = await makeServer();
+    // This path still plans a merge-scan run before responding. Use the same
+    // ephemeral workspace as the selected-PR case so no shared mirror is read.
+    const mergeServer = await makeServer({
+      registry: isolatedScheduleRegistry(),
+    });
     try {
       const res = await fetch(mergeServer.url("/schedules/merge-factory/run"), {
         method: "POST",

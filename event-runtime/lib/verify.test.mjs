@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { hashJson, sha256Hex } from "./canonical.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
-import { ContractViolation, verifyResult } from "./verify.mjs";
+import { ContractViolation, normalizeFailureOutput, verifyResult } from "./verify.mjs";
 
 const registry = loadRegistry();
 const def = getAgent(registry, "factory-status-report@1");
@@ -41,6 +41,21 @@ function makeWorkspace(result) {
 const VALID_ARTIFACT = {
   repos: [{ name: "bj29", triage: 1, agentReady: 2, inProgress: 0, blocked: 0 }],
   recommendedAction: "dispatch",
+};
+
+const VALID_DECISION = {
+  schemaVersion: "factory.decision-request/v1",
+  question: "May I proceed within the ticket's owned paths?",
+  recommended: "authorise",
+  options: [
+    {
+      id: "authorise",
+      label: "Authorise",
+      effect: "authorise",
+      scope: { paths: ["event-runtime/lib/verify.mjs"], summary: "Apply the scoped change." },
+    },
+    { id: "dismiss", label: "Dismiss", effect: "dismiss" },
+  ],
 };
 
 describe("verifyResult", () => {
@@ -307,6 +322,52 @@ describe("verifyResult", () => {
     expect(out.result.artifactHash).toBeUndefined();
   });
 
+  test("refused with a valid decision → decision retained", () => {
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      decision: VALID_DECISION,
+    });
+    const spec = makeSpec({ repo: "factory", ticket: "WM-389" });
+    const out = verifyResult({ spec, def, registry, workspaceDir: dir, attempt: 1 });
+    expect(out.kind).toBe("refused");
+    expect(out.result.decision).toEqual(VALID_DECISION);
+    expect(out.result.decisionErrors).toBeUndefined();
+  });
+
+  test("refused with an invalid decision → refusal retained with decision errors", () => {
+    const decision = { ...VALID_DECISION, recommended: "missing" };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      decision,
+    });
+    const spec = makeSpec({ repo: "factory", ticket: "WM-389" });
+    const out = verifyResult({ spec, def, registry, workspaceDir: dir, attempt: 1 });
+    expect(out.kind).toBe("refused");
+    expect(out.result.decision).toBeUndefined();
+    expect(out.result.decisionErrors).toBeArray();
+    expect(out.result.decisionErrors[0]).toContain("recommended");
+  });
+
+  test("completed with a decision → ContractViolation", () => {
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+      decision: VALID_DECISION,
+    });
+    try {
+      verifyResult({ spec: makeSpec(), def, registry, workspaceDir: dir, attempt: 1 });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toEqual(["decision_not_allowed_on_completed_result"]);
+    }
+  });
+
   test("refused with an unknown reasonCode → ContractViolation", () => {
     const dir = makeWorkspace({
       schemaVersion: "factory.agent-result/v1",
@@ -392,6 +453,17 @@ describe("verifyResult", () => {
     });
     expect(() => verifyResult({ spec: makeSpec(), def, registry, workspaceDir: dir, attempt: 1 }))
       .toThrow(ContractViolation);
+  });
+});
+
+describe("failure normalization", () => {
+  test("drops ANSI-colored warn lines so run-varying diagnostics do not change the signature", () => {
+    expect(normalizeFailureOutput(
+      "\u001b[33mwarn:\u001b[0m recorded ports 7740 / 7741 are occupied\nentry chunk exceeds budget\n",
+    )).toEqual(["entry chunk exceeds budget"]);
+    expect(normalizeFailureOutput(
+      "warn: recorded ports 8120 / 8121 are occupied\nentry chunk exceeds budget\n",
+    )).toEqual(["entry chunk exceeds budget"]);
   });
 });
 

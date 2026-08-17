@@ -33,6 +33,24 @@ type NavBadge = {
   title?: string;
 };
 
+function NavCount({ id, badge }: { id: string; badge: NavBadge }) {
+  return (
+    <span
+      id={id}
+      aria-hidden="true"
+      className="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-medium leading-none tabular-nums"
+      title={badge.title}
+      style={{
+        color: badge.hue,
+        background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
+      }}
+    >
+      {badge.count}
+      {badge.word && <span className="ml-1">{badge.word}</span>}
+    </span>
+  );
+}
+
 const Artifacts = lazy(() => import("./views/Artifacts").then((m) => ({ default: m.Artifacts })));
 const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph })));
 const Chain = lazy(() => import("./views/Chain").then((m) => ({ default: m.Chain })));
@@ -42,6 +60,7 @@ const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default:
 const Agents = lazy(() => import("./views/Agents").then((m) => ({ default: m.Agents })));
 const RunFull = lazy(() => import("./views/RunFull").then((m) => ({ default: m.RunFull })));
 const Workers = lazy(() => import("./views/Workers").then((m) => ({ default: m.Workers })));
+const Inbox = lazy(() => import("./views/Inbox").then((m) => ({ default: m.Inbox })));
 const ShortcutsDialog = lazy(() =>
   import("./components/ShortcutsDialog").then((m) => ({ default: m.ShortcutsDialog })),
 );
@@ -127,6 +146,8 @@ export function App() {
   const focusAgentRef = view === "agents" ? (route[1] ?? null) : null;
   const focusScheduleLoop = view === "schedules" ? (route[1] ?? null) : null;
   const focusWorkerId = view === "workers" ? (route[1] ?? null) : null;
+  // `#/inbox/:id` — the Telegram push deep-links here (lib/inbox.mjs telegramMessage).
+  const focusInboxId = view === "inbox" ? (route[1] ?? null) : null;
   const workerHealthFromHash = view === "workers" ? hashSearch(window.location.hash).get("health") : null;
   const focusWorkerHealth = isWorkerHealthFilter(workerHealthFromHash) ? workerHealthFromHash : null;
   const focusGraphNode = view === "graph" ? (route[1] ?? null) : null;
@@ -239,8 +260,16 @@ export function App() {
   // heartbeat is a worker that is gone while claiming to work, so it
   // outranks the busy count. The word carries that — reading the
   // count off the tone alone fails in the contrast theme.
+  const inboxOpen = status.data?.inbox?.open ?? 0;
   const navBadges: Record<NavKey, NavBadge> = {
     overview: { count: 0, hue: "var(--accent)" },
+    // Open = not even acked yet. Warn hue: every one of these is a human's
+    // turn, which is exactly what the amber wash means everywhere else.
+    inbox: {
+      count: inboxOpen,
+      hue: "var(--hue-warn)",
+      title: `${inboxOpen} inbox item${inboxOpen === 1 ? "" : "s"} waiting on you`,
+    },
     events: { count: scopedNav ? 0 : eventAttention, hue: "var(--accent)" },
     proposals: { count: scopedNav ? 0 : openProposals, hue: "var(--accent)" },
     runs: { count: scopedRunsNav ? 0 : activeRuns, hue: "var(--accent)" },
@@ -249,8 +278,7 @@ export function App() {
     artifacts: {
       count: status.data?.artifacts.orphans ?? 0,
       hue: "var(--hue-warn)",
-      word: "orphan",
-      title: `${status.data?.artifacts.orphans ?? 0} unreferenced artifact${status.data?.artifacts.orphans === 1 ? "" : "s"}`,
+      title: `${status.data?.artifacts.orphans ?? 0} orphan artifact${status.data?.artifacts.orphans === 1 ? "" : "s"} (unreferenced)`,
     },
     schedules:
       stoppedSchedulesCount > 0
@@ -330,7 +358,9 @@ export function App() {
     setViewAnnouncement(`${viewLabel} view`);
     // `/` intentionally sends focus to the destination view's filter instead.
     // Fall back to main when a lazy destination has not mounted its filter yet.
-    if (!document.activeElement?.matches("[data-view-filter]")) mainRef.current?.focus();
+    if (!document.activeElement?.matches("[data-view-filter]")) {
+      mainRef.current?.focus({ preventScroll: true });
+    }
   }, [view, viewLabel]);
 
   useEffect(() => {
@@ -490,19 +520,7 @@ export function App() {
                      aria-describedby reference above still reads it back as
                      the button's description (accname spec includes hidden
                      nodes referenced by labelledby/describedby). */
-                  <span
-                    id={`nav-badge-${n.key}`}
-                    aria-hidden="true"
-                    className="rounded px-1.5 text-[11px] tabular-nums"
-                    title={badge.title}
-                    style={{
-                      color: badge.hue,
-                      background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
-                    }}
-                  >
-                    {badge.count}
-                    {badge.word && <span className="ml-1">{badge.word}</span>}
-                  </span>
+                  <NavCount id={`nav-badge-${n.key}`} badge={badge} />
                 )}
               </button>
             );
@@ -647,6 +665,17 @@ export function App() {
                 onJumpEvent={jumpToEvent}
                 onJumpAgent={jumpToAgent}
                 rejumpEpoch={rejumpEpoch}
+              />
+            </Suspense>
+          ) : view === "inbox" ? (
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading inbox…</div>}>
+              <Inbox
+                connected={connected}
+                focusItemId={focusInboxId}
+                onSelectItem={(id) => navigate(hashPath("inbox", id))}
+                onJumpRun={jumpToRun}
+                onJumpProposal={jumpToProposal}
+                onJumpEvent={jumpToEvent}
               />
             </Suspense>
           ) : view === "workers" ? (

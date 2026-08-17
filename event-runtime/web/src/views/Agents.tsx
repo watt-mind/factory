@@ -28,6 +28,7 @@ import {
   KVGroup,
   ListEmpty,
   ListPane,
+  ModelCell,
   Section,
   Th,
   copyText,
@@ -339,11 +340,8 @@ export function Agents({
                     </td>
                   )}
                   {show.has("model") && (
-                    <td
-                      className="mono max-w-56 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim) whitespace-nowrap"
-                      title={modelText(a)}
-                    >
-                      {modelText(a)}
+                    <td className="max-w-56 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <ModelCell model={modelText(a)} className="text-(--text-dim)" />
                     </td>
                   )}
                   {show.has("mutating") && (

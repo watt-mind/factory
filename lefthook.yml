@@ -7,3 +7,10 @@ pre-commit:
   commands:
     gitleaks:
       run: gitleaks git --pre-commit --staged --no-banner --redact
+
+# WM-609: enforce `type(scope): summary (ISSUE-ID)` locally (dependency-free
+# bash regex, same tier-4 rule as pre-commit above).
+commit-msg:
+  commands:
+    check-commit-msg:
+      run: bin/check-commit-msg.sh {1}

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
@@ -375,8 +375,127 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
   }
 });
 
-test("re-dispatch refuses a branch carrying unique commits and names it", () => {
+test("merge-fix re-dispatch resumes a committed PR branch as-is", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-merge-fix-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-open-pr-bin-"));
+  const ticketId = makeTestTicket("MERGEFIX");
+  const branch = `fix/${ticketId}`;
+  const expectedPath = path.join(tempWtRoot, ticketId);
+  const ghArgs = path.join(mockBin, "gh-args.txt");
+
+  try {
+    const firstUp = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "fix", "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(firstUp.exitCode).toBe(0);
+    writeFileSync(path.join(expectedPath, "merge-fix.txt"), "resolved conflict\n");
+    expect(Bun.spawnSync({ cmd: ["git", "add", "merge-fix.txt"], cwd: expectedPath }).exitCode).toBe(0);
+    expect(Bun.spawnSync({
+      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "merge fix"],
+      cwd: expectedPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode).toBe(0);
+    const committedSha = Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: expectedPath }).stdout.toString().trim();
+    expect(Bun.spawnSync({
+      cmd: ["bash", DOWN, ticketId],
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode).toBe(0);
+
+    writeFileSync(path.join(mockBin, "gh"), `#!/usr/bin/env bash
+printf '%s\\n' "$*" > "${ghArgs}"
+printf '1\\n'
+`, { mode: 0o755 });
+    const resumed = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "fix", "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(resumed.exitCode).toBe(0);
+    expect(Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: expectedPath }).stdout.toString().trim()).toBe(committedSha);
+    expect(readFileSync(ghArgs, "utf8")).toBe(`pr list --head ${branch} --state open --json number --limit 1 --jq length\n`);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
+  }
+});
+
+test("explicit resume flag and environment preserve committed branches without querying PRs", () => {
+  for (const mode of ["flag", "environment"]) {
+    const tempWtRoot = mkdtempSync(path.join(tmpdir(), `factory-wt-resume-${mode}-`));
+    const mockBin = mkdtempSync(path.join(tmpdir(), `factory-wt-resume-${mode}-bin-`));
+    const ticketId = makeTestTicket(mode === "flag" ? "RESUMEFLAG" : "RESUMEENV");
+    const branch = `feat/${ticketId}`;
+    const expectedPath = path.join(tempWtRoot, ticketId);
+    const ghCalled = path.join(mockBin, "gh-called.txt");
+
+    try {
+      expect(Bun.spawnSync({
+        cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      }).exitCode).toBe(0);
+      writeFileSync(path.join(expectedPath, "resume.txt"), `${mode}\n`);
+      expect(Bun.spawnSync({ cmd: ["git", "add", "resume.txt"], cwd: expectedPath }).exitCode).toBe(0);
+      expect(Bun.spawnSync({
+        cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", `explicit ${mode} resume`],
+        cwd: expectedPath,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exitCode).toBe(0);
+      const committedSha = Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: expectedPath }).stdout.toString().trim();
+      expect(Bun.spawnSync({
+        cmd: ["bash", DOWN, ticketId],
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exitCode).toBe(0);
+
+      writeFileSync(path.join(mockBin, "gh"), `#!/usr/bin/env bash
+touch "${ghCalled}"
+exit 99
+`, { mode: 0o755 });
+      const resumeArgs = mode === "flag" ? ["--resume"] : [];
+      const resumed = Bun.spawnSync({
+        cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch", ...resumeArgs],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          FACTORY_WT_ROOT: tempWtRoot,
+          FACTORY_WORKTREE_RESUME: mode === "environment" ? "1" : "0",
+          FACTORY_BASE_BRANCH: `missing-base-${ticketId}`,
+          PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+        },
+      });
+      expect(resumed.exitCode).toBe(0);
+      expect(Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: expectedPath }).stdout.toString().trim()).toBe(committedSha);
+      expect(existsSync(ghCalled)).toBe(false);
+    } finally {
+      Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+      rmSync(tempWtRoot, { recursive: true, force: true });
+      rmSync(mockBin, { recursive: true, force: true });
+      Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
+    }
+  }
+});
+
+test("re-dispatch refuses a branch carrying unique commits and names the escape", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-unique-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-no-pr-bin-"));
   const ticketId = makeTestTicket("UNIQUE");
   const branch = `feat/${ticketId}`;
   const expectedPath = path.join(tempWtRoot, ticketId);
@@ -404,19 +523,26 @@ test("re-dispatch refuses a branch carrying unique commits and names it", () => 
       stderr: "pipe",
     }).exitCode).toBe(0);
 
+    writeFileSync(path.join(mockBin, "gh"), "#!/usr/bin/env bash\nprintf '0\\n'\n", { mode: 0o755 });
     const secondUp = Bun.spawnSync({
       cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
     });
     expect(secondUp.exitCode).not.toBe(0);
     expect(secondUp.stderr.toString()).toContain("worktree_branch_has_commits");
     expect(secondUp.stderr.toString()).toContain(branch);
+    expect(secondUp.stderr.toString()).toContain("re-run with --resume");
     expect(existsSync(expectedPath)).toBe(false);
   } finally {
     Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
     rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
   }
 });

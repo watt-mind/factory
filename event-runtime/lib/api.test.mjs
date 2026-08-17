@@ -34,6 +34,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+import { cpSync } from "node:fs";
 import { emitDueTicks } from "./schedules.mjs";
 
 describe("schedule trigger metadata (WM-259)", () => {
@@ -86,6 +87,66 @@ describe("schedule trigger metadata (WM-259)", () => {
       });
     } finally {
       s.close();
+    }
+  });
+});
+
+describe("artifact-view sidecar on GET /agents (WM-454)", () => {
+  test("every agent item carries outputView/outputViewFile; views are objects where a sidecar exists, null elsewhere", async () => {
+    const { server, port } = await makeServer();
+    const client = apiClient({ port });
+    try {
+      const { agents: defs } = await client.agents();
+      for (const def of defs) {
+        expect(def).toHaveProperty("outputView");
+        expect(def).toHaveProperty("outputViewFile");
+      }
+      const merge = defs.find((d) => d.ref === "merge-scan@2");
+      expect(merge.outputViewFile).toBe("agents/merge-scan.view.json");
+      expect(merge.outputView.schemaVersion).toBe("factory.artifact-view/v1");
+      expect(merge.outputView.status.path).toBe("/recommendation");
+      const triage = defs.find((d) => d.ref === "triage-scan@1");
+      expect(triage.outputView.summary).toBe("/summary");
+      const bare = defs.find((d) => d.ref === "reconcile@1");
+      expect(bare.outputView).toBeNull();
+      expect(bare.outputViewFile).toBeNull();
+      // Not part of the pinned identity.
+      expect(Object.keys(merge.pins)).not.toContain("agents/merge-scan.view.json");
+      // web/src/types.ts AgentDef names both fields (kept in step by hand;
+      // AgentDef is not pinned by the OPS-284 parity test).
+      const typesSrc = readFileSync(path.resolve(import.meta.dir, "../web/src/types.ts"), "utf8");
+      const agentDef = typesSrc.slice(typesSrc.indexOf("export interface AgentDef {"));
+      expect(agentDef).toContain("outputViewFile?");
+      expect(agentDef).toContain("outputView?");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("a drifted view is served as null and named in /status.anomalies.configuration", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-view-"));
+    for (const dir of ["agents", "schemas"]) {
+      cpSync(path.join(registry.root, dir), path.join(root, dir), { recursive: true });
+    }
+    cpSync(path.join(registry.root, "event-types.json"), path.join(root, "event-types.json"));
+    const viewFile = path.join(root, "agents", "triage-scan.view.json");
+    const view = JSON.parse(readFileSync(viewFile, "utf8"));
+    view.summary = "/tldr";
+    writeFileSync(viewFile, JSON.stringify(view));
+    const drifted = loadRegistry({ root, modelTiers: registry.modelTiers });
+    const { server, port } = await makeServer({ registry: drifted });
+    const client = apiClient({ port });
+    try {
+      const { agents: defs } = await client.agents();
+      const triage = defs.find((d) => d.ref === "triage-scan@1");
+      expect(triage.outputView).toBeNull();
+      expect(triage.outputViewFile).toBe("agents/triage-scan.view.json");
+      const status = await client.status();
+      const anomaly = status.anomalies.configuration.find((a) => a.includes("triage-scan@1"));
+      expect(anomaly).toContain("agents/triage-scan.view.json");
+      expect(anomaly).toMatch(/"\/tldr" does not resolve/);
+    } finally {
+      server.close();
     }
   });
 });

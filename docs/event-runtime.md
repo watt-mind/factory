@@ -220,6 +220,8 @@ The LLM appears only inside `execute`.
 
 ## 5. Versioned contracts
 
+Besides the three below, `factory.decision-request/v1` and `factory.decision-response/v1` (`event-runtime/schemas/`, validated by `lib/decision.mjs`) define a bounded human question — 1–6 options with runtime effects plus gated fields from a closed widget vocabulary — and its hash-bound answer; a refused agent-result may carry a request as `decision` (docs/event-runtime-inbox.md §2–§4).
+
 ### 5.1 Event envelope
 
 ```json
@@ -359,6 +361,14 @@ mutating: false
 
 A definition is admitted only when its adapter can prove the required
 capabilities. Adapter support is a contract, not a hopeful command-line flag.
+
+**Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
+`factory.artifact-view/v1` document beside the definition annotates pointers
+into the output schema with rendering hints ([event-runtime-artifact-views.md](event-runtime-artifact-views.md)
+§2); it is validated against the output schema at load, is not part of the
+definition pin, is served as `GET /agents[].outputView`, and a view that does
+not fit its schema is a `/status.anomalies.configuration` entry — the agent
+still loads, without a view.
 
 **Per-agent repo scoping (`repos`, WM-64).** A definition may declare an
 optional top-level `"repos": ["bj29", "cw-app"]` — a closed set of repos the

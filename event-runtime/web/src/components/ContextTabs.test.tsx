@@ -76,7 +76,7 @@ describe("ContextTabs", () => {
     expect(all.className).toContain("focus-visible:ring-2");
   });
 
-  test("gives the navbar breathing room and every context tab consistent pill geometry", () => {
+  test("groups scope chips on the left, separates In flight, and leaves a labeled Repo action on the right", () => {
     const r = render(
       <ContextTabs
         repos={[repo("factory")]}
@@ -96,9 +96,24 @@ describe("ContextTabs", () => {
 
     for (const name of ["All", "factory", "run_abc", "In flight"]) {
       const tab = r.getByRole("button", { name });
+      expect(toolbar.contains(tab)).toBe(true);
       expect(tab.className).toContain("h-7");
       expect(tab.className).toContain("rounded-full");
     }
+
+    const repoScroller = toolbar.querySelector("[data-context-repos-scroll]");
+    expect(repoScroller?.className).toContain("min-w-0");
+    expect(repoScroller?.className).toContain("overflow-x-auto");
+    expect(repoScroller?.className).not.toContain("flex-1");
+
+    const divider = toolbar.querySelector("[data-context-filter-divider]");
+    expect(divider).not.toBeNull();
+    expect(divider?.nextElementSibling).toBe(r.getByRole("button", { name: "In flight" }));
+
+    const repoAction = r.getByRole("button", { name: "Open a repo tab" });
+    expect(toolbar.contains(repoAction)).toBe(false);
+    expect(repoAction.textContent).toBe("+Repo");
+    expect(repoAction.getAttribute("title")).toBe("Open a repo tab (g 1–9)");
 
     for (const name of ["Close factory", "Close run_abc"]) {
       const close = r.getByRole("button", { name });

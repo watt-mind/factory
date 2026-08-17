@@ -239,7 +239,7 @@ per-repo entries in `schedules.json`:
 | Loop | Cadence | Fires | Chain it heads |
 | :--- | :--- | :--- | :--- |
 | `work-<repo>` | `30m` | `factory.work.requested {repo}` | work-scan → dispatch (WM-110/108) |
-| `merge-<repo>` | `30m` | `factory.merge.requested {repo}` | merge-scan → merge-apply / escalate (WM-109) |
+| `merge-<repo>` | `30m` fallback (`merge-factory`: `15m`) | `factory.merge.requested {repo}` | full-set sweep → merge-scan → merge-apply / escalate (WM-109/WM-576) |
 | `ship-<repo>` | `7d` | `factory.ship.requested {repo}` | ship-scan → human-only ship-apply (WM-111) |
 
 Every entry ships `enabled: false`, `approval: "watched"`, `singleton: true`,
@@ -256,12 +256,14 @@ Notes, stated rather than absorbed:
   That is safe by construction — each loop is a singleton, each tick is a
   watched proposal, and merges serialize downstream — so staggering is a
   cosmetic nicety this mechanism deliberately does not have.
-- **The latency half is the dispatch-completion edge**, not a faster clock:
-  `dispatch@1` outcomes `PR_OPEN` and `NOT_CLAIMED` chain straight back into
-  `factory.work.requested {repo}` (edges.json, WM-112), so a freed slot is
-  re-scanned immediately and the 30-minute tick only catches what no
-  completion re-fired. `FAILED` and `BLOCKED` terminate — a run that needs a
-  human must not spin the scanner.
+- **The latency half is event-driven**, not the sweep clock: `dispatch@1`
+  outcome `PR_OPEN` fans out to both `factory.work.requested {repo}` and
+  `factory.merge.requested {repo, prNumbers: [prNumber]}` (edges.json,
+  WM-576), while `NOT_CLAIMED` only re-fires work. A successful pull-request
+  `workflow_run` re-fires the same scoped merge request for its exact PR/head.
+  The 15-minute Factory sweep catches missed webhook deliveries and
+  human-opened PRs. `FAILED` and `BLOCKED` terminate — a run that needs a human
+  must not spin either scanner.
 - **Tick payloads validate (WM-112's known gap, fixed by WM-123).** A tick's
   payload carries `{loop, slot, cadenceSeconds, skippedSlots}` alongside the
   static `{repo}`. Every loop-target input schema whitelists those
@@ -291,10 +293,11 @@ unchanged.
 
 - **Path**: `POST /github` (GitHub webhook "Content type:
   application/json").
-- **Headers**: `X-GitHub-Event` (kind), `X-GitHub-Delivery` (GUID →
-  `eventId`, so at-least-once delivery dedupes on the ordinary
-  `(source="github", eventId)` key), `X-Hub-Signature-256` (GitHub's
-  `sha256=<hex>` HMAC over the raw body).
+- **Headers**: `X-GitHub-Event` (kind), `X-GitHub-Delivery` (delivery GUID),
+  `X-Hub-Signature-256` (GitHub's `sha256=<hex>` HMAC over the raw body).
+  Ordinary deliveries use the GUID as `eventId`; successful pull-request
+  workflows use `merge-pr:<repo>:<pr>:<headSha>` so redeliveries and duplicate
+  green notifications converge on one scoped review.
 - **Secret**: `FACTORY_GITHUB_WEBHOOK_SECRET`, dedicated on purpose — GitHub
   signs raw-body-only with no timestamp, and one secret across two signature
   schemes would let a capture from the weaker scheme replay against the
@@ -308,6 +311,7 @@ unchanged.
 | Delivery | Condition | Envelope |
 | :--- | :--- | :--- |
 | `pull_request` | action `opened`/`synchronize`/`ready_for_review`, base ref = the configured repo's `base`, repo not `report_only` | `factory.merge.requested`, subject + payload `{repo}` (short name) |
+| `workflow_run` | action `completed`, conclusion `success`, event `pull_request`, exactly one PR targeting the configured base, repo not `report_only` | `factory.merge.requested`, payload `{repo, prNumbers: [N]}`, idempotent as `merge-pr:<repo>:<pr>:<headSha>` |
 | `workflow_run` | action `completed`, conclusion `failure`, repo configured (`report_only` included) | `github.workflow-run.failed`, subject `ci`, payload `{repo: owner/name slug, runId}` — the existing shape ci-log-capture consumes |
 
 **Refusal cases**, following intake's typed-refusal conventions:
@@ -316,12 +320,13 @@ unchanged.
   nothing written.
 - `200 {admitted: false, ignored: true, reason}` — benign non-events, so
   GitHub never marks the hook failing: `unhandled_event` (ping and every
-  other kind), `unhandled_action` (closed PRs, green runs),
-  `unconfigured_repo` (no `github:` match in repos.yaml),
-  `not_base_branch`, `repo_report_only` (CI failures still flow for
+  other kind), `unhandled_action` (closed PRs and non-completed runs),
+  `not_pull_request_head`, `unconfigured_repo` (no `github:` match in
+  repos.yaml), `not_base_branch`, `repo_report_only` (CI failures still flow for
   report-only repos; merge requests never do).
 - `422 {errors}` — malformed deliveries that deserve a failure:
-  `missing_delivery_id`, `malformed_payload`, invalid JSON.
+  `missing_delivery_id`, `malformed_payload`, `ambiguous_pull_request_head`,
+  invalid JSON.
 
 **Replay-CLI parity.** Every webhook kind has an injected equivalent through
 `cli.mjs inject` (same intake, no signature, loopback only) — which is also
@@ -353,12 +358,13 @@ port 7522 — a demo, never a test dependency), or any watched environment:
    its Owned Paths evidence. **Approve.**
 3. **(fake) dispatch** runs: claim → worktree by delegation → PR → the
    `factory.dispatch-result/v1` artifact. Its `PR_OPEN` outcome chains
-   `factory.work.requested` again — the queue is re-scanned without anyone
-   asking.
-4. **PR webhook arrives** — GitHub's `pull_request` delivery on the repo's
-   base branch through `POST /github` (or its injected equivalent above) —
-   and admits `factory.merge.requested {repo}`, deduped on the delivery ID.
-5. **merge proposal**: merge-scan reviews the open PRs cold and its MERGE
+   `factory.work.requested` again and immediately chains
+   `factory.merge.requested {repo, prNumbers: [prNumber]}` — no full PR scan.
+4. **CI turns green** — GitHub's successful pull-request `workflow_run`
+   delivery through `POST /github` admits the same scoped request, deduped per
+   `(repo, PR, head SHA)`. The earlier `pull_request` delivery can still start
+   a scan, while the 15-minute full-set sweep catches missed events.
+5. **merge proposal**: merge-scan reviews only the selected PR cold and its MERGE
    verdict chains a head-SHA-pinned `merge-apply` plan into a watched
    proposal. Approving *that* is the merge.
 

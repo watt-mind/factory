@@ -39,11 +39,39 @@ export class PathViolation extends Error {
 
 /** Tier-2 worktree delegation failure — always typed, never a bare throw. */
 export class WorktreeError extends Error {
-  constructor(message) {
+  constructor(message, evidence = null) {
     super(message);
     this.name = "WorktreeError";
     this.code = "workspace_provisioning_error";
+    this.evidence = evidence;
   }
+}
+
+const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
+const WARNING_LINE = /^warn:\s*/i;
+
+/**
+ * Select a stable failure headline without discarding the script's raw output.
+ * Lifecycle scripts use warn: for recoverable diagnostics, so those lines are
+ * evidence but never the reason a non-zero exit is reported.
+ */
+function worktreeScriptFailure(result) {
+  const stdout = String(result.stdout ?? "");
+  const stderr = String(result.stderr ?? "");
+  const actionable = (output) => output
+    .replace(ANSI_ESCAPE, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !WARNING_LINE.test(line));
+  const lines = actionable(stderr);
+  if (lines.length === 0) lines.push(...actionable(stdout));
+  const status = result.status ?? null;
+  return {
+    reason: lines.join("\n") || `exit ${status ?? "unknown"}, no error output`,
+    status,
+    stdout,
+    stderr,
+  };
 }
 
 /**
@@ -146,16 +174,21 @@ function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
     timeout: timeoutMs,
   });
   // A timeout surfaces as up.error, not a non-zero status, so both are failures
-  // (WM-262). The full stderr/stdout beats its last line — a bash `set -e` abort
-  // often puts the useful message above the final one (WM-481).
+  // (WM-262). Keep raw output in the marker/error as evidence, but use only
+  // actionable (non-warn) lines for the failure headline (WM-518).
   if (up.error?.code === "ETIMEDOUT" || up.status !== 0) {
     const timedOut = up.error?.code === "ETIMEDOUT";
-    const stderr = (up.stderr || "").trim();
-    const stdout = (up.stdout || "").trim();
-    const why = timedOut
-      ? `timed out after ${timeoutMs}ms`
-      : stderr || stdout || `exit ${up.status}`;
-    throw new WorktreeError(`worktree_up failed for ${repoName}/${ticket}: ${why}`);
+    const failure = worktreeScriptFailure(up);
+    if (timedOut) failure.reason = `timed out after ${timeoutMs}ms`;
+    writeFileSync(
+      path.join(workspaceDir, WORKTREE_MARKER),
+      `${canonicalJson({ ...record, upFailure: failure })}\n`,
+      "utf8",
+    );
+    throw new WorktreeError(
+      `worktree_up failed for ${repoName}/${ticket}: ${failure.reason}`,
+      failure,
+    );
   }
 
   if (!existsSync(worktreePath)) {
@@ -302,7 +335,12 @@ export function destroyWorkspace(
       encoding: "utf8",
       timeout: worktreeTimeoutMs,
     });
-    if (down.error?.code === "ETIMEDOUT" || down.status !== 0) return false;
+    if (down.error?.code === "ETIMEDOUT" || down.status !== 0) {
+      const failure = worktreeScriptFailure(down);
+      if (down.error?.code === "ETIMEDOUT") failure.reason = `timed out after ${worktreeTimeoutMs}ms`;
+      writeFileSync(marker, `${canonicalJson({ ...record, downFailure: failure })}\n`, "utf8");
+      return false;
+    }
     // A retained workspace may outlive a successfully removed worktree. Drop
     // its teardown marker so a later operator cleanup does not invoke the
     // repo script again against a tree that no longer exists.

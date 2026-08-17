@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import type { RunState, TraceEntry } from "../types";
 import { changeInput, renderWithClient, restoreApi } from "../test-render";
-import { LIVE_STATES, RunTrace } from "./RunTrace";
+import { formatErrorRowLabel, LIVE_STATES, RunTrace } from "./RunTrace";
 
 afterEach(() => {
   cleanup();
@@ -78,6 +78,48 @@ describe("RunTrace feed", () => {
   });
 });
 
+describe("RunTrace error context (WM-588)", () => {
+  test("formats the tool name and a truncated first error line", () => {
+    const firstLine = "x".repeat(120);
+    const formatted = formatErrorRowLabel("bash", `${firstLine}\nsecond line`);
+
+    expect(formatted.label.startsWith("bash · ")).toBe(true);
+    expect(formatted.label.endsWith("…")).toBe(true);
+    expect(formatted.label).not.toContain("second line");
+    expect(formatted.title).toBe(`bash · ${firstLine}`);
+  });
+
+  test("error rows retain their originating call input in the Errors tab", async () => {
+    const ts = "2026-08-17T15:26:37Z";
+    const contextualTrace: TraceEntry[] = [
+      { ...entry(1, "tool_use", { id: "call_bash", name: "bash", input: { command: "bun test missing.test.ts" } }), ts },
+      { ...entry(2, "tool_result", { toolUseId: "call_bash", content: "Command exited with code 2\nfull stderr", isError: true }), ts },
+    ];
+    const r = renderWithClient(
+      <RunTrace runId="run_error_context" state="COMPLETED" variant="full" />,
+      {
+        apiMocks: {
+          trace: async () => ({ head: 2, entries: contextualTrace }),
+        },
+      },
+    );
+    await waitForChrome(r);
+
+    fireEvent.click(r.getByRole("tab", { name: /^Errors/ }));
+    const label = r.getByText("bash · Command exited with code 2");
+    expect(label.getAttribute("title")).toBe("bash · Command exited with code 2");
+    const timestamp = r.getByTitle(ts);
+    expect(timestamp.textContent).toContain("15:26:37");
+
+    const summary = label.closest("summary")!;
+    expect(summary.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(summary);
+    expect(summary.getAttribute("aria-expanded")).toBe("true");
+    expect(await r.findByText("Originating call · bash")).toBeTruthy();
+    expect(r.getByText(/bun test missing\.test\.ts/)).toBeTruthy();
+  });
+});
+
 describe("RunTrace timing (WM-272)", () => {
   test("filtered views use the next unfiltered entry for duration", async () => {
     const start = Date.parse("2025-01-01T00:00:00.000Z");
@@ -131,7 +173,7 @@ describe("RunTrace a11y (WM-143)", () => {
 
     expect(r.getByText("tool · Read")).toBeTruthy();
     expect(r.getByText(/12 in · 34 out/)).toBeTruthy();
-    const errorJump = r.getByRole("button", { name: /1 error/ });
+    const errorJump = r.getByRole("button", { name: /next error/ });
     expect(errorJump).toBeTruthy();
 
     const search = r.getByPlaceholderText("Search trace…") as HTMLInputElement;
@@ -312,13 +354,13 @@ describe("RunTrace a11y (WM-143)", () => {
     const r = renderTrace();
     await waitForChrome(r);
 
-    const errorBtn = r.getByRole("button", { name: /1 error/ });
+    const errorBtn = r.getByRole("button", { name: /next error/ });
     expect(errorBtn).toBeTruthy();
 
     act(() => {
       document.body.dispatchEvent(new KeyboardEvent("keydown", { key: ".", bubbles: true }));
     });
-    expect(r.getByText(/\(1\/1\)/)).toBeTruthy();
+    expect(r.getByText("1/1")).toBeTruthy();
 
     // G triggers jump to latest
     act(() => {
@@ -373,6 +415,6 @@ describe("RunTrace a11y (WM-143)", () => {
     expect(r.getByRole("button", { name: /Follow live/ }).textContent).toContain("l");
 
     // . hint on Error button
-    expect(r.getByRole("button", { name: /1 error/ }).textContent).toContain(".");
+    expect(r.getByRole("button", { name: /next error/ }).textContent).toContain(".");
   });
 });

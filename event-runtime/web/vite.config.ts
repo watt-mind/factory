@@ -90,7 +90,16 @@ function vendorChunk(id: string): string | undefined {
 // vendor split is unchanged. The operator accepted the larger entry for one
 // consistent icon set over per-route duplication. Slack is ~27 kB (5%), the same
 // proportion as the WM-332 raise.
-const ENTRY_CHUNK_BUDGET_BYTES = 550 * 1000;
+//
+// WM-286 re-baselined to 575 kB on 2026-08-17. develop had crept to ~548 kB
+// through the polish round (#512 context strip, #518 trace errors, #519
+// artifacts) — 2 kB of slack, i.e. the same 0.4% drift WM-332 warned about —
+// and the Inbox view's eager-path additions (route + nav badge in App.tsx,
+// three api client calls, the Overview "Waiting on you" tile; the view itself
+// is a lazy chunk) took the entry to 550.29 kB. Vendor split verified: xyflow
+// still 197.04 kB, elk still its own chunk. Slack ~25 kB (4.5%). If the next
+// raise buys less than this, split Overview's stage cards instead.
+const ENTRY_CHUNK_BUDGET_BYTES = 575 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {

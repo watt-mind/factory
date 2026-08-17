@@ -1,0 +1,241 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: ["develop", "main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gitleaks:
+    name: Gitleaks
+    # Self-hosted per project-conventions PC-03 / PC-22.
+    runs-on: [self-hosted, shadow]
+    timeout-minutes: 15
+    steps:
+      # No `uses:` steps in this workflow on purpose (WM-573, mirrors ci.yml):
+      # every marketplace action is fetched from codeload.github.com at "Set
+      # up job", and the shadow fleet (eight runners, one egress IP, no action
+      # archive cache) has hit 429 Too Many Requests on actions/checkout.
+      # PR runs need connected history between base and head so `git log
+      # base..head` (gitleaks --log-opts) can walk it — start shallow and
+      # deepen only as far as needed to connect the two endpoints.
+      # Push runs (WM-620) do the same against `github.event.before`: in a
+      # depth-1 clone `git log -1` emits the whole tree as added, so gitleaks
+      # scanned ~6 MB per develop push and tripped on pre-existing text.
+      # `before` is all zeros on branch creation and empty on
+      # workflow_dispatch — those fall back to a depth-1 checkout.
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          zeros="0000000000000000000000000000000000000000"
+          if [ -n "${BASE_SHA:-}" ]; then
+            git fetch -q --depth=50 origin "$SHA" "$BASE_SHA"
+            git checkout -q "$SHA"
+            depth=50
+            while ! git merge-base "$BASE_SHA" "$SHA" >/dev/null 2>&1; do
+              if [ "$depth" -ge 2000 ]; then
+                echo "::warning::could not connect base $BASE_SHA to head $SHA within $depth commits; falling back to full history"
+                git fetch -q --unshallow origin || git fetch -q origin "$BASE_SHA" "$SHA"
+                break
+              fi
+              depth=$((depth * 4))
+              git fetch -q --deepen="$depth" origin "$SHA" "$BASE_SHA"
+            done
+          elif [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "$zeros" ]; then
+            # `before` is normally the parent (or first parent of a merge) of
+            # SHA, so depth 2 covers the common single-commit push; deepen
+            # from SHA only if the pushed range is longer.
+            git fetch -q --depth=2 origin "$SHA"
+            git checkout -q "$SHA"
+            depth=2
+            while ! git rev-parse -q --verify "${BEFORE_SHA}^{commit}" >/dev/null 2>&1; do
+              if [ "$depth" -ge 2000 ]; then
+                echo "::warning::could not reach before $BEFORE_SHA from head $SHA within $depth commits; falling back to full history"
+                git fetch -q --unshallow origin || git fetch -q origin "$SHA" "$BEFORE_SHA"
+                break
+              fi
+              depth=$((depth * 4))
+              git fetch -q --deepen="$depth" origin "$SHA"
+            done
+          else
+            git fetch -q --depth 1 origin "$SHA"
+            git checkout -q FETCH_HEAD
+          fi
+          git log -1 --oneline
+
+      - name: Resolve gitleaks binary
+        id: gitleaks-bin
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if command -v gitleaks >/dev/null 2>&1; then
+            echo "bin=gitleaks" >> "$GITHUB_OUTPUT"
+          elif [ -x "$HOME/.local/bin/gitleaks" ]; then
+            echo "bin=$HOME/.local/bin/gitleaks" >> "$GITHUB_OUTPUT"
+          else
+            # Releases download, not codeload — resolve the current tag via the
+            # GitHub API (versioned asset name, so a hardcoded URL goes stale)
+            # then fetch the linux_x64 tarball straight from
+            # objects.githubusercontent.com, no actions/* download involved.
+            # Capture the full response before grepping it: piping curl
+            # straight into `grep -m1` lets grep exit after the first match
+            # while curl is still writing, which curl reports as exit 23
+            # ("Failure writing output to destination").
+            resp="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              https://api.github.com/repos/gitleaks/gitleaks/releases/latest)"
+            tag="$(printf '%s' "$resp" | grep -m1 '"tag_name"' | cut -d '"' -f4)"
+            ver="${tag#v}"
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+              "https://github.com/gitleaks/gitleaks/releases/download/${tag}/gitleaks_${ver}_linux_x64.tar.gz"
+            tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$HOME/.local/bin" gitleaks
+            chmod +x "$HOME/.local/bin/gitleaks"
+            echo "bin=$HOME/.local/bin/gitleaks" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Gitleaks scan
+        shell: bash
+        env:
+          GITLEAKS_BIN: ${{ steps.gitleaks-bin.outputs.bin }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # .gitleaks.toml at repo root is auto-loaded by gitleaks if present;
+          # it allowlists the known false positives so the `-1` fallback (a
+          # depth-1 clone, whole tree as one diff) is clean too (WM-620).
+          zeros="0000000000000000000000000000000000000000"
+          if [ -n "${BASE_SHA:-}" ]; then
+            log_opts="${BASE_SHA}..${SHA}"
+          elif [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "$zeros" ] \
+            && git rev-parse -q --verify "${BEFORE_SHA}^{commit}" >/dev/null 2>&1; then
+            log_opts="${BEFORE_SHA}..${SHA}"
+          else
+            log_opts="-1"
+          fi
+          echo "gitleaks log opts: $log_opts"
+          "$GITLEAKS_BIN" git --no-banner --redact --log-opts="$log_opts"
+
+  semgrep:
+    name: Semgrep
+    runs-on: [self-hosted, shadow]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      # uv is on the runner host per code-security.md §4 tier 2b; only install
+      # (from astral.sh, not codeload) if it is missing.
+      - name: Setup uv (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v uvx >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uvx" ]; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+          fi
+          # $GITHUB_PATH only takes effect starting the *next* step, not this
+          # one — resolve the binary directly here rather than relying on PATH.
+          if [ -x "$HOME/.local/bin/uvx" ]; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            uvx_bin="$HOME/.local/bin/uvx"
+          else
+            uvx_bin="uvx"
+          fi
+          "$uvx_bin" --version
+
+      - name: Semgrep scan
+        run: uvx semgrep scan --config p/security-audit --error --metrics=off .
+
+  actionlint:
+    name: Actionlint
+    runs-on: [self-hosted, shadow]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Resolve actionlint binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v actionlint >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/actionlint" ]; then
+            bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) latest "$HOME/.local/bin"
+          fi
+          # $GITHUB_PATH only takes effect starting the *next* step, not this
+          # one — resolve the binary directly here rather than relying on PATH.
+          if [ -x "$HOME/.local/bin/actionlint" ]; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            actionlint_bin="$HOME/.local/bin/actionlint"
+          else
+            actionlint_bin="actionlint"
+          fi
+          "$actionlint_bin" -version
+
+      - name: Actionlint
+        run: actionlint -color .github/workflows/*.yml
+
+  codeql:
+    name: CodeQL
+    # Gated: this repo is private with no GitHub Advanced Security, so
+    # `gh api repos/watt-mind/factory/code-scanning/default-setup` returns 403
+    # "Advanced Security must be enabled" (project-conventions.md §3D). Real
+    # CodeQL steps need `github/codeql-action/init` + `.../analyze`, which are
+    # `uses:` marketplace steps — acceptable here specifically because they
+    # only run once GHAS unlocks the codeload path for this repo. Flip the
+    # `CODEQL_ENABLED` repo variable to `true` and replace this placeholder
+    # with the real init/analyze steps at that point.
+    if: ${{ vars.CODEQL_ENABLED == 'true' }}
+    runs-on: [self-hosted, shadow]
+    timeout-minutes: 15
+    steps:
+      - name: CodeQL gated placeholder
+        run: echo "CodeQL is gated behind vars.CODEQL_ENABLED; this repo has no GHAS yet (project-conventions.md §3D)."

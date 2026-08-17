@@ -680,6 +680,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
+        // The claim gate fails closed on tickets whose Owned Paths do not
+        // parse (owned_paths_unknown, WM-575); a stub ticket must carry a
+        // parseable section or the demo stub refuses every dispatch. `**`
+        // also lets the stubbed merge-fix gate (WM-582) accept any fix path.
         description: "## Owned Paths\n- **\n",
       }),
       fetchInFlight: () => [],
@@ -1047,18 +1051,35 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
 
     const { exitCode, timedOut, policyDenials = [] } = outcome ?? {};
+    let lateCompletion = false;
 
     if (timedOut) {
-      if (ticketClaimed) {
-        try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "timeout", log: null }); } catch {}
+      // The adapter's stream may outlive the agent-authored artifact. Perform
+      // an output-contract preflight before recording TIMED_OUT, but suppress
+      // worktree command verification until after the fenced VERIFYING
+      // transition below. The normal verifier then runs again in full.
+      try {
+        verifyResult({
+          spec, def, registry, workspaceDir, attempt,
+          extraArtifacts: RUNTIME_ARTIFACTS, worktreeRecord: {},
+        });
+        lateCompletion = true;
+      } catch (err) {
+        if (!(err instanceof ContractViolation)) throw err;
       }
-      const res = failTerminal("TIMED_OUT", "timeout", "timeout");
-      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
-      if (res?.fenced) return { fenced: true };
-      return { runId, attempt, terminalState: "TIMED_OUT", reasonCode: "timeout" };
+
+      if (!lateCompletion) {
+        if (ticketClaimed) {
+          try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "timeout", log: null }); } catch {}
+        }
+        const res = failTerminal("TIMED_OUT", "timeout", "timeout");
+        destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "TIMED_OUT", reasonCode: "timeout" };
+      }
     }
     const denial = policyDenials[0];
-    if (denial) {
+    if (!lateCompletion && denial) {
       if (ticketClaimed) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `policy_denied:${denial.tool}`, log: null }); } catch {}
       }
@@ -1068,7 +1089,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
-    if (exitCode !== 0) {
+    if (!lateCompletion && exitCode !== 0) {
       if (ticketClaimed) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `agent_exit_${exitCode}`, log: null }); } catch {}
       }
@@ -1098,7 +1119,8 @@ export async function executeClaimed(db, registry, adapters, claim, {
       }
       transition(db, {
         runId, to: "VERIFYING", expectFrom: "RUNNING",
-        actor: owner, reason: "exit_0", attempt, policyVersion, now: currentNow,
+        actor: owner, reason: lateCompletion ? "late_completion_after_timeout" : "exit_0",
+        attempt, policyVersion, now: currentNow,
       });
       return { ok: true };
     });

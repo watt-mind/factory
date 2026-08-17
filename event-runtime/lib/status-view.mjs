@@ -255,6 +255,9 @@ export function statusView(
   if (policyVersion === "unknown")
     configAnomalies.push("policyVersion is unknown");
   if (fleet.policyError) configAnomalies.push(fleet.policyError);
+  // Registry-load anomalies that are deliberately not load errors — today
+  // only artifact-view sidecars that do not fit their schema (WM-454).
+  configAnomalies.push(...(registry?.anomalies ?? []));
 
   return {
     events: eventCounts(db),

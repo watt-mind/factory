@@ -15,7 +15,7 @@ import { api } from "../api";
 import { keyGuard, useNow } from "../hooks";
 import { buildCapabilityGraph, type GraphNode } from "../graph/model";
 import { nodeTypes } from "../graph/nodes";
-import { largestComponentIds, matchNodes, missingFocusNode, searchEnter } from "../graph/search";
+import { matchNodes, missingFocusNode, searchEnter } from "../graph/search";
 import { EDGE_STYLES, legendEntries } from "../graph/style";
 import { hashPath, hashProject, withProject } from "../hash";
 import type { EventFocus } from "../types";
@@ -37,10 +37,26 @@ import {
 } from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
 
-// Fit-all on a large graph lands at ~0.1–0.3 zoom where labels are unreadable
-// (WM-99). The initial fit centers on the largest component and never goes
-// below this floor — the minimap covers "where is everything else".
-const INITIAL_FIT_MIN_ZOOM = 0.65;
+const GRAPH_FIT_PADDING = "24px";
+const FOCUSED_NODE_MIN_ZOOM = 0.65;
+
+type GraphFitViewOptions = {
+  nodes?: Array<{ id: string }>;
+  padding?: number | `${number}px` | `${number}%`;
+  duration?: number;
+  minZoom?: number;
+  maxZoom?: number;
+};
+
+export function focusedNodeFit(id: string, zoom: number): GraphFitViewOptions {
+  return {
+    nodes: [{ id }],
+    padding: 0.45,
+    duration: 180,
+    minZoom: zoom,
+    maxZoom: zoom,
+  };
+}
 
 function flowEdges(graph: { edges: Array<{ id: string; source: string; target: string; kind: keyof typeof EDGE_STYLES; label?: string }> }): Edge[] {
   return graph.edges.map((edge) => ({
@@ -111,15 +127,10 @@ export function Graph({
   const [layoutEpoch, setLayoutEpoch] = useState(0);
   const lastIdentityRef = useRef<string | null>(null);
   const epochLaidOutRef = useRef(0);
+  const [completedLayoutEpoch, setCompletedLayoutEpoch] = useState(-1);
   const flowRef = useRef<{
     getZoom: () => number;
-    fitView: (opts: {
-      nodes?: Array<{ id: string }>;
-      padding?: number;
-      duration?: number;
-      minZoom?: number;
-      maxZoom?: number;
-    }) => void;
+    fitView: (opts: GraphFitViewOptions) => void;
   } | null>(null);
   const [flowReady, setFlowReady] = useState(0);
 
@@ -177,6 +188,7 @@ export function Graph({
                   })),
                   edges: flowEdges(graph),
                 });
+                setCompletedLayoutEpoch(layoutEpoch);
               } catch (err) {
                 if (cancelled) return;
                 console.error("graph node/edge positioning failed", err);
@@ -235,13 +247,7 @@ export function Graph({
   const revealSelected = useCallback(() => {
     if (!focusNodeId || !flowRef.current) return;
     const zoom = flowRef.current.getZoom();
-    flowRef.current.fitView({
-      nodes: [{ id: focusNodeId }],
-      padding: 0.45,
-      duration: 180,
-      minZoom: zoom,
-      maxZoom: zoom,
-    });
+    flowRef.current.fitView(focusedNodeFit(focusNodeId, zoom));
   }, [focusNodeId]);
 
   useEffect(() => {
@@ -298,26 +304,30 @@ export function Graph({
     return () => window.removeEventListener("keydown", onKey);
   }, [onSelectNode, focusNodeId, graph, positioned, revealSelected]);
 
-  // Initial view (WM-99): fit the largest connected component with a zoom
-  // floor instead of squeezing every island on screen at label-illegible zoom.
-  // Runs once per mount; refetches must not yank the viewport afterwards.
-  const didInitialFit = useRef(false);
+  // Fit every component after the initial layout and each explicit reset. The
+  // completed epoch prevents Reset layout from fitting the stale positions
+  // while ELK is still calculating the replacement layout.
+  const lastFittedLayoutEpoch = useRef(-1);
   useEffect(() => {
-    if (didInitialFit.current || !flowRef.current || !positioned || !graph || graph.nodes.length === 0)
-      return;
-    didInitialFit.current = true;
-    flowRef.current.fitView({
-      nodes: largestComponentIds(graph).map((id) => ({ id })),
-      padding: 0.25,
-      minZoom: INITIAL_FIT_MIN_ZOOM,
-      maxZoom: 1,
-    });
-  }, [graph, positioned, flowReady]);
+    if (
+      lastFittedLayoutEpoch.current === layoutEpoch ||
+      completedLayoutEpoch !== layoutEpoch ||
+      !flowRef.current ||
+      !positioned ||
+      !graph ||
+      graph.nodes.length === 0
+    ) return;
+    lastFittedLayoutEpoch.current = layoutEpoch;
+    flowRef.current.fitView({ padding: GRAPH_FIT_PADDING, maxZoom: 1 });
+  }, [completedLayoutEpoch, flowReady, graph, layoutEpoch, positioned]);
 
   useEffect(() => {
     revealSelected();
+    // `flowReady` makes an initial deep link wait for React Flow's onInit.
+    // Deliberately exclude `positioned`: Reset layout should fit the whole
+    // graph instead of immediately snapping back to the selected node.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusNodeId, flowReady, positioned]);
+  }, [focusNodeId, flowReady]);
 
   // Center the current search match at the operator's zoom; `currentMatch` is
   // a stable string, so background refetches do not re-center the viewport.
@@ -326,7 +336,7 @@ export function Graph({
   }, [query]);
   useEffect(() => {
     if (!currentMatch || !flowRef.current) return;
-    const zoom = Math.max(flowRef.current.getZoom(), INITIAL_FIT_MIN_ZOOM);
+    const zoom = Math.max(flowRef.current.getZoom(), FOCUSED_NODE_MIN_ZOOM);
     flowRef.current.fitView({
       nodes: [{ id: currentMatch }],
       padding: 0.45,
@@ -354,7 +364,7 @@ export function Graph({
   return (
     <div className="flex h-full min-w-0">
       <div className="relative min-w-0 flex-1">
-        <div className="absolute top-4 left-5 z-10">
+        <div className="absolute top-4 left-5 z-10 rounded-md bg-(--surface-0)/85 px-2.5 py-2 backdrop-blur-sm">
           <h1 className="display text-lg font-semibold">Graph</h1>
           <div className="text-[11px] text-(--text-faint)">
             what this runtime can do — registered routes and recommendation edges

@@ -1,6 +1,7 @@
 import { createContext, type ReactNode, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { attrIcon } from "./attrIcons";
 import { createPortal } from "react-dom";
+import { ChevronRightIcon } from "@radix-ui/react-icons";
 import { modal, useFocusReturn, useNow } from "../hooks";
 import type { Section, SortDir } from "../displayOptions";
 import { tokenizeJson, TOKEN_CLASSES } from "../highlight";
@@ -93,6 +94,42 @@ export function shortId(id: string): string {
   return body.length <= 8 ? id : id.slice(0, sep + 1) + body.slice(0, 8);
 }
 
+/**
+ * A model id that keeps its distinguishing name visible in narrow columns.
+ * The provider prefix is allowed to shrink away first; the full id remains in
+ * the tooltip. Sentinel values such as `n/a` and `-` render unchanged.
+ */
+export function ModelCell({
+  model,
+  className = "",
+  title = model,
+}: {
+  model: string;
+  className?: string;
+  title?: string;
+}) {
+  const slash = model.indexOf("/");
+  if (slash <= 0 || slash === model.length - 1) {
+    return (
+      <span className={`mono block max-w-full truncate ${className}`} title={title}>
+        {model}
+      </span>
+    );
+  }
+
+  const provider = model.slice(0, slash + 1);
+  const name = model.slice(slash + 1);
+  return (
+    <span className={`mono block min-w-0 max-w-full ${className}`} title={title}>
+      <span className="sr-only">{model}</span>
+      <span aria-hidden="true" className="flex min-w-0 max-w-full items-baseline">
+        <span className="min-w-0 truncate text-(--text-faint)">{provider}</span>
+        <span className="max-w-full shrink-0 truncate">{name}</span>
+      </span>
+    </span>
+  );
+}
+
 export function copyText(text: string, label: string) {
   navigator.clipboard.writeText(text);
   notify(`Copied ${label}`, "info");
@@ -108,17 +145,22 @@ type CopyActionButtonProps = {
   label: string;
   chord: string;
   onClick: () => void;
+  quiet?: boolean;
   children: ReactNode;
 };
 
-function CopyActionButton({ label, chord, onClick, children }: CopyActionButtonProps) {
+function CopyActionButton({ label, chord, onClick, quiet = false, children }: CopyActionButtonProps) {
   return (
     <button
       type="button"
       title={`${label} · ${chord}`}
       aria-label={`${label} (${chord})`}
       onClick={onClick}
-      className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1)"
+      className={
+        quiet
+          ? "mono cursor-pointer rounded-sm text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent)"
+          : "inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1)"
+      }
     >
       {children}
     </button>
@@ -132,13 +174,40 @@ export function CopyActions({
   idChord = "c",
   cli,
   cliLabel = "CLI command",
+  variant = "icons",
 }: {
   id: string;
   idLabel: string;
   idChord?: string;
   cli?: string;
   cliLabel?: string;
+  /** Quiet text links suit the utility row below a detail header; icons remain
+   *  the compact default for inline use on other surfaces. */
+  variant?: "icons" | "quiet";
 }) {
+  if (variant === "quiet") {
+    return (
+      <div className="inline-flex items-center gap-1.5" role="group" aria-label="Copy actions">
+        <span>copy:</span>
+        <CopyActionButton label={`Copy ${idLabel}`} chord={idChord} onClick={() => copyText(id, idLabel)} quiet>
+          id
+        </CopyActionButton>
+        <span aria-hidden="true">·</span>
+        {cli !== undefined && (
+          <>
+            <CopyActionButton label={`Copy ${cliLabel}`} chord="c i" onClick={() => copyText(cli, cliLabel)} quiet>
+              CLI
+            </CopyActionButton>
+            <span aria-hidden="true">·</span>
+          </>
+        )}
+        <CopyActionButton label="Copy link" chord="c l" onClick={copyLink} quiet>
+          link
+        </CopyActionButton>
+      </div>
+    );
+  }
+
   return (
     <div className="inline-flex items-center gap-1" role="group" aria-label="Copy actions">
       <CopyActionButton label={`Copy ${idLabel}`} chord={idChord} onClick={() => copyText(id, idLabel)}>
@@ -666,6 +735,22 @@ export function Th({
   );
 }
 
+/** One disclosure marker everywhere: Radix weight, aligned box, 150ms rotation. */
+export function DisclosureChevron({
+  open,
+  className = "",
+}: {
+  open: boolean;
+  className?: string;
+}) {
+  return (
+    <ChevronRightIcon
+      aria-hidden="true"
+      className={`size-3 shrink-0 text-(--text-faint) transition-transform duration-150 ${open ? "rotate-90" : ""} ${className}`}
+    />
+  );
+}
+
 /**
  * A Linear-style section header row: chevron, state dot, label, count. The
  * whole band is one button (Enter/Space toggle for free, `aria-expanded` for
@@ -698,12 +783,7 @@ export function GroupHeaderRow({
             sub ? "h-7 pl-8" : "h-8"
           }`}
         >
-          <span
-            aria-hidden
-            className={`text-[9px] text-(--text-faint) transition-transform duration-150 ${collapsed ? "" : "rotate-90"}`}
-          >
-            ▶
-          </span>
+          <DisclosureChevron open={!collapsed} />
           {!sub && (
             <span
               aria-hidden
@@ -899,6 +979,38 @@ export function StateBadge({
       {dot && <StateIcon state={state} className="size-3 shrink-0" />}
       {state}
     </span>
+  );
+}
+
+export function StatCard({
+  label,
+  value,
+  suffix,
+  caption,
+  hue,
+  compact = false,
+}: {
+  label: string;
+  value: ReactNode;
+  suffix?: ReactNode;
+  caption?: ReactNode;
+  hue?: string;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      data-stat-card
+      className={`${compact ? "min-w-0 rounded-md px-3 py-2" : "min-w-36 rounded-lg px-3.5 py-3"} border border-(--border) bg-(--surface-1)`}
+    >
+      <div className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">{label}</div>
+      <div className={`display font-semibold tabular-nums ${compact ? "mt-0.5 text-lg" : "mt-1 text-xl"}`}>
+        <span data-stat-value style={hue ? { color: hue } : undefined}>{value}</span>
+        {suffix}
+      </div>
+      {caption != null && (
+        <div className={`${compact ? "text-[10px]" : "text-[11px]"} mt-0.5 text-(--text-faint)`}>{caption}</div>
+      )}
+    </div>
   );
 }
 
@@ -1200,13 +1312,11 @@ export function Disclosure({
       onToggle={(e) => setOpen(e.currentTarget.open)}
       className="group mb-1.5 list-none"
     >
-      <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-(--text-faint) select-none hover:text-(--text-dim) [&::-webkit-details-marker]:hidden list-none">
-        <span
-          aria-hidden
-          className={`inline-block text-[9px] text-(--text-faint) transition-transform duration-150 ${open ? "rotate-90" : ""}`}
-        >
-          ▶
-        </span>
+      <summary
+        aria-expanded={open}
+        className="flex cursor-pointer items-center gap-1.5 text-[11px] text-(--text-faint) select-none hover:text-(--text-dim) [&::-webkit-details-marker]:hidden list-none"
+      >
+        <DisclosureChevron open={open} />
         <span>{label}</span>
       </summary>
       <div className="mt-1.5">{children}</div>
@@ -1300,12 +1410,7 @@ export function Section({
           aria-expanded={!collapsed}
           className="mb-1.5 flex w-full cursor-pointer items-center gap-1.5 text-left hover:text-(--text-dim)"
         >
-          <span
-            aria-hidden="true"
-            className={`text-[9px] text-(--text-faint) transition-transform ${collapsed ? "" : "rotate-90"}`}
-          >
-            ▶
-          </span>
+          <DisclosureChevron open={!collapsed} />
           {heading}
         </button>
       ) : (

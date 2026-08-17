@@ -1,5 +1,6 @@
-import { useState, type ReactNode } from "react";
-import { artifactUrl } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { Suspense, lazy, useState, type ReactNode } from "react";
+import { api, artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import { dur } from "../heartbeat";
 import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
@@ -10,6 +11,7 @@ import {
   JsonBlock,
   JumpLink,
   KV,
+  ModelCell,
   Section,
   STATE_HUES,
   StateBadge,
@@ -18,6 +20,15 @@ import {
   shortId,
 } from "./ui";
 import { AgentHoverCard } from "./AgentHoverCard";
+import { attrIcon } from "./attrIcons";
+
+/**
+ * The artifact view renderer (WM-455) is fetched on demand: RunDetailBlocks
+ * is on the eager Runs path and the entry chunk is budgeted
+ * (vite.config.ts); until the chunk lands the JSON block below stands in,
+ * which is also exactly what an agent without a view gets.
+ */
+const ArtifactPanel = lazy(() => import("./ArtifactView").then((m) => ({ default: m.ArtifactPanel })));
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
 export const isCancellable = (state: RunState) => !TERMINAL.includes(state) && state !== "VERIFYING";
@@ -329,6 +340,22 @@ export const modelTierText = (spec: Pick<RunSpec, "adapter" | "modelTier" | "mod
   return spec.model ? "override" : "not declared";
 };
 
+/** Model detail rows need enough label width for `model (observed)` plus its icon. */
+function ModelDetailRow({ label, value }: { label: string; value: ReactNode }) {
+  const icon = attrIcon(label);
+  return (
+    <div className="grid grid-cols-[minmax(0,9.25rem)_minmax(0,1fr)] items-baseline gap-3 py-[3px]">
+      <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-(--text-faint)" title={label}>
+        <i className="inline-flex size-3.5 shrink-0 items-center justify-center not-italic [&>svg]:size-3.5" aria-hidden="true">
+          {icon}
+        </i>
+        <span>{label}</span>
+      </div>
+      <div className="min-w-0 text-(--text-dim)">{value}</div>
+    </div>
+  );
+}
+
 /**
  * The model rows, next to `adapter` (WM-221): tier and pinned come from the
  * spec, observed from the transcript the runtime stored. A non-model adapter
@@ -358,11 +385,10 @@ function ModelRows({ spec, observed }: { spec: RunSpec; observed: string | null 
   const pinned = pinnedModelText(spec.adapter, spec.model);
   return (
     <>
-      <KV
-        k="model tier"
-        v={
+      <ModelDetailRow
+        label="model tier"
+        value={
           <span
-            className="text-(--text-dim)"
             title={
               spec.modelTier
                 ? "Declared intent, resolved to a model at plan time (WM-135)."
@@ -375,36 +401,32 @@ function ModelRows({ spec, observed }: { spec: RunSpec; observed: string | null 
           </span>
         }
       />
-      <KV
-        k="model (pinned)"
-        v={
-          <span
-            className={pinned === DEFAULT_MODEL_TEXT ? "text-(--text-dim)" : "mono text-(--text-dim)"}
+      <ModelDetailRow
+        label="model (pinned)"
+        value={
+          <ModelCell
+            model={pinned}
+            className={pinned === DEFAULT_MODEL_TEXT ? "" : "text-(--text-dim)"}
             title={
               pinned !== DEFAULT_MODEL_TEXT
-                ? "What the planner pinned into this RunSpec — passed to the CLI as --model."
+                ? pinned
                 : spec.model === DEFAULT_MODEL
                   ? "The tier resolved to the `default` sentinel: no --model is passed and the CLI picks."
                   : "This spec pins nothing, so no --model was passed and the CLI picked."
             }
-          >
-            {pinned}
-          </span>
+          />
         }
       />
-      <KV
-        k="model (observed)"
-        v={
-          <span
-            className={observed ? "mono text-(--text-dim)" : "text-(--text-faint)"}
-            title={
-              observed
-                ? "What the harness reported it ran on, read from this run's stored transcript."
-                : "No model id in this run's transcript — it may predate the capture, or none was stored."
-            }
-          >
-            {observed ?? "not recorded"}
-          </span>
+      <ModelDetailRow
+        label="model (observed)"
+        value={
+          observed ? (
+            <ModelCell model={observed} className="text-(--text-dim)" />
+          ) : (
+            <span className="text-(--text-faint)" title="No model id in this run's transcript — it may predate the capture, or none was stored.">
+              not recorded
+            </span>
+          )
         }
       />
     </>
@@ -479,6 +501,14 @@ export function RunDetailBlocks({
     ? (d.attempts.find((a) => a.attempt === d.run.attempts) ?? null)
     : null;
   const clocks = current ? deadlinesOf(current, d.run.spec.timeoutSeconds, now) : null;
+
+  // The artifact's view sidecar rides the `/agents` item for this run's agent
+  // (WM-454); the same query AgentHoverCard already keeps warm, so no new
+  // request per run. No agent, no view → the JSON block, unchanged.
+  const agentsQ = useQuery({ queryKey: ["agents"], queryFn: () => api.agents(), staleTime: 30_000 });
+  const agentDef = (agentsQ.data?.agents ?? []).find(
+    (a) => a.ref === d.run.spec.agent || a.id === d.run.spec.agent,
+  );
 
   return (
     <>
@@ -694,7 +724,17 @@ export function RunDetailBlocks({
         >
           {d.result.artifact !== undefined ? (
             <Disclosure label="artifact" defaultOpen>
-              <JsonBlock value={d.result.artifact} />
+              {agentDef?.outputView ? (
+                <Suspense fallback={<JsonBlock value={d.result.artifact} />}>
+                  <ArtifactPanel
+                    artifact={d.result.artifact}
+                    schema={agentDef.outputSchema}
+                    view={agentDef.outputView}
+                  />
+                </Suspense>
+              ) : (
+                <JsonBlock value={d.result.artifact} />
+              )}
             </Disclosure>
           ) : (
             <Disclosure label="result" defaultOpen>

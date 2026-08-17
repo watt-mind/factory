@@ -6,8 +6,10 @@ import { cpSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import {
-  DEFAULT_MODEL, RegistryError, getAgent, getEventType, loadModelTierMap, loadRegistry, resolveModel, updatePins,
+  DEFAULT_MODEL, RegistryError, getAgent, getArtifactView, getEventType, loadModelTierMap, loadRegistry, resolveModel,
+  updatePins,
 } from "./registry.mjs";
+import { computeDefHash } from "./receipts.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry() {
@@ -234,5 +236,56 @@ describe("registry", () => {
       JSON.stringify({ "x.y": { agent: "ghost@9", idempotencyScope: ["correlationId"] } }),
     );
     expect(() => loadRegistry({ root })).toThrow(/unregistered agent/);
+  });
+
+  test("artifact-view sidecars load beside their definition and are served off the pinned identity (WM-454)", () => {
+    const registry = loadRegistry();
+    // The committed views: present, validated, keyed by ref, not on the def.
+    const merge = getArtifactView(registry, "merge-scan@2");
+    expect(merge.file).toBe("agents/merge-scan.view.json");
+    expect(merge.view.schemaVersion).toBe("factory.artifact-view/v1");
+    expect(getArtifactView(registry, "triage-scan@1").view.status.path).toBe("/recommendation");
+    expect(getArtifactView(registry, "reconcile@1")).toEqual({ file: null, view: null });
+    expect(getArtifactView(registry, "ghost@9")).toEqual({ file: null, view: null });
+    expect(registry.anomalies).toEqual([]);
+    // Views are not part of the definition pin nor of the receipt defHash:
+    // the def object never carries them, and the sidecar has no pin entry.
+    const def = getAgent(registry, "merge-scan@2");
+    expect(def.outputView).toBeUndefined();
+    expect(Object.keys(def.pins)).not.toContain("agents/merge-scan.view.json");
+    const { promptPath, inputSchema, outputSchema, ...pinnedIdentity } = def;
+    expect(computeDefHash(def)).toBe(computeDefHash({ ...pinnedIdentity, promptPath, inputSchema, outputSchema }));
+    // A .view.json file is never mistaken for a definition, and re-pinning
+    // leaves it alone.
+    expect([...registry.agents.keys()].some((ref) => ref.includes(".view"))).toBe(false);
+    const root = tempRegistry();
+    expect(updatePins({ root })).toEqual([]);
+  });
+
+  test("a view that drifts from its schema is a configuration anomaly, not a load error (WM-454)", () => {
+    const root = tempRegistry();
+    const viewFile = path.join(root, "agents", "merge-scan.view.json");
+    const view = JSON.parse(readFileSync(viewFile, "utf8"));
+    view.sections[0].columns.push("owner");
+    view.status.path = "/verdict";
+    writeFileSync(viewFile, JSON.stringify(view));
+    const registry = loadRegistry({ root, modelTiers: PI_TIERS });
+    // Served without a view; the anomaly names the agent, the file and the errors.
+    expect(getArtifactView(registry, "merge-scan@2")).toEqual({ file: "agents/merge-scan.view.json", view: null });
+    expect(registry.anomalies).toHaveLength(1);
+    expect(registry.anomalies[0]).toContain("merge-scan@2");
+    expect(registry.anomalies[0]).toContain("agents/merge-scan.view.json");
+    expect(registry.anomalies[0]).toMatch(/"owner" does not resolve/);
+    expect(registry.anomalies[0]).toMatch(/"\/verdict" does not resolve/);
+    // Other agents' views are unaffected.
+    expect(getArtifactView(registry, "triage-scan@1").view).not.toBeNull();
+    // Unparseable JSON is the same class of anomaly.
+    writeFileSync(viewFile, "{ not json");
+    const again = loadRegistry({ root, modelTiers: PI_TIERS });
+    expect(getArtifactView(again, "merge-scan@2").view).toBeNull();
+    expect(again.anomalies[0]).toMatch(/unparseable/);
+    // A schema-invalid document (bad `as`) is refused the same way.
+    writeFileSync(viewFile, JSON.stringify({ ...view, sections: [{ path: "/plan", as: "chart" }] }));
+    expect(loadRegistry({ root, modelTiers: PI_TIERS }).anomalies[0]).toMatch(/not in enum/);
   });
 });

@@ -1,12 +1,18 @@
 import "../test-dom";
-import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup } from "@testing-library/react";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { api } from "../api";
+import { ARTIFACT_RAW_KEY } from "./ArtifactView";
 import { RunDetailBlocks, isCancellable, modelTierText, pinnedModelText } from "./RunDetailBlocks";
 import {
+  createAgentsFixture,
   createLifecycleEventFixture,
   createRunDetailFixture,
   renderWithClient,
   restoreApi,
+  stubApi,
 } from "../test-render";
 import type { RunDetail, RunState } from "../types";
 
@@ -278,5 +284,53 @@ describe("pinnedModelText / modelTierText (WM-221)", () => {
     expect(modelTierText({ adapter: "fake", modelTier: null, model: null })).toBe("n/a");
     // A declared tier survives even where the adapter cannot use it.
     expect(modelTierText({ adapter: "command", modelTier: "light", model: null })).toBe("light");
+  });
+});
+
+describe("artifact position renders the agent's view (WM-455)", () => {
+  const TRIAGE_VIEW = JSON.parse(readFileSync(path.resolve(import.meta.dir, "../../../agents/triage-scan.view.json"), "utf8"));
+  const triageAgent = {
+    ref: "triage-scan@1",
+    id: "triage-scan",
+    outputSchema: { title: "triage plan" },
+    outputView: TRIAGE_VIEW,
+  };
+  const artifact = {
+    recommendation: "TRIAGE",
+    repo: "factory",
+    summary: "One issue is ready.",
+    plan: [{ issueId: "WM-7", action: "label-agent-ready", reason: "Complete." }],
+  };
+  const withArtifact = () =>
+    createRunDetailFixture({
+      run: { state: "COMPLETED", spec: { agent: "triage-scan@1" } } as RunDetail["run"],
+      result: { terminalState: "COMPLETED", reasonCode: null, artifact },
+    });
+
+  afterEach(() => localStorage.removeItem(ARTIFACT_RAW_KEY));
+
+  test("with a view from /agents: summary, status, plan table with an issue chip, and a Raw toggle back to JSON", async () => {
+    stubApi({ agents: mock(async () => createAgentsFixture({ agents: [triageAgent] as never })) });
+    const r2 = renderBlocks(withArtifact());
+    expect(await r2.findByText("One issue is ready.")).toBeTruthy();
+    expect(r2.getByText("TRIAGE")).toBeTruthy();
+    expect((r2.getByRole("link", { name: "WM-7" }) as HTMLAnchorElement).getAttribute("href")).toBe(
+      "https://linear.app/watt-mind/issue/WM-7",
+    );
+    fireEvent.click(r2.getByRole("button", { name: "Raw" }));
+    expect(r2.queryByRole("table")).toBeNull();
+    const pre = Array.from(r2.container.querySelectorAll("pre")).find((el) => el.textContent?.includes('"issueId": "WM-7"'));
+    expect(pre).toBeTruthy();
+    expect(localStorage.getItem(ARTIFACT_RAW_KEY)).toBe("1");
+  });
+
+  test("no view for the agent → the JSON block, unchanged, and no toggle", async () => {
+    stubApi({ agents: mock(async () => createAgentsFixture({ agents: [{ ...triageAgent, outputView: null }] as never })) });
+    const r = renderBlocks(withArtifact());
+    await waitFor(() => expect(api.agents).toHaveBeenCalled());
+    expect(r.queryByRole("group", { name: "Artifact rendering" })).toBeNull();
+    expect(r.queryByRole("table")).toBeNull();
+    const pre = Array.from(r.container.querySelectorAll("pre")).find((el) => el.textContent?.includes('"issueId": "WM-7"'));
+    expect(pre).toBeTruthy();
   });
 });

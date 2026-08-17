@@ -46,6 +46,7 @@ import {
   DetailPane,
   JumpLink,
   ListEmpty,
+  ModelCell,
   notify,
   StateBadge,
   STATE_HUES,
@@ -779,17 +780,8 @@ export function Runs({
                     </td>
                   )}
                   {show.has("model") && (
-                    <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
-                      title={
-                        rowModel(r) === "n/a"
-                          ? `The ${r.adapter} adapter runs a fixed argv, not a model.`
-                          : r.model && r.model !== "default"
-                            ? `Pinned into the RunSpec at plan time${r.modelTier ? ` from model_tier "${r.modelTier}"` : ""} — open the run for the model it was observed on.`
-                            : "This run pinned no model, so the CLI picked — open the run for the one it was observed on."
-                      }
-                    >
-                      {rowModel(r)}
+                    <td className="max-w-40 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <ModelCell model={rowModel(r)} className="text-(--text-faint)" />
                     </td>
                   )}
                   {show.has("attempts") && (
@@ -903,7 +895,7 @@ export function Runs({
 
       {sel && (
         <DetailPane
-          widthClass="w-[460px]"
+          widthClass="fixed inset-0 z-20 w-full sm:static sm:z-auto sm:w-[460px]"
           title={
             <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
               <button
@@ -985,6 +977,7 @@ export function Runs({
               idLabel="run id"
               cli={`bun event-runtime/cli.mjs inspect ${sel.runId}`}
               cliLabel="CLI inspect command"
+              variant="quiet"
             />
           }
           close={<Button onClick={() => onSelectRun(null)}>Close</Button>}

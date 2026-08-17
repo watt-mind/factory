@@ -203,13 +203,9 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       expect(res.status).toBe(200);
       const status = await res.json();
 
-      // Top-level StatusView keys match. The inbox field is introduced by
-      // WM-285; its web type/view lands separately with WM-286.
+      // Top-level StatusView keys match (inbox declared on the web type since WM-286).
       const statusViewBlock = extractInterfaceBlock(typesSrc, "StatusView");
-      const expectedStatusKeys = [
-        ...extractDirectProperties(statusViewBlock),
-        "inbox",
-      ].sort();
+      const expectedStatusKeys = extractDirectProperties(statusViewBlock).sort();
       expect(Object.keys(status).sort()).toEqual(expectedStatusKeys);
       expect(status.inbox).toEqual({ open: 0, acked: 0, byKind: {} });
 

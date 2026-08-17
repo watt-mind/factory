@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
+import { validateDecisionRequest } from "./decision.mjs";
 import { validate } from "./schema.mjs";
 import { PathViolation, safeJoin } from "./workspace.mjs";
 
@@ -34,7 +35,7 @@ export const EVIDENCE_INLINE_LIMIT_BYTES = 256 * 1024;
  * own verify at the time (`bun test && bun build/emit.mjs --check`, the full
  * suite) measured 196-217s, so nothing could ever pass. Sized at ~3x the
  * slowest observed run, which leaves room for a loaded host while staying far
- * under `limits.max_run_minutes: 45` in config/policy.yaml — the bound that
+ * under `limits.max_run_minutes: 90` in config/policy.yaml — the bound that
  * actually caps a wedged run. (The factory verify has since been narrowed to
  * `bun test event-runtime/lib && bun build/emit.mjs --check`, ~70s, WM-528 —
  * the ceiling stays where it is for the other repos.)
@@ -74,6 +75,9 @@ function normalizeFailureOutput(output) {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
+    // Lifecycle scripts emit recoverable, run-varying diagnostics as warn:.
+    // They are evidence, not part of the underlying failure signature.
+    .filter((line) => !/^warn:\s*/i.test(line))
     // Runners repeat these for unrelated failures; they are not evidence that
     // the same underlying check remains red.
     .filter((line) => !/^(\$ |bun test|error: script |error: ".*" exited|exited with code)/i.test(line));
@@ -191,6 +195,9 @@ export function verifyResult({
   if (!shape.valid) throw new ContractViolation(shape.errors);
 
   if (candidate.terminalState === "refused") return verifyRefused({ spec, def, candidate, attempt });
+  if (candidate.decision !== undefined) {
+    throw new ContractViolation(["decision_not_allowed_on_completed_result"]);
+  }
   return verifyCompleted({
     spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts, worktreeRecord, verifyTimeoutMs,
   });
@@ -211,6 +218,18 @@ function verifyRefused({ spec, def, candidate, attempt }) {
 
   const context = {};
   const checks = ["schema_valid"];
+  if (candidate.decision !== undefined) {
+    const decisionCheck = validateDecisionRequest(candidate.decision, {
+      refs: {
+        issue: spec.input?.ticket,
+        repo: spec.input?.repo,
+        runId: spec.runId,
+      },
+    });
+    if (decisionCheck.valid) context.decision = candidate.decision;
+    else context.decisionErrors = decisionCheck.errors;
+    checks.push("decision_validated");
+  }
   if (candidate.artifact !== undefined) {
     const artifactCheck = validate(def.outputSchema, candidate.artifact);
     if (!artifactCheck.valid) throw new ContractViolation(artifactCheck.errors);
