@@ -78,6 +78,26 @@ was right.
 
 Never invent an action id. Never propose changes to issues outside this repo.
 
+### Owned Paths are the dispatch concurrency lock
+
+Owned Paths are not only a diff-hygiene declaration. `work-scan` and
+`orchestrator/owned-paths.mjs` consume them as the dispatch concurrency lock:
+any overlap prevents the tickets from running at the same time. A path broader
+than the natural diff therefore does not merely overclaim ownership; it can
+prevent another ticket from being dispatched at all.
+
+For every issue, require the narrowest set of concrete files that still gives
+complete criterion→path coverage. Do not omit a file the diff actually needs,
+but do not add files for general relevance or speculative coverage. A test file
+has exactly the same locking cost as a source file, so include it only when the
+acceptance criteria require that test file to change.
+
+When the natural diff crosses a known contended hub (for example
+`event-runtime/lib/api.mjs` or `event-runtime/cli.mjs`), name the hub and its
+contention cost in that plan item's `reason`. Prefer scoping the issue down or
+emitting `needs-detail` with a specific requested split over silently claiming
+the hub; never hide a required hub-file change merely to avoid a collision.
+
 ### `write-detail` is narrow
 
 Use `write-detail` only when all missing information is discoverable in the
@@ -96,10 +116,14 @@ Acceptance Criteria`, `## Owned Paths`, or `## Verification` sections.
   not restate or revise an existing section, put prose before the first
   heading, or use any other level-two heading.
 - When authoring Owned Paths, set `ownedPaths` to the same paths used in
-  `detail`. Every entry must name a concrete regular file that exists in
-  `./repo` at `repoPin.sha`. Reject globs (`*`, `?`, bracket/brace patterns),
-  directories, generated guesses, and paths broader than the expected diff.
-  Prefer `needs-detail` over a broad path.
+  `detail`. Every entry must name one concrete regular-file path. Existing
+  files must exist in `./repo` at `repoPin.sha`; a planned new file may be
+  absent only when its exact path and creation are directly evidenced by the
+  issue and pinned repository conventions. This is the same case that
+  `work-scan` tolerates when a declared path matches nothing yet. Reject globs
+  (`*`, `?`, bracket/brace patterns), directories, generated guesses, and paths
+  broader than the expected diff in both existing-file and new-file cases.
+  Prefer `needs-detail` over guessing a future path or claiming a broad path.
 - When authoring Verification, set `verificationCommand` to the exact command
   used in `detail`. Validate it statically against `./repo`: every referenced
   file and directory must exist, every package script must exist in the

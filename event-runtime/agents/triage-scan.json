@@ -24,7 +24,7 @@
   },
   "mutating": false,
   "pins": {
-    "agents/triage-scan.md": "sha256:5e6d6979879ce4c331fc020e4c947cffc2c070955fae796939cb0d18eddb53de",
+    "agents/triage-scan.md": "sha256:8a436344a560506367e8a745e98290e2ecb76fe32be032e7325beedd667788e5",
     "schemas/triage-scan.input.json": "sha256:893c6ada3445fdcf2c5507319fe4933618ca6104298493b6339677ab2e295614",
     "schemas/triage-scan.output.json": "sha256:6eb237281746aaaea34e4e5927228e9eb90f2954d9df8d05f8c04b00bad27868"
   }
