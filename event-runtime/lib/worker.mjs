@@ -43,6 +43,16 @@ const LEASE_GRACE_SECONDS = 120;
 /** Infrastructure retries are independent from the agent-error attempt budget. */
 export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
 
+/** Hard ceiling for synchronous git and Linear helper processes (WM-262). */
+export const DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS = 120_000;
+
+function workerSubprocessTimeoutMs() {
+  const configured = Number(process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS;
+}
+
 const ENVIRONMENT_FAILURES = new Set(["adapter_error", "lease_expired"]);
 const AGENT_FAILURES = new Set(["contract_violation"]);
 const FATAL_FAILURES = new Set([
@@ -112,9 +122,13 @@ function finishAttempt(db, runId, attempt, terminalState, reasonCode, now, usage
 }
 
 /** Include ignored files: an agent must not be able to hide a repository write. */
-export function repositoryStatus(checkoutPath) {
-  const result = spawnSync("git", ["-C", checkoutPath, "status", "--porcelain", "--untracked-files=all", "--ignored=matching"], {
+export function repositoryStatus(
+  checkoutPath,
+  { timeoutMs = workerSubprocessTimeoutMs(), gitCommand = "git" } = {},
+) {
+  const result = spawnSync(gitCommand, ["-C", checkoutPath, "status", "--porcelain", "--untracked-files=all", "--ignored=matching"], {
     encoding: "utf8",
+    timeout: timeoutMs,
   });
   return result.status === 0 ? result.stdout : null;
 }
@@ -311,7 +325,10 @@ export function codeStampFiles(repoRoot = codeStampRoot(), paths = CODE_STAMP_PA
 }
 
 function gitHead(repoRoot) {
-  const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+  const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+    timeout: workerSubprocessTimeoutMs(),
+  });
   return result.status === 0 ? result.stdout.trim().slice(0, 12) : "nogit";
 }
 
@@ -384,12 +401,21 @@ export function createReloadWatcher({
 
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
 
+/** Execute one bounded Linear CLI operation; exported for timeout regression tests. */
+export function runLinearCli(
+  args,
+  { command = "bun", timeoutMs = workerSubprocessTimeoutMs() } = {},
+) {
+  return execFileSync(command, [linearCli(), ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: timeoutMs,
+  });
+}
+
 function defaultClaimTicket({ repo, ticket, harness = "claude" }) {
   try {
-    execFileSync("bun", [linearCli(), "claim", ticket, "--agent", harness], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    runLinearCli(["claim", ticket, "--agent", harness]);
     return { ok: true };
   } catch (err) {
     const stderr = String(err?.stderr ?? "");
@@ -403,24 +429,15 @@ function defaultUnclaimTicket({ repo, ticket, why, log = null, fetchTicket }) {
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = execFileSync("bun", [linearCli(), "get", ticket, "--json"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const out = runLinearCli(["get", ticket, "--json"]);
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
     if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress")) return false;
 
-    execFileSync("bun", [linearCli(), "state", ticket, "Todo", "--unassign", "--remove", "ai:in-progress"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    runLinearCli(["state", ticket, "Todo", "--unassign", "--remove", "ai:in-progress"]);
     const body = `Dispatch run failed, claim released back to Todo.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
-    execFileSync("bun", [linearCli(), "comment", ticket, body], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    runLinearCli(["comment", ticket, body]);
     return true;
   } catch {
     return false;
@@ -444,10 +461,7 @@ function baselineFailureSignature({ why, log = null, baseline = null }) {
 function hasRecordedBaselineFailureComment(ticket, signature) {
   const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
   try {
-    const out = execFileSync("bun", [linearCli(), "comments", ticket, "--json"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const out = runLinearCli(["comments", ticket, "--json"]);
     const comments = JSON.parse(out);
     return (comments ?? []).some((row) => String(row.body ?? "").includes(marker));
   } catch {
@@ -461,29 +475,20 @@ function defaultBlockBaselineTicket({ repo, ticket, why, log = null, baseline = 
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = execFileSync("bun", [linearCli(), "get", ticket, "--json"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const out = runLinearCli(["get", ticket, "--json"]);
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
     if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress")) return false;
 
     const signature = baselineFailureSignature({ why, log, baseline });
-    execFileSync("bun", [linearCli(), "state", ticket, "Blocked", "--unassign", "--add", "ai:blocked", "--remove", "ai:in-progress"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    runLinearCli(["state", ticket, "Blocked", "--unassign", "--add", "ai:blocked", "--remove", "ai:in-progress"]);
 
     if (!hasRecordedBaselineFailureComment(ticket, signature)) {
       const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
       const body = `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}\n\n
 <!-- ${marker} -->`;
-      execFileSync("bun", [linearCli(), "comment", ticket, body], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      runLinearCli(["comment", ticket, body]);
     }
     return true;
   } catch {

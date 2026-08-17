@@ -17,6 +17,16 @@ import { artifactsRoot } from "./config.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 
+/** Hard ceiling for repository-owned worktree lifecycle scripts (WM-262). */
+export const DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS = 120_000;
+
+function worktreeScriptTimeoutMs() {
+  const configured = Number(process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS;
+}
+
 export class PathViolation extends Error {
   constructor(workspaceDir, relPath) {
     super(`path "${relPath}" escapes workspace ${workspaceDir}`);
@@ -98,7 +108,7 @@ const WORKTREE_MARKER = ".worktree.json";
  * repo's declared `verify` command rides along in the returned record — the
  * §9 verifier runs it as ordinary code, never trusting the agent's report.
  */
-function materializeWorktree({ workspaceDir, input, checkoutDir }) {
+function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
   const repoName = input?.repo;
   const ticket = input?.ticket;
   if (!repoName || !ticket) {
@@ -110,6 +120,20 @@ function materializeWorktree({ workspaceDir, input, checkoutDir }) {
       `repo "${repoName}" declares no worktree lifecycle in config/repos.yaml (worktree_up/worktree_down/worktree_root) — the planner should have refused this`,
     );
   }
+  const worktreePath = path.join(repo.worktreeRoot, ticket);
+  const record = {
+    repo: repoName,
+    ticket,
+    path: worktreePath,
+    repoPath: repo.path,
+    down: repo.worktreeDown,
+    verify: repo.verify,
+  };
+  // Persist teardown facts before bring-up starts. A script can create its
+  // worktree and daemons before timing out; the marker lets the janitor find
+  // and safely delegate cleanup even when createWorkspace never returns.
+  writeFileSync(path.join(workspaceDir, WORKTREE_MARKER), `${canonicalJson(record)}\n`, "utf8");
+
   // Repo-owned bring-up may discover a red project baseline after the usable
   // worktree already exists. It reports that condition out-of-band and still
   // exits zero; a non-zero exit remains a provisioning failure.
@@ -118,13 +142,16 @@ function materializeWorktree({ workspaceDir, input, checkoutDir }) {
     cwd: repo.path,
     encoding: "utf8",
     env: { ...process.env, FACTORY_WORKTREE_REPORT: reportPath },
+    timeout: timeoutMs,
   });
-  if (up.status !== 0) {
-    const why = (up.stderr || up.stdout || "").trim().split("\n").pop() || `exit ${up.status}`;
+  if (up.error?.code === "ETIMEDOUT" || up.status !== 0) {
+    const timedOut = up.error?.code === "ETIMEDOUT";
+    const why = timedOut
+      ? `timed out after ${timeoutMs}ms`
+      : (up.stderr || up.stdout || "").trim().split("\n").pop() || `exit ${up.status}`;
     throw new WorktreeError(`worktree_up failed for ${repoName}/${ticket}: ${why}`);
   }
 
-  const worktreePath = path.join(repo.worktreeRoot, ticket);
   if (!existsSync(worktreePath)) {
     throw new WorktreeError(`worktree_up reported success for ${repoName}/${ticket} but did not create ${worktreePath}`);
   }
@@ -143,15 +170,7 @@ function materializeWorktree({ workspaceDir, input, checkoutDir }) {
   }
 
   symlinkSync(worktreePath, path.join(workspaceDir, checkoutDir));
-  const record = {
-    repo: repoName,
-    ticket,
-    path: worktreePath,
-    repoPath: repo.path,
-    down: repo.worktreeDown,
-    verify: repo.verify,
-    ...(baseline ? { baseline } : {}),
-  };
+  if (baseline) record.baseline = baseline;
   writeFileSync(path.join(workspaceDir, WORKTREE_MARKER), `${canonicalJson(record)}\n`, "utf8");
 
   // The agent contract points it at input.json, so runtime-discovered context
@@ -170,7 +189,15 @@ function materializeWorktree({ workspaceDir, input, checkoutDir }) {
   return record;
 }
 
-export function createWorkspace({ root, runId, attempt, input, workspace = {}, artifactStore = artifactsRoot() }) {
+export function createWorkspace({
+  root,
+  runId,
+  attempt,
+  input,
+  workspace = {},
+  artifactStore = artifactsRoot(),
+  worktreeTimeoutMs = worktreeScriptTimeoutMs(),
+}) {
   const dir = path.join(root, `${runId}-a${attempt}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "input.json"), `${canonicalJson(input)}\n`, "utf8");
@@ -207,7 +234,12 @@ export function createWorkspace({ root, runId, attempt, input, workspace = {}, a
 
   let worktree = null;
   if (workspace.type === "worktree") {
-    worktree = materializeWorktree({ workspaceDir: dir, input, checkoutDir: workspace.checkoutDir ?? "repo" });
+    worktree = materializeWorktree({
+      workspaceDir: dir,
+      input,
+      checkoutDir: workspace.checkoutDir ?? "repo",
+      timeoutMs: worktreeTimeoutMs,
+    });
   }
   return { dir, checkout, materialized, worktree };
 }
@@ -216,7 +248,15 @@ export function createWorkspace({ root, runId, attempt, input, workspace = {}, a
  * Remove the workspace unless retention was requested (§7: retain on failure
  * when policy says so). Returns false when retained, true when destroyed.
  */
-export function destroyWorkspace(dir, { retain = false, checkout = null, repoName = null } = {}) {
+export function destroyWorkspace(
+  dir,
+  {
+    retain = false,
+    checkout = null,
+    repoName = null,
+    worktreeTimeoutMs = worktreeScriptTimeoutMs(),
+  } = {},
+) {
   // Deregister a repository checkout even when the directory is retained:
   // a mirror that keeps stale worktree registrations refuses future adds.
   if (checkout) releaseCheckout({ checkoutPath: checkout, repoName });
@@ -237,8 +277,12 @@ export function destroyWorkspace(dir, { retain = false, checkout = null, repoNam
       record = null;
     }
     if (!record?.down || !record?.ticket) return false;
-    const down = spawnSync("/bin/bash", [record.down, record.ticket], { cwd: record.repoPath, encoding: "utf8" });
-    if (down.status !== 0) return false;
+    const down = spawnSync("/bin/bash", [record.down, record.ticket], {
+      cwd: record.repoPath,
+      encoding: "utf8",
+      timeout: worktreeTimeoutMs,
+    });
+    if (down.error?.code === "ETIMEDOUT" || down.status !== 0) return false;
   }
 
   rmSync(dir, { recursive: true, force: true });

@@ -18,7 +18,7 @@ import {
   acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
   createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
   executeClaimed, classifyFailureCause, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
-  repositoryStatus, retryRun, runOnce,
+  repositoryStatus, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
 
@@ -112,6 +112,35 @@ describe("worker", () => {
     expect(repositoryStatus(repo)).toBe(baseline);
     writeFileSync(path.join(repo, "generated", "agent-write.log"), "new\n");
     expect(repositoryStatus(repo)).not.toBe(baseline);
+  });
+
+  test("repository status returns null when git exceeds its timeout", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-hanging-git-"));
+    const hangingGit = path.join(dir, "git");
+    writeFileSync(hangingGit, "#!/bin/bash\nwhile :; do :; done\n", "utf8");
+    execFileSync("chmod", ["+x", hangingGit]);
+
+    const started = Date.now();
+    expect(repositoryStatus(dir, { gitCommand: hangingGit, timeoutMs: 25 })).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("Linear helper subprocesses honor the configured timeout", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-hanging-linear-"));
+    const hangingCommand = path.join(dir, "bun");
+    writeFileSync(hangingCommand, "#!/bin/bash\nwhile :; do :; done\n", "utf8");
+    execFileSync("chmod", ["+x", hangingCommand]);
+    const previous = process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS;
+    process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = "25";
+
+    const started = Date.now();
+    try {
+      expect(() => runLinearCli(["get", "WM-262"], { command: hangingCommand })).toThrow();
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS;
+      else process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = previous;
+    }
   });
 
   test("e2e (WM-135): tiered pi route plans a spec with the model pinned; the fake adapter executes it, ignoring the model", async () => {
