@@ -25,6 +25,7 @@ import { SpecDiff } from "../components/SpecDiff";
 import { AgentHoverCard } from "../components/AgentHoverCard";
 import { ApprovalRiskDetails, ApprovalSafetyCard } from "../components/ApprovalRisk";
 import { decideRevealFilters } from "../reveal";
+import { humanizeReason } from "../reasons";
 import {
   Ago,
   BulkActionBar,
@@ -75,14 +76,6 @@ export function filterOpenProposals(
   return proposals.filter(
     (p) => p.status === "open" && proposalIsExpired(p, now) === expiredOnly,
   );
-}
-
-const HUMANIZED_REASONS: Record<string, string> = {
-  "auto_approval_ineligible:proposal_expired": "Auto-approval not eligible — proposal expired",
-};
-
-export function humanizeReason(reason: string): string {
-  return HUMANIZED_REASONS[reason] ?? reason.replaceAll("_", " ");
 }
 
 /** Grouping/ordering/columns per tab (OPS-493) — two views, two persisted keys. */
@@ -202,13 +195,16 @@ export function Proposals({
     refetchInterval: 2000,
   });
   const [expiredOnly, setExpiredOnly] = useState(false);
-  const rows = useMemo(
-    () =>
-      tab === "open"
-        ? filterOpenProposals(query.data?.proposals ?? [], now, expiredOnly)
-        : (history.data?.proposals ?? []).filter((p) => p.status !== "open"),
-    [tab, query.data, history.data, now, expiredOnly],
-  );
+  const rows = useMemo(() => {
+    if (tab !== "open") return (history.data?.proposals ?? []).filter((p) => p.status !== "open");
+    const open = query.data?.proposals ?? [];
+    const shown = new Set(filterOpenProposals(open, now, expiredOnly).map((p) => p.id));
+    // The focused proposal never drops out from under the operator: a TTL that
+    // passes while it is selected would otherwise close the detail pane and take
+    // the expired banner with it, mid-read (WM-547). `scoped` exempts the focused
+    // id from repo scoping for the same reason.
+    return open.filter((p) => p.status === "open" && (shown.has(p.id) || p.id === focusProposalId));
+  }, [tab, query.data, history.data, now, expiredOnly, focusProposalId]);
   const scoped = useMemo(
     () => rows.filter((p) => p.id === focusProposalId || matchesRepo(p.repos, context)),
     [rows, context, focusProposalId],
@@ -360,12 +356,10 @@ export function Proposals({
     let err = 0;
     const processed = new Set<string>();
     let haltedOnReplan: { before: Proposal; after: Proposal } | null = null;
+    // `approvableSelected` already dropped the expired ones. A TTL that passes
+    // mid-loop is left to the server, which answers with a re-plan the operator
+    // reviews — a silent client-side failure count would hide that.
     for (const p of approvableSelected) {
-      if (proposalIsExpired(p)) {
-        err++;
-        processed.add(p.id);
-        continue;
-      }
       try {
         const o = await api.approve(p.id);
         processed.add(p.id);
@@ -422,14 +416,10 @@ export function Proposals({
     if (err) notify(`Failed to reject ${err} proposal${err === 1 ? "" : "s"}`, "err");
   };
 
-  // What the list would show without the text filter. An empty list under the
-  // expired chip has two causes and needs two messages: no expired opens exist
-  // (chip copy, nothing for Esc to clear) or the text filter hid the expired
-  // ones (filter copy + the Esc hint).
-  const unfilteredCount = useMemo(
-    () => scoped.length,
-    [scoped],
-  );
+  // What the list would show without the text filter — the tab and the expired
+  // chip are already applied to `scoped`. ListEmpty uses it to tell "the filter
+  // hid everything" (offer Esc to clear) from "there is nothing here" (say so).
+  const unfilteredCount = useMemo(() => scoped.length, [scoped]);
 
   // Esc clears the text filter and the expired chip together, so the hint is
   // owed whenever either is set — including when the unfiltered set is itself
@@ -486,6 +476,20 @@ export function Proposals({
     [agentsQuery.data, sel],
   );
 
+  /** Planner reason for the selection, humanized off the shared table (WM-594). */
+  const selReason = useMemo(() => (sel?.reason ? humanizeReason(sel.reason) : null), [sel]);
+
+  // Losing the selection must disarm its dialogs. Both render inside `sel`, so a
+  // proposal that leaves `visible` (decided elsewhere, scoped away) unmounts them
+  // while the flag stays true — the next selection would then open an approve
+  // dialog the operator never armed, with Enter bound to it (WM-547).
+  const noSelection = sel === null;
+  useEffect(() => {
+    if (!noSelection) return;
+    setConfirmApprove(false);
+    setRejecting(false);
+  }, [noSelection]);
+
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex, windowStart]);
@@ -538,18 +542,23 @@ export function Proposals({
     }
     if (query.isPending || history.isPending) return;
     const focusedOpen = (query.data?.proposals ?? []).find((p) => p.id === focusProposalId);
-    const inOpen = Boolean(focusedOpen);
     const inHistory = (history.data?.proposals ?? []).some(
       (p) => p.id === focusProposalId && p.status !== "open",
     );
     const isNewFocus = locatedFocusId.current !== focusProposalId;
-    if (isNewFocus && (inOpen || inHistory)) locatedFocusId.current = focusProposalId;
+    if (isNewFocus && (focusedOpen || inHistory)) locatedFocusId.current = focusProposalId;
 
-    if (inOpen && (tab !== "open" || isNewFocus)) {
-      setTab("open");
-      if (isNewFocus) setExpiredOnly(focusedOpen ? proposalIsExpired(focusedOpen, now) : false);
-      setSelectedIds(new Set());
-    } else if (!inOpen && inHistory && tab === "open") {
+    if (focusedOpen) {
+      // Only a real tab switch drops the bulk selection (selectTab does the same).
+      // Moving focus between rows inside Open must keep it: ticking three rows,
+      // opening one to read its spec, then bulk-approving is the whole flow (WM-547).
+      if (tab !== "open") {
+        setTab("open");
+        setSelectedIds(new Set());
+      }
+      // A newly focused expired proposal needs the chip on to be reachable.
+      if (isNewFocus) setExpiredOnly(proposalIsExpired(focusedOpen, now));
+    } else if (inHistory && tab === "open") {
       setTab("history");
       setExpiredOnly(false);
       setSelectedIds(new Set());
@@ -1038,11 +1047,18 @@ export function Proposals({
                       <Ago iso={p.created_at} now={now} />
                     </td>
                   )}
-                  {show.has("reason") && (
-                    <td className={`max-w-48 truncate ${tdCls} text-(--text-dim)`} title={p.reason ?? undefined}>
-                      {p.reason ? humanizeReason(p.reason) : "-"}
-                    </td>
-                  )}
+                  {show.has("reason") &&
+                    (() => {
+                      const r = humanizeReason(p.reason);
+                      return (
+                        <td
+                          className={`max-w-48 truncate ${tdCls} text-(--text-dim)`}
+                          title={r.raw ?? undefined}
+                        >
+                          {r.text || "-"}
+                        </td>
+                      );
+                    })()}
                   {listCols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
                     <CustomCell key={c.key} row={p} path={c.key.replace(/^custom:/, "")} />
                   ))}
@@ -1188,15 +1204,15 @@ export function Proposals({
             <KV k="created" v={<Ago iso={sel.created_at} now={now} />} />
             {sel.decided_at && <KV k="decided at" v={<Ago iso={sel.decided_at} now={now} />} />}
             {sel.decided_by && <KV k="decided by" v={sel.decided_by} />}
-            {sel.reason && (
+            {selReason && (
               <KV
                 k="planner reason"
                 v={
                   <span
                     className="break-words whitespace-pre-wrap leading-relaxed text-(--text-dim)"
-                    title={sel.reason}
+                    title={selReason.raw ?? undefined}
                   >
-                    {humanizeReason(sel.reason)}
+                    {selReason.text}
                   </span>
                 }
               />

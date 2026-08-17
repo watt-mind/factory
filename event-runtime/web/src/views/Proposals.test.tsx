@@ -1,7 +1,7 @@
 import "../test-dom";
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { filterOpenProposals, humanizeReason, Proposals } from "./Proposals";
+import { filterOpenProposals, Proposals } from "./Proposals";
 import { api } from "../api";
 import {
   changeInput,
@@ -458,15 +458,6 @@ describe("Proposals component harness: filter retention", () => {
 });
 
 describe("Proposals expiration and reason presentation (WM-547)", () => {
-  test("humanizeReason maps known reason codes and makes unknown codes readable", () => {
-    expect(humanizeReason("auto_approval_ineligible:proposal_expired")).toBe(
-      "Auto-approval not eligible — proposal expired",
-    );
-    expect(humanizeReason("custom_reason:needs_operator_review")).toBe(
-      "custom reason:needs operator review",
-    );
-  });
-
   test("filterOpenProposals keeps TTL-expired proposals out of Open", () => {
     const now = Date.now();
     const expired = stubProposal("prop_expired", "open", {
@@ -519,7 +510,8 @@ describe("Proposals expiration and reason presentation (WM-547)", () => {
         expect(approve.parentElement?.getAttribute("title")).toBe(
           "This proposal has expired and can no longer be approved.",
         );
-        expect(r.getAllByText("Auto-approval not eligible — proposal expired").length).toBeGreaterThan(0);
+        // Rendered through the shared reason table (WM-594), not a local map.
+        expect(r.getAllByText("Not eligible for auto-approval — Proposal expired").length).toBeGreaterThan(0);
         expect(r.getAllByTitle(rawReason).length).toBeGreaterThan(0);
         expect(r.getByText("Safety & blast radius")).toBeTruthy();
 
@@ -533,16 +525,164 @@ describe("Proposals expiration and reason presentation (WM-547)", () => {
           ),
         ).toBe(true);
 
+        // Clearing the chip brings the live proposals back. The focused one is
+        // exempt from the chip so the operator keeps the pane they are reading.
         act(() => {
           fireEvent.click(r.getByRole("button", { name: /^Expired/ }));
         });
         await waitFor(() => {
-          expect(r.queryByText("expired-agent")).toBeNull();
           expect(r.getByText("active-agent")).toBeTruthy();
+          expect(r.getAllByText("expired-agent").length).toBeGreaterThan(0);
         });
       },
     );
   });
+});
+
+describe("Proposals selection safety under focus and expiry (WM-547)", () => {
+  /** Re-render with a different focused row, the way the hash/parent does. */
+  function refocus(r: ReturnType<typeof renderProposals>, focusProposalId: string | null) {
+    r.rerender(
+      <Proposals
+        connected={true}
+        context={{ kind: "all" }}
+        onRunQueued={noop}
+        focusProposalId={focusProposalId}
+        onSelectProposal={noop}
+        focusExpired={false}
+        onFocusExpiredConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+      />,
+    );
+  }
+
+  test("opening a row to read it keeps the bulk selection", async () => {
+    const p1 = stubProposal("prop_bulk_1", "open", { agent: "agent-one" });
+    const p2 = stubProposal("prop_bulk_2", "open", { agent: "agent-two" });
+
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [p1, p2] }),
+        proposalHistory: async () => ({ proposals: [] }),
+        status: async () => createStatusFixture(),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const r = renderProposals({ focusProposalId: null });
+        await waitFor(() => expect(r.getByLabelText("Select proposal prop_bulk_1")).toBeTruthy());
+
+        act(() => {
+          fireEvent.click(r.getByLabelText("Select proposal prop_bulk_1"));
+          fireEvent.click(r.getByLabelText("Select proposal prop_bulk_2"));
+        });
+        expect(r.getByText("Approve selected (2)")).toBeTruthy();
+
+        // Open one of the ticked rows to read its spec before bulk-approving.
+        act(() => refocus(r, "prop_bulk_1"));
+        await waitFor(() => expect(r.container.querySelector("tr.row-selected")).toBeTruthy());
+
+        expect(r.getByRole("toolbar", { name: /bulk actions/i })).toBeTruthy();
+        expect(r.getByText("Approve selected (2)")).toBeTruthy();
+        expect((r.getByLabelText("Select proposal prop_bulk_2") as HTMLInputElement).checked).toBe(true);
+
+        // And moving on to the next row keeps it too.
+        act(() => refocus(r, "prop_bulk_2"));
+        await waitFor(() => expect(r.getByText("Approve selected (2)")).toBeTruthy());
+      },
+    );
+  });
+
+  test("losing the selection disarms the approve dialog", async () => {
+    const p1 = stubProposal("prop_armed_1", "open", {
+      agent: "armed-agent",
+      spec: createRunSpecFixture("run_armed_1"),
+    });
+    const p2 = stubProposal("prop_armed_2", "open", {
+      agent: "other-agent",
+      spec: createRunSpecFixture("run_armed_2"),
+    });
+
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [p1, p2] }),
+        proposalHistory: async () => ({ proposals: [] }),
+        status: async () => createStatusFixture(),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const r = renderProposals({ focusProposalId: "prop_armed_1" });
+        const openApprove = await waitFor(
+          () => r.getByRole("button", { name: /^Approve…/ }) as HTMLButtonElement,
+        );
+        act(() => {
+          fireEvent.click(openApprove);
+        });
+        expect(r.getByText("Approve and queue this run?")).toBeTruthy();
+
+        // The armed proposal is decided elsewhere and leaves the open list, so
+        // the dialog unmounts with the detail pane.
+        api.proposals = async () => ({ proposals: [p2] });
+        await act(async () => {
+          await r.queryClient.invalidateQueries({ queryKey: ["proposals"] });
+        });
+        await waitFor(() => expect(r.queryByText("Approve and queue this run?")).toBeNull());
+
+        // Selecting another proposal must not re-open an approve dialog the
+        // operator never armed — Enter is bound to its confirm button.
+        act(() => refocus(r, "prop_armed_2"));
+        await waitFor(() => expect(r.getAllByText("prop_armed_2").length).toBeGreaterThan(0));
+        expect(r.queryByText("Approve and queue this run?")).toBeNull();
+      },
+    );
+  });
+
+  test("a TTL that passes while the row is selected keeps the pane and its expired banner", async () => {
+    const t0 = new Date("2026-03-01T00:00:00Z").getTime();
+    setSystemTime(new Date(t0));
+    try {
+      const live = stubProposal("prop_ticking", "open", {
+        agent: "ticking-agent",
+        created_at: new Date(t0).toISOString(),
+        ttl_seconds: 60,
+        spec: createRunSpecFixture("run_ticking"),
+      });
+
+      await withApi(
+        {
+          proposals: async () => ({ proposals: [live] }),
+          proposalHistory: async () => ({ proposals: [] }),
+          status: async () => createStatusFixture(),
+          runs: async () => ({ runs: [] }),
+          events: async () => ({ events: [] }),
+        },
+        async () => {
+          const r = renderProposals({ focusProposalId: "prop_ticking" });
+          const approve = await waitFor(
+            () => r.getByRole("button", { name: /^Approve…/ }) as HTMLButtonElement,
+          );
+          expect(approve.disabled).toBe(false);
+
+          // The TTL passes under the operator, on the next useNow tick.
+          setSystemTime(new Date(t0 + 120_000));
+          await waitFor(
+            () => {
+              const b = r.getByRole("button", { name: /^Approve…/ }) as HTMLButtonElement;
+              expect(b.disabled).toBe(true);
+              expect(b.parentElement?.getAttribute("title")).toBe(
+                "This proposal has expired and can no longer be approved.",
+              );
+            },
+            { timeout: 4000 },
+          );
+        },
+      );
+    } finally {
+      setSystemTime();
+    }
+  }, 15_000);
 });
 
 describe("Proposals component harness: cross-tab reveal", () => {
