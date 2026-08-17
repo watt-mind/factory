@@ -1,5 +1,7 @@
 # Event runtime web control plane
 
+[`event-runtime/web/DESIGN.md`](../event-runtime/web/DESIGN.md) defines **why** the web UI exists—its operator, jobs, and product principles. This document defines **how** it is built and behaves: architecture, components, tokens, interaction rules, and runtime contracts.
+
 Status: **implemented** (OPS-212) at `event-runtime/web/`. Tracking: OPS-209
 (this spec), OPS-212 (implementation).
 
