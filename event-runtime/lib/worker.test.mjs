@@ -1303,17 +1303,19 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     releaseClaimLock(lockFile);
   });
 
-  test("contended claim lock at execute time causes typed refusal claim_lock_busy", async () => {
+  test("contended claim lock requeues with jittered backoff without consuming an attempt, then runs", async () => {
     const db = openDb(":memory:");
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-busy-"));
     const lockFile = dispatchLockPath("wt-worker", lockDir);
-    // Hold the lock
     acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
 
     const spec = queueRun(db, makeDispatchSpec());
+    let now = T0;
     const o = opts({
+      now: () => now,
       dispatch: {
         locksDir: lockDir,
+        random: () => 0,
         fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
         fetchInFlight: () => [],
         countLeases: () => 0,
@@ -1321,10 +1323,106 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       },
     });
 
-    const summary = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
-    expect(summary.terminalState).toBe("REFUSED");
-    expect(summary.reasonCode).toBe("claim_lock_busy");
+    const deferred = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(deferred).toMatchObject({ terminalState: "QUEUED", reasonCode: "claim_lock_contention" });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts).toBe(0);
+    expect(db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId)).toHaveLength(0);
+    expect(db.query(`SELECT * FROM results WHERE run_id = ?`).all(spec.runId)).toHaveLength(0);
+    expect(claimNext(db, o)).toBeNull();
+
     releaseClaimLock(lockFile);
+    now += deferred.requeueAfterMs;
+    const completed = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(completed).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok", attempt: 1 });
+    expect(runState(db, spec.runId)).toBe("COMPLETED");
+    expect(db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts).toBe(1);
+  });
+
+  test("claim lock starvation refuses with a distinct reason after the requeue ceiling", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-starved-"));
+    const lockFile = dispatchLockPath("wt-worker", lockDir);
+    acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
+
+    const spec = queueRun(db, makeDispatchSpec());
+    let now = T0;
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        random: () => 0,
+        maxClaimLockContentionRequeues: 1,
+        fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    });
+
+    const deferred = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    now += deferred.requeueAfterMs;
+    const refused = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(refused).toMatchObject({ terminalState: "REFUSED", reasonCode: "claim_lock_starvation" });
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    releaseClaimLock(lockFile);
+  });
+
+  test("concurrent disjoint dispatches drain through the claim lock with mutually exclusive claims", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-burst-"));
+    const specs = ["WM-710", "WM-711", "WM-712"].map((ticket, index) => queueRun(db, makeDispatchSpec({
+      runId: `run_lock_burst_${index + 1}`,
+      input: { repo: "wt-worker", ticket },
+    })));
+    let now = T0;
+    let releaseFirst;
+    let markFirstStarted;
+    const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+    const firstRelease = new Promise((resolve) => { releaseFirst = resolve; });
+    let activeClaims = 0;
+    let maxActiveClaims = 0;
+    const claimedTickets = [];
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        random: () => 1,
+        fetchTicket: (ticket) => ({ identifier: ticket, state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: async ({ ticket }) => {
+          activeClaims += 1;
+          maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+          claimedTickets.push(ticket);
+          if (ticket === "WM-710") {
+            markFirstStarted();
+            await firstRelease;
+          }
+          activeClaims -= 1;
+          return { ok: true };
+        },
+      },
+    });
+
+    const first = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    await firstStarted;
+    const second = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    const third = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect([second.reasonCode, third.reasonCode]).toEqual(["claim_lock_contention", "claim_lock_contention"]);
+    releaseFirst();
+    expect((await first).terminalState).toBe("COMPLETED");
+
+    now += Math.max(second.requeueAfterMs, third.requeueAfterMs);
+    const drained = [
+      await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
+      await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
+    ];
+    expect(drained.map((summary) => summary.terminalState)).toEqual(["COMPLETED", "COMPLETED"]);
+    expect(specs.map((spec) => runState(db, spec.runId))).toEqual(["COMPLETED", "COMPLETED", "COMPLETED"]);
+    expect(specs.map((spec) => db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts)).toEqual([1, 1, 1]);
+    expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
+    expect(maxActiveClaims).toBe(1);
   });
 
   test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {

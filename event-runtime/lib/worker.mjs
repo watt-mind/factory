@@ -43,6 +43,11 @@ const LEASE_GRACE_SECONDS = 120;
 /** Infrastructure retries are independent from the agent-error attempt budget. */
 export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
 
+/** Claim-lock contention is deferred independently from execution attempts. */
+export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = 8;
+export const CLAIM_LOCK_BACKOFF_BASE_MS = 25;
+export const CLAIM_LOCK_BACKOFF_MAX_MS = 1_000;
+
 /** Hard ceiling for synchronous git and Linear helper processes (WM-262). */
 export const DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS = 120_000;
 
@@ -193,18 +198,28 @@ export function claimNext(db, { owner, now = () => Date.now(), policyVersion = "
   // BEGIN IMMEDIATE, not the default deferred transaction: two workers must
   // not both read the same QUEUED row before either writes (OPS-233).
   return txImmediate(db, () => {
-    // Oldest-first, but skip runs this worker may not take — placement
-    // requirements (§4) and adapters it does not have. Filtering in JS keeps
-    // the rule in one predicate; Postgres can push it into SQL later.
+    const claimNow = resolveNow(now);
+    // Claim-lock backoff is recorded on the latest QUEUED lifecycle event.
+    // updated_at cannot be treated as a generic not-before because tests and
+    // event replay may enqueue rows whose source timestamps are ahead of this
+    // worker's clock.
     const candidates = db
       .query(
-        `SELECT run_id, spec_json, attempts FROM runs
-         WHERE state = 'QUEUED' ORDER BY created_at, run_id`,
+        `SELECT r.run_id, r.spec_json, r.attempts,
+                le.reason AS queue_reason, le.at AS queued_at
+           FROM runs r
+           JOIN lifecycle_events le ON le.seq = (
+             SELECT MAX(latest.seq) FROM lifecycle_events latest WHERE latest.run_id = r.run_id
+           )
+          WHERE r.state = 'QUEUED'
+          ORDER BY r.created_at, r.run_id`,
       )
       .all();
     let row = null;
     let spec = null;
     for (const candidate of candidates) {
+      const backoff = /^claim_lock_contention:\d+:backoff_(\d+)ms$/.exec(candidate.queue_reason ?? "");
+      if (backoff && Date.parse(candidate.queued_at) + Number(backoff[1]) > claimNow) continue;
       const candidateSpec = JSON.parse(candidate.spec_json);
       if (!satisfiesPlacement(labels, candidateSpec.placement)) continue;
       if (adapters && !adapterOverride && !adapters.includes(candidateSpec.adapter)) continue;
@@ -215,7 +230,6 @@ export function claimNext(db, { owner, now = () => Date.now(), policyVersion = "
     if (!row) return null;
     const attempt = row.attempts + 1;
     const fencingToken = nextCounter(db, "fencing");
-    const claimNow = resolveNow(now);
     const leaseExpiresAt = iso(claimNow + (spec.timeoutSeconds + LEASE_GRACE_SECONDS) * 1000);
 
     db.query(`UPDATE runs SET attempts = ?, updated_at = ? WHERE run_id = ?`)
@@ -272,6 +286,50 @@ export function acquireClaimLock(lockFile, { pid = process.pid, now = Date.now()
 
 export function releaseClaimLock(lockFile) {
   try { unlinkSync(lockFile); } catch {}
+}
+
+function claimLockBackoffMs(contentionNumber, random = Math.random) {
+  const cap = Math.min(
+    CLAIM_LOCK_BACKOFF_MAX_MS,
+    CLAIM_LOCK_BACKOFF_BASE_MS * (2 ** Math.max(0, contentionNumber - 1)),
+  );
+  const sample = Math.min(1, Math.max(0, Number(random()) || 0));
+  return Math.floor((cap / 2) + (sample * cap / 2));
+}
+
+/**
+ * Put a run that never acquired the claim lock back in the queue without
+ * spending its execution attempt. The lifecycle reason and timestamp form a
+ * durable not-before value consumed by claimNext().
+ */
+function deferClaimLockContention(db, {
+  runId, attempt, fencingToken, owner, policyVersion, now,
+  maxRequeues = DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
+  random = Math.random,
+}) {
+  return txImmediate(db, () => {
+    const currentNow = resolveNow(now);
+    if (!assertCurrentToken(db, runId, fencingToken)) {
+      recordFencedAttempt(db, { runId, attempt, actor: owner, policyVersion, now: currentNow });
+      return { fenced: true };
+    }
+    const prior = Number(db.query(
+      `SELECT COUNT(*) AS n FROM lifecycle_events
+       WHERE run_id = ? AND reason LIKE 'claim_lock_contention:%'`,
+    ).get(runId)?.n ?? 0);
+    if (prior >= maxRequeues) return { starved: true, contentions: prior };
+
+    const contentionNumber = prior + 1;
+    const backoffMs = claimLockBackoffMs(contentionNumber, random);
+    transition(db, {
+      runId, to: "QUEUED", expectFrom: "RUNNING", actor: owner,
+      reason: `claim_lock_contention:${contentionNumber}:backoff_${backoffMs}ms`,
+      attempt, policyVersion, now: currentNow,
+    });
+    db.query(`DELETE FROM attempts WHERE run_id = ? AND attempt = ?`).run(runId, attempt);
+    db.query(`UPDATE runs SET attempts = ? WHERE run_id = ?`).run(attempt - 1, runId);
+    return { requeued: true, contentions: contentionNumber, backoffMs };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +628,11 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
   }, 250);
   cancelPoll?.unref?.();
+  const stopCancellationMonitor = () => {
+    if (cancelPoll) clearInterval(cancelPoll);
+    cancelPoll = null;
+    ACTIVE_EXECUTIONS.delete(runId);
+  };
 
   /** Terminal failure-shaped write: classify, finalize, and budget any retry atomically. */
   const failTerminal = (to, journalReason, reasonCode) =>
@@ -668,9 +731,28 @@ export async function executeClaimed(db, registry, adapters, claim, {
     if (isWorktree && repoName && ticketId) {
       const lockAcquired = acquireClaimLock(lockFile, { pid: process.pid, now: nowFn(), isAlive: isAliveFn });
       if (!lockAcquired) {
-        const res = refuseTerminal("claim_lock_busy", ["dispatch_claim_lock"]);
+        const deferred = deferClaimLockContention(db, {
+          runId, attempt, fencingToken, owner, policyVersion, now: nowFn,
+          maxRequeues: Number.isInteger(dispatchOpts?.maxClaimLockContentionRequeues)
+            ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
+            : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
+          random: dispatchOpts?.random ?? Math.random,
+        });
+        if (deferred?.fenced) {
+          stopCancellationMonitor();
+          return { fenced: true };
+        }
+        if (deferred?.requeued) {
+          stopCancellationMonitor();
+          return {
+            runId, attempt, terminalState: "QUEUED", reasonCode: "claim_lock_contention",
+            requeueAfterMs: deferred.backoffMs,
+          };
+        }
+        const res = refuseTerminal("claim_lock_starvation", ["dispatch_claim_lock"]);
+        stopCancellationMonitor();
         if (res?.fenced) return { fenced: true };
-        return { runId, attempt, terminalState: "REFUSED", reasonCode: "claim_lock_busy", receipt: res?.receipt };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode: "claim_lock_starvation", receipt: res?.receipt };
       }
 
       let gateRefusal = null;
@@ -765,8 +847,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         abortSignal: abortController.signal, signal: abortController.signal,
       });
     } finally {
-      clearInterval(cancelPoll);
-      ACTIVE_EXECUTIONS.delete(runId);
+      stopCancellationMonitor();
     }
 
     if (outcome?.usage) attemptUsage = { adapter: adapterKey, ...outcome.usage };
