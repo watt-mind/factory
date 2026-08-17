@@ -9,7 +9,8 @@ import { loadRegistry } from "../registry.mjs";
 import { validate } from "../schema.mjs";
 import { emitDueTicks } from "../schedules.mjs";
 import { preflight } from "../sandbox/gondolin.mjs";
-import { execute, resolveTemplate } from "./command.mjs";
+import { execute, resolveTemplate, SANDBOX_SUPPORT } from "./command.mjs";
+import { SANDBOX_CONSOLE_FILE } from "./sandboxed.mjs";
 
 const def = (command) => ({ ref: "test-cmd@1", command });
 const spec = (input) => ({ input });
@@ -309,6 +310,53 @@ describe("sandboxed execution (WM-185)", () => {
         timeoutMs: 5000,
       }),
     ).rejects.toThrow(/unknown sandbox provider/);
+  });
+
+  test("goes through the shared sandbox seam (WM-313): the stubbed VM boundary sees the argv, and the result contract plus console artifact are written on the host", async () => {
+    expect(SANDBOX_SUPPORT).toBe("gondolin");
+    const workspaceDir = ws();
+    const trace = [];
+    let seen;
+    const outcome = await execute({
+      spec: spec({}),
+      def: sandboxDef(["/bin/echo", "hi"], { captureStdout: "out.txt" }),
+      workspaceDir,
+      timeoutMs: 5000,
+      onTrace: (kind, payload) => trace.push({ kind, payload }),
+      runSandbox: async (request) => {
+        seen = request;
+        request.onStdout("hi\n");
+        return { exitCode: 0, timedOut: false, bootMs: 9 };
+      },
+    });
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    // No stdin wrapping for the command adapter: the argv runs as declared, no shell.
+    expect(seen.command).toEqual(["/bin/echo", "hi"]);
+    expect(seen.policy).toEqual({ provider: "gondolin", allowedHosts: [] });
+    expect(seen.workspaceDir).toBe(workspaceDir);
+    const result = JSON.parse(readFileSync(path.join(workspaceDir, "result.json"), "utf8"));
+    expect(result.artifact.command).toEqual(["/bin/echo", "hi"]);
+    expect(result.artifact.outputTail).toContain("hi");
+    expect(readFileSync(path.join(workspaceDir, "out.txt"), "utf8")).toBe("hi\n");
+    expect(readFileSync(path.join(workspaceDir, SANDBOX_CONSOLE_FILE), "utf8")).toContain("adapter=command");
+    expect(trace.some((t) => t.kind === "lifecycle" && t.payload.note === "sandbox_console")).toBe(true);
+  });
+
+  test("a cancelled sandboxed command resolves like a cancelled host command: null exit, not timed out", async () => {
+    const ac = new AbortController();
+    const pending = execute({
+      spec: spec({}),
+      def: sandboxDef(["/bin/sleep", "60"]),
+      workspaceDir: ws(),
+      timeoutMs: 60_000,
+      abortSignal: ac.signal,
+      runSandbox: ({ abortSignal }) =>
+        new Promise((_, reject) => {
+          abortSignal.addEventListener("abort", () => reject(Object.assign(new Error("runner exited (null)"), { code: "sandbox_runner_crashed" })));
+        }),
+    });
+    setTimeout(() => ac.abort(), 5);
+    expect(await pending).toEqual({ exitCode: null, timedOut: false });
   });
 
   const report = preflight();
