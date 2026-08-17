@@ -86,14 +86,14 @@ describe("Projects unscoped caption (WM-157)", () => {
     });
   });
 
-  test("repo context tab captions that the registry is factory-wide", async () => {
+  test("repo context tab captions that Projects are factory-wide", async () => {
     window.location.hash = "#/projects?project=factory";
     await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
       const r = renderProjects();
       await waitFor(() => {
         expect(r.getByText("factory")).toBeTruthy();
       });
-      expect(r.getByText("registry is not scoped to factory.")).toBeTruthy();
+      expect(r.getByText("Projects are not scoped to factory.")).toBeTruthy();
     });
   });
 
@@ -128,7 +128,7 @@ describe("Projects unscoped caption (WM-157)", () => {
         window.removeEventListener("hashchange", swallow, true);
       }
 
-      expect(r.getByText("registry is not scoped to factory.")).toBeTruthy();
+      expect(r.getByText("Projects are not scoped to factory.")).toBeTruthy();
     });
   });
 });
