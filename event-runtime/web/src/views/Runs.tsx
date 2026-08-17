@@ -327,7 +327,6 @@ export function Runs({
     [sections, display.collapsed],
   );
   const cols = visibleColumns(displayConfig, display);
-  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
 
   const selectedId = focusRunId;
   // Keyboard index walks the open sections; the detail pane keys off the row
@@ -421,6 +420,13 @@ export function Runs({
     () => (selectedId ? (visible.find((r) => r.runId === selectedId) ?? null) : null),
     [visible, selectedId],
   );
+  // A side pane turns the list into a compact comparison rail. Keep the five
+  // decision-bearing columns instead of forcing a horizontal scrollbar; the
+  // pane and the unselected list retain every configured column.
+  const listCols = sel
+    ? cols.filter((c) => ["run", "state", "reason", "origin", "updated"].includes(c.key))
+    : cols;
+  const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -700,10 +706,10 @@ export function Runs({
         }
       >
 
-        <table className="w-full border-separate border-spacing-0">
+        <table className="w-full table-fixed border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              {cols.map((c) => {
+              {listCols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
                 const isCustom = c.isCustom || c.key.startsWith("custom:");
                 const customPath = c.key.replace(/^custom:/, "");
@@ -741,8 +747,8 @@ export function Runs({
                     to its content instead, which keeps the link fully rendered.
                   */}
                   {show.has("state") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                      <div className="flex items-center gap-1.5 whitespace-nowrap">
+                    <td className="overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <div className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap">
                         <StateBadge state={r.state} />
                         {r.state === "PROPOSED" && (() => {
                           const prop = proposalByRunId.get(r.runId);
@@ -819,7 +825,7 @@ export function Runs({
                       <Ago iso={r.updated_at} now={now} />
                     </td>
                   )}
-                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                  {listCols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
                     <CustomCell key={c.key} row={r} path={c.key.replace(/^custom:/, "")} />
                   ))}
                 </tr>
@@ -830,7 +836,7 @@ export function Runs({
                 return (
                   <Fragment key={s.key}>
                     <GroupHeaderRow
-                      colSpan={cols.length}
+                      colSpan={listCols.length}
                       section={s}
                       collapsed={closed}
                       onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
@@ -842,7 +848,7 @@ export function Runs({
                             return (
                               <Fragment key={child.key}>
                                 <GroupHeaderRow
-                                  colSpan={cols.length}
+                                  colSpan={listCols.length}
                                   section={child}
                                   collapsed={childClosed}
                                   onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
@@ -859,7 +865,7 @@ export function Runs({
             })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={cols.length}
+                colSpan={listCols.length}
                 query={list}
                 filtered={byTab.length > 0}
                 onClear={filter.trim() ? () => setFilter("") : undefined}

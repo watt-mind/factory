@@ -15,6 +15,13 @@
  * additionally mapped to factory.trace/v1 events via the optional `onTrace`
  * callback so the operator can watch the agent live. Trace mapping is
  * best-effort — an unparseable or unrecognized line is ignored, never fatal.
+ *
+ * Sandboxing (WM-313): this adapter does NOT yet execute inside the Gondolin
+ * microVM, and it says so — a definition carrying a `sandbox` block is refused
+ * with `SandboxUnsupportedError` before anything is spawned, never run on the
+ * host as if the block were absent. The deferral is deliberate and narrow;
+ * `SANDBOX_DEFERRAL_REASON` below is the whole rationale, and it names what
+ * the pi path did not have to solve.
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -22,6 +29,34 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
+import { refuseSandbox } from "./sandboxed.mjs";
+
+/**
+ * Deferred, not ignored. Everything this adapter passes claude on the host is
+ * a host-shaped contract that has no guest translation yet:
+ *   - `--mcp-config` names `FACTORY_ROOT/config/mcp/claude.json`, whose only
+ *     server is fetched with `npx` — a deny-all guest cannot start it, and a
+ *     translated config would need the checkout mounted read-only in the guest;
+ *   - the generated `--settings` policy for `mutating: false` carries host
+ *     absolute deny paths (`Edit(//<checkoutDir>/**)`, `filesystem.denyWrite`)
+ *     and turns on Claude Code's own OS sandbox (`sandbox.enabled`), which is
+ *     seatbelt/bubblewrap — untested inside an Alpine guest and, with
+ *     `allowUnsandboxedCommands: false`, would deny every Bash call if absent;
+ *   - the auth model is subscription OAuth held on the host (this adapter
+ *     strips ANTHROPIC_API_KEY on purpose); in-guest that becomes API-key
+ *     placeholder mode, a billing-policy change docs/eval-gondolin-guest-image.md
+ *     §4.2 says must be an explicit profile, not a transparent switch.
+ * pi shares the third point but not the first two: its extensions and tools are
+ * argv-declared and it needs no host config file, which is why it went first.
+ * Until a follow-up translates the settings/MCP contract to guest paths, the
+ * only honest behaviour is to refuse — placement then keeps such a definition
+ * from ever being claimed by a worker that would refuse it.
+ */
+export const SANDBOX_DEFERRAL_REASON =
+  "claude's --mcp-config and generated --settings policy carry host absolute paths and enable Claude Code's own OS sandbox, neither of which has a guest translation yet (WM-313 deferral; see lib/adapters/claude.mjs)";
+
+/** This adapter refuses sandboxed definitions (fail closed) until the deferral above is resolved. */
+export const SANDBOX_SUPPORT = "unsupported";
 
 export const KILL_GRACE_MS = 30_000;
 
@@ -312,6 +347,10 @@ export async function execute({
   abortSignal,
   signal,
 }) {
+  // First, before the prompt is read or the env assembled: a sandboxed
+  // definition never reaches the host spawn below (WM-313).
+  refuseSandbox("claude", def, SANDBOX_DEFERRAL_REASON);
+
   const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
   const childEnv = safeChildEnvironment(env, def);
 

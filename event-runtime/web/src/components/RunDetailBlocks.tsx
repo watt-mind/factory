@@ -1,8 +1,10 @@
-import { useState, type ReactNode } from "react";
-import { artifactUrl } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { Suspense, lazy, useState, type ReactNode } from "react";
+import { api, artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import { dur } from "../heartbeat";
-import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
+import { humanizeReason } from "../reasons";
+import type { AdmittedEvent, ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
 import {
   Ago,
   Disclosure,
@@ -20,6 +22,29 @@ import {
 } from "./ui";
 import { AgentHoverCard } from "./AgentHoverCard";
 import { attrIcon } from "./attrIcons";
+
+/**
+ * The artifact view renderer (WM-455) is fetched on demand: RunDetailBlocks
+ * is on the eager Runs path and the entry chunk is budgeted
+ * (vite.config.ts); until the chunk lands the JSON block below stands in,
+ * which is also exactly what an agent without a view gets.
+ */
+const ArtifactPanel = lazy(() => import("./ArtifactView").then((m) => ({ default: m.ArtifactPanel })));
+
+/**
+ * The per-ticket Decisions block (WM-594) rides its own chunk for the same
+ * budget reason; `TicketDecisionsPanel` is the Suspense-wrapped handle every
+ * pane renders. Until the chunk lands nothing is shown — a block that answers
+ * "why not" a beat late beats a heavier first paint on every view.
+ */
+const TicketDecisionsLazy = lazy(() => import("./TicketDecisions").then((m) => ({ default: m.TicketDecisions })));
+export function TicketDecisionsPanel(props: Parameters<typeof import("./TicketDecisions").TicketDecisions>[0]) {
+  return (
+    <Suspense fallback={null}>
+      <TicketDecisionsLazy {...props} />
+    </Suspense>
+  );
+}
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
 export const isCancellable = (state: RunState) => !TERMINAL.includes(state) && state !== "VERIFYING";
@@ -452,6 +477,118 @@ function InputRows({ input }: { input: unknown }) {
   return <KV k="input" v={compactValue(input)} />;
 }
 
+// ---------------------------------------------------------------------------
+// Planner decisions, explained (WM-594)
+// ---------------------------------------------------------------------------
+
+const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+
+/** The ticket id a value names, normalised, or null. */
+export function ticketIdOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const t = value.trim().toUpperCase();
+  return TICKET_ID.test(t) ? t : null;
+}
+
+/** The ticket an admitted event is about: its subject, or `payload.ticket`. */
+export function eventTicket(e: Pick<AdmittedEvent, "subject" | "envelope">): string | null {
+  const payload = (e.envelope as { payload?: Record<string, unknown> } | undefined)?.payload;
+  return ticketIdOf(e.subject) ?? ticketIdOf(payload?.ticket) ?? ticketIdOf(payload?.ticketId) ?? null;
+}
+
+export const hashHref = (view: string, ...ids: string[]) =>
+  `#/${withProject(hashPath(view, ...ids), hashProject(window.location.hash))}`;
+
+/**
+ * A reason code as a sentence, with the identifiers in its suffix turned into
+ * jump links (run → onJumpRun, proposal → onJumpProposal, ticket → the ticket
+ * journey). The raw code stays in `title` so nothing is lost to the prose.
+ */
+export function ReasonText({
+  code,
+  onJumpRun,
+  onJumpProposal,
+  onJumpTicket,
+  className = "",
+}: {
+  code: string | null | undefined;
+  onJumpRun?: (runId: string) => void;
+  onJumpProposal?: (id: string) => void;
+  onJumpTicket?: (ticketId: string) => void;
+  className?: string;
+}) {
+  const h = humanizeReason(code);
+  if (!h.text) return null;
+  const refs = h.refs ?? {};
+  // Split the sentence around each reference so the reference itself is a link.
+  const targets: Array<{ id: string; href: string; onClick?: () => void; title: string }> = [];
+  if (refs.runId)
+    targets.push({
+      id: refs.runId,
+      href: hashHref("runs", refs.runId),
+      onClick: onJumpRun ? () => onJumpRun(refs.runId!) : undefined,
+      title: `Open run ${refs.runId}`,
+    });
+  if (refs.proposalId)
+    targets.push({
+      id: refs.proposalId,
+      href: hashHref("proposals", refs.proposalId),
+      onClick: onJumpProposal ? () => onJumpProposal(refs.proposalId!) : undefined,
+      title: `Open proposal ${refs.proposalId}`,
+    });
+  if (refs.ticket)
+    targets.push({
+      id: refs.ticket,
+      href: hashHref("tickets", refs.ticket),
+      onClick: onJumpTicket ? () => onJumpTicket(refs.ticket!) : undefined,
+      title: `Open ticket journey for ${refs.ticket}`,
+    });
+  const parts: ReactNode[] = [];
+  let rest = h.text;
+  let key = 0;
+  while (rest) {
+    let firstAt = -1;
+    let hit: (typeof targets)[number] | null = null;
+    for (const t of targets) {
+      const at = rest.indexOf(t.id);
+      if (at !== -1 && (firstAt === -1 || at < firstAt)) {
+        firstAt = at;
+        hit = t;
+      }
+    }
+    if (!hit) {
+      parts.push(rest);
+      break;
+    }
+    if (firstAt > 0) parts.push(rest.slice(0, firstAt));
+    const target = hit;
+    parts.push(
+      <JumpLink
+        key={key++}
+        href={target.href}
+        onClick={
+          target.onClick
+            ? (ev) => {
+                ev?.preventDefault();
+                target.onClick!();
+              }
+            : undefined
+        }
+        title={target.title}
+        className="text-[inherit]"
+      >
+        {target.id.startsWith("run_") || target.id.startsWith("prop_") ? shortId(target.id) : target.id}
+      </JumpLink>,
+    );
+    rest = rest.slice(firstAt + hit.id.length);
+  }
+  return (
+    <span className={className} title={h.raw ?? undefined}>
+      {parts}
+    </span>
+  );
+}
+
 /**
  * The run detail blocks, shared verbatim between the Runs side panel and the
  * `#/run/:id` full page (WM-129) — one renderer, so the two views cannot
@@ -467,6 +604,8 @@ export function RunDetailBlocks({
   origin,
   onJumpAgent,
   onJumpEvent,
+  onJumpProposal,
+  onJumpRun,
   verbError,
   afterLifecycle,
 }: {
@@ -477,6 +616,9 @@ export function RunDetailBlocks({
   origin: { eventId?: string | null; eventSource?: string | null } | null;
   onJumpAgent: (ref: string) => void;
   onJumpEvent: (source: string, eventId: string) => void;
+  /** Optional: the Decisions block falls back to hash hrefs when these are absent (WM-594). */
+  onJumpProposal?: (id: string) => void;
+  onJumpRun?: (runId: string) => void;
   onCancel?: () => void;
   onRetry?: () => void;
   onForceRetry?: () => void;
@@ -492,6 +634,15 @@ export function RunDetailBlocks({
     ? (d.attempts.find((a) => a.attempt === d.run.attempts) ?? null)
     : null;
   const clocks = current ? deadlinesOf(current, d.run.spec.timeoutSeconds, now) : null;
+  const inputTicket = ticketIdOf((d.run.spec.input as Record<string, unknown> | null | undefined)?.ticket);
+
+  // The artifact's view sidecar rides the `/agents` item for this run's agent
+  // (WM-454); the same query AgentHoverCard already keeps warm, so no new
+  // request per run. No agent, no view → the JSON block, unchanged.
+  const agentsQ = useQuery({ queryKey: ["agents"], queryFn: () => api.agents(), staleTime: 30_000 });
+  const agentDef = (agentsQ.data?.agents ?? []).find(
+    (a) => a.ref === d.run.spec.agent || a.id === d.run.spec.agent,
+  );
 
   return (
     <>
@@ -546,6 +697,18 @@ export function RunDetailBlocks({
           <JsonBlock value={d.run.spec} />
         </Disclosure>
       </Section>
+
+      {/* Why the planner ran, held, or refused this ticket (WM-594) — the
+          question a REFUSED run or a re-dispatch prompts, answered in place. */}
+      {inputTicket && (
+        <TicketDecisionsPanel
+          ticket={inputTicket}
+          now={now}
+          onJumpEvent={onJumpEvent}
+          onJumpProposal={onJumpProposal}
+          onJumpRun={onJumpRun}
+        />
+      )}
 
       {/* What a live run is racing, above the verbs: cancelling is the
           answer to a budget about to be spent on a hung agent. */}
@@ -707,7 +870,17 @@ export function RunDetailBlocks({
         >
           {d.result.artifact !== undefined ? (
             <Disclosure label="artifact" defaultOpen>
-              <JsonBlock value={d.result.artifact} />
+              {agentDef?.outputView ? (
+                <Suspense fallback={<JsonBlock value={d.result.artifact} />}>
+                  <ArtifactPanel
+                    artifact={d.result.artifact}
+                    schema={agentDef.outputSchema}
+                    view={agentDef.outputView}
+                  />
+                </Suspense>
+              ) : (
+                <JsonBlock value={d.result.artifact} />
+              )}
             </Disclosure>
           ) : (
             <Disclosure label="result" defaultOpen>

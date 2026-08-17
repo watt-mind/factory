@@ -194,3 +194,29 @@ export function validateArtifactView(view, outputSchema) {
 
   return { valid: errors.length === 0, errors };
 }
+
+/**
+ * The lines `cli.mjs inspect` prints first in its result section when the
+ * run's agent ships a view (design §2.4): the `summary` prose, then the
+ * status as `<label>: <value>` where the label is the last token of
+ * `status.path` (`recommendation: ESCALATE`). Pure; a pointer that does not
+ * resolve in this artifact contributes nothing, and no view means no lines.
+ * @returns {string[]}
+ */
+export function inspectHeader(view, artifact) {
+  if (!isObject(view)) return [];
+  const lines = [];
+  if (typeof view.summary === "string") {
+    const summary = resolvePointer(artifact, view.summary);
+    if (typeof summary === "string" && summary.trim()) lines.push(summary.trim());
+  }
+  if (isObject(view.status) && typeof view.status.path === "string") {
+    const value = resolvePointer(artifact, view.status.path);
+    if (value !== undefined && value !== null && (typeof value !== "object")) {
+      const tokens = parsePointer(view.status.path) ?? [];
+      const label = tokens.length ? tokens[tokens.length - 1] : "status";
+      lines.push(`${label}: ${String(value)}`);
+    }
+  }
+  return lines;
+}

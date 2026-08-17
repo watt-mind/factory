@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ScheduleItem, type TriggerOutcome } from "../api";
-import { useListKeys, useNow } from "../hooks";
+import { useListKeys, useNow, useTabKeys } from "../hooks";
 import {
+  DEFAULT_ORDER,
   cycleColumnSort,
   defaultDisplayState,
   sortRows,
@@ -54,6 +55,43 @@ export function scheduleFilterTokens(s: ScheduleItem): string[] {
 
 const scheduleState = (schedule: ScheduleItem): string =>
   schedule.error ? "error" : !schedule.enabled ? "not scheduled" : schedule.stopped ? "stopped" : "running";
+
+type ScheduleTab = "all" | "enabled" | "disabled";
+const SCHEDULE_TABS: readonly ScheduleTab[] = ["all", "enabled", "disabled"];
+
+/** The registry's operator-first order when no column sort is selected. */
+export function compareSchedules(a: ScheduleItem, b: ScheduleItem): number {
+  if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+  // Disabled schedules are not due, even if the API retains a historical
+  // nextDue value; the table renders "-" for them, so name is their tie-break.
+  const parsedADue = a.enabled && a.nextDue ? Date.parse(a.nextDue) : Number.POSITIVE_INFINITY;
+  const parsedBDue = b.enabled && b.nextDue ? Date.parse(b.nextDue) : Number.POSITIVE_INFINITY;
+  const aDue = Number.isNaN(parsedADue) ? Number.POSITIVE_INFINITY : parsedADue;
+  const bDue = Number.isNaN(parsedBDue) ? Number.POSITIVE_INFINITY : parsedBDue;
+  if (aDue !== bDue) return aDue - bDue;
+  return a.loop.localeCompare(b.loop);
+}
+
+function ScheduleStateBadge({
+  state,
+  hue,
+  title,
+}: {
+  state: string;
+  hue: string;
+  title: string;
+}) {
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] font-medium"
+      style={{ color: hue, background: `color-mix(in oklch, ${hue} 12%, transparent)` }}
+      title={title}
+    >
+      <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
+      {state}
+    </span>
+  );
+}
 
 const SCHEDULES_SORT: DisplayConfig<ScheduleItem> = {
   view: "schedules-table-sort",
@@ -145,16 +183,41 @@ export function Schedules({
   });
   const allEvents = eventsQ.data?.events ?? [];
 
+  const enabledCount = rows.filter((schedule) => schedule.enabled).length;
+  const disabledCount = rows.length - enabledCount;
+  const [tab, setTab] = useState<ScheduleTab>("enabled");
+  useTabKeys(SCHEDULE_TABS, tab, setTab);
+
   const [filter, setFilter] = useState("");
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((s) =>
-      scheduleFilterTokens(s).some((v) => (v ?? "").toLowerCase().includes(q)),
-    );
-  }, [rows, filter]);
+    return rows.filter((schedule) => {
+      if (tab === "enabled" && !schedule.enabled) return false;
+      if (tab === "disabled" && schedule.enabled) return false;
+      return !q || scheduleFilterTokens(schedule).some((value) => value.toLowerCase().includes(q));
+    });
+  }, [rows, tab, filter]);
   const [sort, setSort] = useState(() => defaultDisplayState(SCHEDULES_SORT));
-  const visible = useMemo(() => sortRows(filtered, SCHEDULES_SORT, sort), [filtered, sort]);
+  const visible = useMemo(
+    () => sort.sortBy === DEFAULT_ORDER
+      ? [...filtered].sort(compareSchedules)
+      : sortRows(filtered, SCHEDULES_SORT, sort),
+    [filtered, sort],
+  );
+  const nextSchedule = useMemo(
+    () => [...rows]
+      .filter((schedule) => schedule.enabled && schedule.nextDue && !Number.isNaN(Date.parse(schedule.nextDue)))
+      .sort(compareSchedules)[0] ?? null,
+    [rows],
+  );
+  const nextFireSeconds = nextSchedule?.nextDue
+    ? Math.max(0, Math.floor((Date.parse(nextSchedule.nextDue) - now) / 1000))
+    : null;
+  const nextFireLabel = nextFireSeconds === null
+    ? "not scheduled"
+    : nextFireSeconds === 0
+      ? "due now"
+      : `in ${Math.floor(nextFireSeconds / 60)}:${String(nextFireSeconds % 60).padStart(2, "0")}`;
 
   const selectedLoop = focusScheduleLoop;
   const selectedIndex = useMemo(
@@ -212,8 +275,14 @@ export function Schedules({
   }, [selectedIndex, rejumpEpoch]);
 
   useEffect(() => {
-    if (focusScheduleLoop) setFilter("");
-  }, [focusScheduleLoop]);
+    if (!focusScheduleLoop) return;
+    setFilter("");
+    const focused = rows.find((schedule) => schedule.loop === focusScheduleLoop);
+    // Keep deep-linked selections visible, but preserve an explicit All choice.
+    if (focused && tab !== "all" && focused.enabled !== (tab === "enabled")) {
+      setTab(focused.enabled ? "enabled" : "disabled");
+    }
+  }, [focusScheduleLoop, rows, tab]);
 
   const submitTrigger = () => {
     if (!confirmLoop) return;
@@ -299,6 +368,39 @@ export function Schedules({
               surface="registry"
               subject={{ label: "Schedules", plural: true }}
             />
+            <div className="mb-2 flex gap-1" role="tablist" aria-label="Schedule state">
+              {SCHEDULE_TABS.map((scheduleTab) => {
+                const count = scheduleTab === "all"
+                  ? rows.length
+                  : scheduleTab === "enabled"
+                    ? enabledCount
+                    : disabledCount;
+                return (
+                  <button
+                    key={scheduleTab}
+                    id={`schedule-tab-${scheduleTab}`}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === scheduleTab}
+                    aria-controls="schedule-table-panel"
+                    tabIndex={tab === scheduleTab ? 0 : -1}
+                    onClick={() => setTab(scheduleTab)}
+                    className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                      tab === scheduleTab
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-faint) hover:bg-(--surface-1)"
+                    }`}
+                  >
+                    {scheduleTab[0]!.toUpperCase() + scheduleTab.slice(1)}
+                    <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mb-3 text-[11px] text-(--text-faint)" aria-label="Schedule summary">
+              {enabledCount} enabled · {disabledCount} disabled · next fire {nextFireLabel}
+              {nextSchedule && <> ({nextSchedule.loop})</>}
+            </p>
             <div className="mb-3">
               <FilterInput
                 value={filter}
@@ -310,6 +412,11 @@ export function Schedules({
           </>
         }
       >
+        <div
+          id="schedule-table-panel"
+          role="tabpanel"
+          aria-labelledby={`schedule-tab-${tab}`}
+        >
         <table className="w-full border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
@@ -344,7 +451,7 @@ export function Schedules({
                   key={s.loop}
                   onClick={() => onSelectSchedule(s.loop)}
                   aria-selected={isSel}
-                  className={`cursor-pointer border-b border-(--border) text-[13px] hover:bg-(--surface-2) ${
+                  className={`group cursor-pointer border-b border-(--border) text-[13px] hover:bg-(--surface-2) ${
                     isSel ? "row-selected bg-(--surface-3)" : ""
                   }`}
                 >
@@ -355,38 +462,22 @@ export function Schedules({
                     {s.every}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                    {s.enabled ? (
-                      <span
-                        className="mono text-[11px] text-(--hue-ok)"
-                        title="enabled: true in event-runtime/schedules.json — the scheduler will fire this loop on cadence"
-                      >
-                        enabled
-                      </span>
-                    ) : (
-                      <span
-                        className="mono text-[11px] text-(--text-faint)"
-                        title="enabled: false in event-runtime/schedules.json — edit that file (or use the CLI) to re-enable"
-                      >
-                        disabled
-                      </span>
-                    )}
+                    <ScheduleStateBadge
+                      state={s.enabled ? "enabled" : "disabled"}
+                      hue={s.enabled ? "var(--hue-ok)" : "var(--text-faint)"}
+                      title={s.enabled
+                        ? "enabled: true in event-runtime/schedules.json — the scheduler will fire this loop on cadence"
+                        : "enabled: false in event-runtime/schedules.json — edit that file (or use the CLI) to re-enable"}
+                    />
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                    {isAuto ? (
-                      <span
-                        className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
-                        title="approval: auto — executes unattended without operator prompt"
-                        style={{
-                          color: "var(--hue-warn)",
-                          borderColor: "color-mix(in oklch, var(--hue-warn) 40%, var(--border))",
-                          background: "color-mix(in oklch, var(--hue-warn) 12%, transparent)",
-                        }}
-                      >
-                        auto
-                      </span>
-                    ) : (
-                      <span className="text-[11px] text-(--text-dim)">watched</span>
-                    )}
+                    <ScheduleStateBadge
+                      state={isAuto ? "auto" : "watched"}
+                      hue={isAuto ? "var(--hue-warn)" : "var(--hue-info)"}
+                      title={isAuto
+                        ? "approval: auto — executes unattended without operator prompt"
+                        : "approval: watched — requires human approval"}
+                    />
                   </td>
                   <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
                     {s.catchUp}
@@ -446,12 +537,14 @@ export function Schedules({
                     )}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-right">
-                    <Button
-                      disabled={connected === false}
-                      onClick={() => setConfirmLoop(s)}
-                    >
-                      Run now…
-                    </Button>
+                    <span className="pointer-events-none opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                      <Button
+                        disabled={connected === false}
+                        onClick={() => setConfirmLoop(s)}
+                      >
+                        Run now…
+                      </Button>
+                    </span>
                   </td>
                 </tr>
               );
@@ -471,6 +564,7 @@ export function Schedules({
           Enable or disable schedules in{" "}
           <code className="mono">event-runtime/schedules.json</code> (or via the CLI) — there is no
           toggle here.
+        </div>
         </div>
       </ListPane>
 
@@ -661,20 +755,24 @@ export function Schedules({
                     return (
                       <div
                         key={`${e.source}:${e.eventId}`}
-                        className="flex items-center justify-between gap-3 rounded border border-(--border) bg-(--surface-2) px-3 py-2 text-[12px]"
+                        className="flex min-w-0 flex-col items-stretch rounded border border-(--border) bg-(--surface-2) px-3 py-2 text-[12px]"
                       >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <JumpLink onClick={() => onJumpEvent(e.source, e.eventId)}>
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <JumpLink
+                              className="min-w-0 truncate"
+                              title={e.eventId}
+                              onClick={() => onJumpEvent(e.source, e.eventId)}
+                            >
                               {e.eventId}
                             </JumpLink>
                             {isAdhoc && (
-                              <span className="rounded bg-(--surface-3) px-1 text-[11px] text-(--hue-info)">
+                              <span className="shrink-0 rounded bg-(--surface-3) px-1 text-[11px] text-(--hue-info)">
                                 ad-hoc
                               </span>
                             )}
                           </div>
-                          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-(--text-dim)">
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-(--text-dim)">
                             <Ago iso={e.occurredAt} now={now} />
                             <span>·</span>
                             <span>source: {e.source}</span>
@@ -688,7 +786,7 @@ export function Schedules({
                             )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-3 text-right">
+                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                           <span
                             className="mono text-[11px]"
                             style={{ color: EVENT_STATUS_HUES[e.status] ?? "inherit" }}

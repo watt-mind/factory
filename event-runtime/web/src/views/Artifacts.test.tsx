@@ -2,9 +2,12 @@ import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { useState } from "react";
 import type { ArtifactInventoryItem } from "../types";
 import { Artifacts, formatBytes, type ArtifactFilters } from "./Artifacts";
+import { ARTIFACT_RAW_KEY } from "../components/ArtifactView";
 import { handleRunArtifactClick } from "./Runs";
 
 const originalFetch = globalThis.fetch;
@@ -57,16 +60,19 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
   localStorage.removeItem("evrt-display-artifacts");
+  localStorage.removeItem(ARTIFACT_RAW_KEY);
 });
 
 function renderArtifacts(
   onJumpRun = mock(() => {}),
   initialFilters: ArtifactFilters = { kind: null, orphan: null, search: "" },
+  seed: { items?: ArtifactInventoryItem[]; agents?: unknown[] } = {},
 ) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchInterval: false, staleTime: Infinity } },
   });
-  client.setQueryData(["artifacts"], { artifacts: ITEMS });
+  client.setQueryData(["artifacts"], { artifacts: seed.items ?? ITEMS });
+  if (seed.agents) client.setQueryData(["agents"], { agents: seed.agents, edges: {}, eventTypes: [], contracts: {} });
   client.setQueryData(["events", "all-for-artifacts"], {
     events: [
       {
@@ -231,5 +237,64 @@ describe("Artifacts inventory (WM-207)", () => {
     );
     fireEvent.click(runLink.getByRole("link", { name: "Open" }));
     expect(window.location.hash).toBe(`#/${`artifacts/${"b".repeat(64)}`}`);
+  });
+});
+
+describe("Artifacts inspector renders a view for the producing agent's artifact (WM-455)", () => {
+  const MERGE_VIEW = JSON.parse(readFileSync(path.resolve(import.meta.dir, "../../../agents/merge-scan.view.json"), "utf8"));
+  const MERGE_AGENT = { ref: "merge-scan@2", id: "merge-scan", outputSchema: { title: "merge plan" }, outputView: MERGE_VIEW };
+  const MERGE_ITEM: ArtifactInventoryItem = {
+    sha256: "d".repeat(64),
+    sizeBytes: 900,
+    mtime: "2026-01-05T03:04:05.000Z",
+    referenced: true,
+    references: [
+      { runId: "run_merge", kind: "report", agent: "merge-scan@2", state: "COMPLETED", createdAt: "2026-01-05T03:04:05.000Z" },
+    ],
+  };
+  const MERGE_PLAN = {
+    recommendation: "ESCALATE",
+    repo: "factory",
+    github: "watt-mind/factory",
+    base: "develop",
+    deployBranch: "main",
+    plan: [],
+    fix: [],
+    escalate: [{ pr: 471, ticket: "WM-210", headSha: "c".repeat(40), reason: "Draft hold." }],
+    summary: "One PR held.",
+  };
+
+  test("a stored merge-plan JSON draws through the merge-scan view, Raw swaps back to the line preview", async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MERGE_PLAN), { status: 200 })) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${"d".repeat(64)}`;
+    const view = renderArtifacts(undefined, undefined, { items: [MERGE_ITEM, ...ITEMS], agents: [MERGE_AGENT] });
+
+    expect(await view.findByText("One PR held.")).toBeTruthy();
+    expect(view.getByText("ESCALATE")).toBeTruthy();
+    expect((view.getByRole("link", { name: "#471" }) as HTMLAnchorElement).getAttribute("href")).toBe(
+      "https://github.com/watt-mind/factory/pull/471",
+    );
+    expect(view.queryByRole("region", { name: "Artifact content" })).toBeNull();
+    expect(view.queryByRole("combobox", { name: "Search artifact content" })).toBeNull();
+    expect(view.getByText(/Merge plan · merge-scan@2/)).toBeTruthy();
+
+    fireEvent.click(view.getByRole("button", { name: "Raw" }));
+    const preview = view.getByRole("region", { name: "Artifact content" });
+    expect(preview.textContent).toContain('"recommendation": "ESCALATE"');
+    expect(view.getByRole("combobox", { name: "Search artifact content" })).toBeTruthy();
+    expect(localStorage.getItem(ARTIFACT_RAW_KEY)).toBe("1");
+
+    fireEvent.click(view.getByRole("button", { name: "View" }));
+    expect(view.queryByRole("region", { name: "Artifact content" })).toBeNull();
+    expect(view.getByText("One PR held.")).toBeTruthy();
+  });
+
+  test("a transcript from an agent with a view keeps the plain preview — the view says nothing about it", async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({ type: "assistant", text: "hi" }), { status: 200 })) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${"d".repeat(64)}`;
+    const view = renderArtifacts(undefined, undefined, { items: [MERGE_ITEM, ...ITEMS], agents: [MERGE_AGENT] });
+    const preview = await view.findByRole("region", { name: "Artifact content" });
+    expect(preview.textContent).toContain('"type": "assistant"');
+    expect(view.queryByRole("group", { name: "Artifact rendering" })).toBeNull();
   });
 });

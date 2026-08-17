@@ -316,6 +316,55 @@ export interface AgentEventRoute {
   resolvedModel: string | null;
 }
 
+/**
+ * `factory.artifact-view/v1` — the sidecar rendering hints an agent may ship
+ * beside its output schema (docs/event-runtime-artifact-views.md §2.2). The
+ * closed vocabularies mirror `SECTION_KINDS` / `FORMATS` / `TONES` in
+ * `event-runtime/lib/artifact-view.mjs`; per-`as` key applicability is
+ * enforced there at registry load, so the web renderer trusts the shape.
+ */
+export type ArtifactTone = "ok" | "warn" | "error" | "muted" | "neutral";
+export type ArtifactFormat =
+  | "issue"
+  | "pr"
+  | "url"
+  | "sha"
+  | "repo"
+  | "run"
+  | "duration"
+  | "datetime"
+  | "state"
+  | "bytes"
+  | "count";
+export type ArtifactSectionKind = "table" | "keyvalue" | "list" | "badge" | "code" | "prose";
+export interface ArtifactViewSection {
+  /** RFC 6901 pointer into the artifact; `""` is the whole document. */
+  path: string;
+  as: ArtifactSectionKind;
+  label?: string;
+  /** table */
+  columns?: string[];
+  groupBy?: string;
+  expand?: string[];
+  /** keyvalue */
+  keys?: string[];
+  /** list */
+  itemLabel?: string;
+  /** code */
+  language?: string;
+  /** column/key (or `""` for the section value itself) → format */
+  formats?: Record<string, ArtifactFormat>;
+  /** table/keyvalue/list: column/key → (value → tone); badge: value → tone */
+  tone?: Record<string, ArtifactTone | Record<string, ArtifactTone>>;
+}
+export interface ArtifactView {
+  schemaVersion: "factory.artifact-view/v1";
+  title?: string;
+  summary?: string;
+  status?: { path: string; tone: Record<string, ArtifactTone> };
+  sections: ArtifactViewSection[];
+}
+
 /** One registered agent, fully readable: definition, prompt, schemas, pins. */
 export interface AgentDef {
   ref: string;
@@ -334,7 +383,7 @@ export interface AgentDef {
   outputSchema: unknown;
   /** Artifact-view sidecar (WM-454), null when the agent ships none. */
   outputViewFile?: string | null;
-  outputView?: unknown;
+  outputView?: ArtifactView | null;
   pins: Record<string, string>;
   /** Closed-execution shape: fixed argv (command adapter) or action registry. */
   command: string[] | null;

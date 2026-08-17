@@ -22,6 +22,17 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
+import { refuseSandbox } from "./sandboxed.mjs";
+
+/**
+ * No guest execution path exists for this adapter (WM-313): its actions are
+ * `ssh` to registered hosts, which a deny-all guest cannot reach and which
+ * would need the SSH agent — the one thing the sandbox exists to withhold.
+ * A sandboxed definition is refused, not run on the host.
+ */
+export const SANDBOX_SUPPORT = "unsupported";
+const SANDBOX_REFUSAL_REASON =
+  "the actions adapter runs registered ssh templates against remote hosts; there is no guest execution path and the SSH agent must not enter the microVM";
 
 const OUTPUT_TAIL_CHARS = 2_000;
 
@@ -220,6 +231,7 @@ async function executeItemList({ spec, def, workspaceDir, timeoutMs }) {
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean }>}
  */
 export async function execute({ spec, def, workspaceDir, timeoutMs }) {
+  refuseSandbox("actions", def, SANDBOX_REFUSAL_REASON);
   // Two closed-registry shapes: a per-item local argv list (OPS-229) and the
   // remote probe → act → probe flow (OPS-208). The definition picks.
   if (def.itemsField) return executeItemList({ spec, def, workspaceDir, timeoutMs });

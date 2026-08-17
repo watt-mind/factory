@@ -1,5 +1,23 @@
+import { inspectHeader } from "../lib/artifact-view.mjs";
 import { fail, pad, withClient } from "./shared.mjs";
 import { spendLine } from "./status.mjs";
+
+/**
+ * The view sidecar for this run's agent, from `GET /agents` (WM-454), or
+ * null when the agent ships none — or when the registry cannot be read:
+ * `inspect` is a read of one run and must not fail because the header
+ * garnish did.
+ */
+async function viewFor(client, agentRef) {
+  if (typeof client.agents !== "function") return null;
+  try {
+    const { agents = [] } = await client.agents();
+    const def = agents.find((a) => a.ref === agentRef || a.id === agentRef);
+    return def?.outputView ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export async function inspect(client, runId) {
   const view = await client.run(runId);
@@ -30,6 +48,12 @@ export async function inspect(client, runId) {
   }
   if (view.result) {
     console.log("\nresult");
+    // The view's summary and status first (WM-455): what the artifact says,
+    // before the JSON that says it.
+    if (view.result.artifact !== undefined) {
+      const artifactView = await viewFor(client, run.spec.agent);
+      for (const line of inspectHeader(artifactView, view.result.artifact)) console.log(`  ${line}`);
+    }
     console.log(
       `  terminalState ${view.result.terminalState}   reason ${view.result.reasonCode ?? "-"}`,
     );

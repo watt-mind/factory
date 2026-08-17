@@ -982,6 +982,38 @@ export function StateBadge({
   );
 }
 
+export function StatCard({
+  label,
+  value,
+  suffix,
+  caption,
+  hue,
+  compact = false,
+}: {
+  label: string;
+  value: ReactNode;
+  suffix?: ReactNode;
+  caption?: ReactNode;
+  hue?: string;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      data-stat-card
+      className={`${compact ? "min-w-0 rounded-md px-3 py-2" : "min-w-36 rounded-lg px-3.5 py-3"} border border-(--border) bg-(--surface-1)`}
+    >
+      <div className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">{label}</div>
+      <div className={`display font-semibold tabular-nums ${compact ? "mt-0.5 text-lg" : "mt-1 text-xl"}`}>
+        <span data-stat-value style={hue ? { color: hue } : undefined}>{value}</span>
+        {suffix}
+      </div>
+      {caption != null && (
+        <div className={`${compact ? "text-[10px]" : "text-[11px]"} mt-0.5 text-(--text-faint)`}>{caption}</div>
+      )}
+    </div>
+  );
+}
+
 export function StatTile({
   label,
   value,

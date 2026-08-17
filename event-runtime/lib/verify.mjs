@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
+import { validateDecisionRequest } from "./decision.mjs";
 import { validate } from "./schema.mjs";
 import { PathViolation, safeJoin } from "./workspace.mjs";
 
@@ -194,6 +195,9 @@ export function verifyResult({
   if (!shape.valid) throw new ContractViolation(shape.errors);
 
   if (candidate.terminalState === "refused") return verifyRefused({ spec, def, candidate, attempt });
+  if (candidate.decision !== undefined) {
+    throw new ContractViolation(["decision_not_allowed_on_completed_result"]);
+  }
   return verifyCompleted({
     spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts, worktreeRecord, verifyTimeoutMs,
   });
@@ -214,6 +218,18 @@ function verifyRefused({ spec, def, candidate, attempt }) {
 
   const context = {};
   const checks = ["schema_valid"];
+  if (candidate.decision !== undefined) {
+    const decisionCheck = validateDecisionRequest(candidate.decision, {
+      refs: {
+        issue: spec.input?.ticket,
+        repo: spec.input?.repo,
+        runId: spec.runId,
+      },
+    });
+    if (decisionCheck.valid) context.decision = candidate.decision;
+    else context.decisionErrors = decisionCheck.errors;
+    checks.push("decision_validated");
+  }
   if (candidate.artifact !== undefined) {
     const artifactCheck = validate(def.outputSchema, candidate.artifact);
     if (!artifactCheck.valid) throw new ContractViolation(artifactCheck.errors);

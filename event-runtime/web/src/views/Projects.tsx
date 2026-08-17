@@ -42,7 +42,11 @@ const projectTarget = (repo: RepoItem) => repo.project || repo.github || repo.pa
 const worktreeScripts = (repo: RepoItem) =>
   [repo.hasWorktreeUp && "up", repo.hasWorktreeDown && "down", repo.hasWorktreeWarm && "warm"]
     .filter(Boolean)
-    .join(" · ") || "—";
+    .join(" · ");
+
+const defaultProjectOrder = (a: RepoItem, b: RepoItem) =>
+  Number(a.reportOnly) - Number(b.reportOnly) ||
+  a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
 
 const PROJECTS_SORT: DisplayConfig<RepoItem> = {
   view: "projects-table-sort",
@@ -131,10 +135,19 @@ export function Projects({
   });
 
   const repos = query.data?.repos ?? [];
+  const modeCounts = useMemo(
+    () => ({
+      ALL: repos.length,
+      DISPATCHABLE: repos.filter((repo) => !repo.reportOnly).length,
+      REPORT_ONLY: repos.filter((repo) => repo.reportOnly).length,
+    }),
+    [repos],
+  );
+  const defaultOrdered = useMemo(() => repos.slice().sort(defaultProjectOrder), [repos]);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return repos.filter((r) => {
+    return defaultOrdered.filter((r) => {
       if (filterMode === "DISPATCHABLE" && r.reportOnly) return false;
       if (filterMode === "REPORT_ONLY" && !r.reportOnly) return false;
       if (!q) return true;
@@ -145,7 +158,7 @@ export function Projects({
         (r.github && r.github.toLowerCase().includes(q))
       );
     });
-  }, [repos, filter, filterMode]);
+  }, [defaultOrdered, filter, filterMode]);
   const [sort, setSort] = useState(() => defaultDisplayState(PROJECTS_SORT));
   const visible = useMemo(() => sortRows(filtered, PROJECTS_SORT, sort), [filtered, sort]);
 
@@ -384,34 +397,35 @@ export function Projects({
               surface="registry"
               subject={{ label: "Projects", plural: true }}
             />
-            <div className="mb-3">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="flex min-w-0 flex-1 flex-wrap gap-1 text-[12px]" role="tablist" aria-label="Project mode">
+                {PROJECT_MODES.map((mode, idx) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="tab"
+                    aria-selected={filterMode === mode}
+                    onClick={() => setFilterMode(mode)}
+                    className={`shrink-0 rounded-md px-2.5 py-1 font-medium transition-colors ${
+                      filterMode === mode
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+                    }`}
+                  >
+                    {mode === "ALL" ? "All" : mode === "DISPATCHABLE" ? "Dispatchable" : "Report-Only"}
+                    <span className="ml-1.5 tabular-nums text-(--text-faint)">{modeCounts[mode]}</span>
+                    <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
+                      {idx + 1}
+                    </span>
+                  </button>
+                ))}
+              </div>
               <FilterInput
                 value={filter}
                 onChange={setFilter}
                 placeholder="Filter repo, project, team, github… (/)"
                 label="Filter repositories"
               />
-            </div>
-            <div className="mb-3 flex gap-1 text-[12px]" role="tablist" aria-label="Project mode">
-              {PROJECT_MODES.map((mode, idx) => (
-                <button
-                  key={mode}
-                  type="button"
-                  role="tab"
-                  aria-selected={filterMode === mode}
-                  onClick={() => setFilterMode(mode)}
-                  className={`rounded px-2 py-0.5 font-medium transition-colors ${
-                    filterMode === mode
-                      ? "bg-(--surface-3) text-(--text)"
-                      : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
-                  }`}
-                >
-                  {mode === "ALL" ? "All" : mode === "DISPATCHABLE" ? "Dispatchable" : "Report-Only"}
-                  <span aria-hidden="true" className="mono ml-1 text-(--text-faint) text-[10px] opacity-70">
-                    {idx + 1}
-                  </span>
-                </button>
-              ))}
             </div>
           </>
         }
@@ -477,7 +491,7 @@ export function Projects({
                     {r.deployBranch ? ` → ${r.deployBranch}` : ""}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-faint)">
-                    {worktreeScripts(r)}
+                    {worktreeScripts(r) || <span className="text-(--text-faint)">—</span>}
                   </td>
                 </tr>
               );

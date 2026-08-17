@@ -356,16 +356,52 @@ export type AnomalyKind =
   | "schedule"
   | "configuration";
 
+type DeadLetter = NonNullable<StatusView["anomalies"]>["deadLettered"][number];
+
+export interface DeadLetterGroup {
+  source: string;
+  errorMessage: string;
+  events: DeadLetter[];
+}
+
 export interface AnomalyRow {
   kind: AnomalyKind;
   text: string;
   links: { label: string; go: () => void }[];
   requeue?: { source: string; eventId: string };
   archive?: { source: string; eventId: string };
+  deadLetterGroup?: DeadLetterGroup;
   releaseWorker?: { workerId: string; runId: string };
   dismissProposalId?: string;
   proposalId?: string;
   proposal?: Proposal;
+}
+
+/** Collapse dead letters that represent the same operator problem. */
+export function groupDeadLetters(deadLetters: DeadLetter[]): DeadLetterGroup[] {
+  const groups = new Map<string, DeadLetterGroup>();
+  for (const event of deadLetters) {
+    const errorMessage = event.lastError ?? "unknown error";
+    const key = JSON.stringify([event.source, errorMessage]);
+    const group = groups.get(key);
+    if (group) group.events.push(event);
+    else groups.set(key, { source: event.source, errorMessage, events: [event] });
+  }
+  return [...groups.values()];
+}
+
+/** Remove a kind prefix when the adjacent badge already communicates it. */
+export function stripAnomalyKindPrefix(kind: AnomalyKind, text: string): string {
+  const label = kind.replaceAll("_", "-");
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const colonPrefix = new RegExp(`^${escaped}\\s*:\\s*`, "i");
+  if (colonPrefix.test(text)) return text.replace(colonPrefix, "");
+
+  const inflectedPrefix = new RegExp(`^${escaped}ed\\s*\\(([^)]*)\\)\\s*:?\\s*`, "i");
+  const match = text.match(inflectedPrefix);
+  if (!match) return text;
+  const remainder = text.slice(match[0].length);
+  return `${match[1]}${remainder ? `: ${remainder}` : ""}`;
 }
 
 /**
@@ -404,7 +440,7 @@ export function buildAnomalyRows(
   for (const warning of anomalies.configuration ?? []) {
     rows.push({
       kind: "configuration",
-      text: `configuration: ${warning}`,
+      text: stripAnomalyKindPrefix("configuration", `configuration: ${warning}`),
       links: [],
     });
   }
@@ -438,13 +474,18 @@ export function buildAnomalyRows(
       ],
     });
   }
-  for (const d of anomalies.deadLettered) {
+  for (const group of groupDeadLetters(anomalies.deadLettered)) {
+    const first = group.events[0]!;
     rows.push({
       kind: "dead_letter",
-      text: `dead-lettered (${d.source}, ${d.eventId}): ${d.lastError ?? "unknown error"}`,
-      links: [{ label: "View event", go: () => callbacks.onJumpEvents({ source: d.source, eventId: d.eventId }) }],
-      requeue: { source: d.source, eventId: d.eventId },
-      archive: { source: d.source, eventId: d.eventId },
+      text:
+        group.events.length > 1
+          ? `${group.events.length} dead-lettered · ${group.source} · ${group.errorMessage}`
+          : `${group.source} · ${group.errorMessage}`,
+      links: [{ label: "View event", go: () => callbacks.onJumpEvents({ source: first.source, eventId: first.eventId }) }],
+      requeue: group.events.length === 1 ? { source: first.source, eventId: first.eventId } : undefined,
+      archive: group.events.length === 1 ? { source: first.source, eventId: first.eventId } : undefined,
+      deadLetterGroup: group,
     });
   }
   for (const w of anomalies.stalledWorkers) {
@@ -662,6 +703,11 @@ export function Overview({
   const pollRequeue = useRequeuePoll(onJumpProposal);
   const [rejectingProposalId, setRejectingProposalId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [expandedDeadLetterGroups, setExpandedDeadLetterGroups] = useState<Set<string>>(new Set());
+  const [bulkDeadLetterAction, setBulkDeadLetterAction] = useState<{
+    action: "archive" | "requeue";
+    group: DeadLetterGroup;
+  } | null>(null);
   const status = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
   const outbox = useQuery({
     queryKey: ["outbox"],
@@ -690,11 +736,11 @@ export function Overview({
   const requeue = useMutation({
     mutationFn: ({ source, eventId }: { source: string; eventId: string }) => api.requeue(source, eventId),
     onSuccess: async (_, { source, eventId }) => {
-      queryClient.invalidateQueries();
+      await queryClient.invalidateQueries({ queryKey: ["status"] });
       notify(`Requeued event ${eventId}`, "ok");
       await pollRequeue(source, eventId);
     },
-    onError: () => queryClient.invalidateQueries(),
+    onError: () => queryClient.invalidateQueries({ queryKey: ["status"] }),
   });
 
   const resolveAnomaly = useMutation({
@@ -706,11 +752,49 @@ export function Overview({
       if (target.kind === "archive") return api.archive(target.source, target.eventId).then(() => undefined);
       return api.releaseWorker(target.workerId, target.runId).then(() => undefined);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries();
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["status"] });
       notify("Anomaly resolved", "ok");
     },
-    onError: () => queryClient.invalidateQueries(),
+    onError: () => queryClient.invalidateQueries({ queryKey: ["status"] }),
+  });
+
+  const bulkDeadLetter = useMutation({
+    mutationFn: async ({
+      action,
+      group,
+    }: {
+      action: "archive" | "requeue";
+      group: DeadLetterGroup;
+    }) => {
+      const results = await Promise.allSettled(
+        group.events.map((event) =>
+          action === "archive"
+            ? api.archive(event.source, event.eventId)
+            : api.requeue(event.source, event.eventId),
+        ),
+      );
+      return {
+        succeeded: group.events.filter((_, index) => results[index]?.status === "fulfilled"),
+        failed: results.filter((result) => result.status === "rejected").length,
+      };
+    },
+    onSuccess: async ({ succeeded, failed }, { action, group }) => {
+      await queryClient.invalidateQueries({ queryKey: ["status"] });
+      setBulkDeadLetterAction(null);
+      if (failed > 0) {
+        notify(
+          `${succeeded.length} of ${group.events.length} events ${action === "archive" ? "archived" : "requeued"}; ${failed} failed`,
+          "err",
+        );
+      } else {
+        notify(`${action === "archive" ? "Archived" : "Requeued"} ${group.events.length} events`, "ok");
+      }
+      if (action === "requeue") {
+        await Promise.all(succeeded.map((event) => pollRequeue(event.source, event.eventId)));
+      }
+    },
+    onError: () => queryClient.invalidateQueries({ queryKey: ["status"] }),
   });
 
   const reject = useMutation({
@@ -719,13 +803,20 @@ export function Overview({
       if (!trimmed) return Promise.reject(new Error("Rejection reason required"));
       return api.reject(proposalId, trimmed);
     },
-    onSuccess: (_, { proposalId }) => {
-      queryClient.invalidateQueries();
+    onSuccess: async (_, { proposalId }) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["status"] }),
+        queryClient.invalidateQueries({ queryKey: ["proposals"] }),
+      ]);
       notify(`Rejected proposal ${proposalId}`, "info");
       setRejectingProposalId(null);
       setRejectReason("");
     },
-    onError: () => queryClient.invalidateQueries(),
+    onError: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["status"] }),
+        queryClient.invalidateQueries({ queryKey: ["proposals"] }),
+      ]),
   });
 
   const closeReject = () => {
@@ -765,7 +856,21 @@ export function Overview({
   }, [anomalies, proposalsById, onJumpProposal, onJumpRuns, onJumpEvents, onJumpRun, onNavigate, s, now]);
 
   const hasAnomalies = anomalyRows.length > 0;
+  const deadLetterEventCount = anomalies?.deadLettered.length ?? 0;
   const anomalyRowRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  const deadLetterGroupKey = (group: DeadLetterGroup) =>
+    JSON.stringify([group.source, group.errorMessage]);
+
+  const toggleDeadLetterGroup = (group: DeadLetterGroup) => {
+    const key = deadLetterGroupKey(group);
+    setExpandedDeadLetterGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -790,15 +895,19 @@ export function Overview({
 
       if (e.key === "r") {
         const focused = anomalyRows[focusedIndex];
-        if (!focused?.requeue || !connected || requeue.isPending) return;
+        if (!focused?.deadLetterGroup || !connected || requeue.isPending || bulkDeadLetter.isPending) return;
         e.preventDefault();
-        requeue.mutate(focused.requeue);
+        if (focused.deadLetterGroup.events.length > 1) {
+          setBulkDeadLetterAction({ action: "requeue", group: focused.deadLetterGroup });
+        } else if (focused.requeue) {
+          requeue.mutate(focused.requeue);
+        }
       }
     }
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [anomalyRows, connected, onJumpEvents, onJumpRuns, onNavigate, requeue]);
+  }, [anomalyRows, bulkDeadLetter.isPending, connected, onJumpEvents, onJumpRuns, onNavigate, requeue]);
 
   const activeRunStates: RunState[] = ["QUEUED", "LEASED", "RUNNING", "VERIFYING"];
   const terminalRunStates: RunState[] = ["COMPLETED", "FAILED", "REFUSED", "TIMED_OUT", "CANCELLED"];
@@ -917,118 +1026,235 @@ export function Overview({
             <div className="flex items-center gap-2 text-[12px] font-semibold text-(--hue-warn)">
               <span className="size-2 rounded-full bg-(--hue-warn) motion-safe:animate-pulse" />
               Anomalies · {anomalyRows.length} active issue{anomalyRows.length === 1 ? "" : "s"}
+              {deadLetterEventCount > 0
+                ? ` · (${deadLetterEventCount} event${deadLetterEventCount === 1 ? "" : "s"})`
+                : ""}
               {feedsUnscoped ? " · factory-wide" : ""}
             </div>
           </div>
           <div className="rounded-md border border-(--border) bg-(--surface-1)">
-            {anomalyRows.map((a, i) => (
-              <div
-                key={i}
-                ref={(node) => {
-                  anomalyRowRefs.current[i] = node;
-                }}
-                tabIndex={-1}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 border-b border-(--border) px-3 py-2 last:border-0 focus-visible:outline-2 focus-visible:outline-(--accent)"
-              >
-                <div className="min-w-0 flex items-start sm:items-center gap-2">
-                  <CategoryPill kind={a.kind} />
-                  {a.proposalId ? (
-                    <div className="min-w-0 flex flex-wrap items-center gap-x-2 gap-y-0.5 break-words text-[12px] text-(--hue-warn)">
-                      <span>expired open proposal</span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span
-                        className="mono text-[11px] text-(--text-dim) cursor-pointer hover:underline"
-                        title={`${a.proposalId} — click to copy`}
-                        onClick={() => copyText(a.proposalId!, "proposal id")}
-                      >
-                        {shortId(a.proposalId)}
-                      </span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span>agent: {a.proposal?.agent ?? "—"}</span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span>
-                        {a.proposal?.decision ?? "—"}
-                        {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
-                      </span>
-                      <span className="text-(--text-faint)">·</span>
-                      <span className="text-(--text-faint)">
-                        origin {a.proposal?.eventSource ?? "—"}/{a.proposal?.eventId ?? "—"}
-                      </span>
-                      <span className="text-(--text-faint)">·</span>
-                      {a.proposal?.created_at ? (
-                        <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
-                      ) : (
-                        <span className="text-(--text-faint)">age —</span>
-                      )}
+            {anomalyRows.map((a, i) => {
+              const deadLetters = a.deadLetterGroup;
+              const deadLetterKey = deadLetters ? deadLetterGroupKey(deadLetters) : null;
+              const expanded = deadLetterKey ? expandedDeadLetterGroups.has(deadLetterKey) : false;
+              const primaryLink = a.links[0];
+              const quietActionClass =
+                "cursor-pointer rounded px-1.5 py-1 text-[11px] text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text) hover:underline focus-visible:outline-2 focus-visible:outline-(--accent) disabled:cursor-not-allowed disabled:opacity-40";
+
+              return (
+                <div
+                  key={`${a.kind}:${a.text}`}
+                  ref={(node) => {
+                    anomalyRowRefs.current[i] = node;
+                  }}
+                  tabIndex={-1}
+                  className="group/anomaly border-b border-(--border) px-3 py-2 last:border-0 focus-visible:outline-2 focus-visible:outline-(--accent)"
+                >
+                  <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center sm:gap-3">
+                    <div className="flex min-w-0 items-start gap-2 sm:items-center">
+                      <CategoryPill kind={a.kind} />
+                      <div className="min-w-0">
+                        {deadLetters ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                deadLetters.events.length > 1
+                                  ? toggleDeadLetterGroup(deadLetters)
+                                  : primaryLink?.go()
+                              }
+                              aria-expanded={deadLetters.events.length > 1 ? expanded : undefined}
+                              className="flex min-w-0 cursor-pointer items-center gap-1.5 break-words text-left text-[12px] text-(--hue-warn) hover:underline focus-visible:outline-2 focus-visible:outline-(--accent) sm:truncate"
+                              title={a.text}
+                            >
+                              {deadLetters.events.length > 1 && (
+                                <span aria-hidden="true" className="w-3 shrink-0 text-(--text-faint)">
+                                  {expanded ? "▾" : "▸"}
+                                </span>
+                              )}
+                              {deadLetters.events.length > 1 && (
+                                <>
+                                  <span>{deadLetters.events.length} dead-lettered</span>
+                                  <span className="text-(--text-faint)">·</span>
+                                </>
+                              )}
+                              <span>{deadLetters.source}</span>
+                              <span className="text-(--text-faint)">·</span>
+                              <span className="sm:truncate">{deadLetters.errorMessage}</span>
+                            </button>
+                            {expanded && (
+                              <ul className="mt-2 space-y-1 border-l border-(--border) pl-3">
+                                {deadLetters.events.map((event) => (
+                                  <li key={`${event.source}:${event.eventId}`}>
+                                    <button
+                                      type="button"
+                                      onClick={() => onJumpEvents({ source: event.source, eventId: event.eventId })}
+                                      className="mono cursor-pointer text-[11px] text-(--text-dim) hover:text-(--text) hover:underline focus-visible:outline-2 focus-visible:outline-(--accent)"
+                                      title={event.eventId}
+                                    >
+                                      {shortId(event.eventId)}
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </>
+                        ) : a.proposalId ? (
+                          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 break-words text-[12px] text-(--hue-warn)">
+                            <button
+                              type="button"
+                              onClick={primaryLink?.go}
+                              className="cursor-pointer hover:underline focus-visible:outline-2 focus-visible:outline-(--accent)"
+                            >
+                              expired open
+                            </button>
+                            <span className="text-(--text-faint)">·</span>
+                            <button
+                              type="button"
+                              className="mono cursor-pointer text-[11px] text-(--text-dim) hover:underline focus-visible:outline-2 focus-visible:outline-(--accent)"
+                              title={`${a.proposalId} — click to copy`}
+                              onClick={() => copyText(a.proposalId!, "proposal id")}
+                            >
+                              {shortId(a.proposalId)}
+                            </button>
+                            <span className="text-(--text-faint)">·</span>
+                            <span>agent: {a.proposal?.agent ?? "—"}</span>
+                            <span className="text-(--text-faint)">·</span>
+                            <span>
+                              {a.proposal?.decision ?? "—"}
+                              {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
+                            </span>
+                            <span className="text-(--text-faint)">·</span>
+                            <span className="text-(--text-faint)">
+                              origin {a.proposal?.eventSource ?? "—"}/
+                              {a.proposal?.eventId ? (
+                                <span className="mono" title={a.proposal.eventId}>
+                                  {shortId(a.proposal.eventId)}
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </span>
+                            <span className="text-(--text-faint)">·</span>
+                            {a.proposal?.created_at ? (
+                              <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
+                            ) : (
+                              <span className="text-(--text-faint)">age —</span>
+                            )}
+                          </div>
+                        ) : primaryLink ? (
+                          <button
+                            type="button"
+                            onClick={primaryLink.go}
+                            className="min-w-0 cursor-pointer break-words text-left text-[12px] text-(--hue-warn) hover:underline focus-visible:outline-2 focus-visible:outline-(--accent) sm:truncate"
+                            title={a.text}
+                          >
+                            {a.text}
+                          </button>
+                        ) : (
+                          <span
+                            className="min-w-0 break-words text-[12px] text-(--hue-warn) sm:truncate"
+                            title={a.text}
+                          >
+                            {a.text}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  ) : (
-                    <span
-                      className="min-w-0 break-words sm:truncate text-[12px]"
-                      title={a.text}
-                      style={{ color: "var(--hue-warn)" }}
-                    >
-                      {a.text}
-                    </span>
-                  )}
+                    <div className="flex shrink-0 flex-wrap items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => copyText(a.text, "anomaly")}
+                        className="cursor-pointer rounded px-1.5 py-1 text-[11px] text-(--text-faint) hover:text-(--text) hover:underline focus-visible:outline-2 focus-visible:outline-(--accent)"
+                      >
+                        copy
+                      </button>
+                      <span className="flex flex-wrap items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover/anomaly:opacity-100 sm:group-focus-within/anomaly:opacity-100">
+                        {a.dismissProposalId && (
+                          <button
+                            type="button"
+                            className={quietActionClass}
+                            disabled={!connected || reject.isPending}
+                            onClick={() => {
+                              reject.reset();
+                              setRejectingProposalId(a.dismissProposalId!);
+                              setRejectReason("");
+                            }}
+                          >
+                            Reject…
+                          </button>
+                        )}
+                        {deadLetters && deadLetters.events.length > 1 ? (
+                          <>
+                            <button
+                              type="button"
+                              className={quietActionClass}
+                              disabled={!connected || bulkDeadLetter.isPending}
+                              onClick={() => setBulkDeadLetterAction({ action: "archive", group: deadLetters })}
+                            >
+                              Archive all
+                            </button>
+                            <button
+                              type="button"
+                              className={quietActionClass}
+                              disabled={!connected || bulkDeadLetter.isPending}
+                              onClick={() => setBulkDeadLetterAction({ action: "requeue", group: deadLetters })}
+                            >
+                              Requeue all
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            {a.archive && (
+                              <button
+                                type="button"
+                                className={quietActionClass}
+                                disabled={!connected || resolveAnomaly.isPending}
+                                onClick={() => resolveAnomaly.mutate({ kind: "archive", ...a.archive! })}
+                              >
+                                Archive
+                              </button>
+                            )}
+                            {a.requeue && (
+                              <button
+                                type="button"
+                                className={quietActionClass}
+                                disabled={!connected || requeue.isPending}
+                                onClick={() => requeue.mutate(a.requeue!)}
+                              >
+                                Requeue
+                              </button>
+                            )}
+                          </>
+                        )}
+                        {a.releaseWorker && (
+                          <button
+                            type="button"
+                            className={quietActionClass}
+                            disabled={!connected || resolveAnomaly.isPending}
+                            onClick={() => resolveAnomaly.mutate({ kind: "release", ...a.releaseWorker! })}
+                          >
+                            Release lease
+                          </button>
+                        )}
+                        {a.links.slice(1).map((link) => (
+                          <button
+                            type="button"
+                            key={link.label}
+                            className={quietActionClass}
+                            onClick={link.go}
+                          >
+                            {link.label.replace(/^View /, "")}
+                          </button>
+                        ))}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <span className="flex flex-wrap items-center gap-1.5 sm:gap-2 sm:shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => copyText(a.text, "anomaly")}
-                    className="cursor-pointer text-[11px] text-(--text-faint) hover:text-(--text) hover:underline"
-                  >
-                    copy
-                  </button>
-                  {a.dismissProposalId && (
-                    <Button
-                      disabled={!connected || reject.isPending}
-                      onClick={() => {
-                        reject.reset();
-                        setRejectingProposalId(a.dismissProposalId!);
-                        setRejectReason("");
-                      }}
-                    >
-                      Reject…
-                    </Button>
-                  )}
-                  {a.archive && (
-                    <Button
-                      disabled={!connected || resolveAnomaly.isPending}
-                      onClick={() => resolveAnomaly.mutate({ kind: "archive", ...a.archive! })}
-                    >
-                      Archive
-                    </Button>
-                  )}
-                  {a.requeue && (
-                    <Button
-                      disabled={!connected || requeue.isPending}
-                      onClick={() => requeue.mutate(a.requeue!)}
-                    >
-                      Requeue
-                    </Button>
-                  )}
-                  {a.releaseWorker && (
-                    <Button
-                      disabled={!connected || resolveAnomaly.isPending}
-                      onClick={() => resolveAnomaly.mutate({ kind: "release", ...a.releaseWorker! })}
-                    >
-                      Release lease
-                    </Button>
-                  )}
-                  {a.links.map((l, idx) => (
-                    <Button
-                      key={l.label}
-                      variant={idx === 0 ? "primary" : "default"}
-                      onClick={l.go}
-                    >
-                      {l.label}
-                    </Button>
-                  ))}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
-          <VerbError error={resolveAnomaly.error ?? reject.error ?? requeue.error} />
+          <VerbError error={resolveAnomaly.error ?? bulkDeadLetter.error ?? reject.error ?? requeue.error} />
         </div>
       ) : (
         <div className="mb-5 flex items-center justify-between rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-2.5 text-[12px] text-(--text-dim)">
@@ -1469,6 +1695,37 @@ export function Overview({
           </div>
         </OverviewSection>
       </div>
+
+      {bulkDeadLetterAction && (
+        <Dialog
+          title={`${bulkDeadLetterAction.action === "archive" ? "Archive" : "Requeue"} ${bulkDeadLetterAction.group.events.length} dead-lettered events?`}
+          onClose={() => {
+            if (!bulkDeadLetter.isPending) setBulkDeadLetterAction(null);
+          }}
+        >
+          <p className="mb-4 text-[12px] text-(--text-dim)">
+            This will {bulkDeadLetterAction.action} all {bulkDeadLetterAction.group.events.length} events from {bulkDeadLetterAction.group.source} with this error.
+          </p>
+          <VerbError error={bulkDeadLetter.error} />
+          <div className="flex justify-end gap-2">
+            <Button
+              disabled={bulkDeadLetter.isPending}
+              onClick={() => setBulkDeadLetterAction(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant={bulkDeadLetterAction.action === "archive" ? "danger" : "primary"}
+              disabled={!connected || bulkDeadLetter.isPending}
+              onClick={() => bulkDeadLetter.mutate(bulkDeadLetterAction)}
+            >
+              {bulkDeadLetter.isPending
+                ? `${bulkDeadLetterAction.action === "archive" ? "Archiving" : "Requeuing"}…`
+                : `${bulkDeadLetterAction.action === "archive" ? "Archive" : "Requeue"} ${bulkDeadLetterAction.group.events.length} events`}
+            </Button>
+          </div>
+        </Dialog>
+      )}
 
       {rejectingProposalId && (
         <Dialog title="Reject expired proposal?" onClose={closeReject}>

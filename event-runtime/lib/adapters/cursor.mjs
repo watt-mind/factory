@@ -32,8 +32,17 @@ import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import { refuseSandbox } from "./sandboxed.mjs";
 
 export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+
+/**
+ * No guest execution path exists for this adapter (WM-313): a sandboxed
+ * definition is refused, not run on the host. See lib/adapters/sandboxed.mjs.
+ */
+export const SANDBOX_SUPPORT = "unsupported";
+const SANDBOX_REFUSAL_REASON =
+  "the Cursor Agent CLI has no guest execution path yet — its binary and CURSOR_API_KEY transport have not been translated to the microVM";
 
 export const KILL_GRACE_MS = 30_000;
 
@@ -259,6 +268,7 @@ export async function execute({
   abortSignal,
   signal,
 }) {
+  refuseSandbox("cursor", def, SANDBOX_REFUSAL_REASON);
   const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
   const childEnv = safeChildEnvironment(env, def);
 

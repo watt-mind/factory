@@ -2,7 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { PathViolation, WorktreeError, createWorkspace, destroyWorkspace, safeJoin } from "./workspace.mjs";
+import { Database } from "bun:sqlite";
+import {
+  PathViolation, WorktreeError, createWorkspace, destroyWorkspace,
+  detectWorktreeOwnershipConflict, safeJoin,
+} from "./workspace.mjs";
 
 function tmpRoot() {
   return mkdtempSync(path.join(os.tmpdir(), "evrt-ws-"));
@@ -30,6 +34,46 @@ describe("safeJoin", () => {
     expect(() => safeJoin(ws, undefined)).toThrow(PathViolation);
     expect(() => safeJoin(ws, ".")).toThrow(PathViolation);
   });
+});
+
+test("detectWorktreeOwnershipConflict excludes self but reports competing runs and leases", () => {
+  const root = tmpRoot();
+  const databasePath = path.join(root, "runtime.db");
+  const db = new Database(databasePath);
+  db.exec(`
+    CREATE TABLE runs (run_id TEXT, state TEXT, spec_json TEXT);
+    CREATE TABLE attempts (run_id TEXT, attempt INTEGER, lease_owner TEXT);
+  `);
+  const spec = JSON.stringify({ input: { repo: "factory", ticket: "WM-627" } });
+  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run("run_self", "RUNNING", spec);
+  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run("run_other", "VERIFYING", spec);
+  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run("run_done", "FAILED", spec);
+  db.query(`INSERT INTO attempts VALUES (?, ?, ?)`).run("run_self", 1, "worker_self");
+  db.close();
+
+  const conflict = detectWorktreeOwnershipConflict({
+    repo: "factory",
+    ticket: "WM-627",
+    runId: "run_self",
+    attempt: 1,
+    databasePath,
+    leases: [
+      { repo: "factory", ticket: "WM-627", owner: "worker_self", pid: process.pid },
+      { repo: "factory", ticket: "WM-627", owner: "worker_other", pid: 42 },
+    ],
+  });
+  expect(conflict).toMatchObject({
+    runs: [{ runId: "run_other", state: "VERIFYING" }],
+    leases: [{ owner: "worker_other", pid: 42 }],
+  });
+  expect(detectWorktreeOwnershipConflict({
+    repo: "factory",
+    ticket: "WM-627",
+    runId: "run_self",
+    attempt: 1,
+    databasePath,
+    leases: [{ repo: "factory", ticket: "WM-627", owner: "worker_self", pid: process.pid }],
+  })?.runs).toEqual([{ runId: "run_other", state: "VERIFYING" }]);
 });
 
 describe("createWorkspace / destroyWorkspace", () => {
@@ -103,6 +147,10 @@ describe("worktree workspaces (WM-108)", () => {
       `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\nprintf '%s\\n' '{"status":"red","check":"web_build","command":"bun run build:fast","exitCode":1,"output":"entry chunk exceeds budget"}' > "$FACTORY_WORKTREE_REPORT"\n`,
     );
     writeFileSync(
+      path.join(repoDir, "bin", "worktree-up-recovered.sh"),
+      `#!/bin/bash\nset -e\necho "up-recovered $1" >> "${callsLog}"\nmkdir -p "${wtRoot}/$1"\nprintf '%s\\n' '{"ref":"wip/WM-13-20260817T183000Z","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","push":"local_only","pushError":"offline"}' > "$FACTORY_WORKTREE_PRESERVATION_REPORT"\n`,
+    );
+    writeFileSync(
       path.join(repoDir, "bin", "worktree-down-refuse.sh"),
       `#!/bin/bash\necho "warn: cleanup probe used fallback" >&2\necho "fatal: refusing dirty tree" >&2\nexit 1\n`,
     );
@@ -131,6 +179,9 @@ describe("worktree workspaces (WM-108)", () => {
         `    worktree_root: ${wtRoot}\n` +
         `  - name: red-baseline\n    path: ${repoDir}\n    base: develop\n` +
         `    worktree_up: bin/worktree-up-red-baseline.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n    verify: bun test\n` +
+        `  - name: recovered-up\n    path: ${repoDir}\n    base: develop\n` +
+        `    worktree_up: bin/worktree-up-recovered.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n    verify: bun test\n` +
         `  - name: refusing-down\n    path: ${repoDir}\n    base: develop\n` +
         `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down-refuse.sh\n` +
@@ -231,6 +282,52 @@ describe("worktree workspaces (WM-108)", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(existsSync(dir)).toBe(true);
     expect(existsSync(path.join(wtRoot, "WM-10"))).toBe(true);
+  });
+
+  test("a live competing run or lease refuses an existing tree before worktree_up", () => {
+    const tree = path.join(wtRoot, "WM-13");
+    mkdirSync(tree, { recursive: true });
+    const before = calls().filter((call) => call.startsWith("up WM-13 ")).length;
+
+    expect(() => make("wtrepo", "WM-13", "run_wt13", {
+      worktreeOwnershipConflict: () => ({
+        reason: "ticket has a non-terminal run or live worker lease",
+        runs: [{ runId: "run_other", state: "RUNNING" }],
+        leases: [{ owner: "worker_other", pid: 42 }],
+      }),
+    })).toThrow(/worktree_in_use/);
+    expect(calls().filter((call) => call.startsWith("up WM-13 "))).toHaveLength(before);
+    expect(existsSync(tree)).toBe(true);
+  });
+
+  test("a recovered wip ref is journaled in the workspace marker/input and commented once", () => {
+    const comments = [];
+    const { dir, worktree } = make("recovered-up", "WM-13", "run_wt13_recovered", {
+      worktreeOwnershipConflict: () => null,
+      worktreePreservationComment: (entry) => {
+        comments.push(entry);
+        return { status: "posted" };
+      },
+    });
+
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({
+      repo: "recovered-up",
+      ticket: "WM-13",
+      preservation: { ref: "wip/WM-13-20260817T183000Z", push: "local_only" },
+    });
+    expect(worktree.preservedWip).toMatchObject({
+      ref: "wip/WM-13-20260817T183000Z",
+      commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      push: "local_only",
+      comment: { status: "posted" },
+    });
+    expect(JSON.parse(readFileSync(path.join(dir, ".worktree.json"), "utf8")).preservedWip).toEqual(worktree.preservedWip);
+    expect(JSON.parse(readFileSync(path.join(dir, "input.json"), "utf8")).worktreeRecovery).toMatchObject({
+      ref: "wip/WM-13-20260817T183000Z",
+      guidance: expect.stringContaining("abandoned prior attempt"),
+    });
+    expect(destroyWorkspace(dir)).toBe(true);
   });
 
   test("a red baseline is recorded in the marker and agent input without aborting workspace creation", () => {

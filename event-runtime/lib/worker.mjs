@@ -22,7 +22,7 @@ import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
-import { worktreeDispatchAutoEligibility } from "./planner.mjs";
+import { worktreeDispatchAutoEligibility, worktreeMergeFixEligibility } from "./planner.mjs";
 import { closeOpenProposalForRun } from "./proposals.mjs";
 import { computeDefHash, createReceipt, verifyDefHash } from "./receipts.mjs";
 import { traceRecorder } from "./trace.mjs";
@@ -59,7 +59,12 @@ function workerSubprocessTimeoutMs() {
     : DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS;
 }
 
-const ENVIRONMENT_FAILURES = new Set(["adapter_error", "lease_expired", "linear_unconfigured"]);
+const ENVIRONMENT_FAILURES = new Set([
+  "adapter_error",
+  "lease_expired",
+  "linear_unconfigured",
+  "registry_stale",
+]);
 const AGENT_FAILURES = new Set(["contract_violation"]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
@@ -193,9 +198,18 @@ function originatingEvent(db, runId) {
  * Claim the oldest QUEUED run: bump the attempt counter, take a lease with a
  * fresh fencing token, and move it to LEASED — all in one transaction.
  *
- * @returns {{ runId: string, attempt: number, fencingToken: number, spec: object } | null}
+ * @returns {{ runId: string, attempt: number, fencingToken: number, spec: object } | { runId: string, spec: object, refused: true, retryable: true, reloadRequired: boolean, reasonCode: "registry_stale", workerRegistryVersion: string, checkoutRegistryVersion: string } | null}
  */
-export function claimNext(db, { owner, now = () => Date.now(), policyVersion = "unknown", labels = {}, adapters = null, adapterOverride } = {}) {
+export function claimNext(db, {
+  owner,
+  now = () => Date.now(),
+  policyVersion = "unknown",
+  registryVersion = null,
+  currentRegistryVersion = null,
+  labels = {},
+  adapters = null,
+  adapterOverride,
+} = {}) {
   // BEGIN IMMEDIATE, not the default deferred transaction: two workers must
   // not both read the same QUEUED row before either writes (OPS-233).
   return txImmediate(db, () => {
@@ -218,17 +232,55 @@ export function claimNext(db, { owner, now = () => Date.now(), policyVersion = "
       .all();
     let row = null;
     let spec = null;
+    let staleRefusal = null;
+    let checkoutVersion;
+    const resolveCheckoutVersion = () => {
+      if (checkoutVersion !== undefined) return checkoutVersion;
+      checkoutVersion = typeof currentRegistryVersion === "function"
+        ? currentRegistryVersion()
+        : currentRegistryVersion;
+      return checkoutVersion;
+    };
     for (const candidate of candidates) {
       const backoff = /^(?:claim_lock_contention:\d+|dispatch_gate_transient:[^:]+:\d+):backoff_(\d+)ms$/.exec(candidate.queue_reason ?? "");
       if (backoff && Date.parse(candidate.queued_at) + Number(backoff[1]) > claimNow) continue;
       const candidateSpec = JSON.parse(candidate.spec_json);
       if (!satisfiesPlacement(labels, candidateSpec.placement)) continue;
       if (adapters && !adapterOverride && !adapters.includes(candidateSpec.adapter)) continue;
+      // The worker snapshots the registry and policy at startup. A run planned
+      // against another checkout must stay QUEUED; leasing it would execute and
+      // validate with incompatible definitions. Compare the live checkout too
+      // so only an actually stale worker reloads — an older queued spec must not
+      // put a fresh supervisor into an endless exit-75 loop.
+      if (
+        registryVersion &&
+        (candidateSpec.promptVersion !== registryVersion ||
+          candidateSpec.policyVersion !== registryVersion)
+      ) {
+        const current = resolveCheckoutVersion();
+        const reloadRequired =
+          candidateSpec.promptVersion === current &&
+          candidateSpec.policyVersion === current &&
+          registryVersion !== current;
+        const refusal = {
+          runId: candidate.run_id,
+          spec: candidateSpec,
+          refused: true,
+          retryable: true,
+          reloadRequired,
+          reasonCode: "registry_stale",
+          workerRegistryVersion: registryVersion,
+          checkoutRegistryVersion: current,
+        };
+        if (reloadRequired) return refusal;
+        staleRefusal ??= refusal;
+        continue;
+      }
       row = candidate;
       spec = candidateSpec;
       break;
     }
-    if (!row) return null;
+    if (!row) return staleRefusal;
     const attempt = row.attempts + 1;
     const fencingToken = nextCounter(db, "fencing");
     const leaseExpiresAt = iso(claimNow + (spec.timeoutSeconds + LEASE_GRACE_SECONDS) * 1000);
@@ -397,6 +449,21 @@ function contradictsPlanTimeOwnedPaths(spec, gateResult) {
  */
 export const CODE_RELOAD_EXIT = 75;
 
+/** Uncached checkout provenance, used to distinguish a stale worker from a stale queued spec. */
+export function checkoutPolicyVersion(repoRoot = FACTORY_ROOT) {
+  try {
+    const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: workerSubprocessTimeoutMs(),
+    }).trim();
+    return `git:${sha}`;
+  } catch {
+    return "unknown";
+  }
+}
+
 /** What "the worker's code" is: everything the claim loop actually executes. */
 export const CODE_STAMP_PATHS = ["event-runtime/lib", "event-runtime/cli.mjs"];
 
@@ -465,8 +532,8 @@ export function codeStamp(repoRoot = codeStampRoot(), paths = CODE_STAMP_PATHS) 
 }
 
 /**
- * Poll-boundary reload detection. `check(inFlight)` is called by the claim
- * loop *between* claims and returns one of:
+ * Poll-boundary reload detection. `check(inFlight, { force })` is called by
+ * the claim loop *between* claims and returns one of:
  *
  *   none      nothing changed (or it is not time to re-stamp yet)
  *   deferred  code changed but this worker holds a lease — keep going
@@ -492,10 +559,13 @@ export function createReloadWatcher({
 
   return {
     from,
-    check(inFlight = null) {
+    check(inFlight = null, { force = false } = {}) {
       if (!pending) {
         const at = now();
-        if (at - lastCheck < intervalMs) return { action: "none", from, to: from };
+        // A completed run is a mandatory freshness boundary: force bypasses
+        // only the cadence gate so a hot queue cannot hide a recent edit.
+        if (!force && at - lastCheck < intervalMs)
+          return { action: "none", from, to: from };
         lastCheck = at;
         const to = stamp();
         if (to === from) return { action: "none", from, to };
@@ -682,8 +752,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
         labels: { nodes: [{ name: "ai:agent-ready" }] },
         // The claim gate fails closed on tickets whose Owned Paths do not
         // parse (owned_paths_unknown, WM-575); a stub ticket must carry a
-        // parseable section or the demo stub refuses every dispatch.
-        description: "## Owned Paths\n- demo/**\n",
+        // parseable section or the demo stub refuses every dispatch. `**`
+        // also lets the stubbed merge-fix gate (WM-582) accept any fix path.
+        description: "## Owned Paths\n- **\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
@@ -884,11 +955,38 @@ export async function executeClaimed(db, registry, adapters, claim, {
         return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
       };
 
+      const gate = def?.gate ?? "dispatch";
+      if (!["dispatch", "merge-fix"].includes(gate)) {
+        releaseClaimLock(lockFile);
+        const reasonCode = "worktree_gate_unknown";
+        const res = refuseTerminal(reasonCode, ["worktree_gate"]);
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+      }
+
       let gateResult;
       try {
-        gateResult = worktreeDispatchAutoEligibility(spec.input, dispatchOpts);
+        if (gate === "merge-fix") {
+          const fetchNonTerminalRuns = dispatchOpts?.fetchNonTerminalRuns ?? (() => db.query(
+            `SELECT run_id AS runId, state
+               FROM runs
+              WHERE run_id <> ?
+                AND state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+                AND json_extract(spec_json, '$.input.repo') = ?
+                AND json_extract(spec_json, '$.input.ticket') = ?
+              ORDER BY created_at, run_id`,
+          ).all(runId, repoName, ticketId));
+          gateResult = worktreeMergeFixEligibility(spec.input, {
+            fetchTicket: dispatchOpts?.fetchTicket,
+            fetchPullRequest: dispatchOpts?.fetchPullRequest,
+            fetchNonTerminalRuns,
+            now: nowFn,
+          });
+        } else {
+          gateResult = worktreeDispatchAutoEligibility(spec.input, dispatchOpts);
+        }
       } catch (err) {
-        if (hasPlanTimeDispatchEvidence(spec) && String(err?.message ?? err).startsWith("linear_read_failed:")) {
+        if (gate === "dispatch" && hasPlanTimeDispatchEvidence(spec) && String(err?.message ?? err).startsWith("linear_read_failed:")) {
           return deferTransientGate("linear_read_failed");
         }
         releaseClaimLock(lockFile);
@@ -898,39 +996,47 @@ export async function executeClaimed(db, registry, adapters, claim, {
       if (!gateResult.ok) {
         const gateRefusal = gateResult.refusal;
         if (
+          gate === "dispatch" &&
           gateRefusal.reason === "owned_paths_unknown" &&
           contradictsPlanTimeOwnedPaths(spec, gateResult)
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
         releaseClaimLock(lockFile);
-        const res = refuseTerminal(gateRefusal.reason, ["dispatch_gate"], { detail: gateRefusal.detail });
+        const res = refuseTerminal(gateRefusal.reason, [`${gate}_gate`], { detail: gateRefusal.detail });
         if (res?.fenced) return { fenced: true };
         return { runId, attempt, terminalState: "REFUSED", reasonCode: gateRefusal.reason, receipt: res?.receipt };
       }
 
-      let claimRes;
-      try {
-        claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
-      } finally {
+      if (gate === "merge-fix") {
+        // The ticket is already assigned and under review by definition. The
+        // merge-fix gate proved those live facts; trying the dispatch claim
+        // verb here would reject the valid run as ticket_assigned.
         releaseClaimLock(lockFile);
-      }
-
-      if (!claimRes?.ok) {
-        const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
-        const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
-        if (res?.fenced) return { fenced: true };
-        return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
-      }
-
-      ticketClaimed = true;
-      writeWorkerLease({ repo: repoName, ticket: ticketId, owner, pid: process.pid, dir: leasesDir, now: nowFn() });
-      leaseHeartbeat = setInterval(() => {
+      } else {
+        let claimRes;
         try {
-          renewWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir, now: Date.now() });
-        } catch {}
-      }, LEASE_HEARTBEAT_MS);
-      leaseHeartbeat?.unref?.();
+          claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
+        } finally {
+          releaseClaimLock(lockFile);
+        }
+
+        if (!claimRes?.ok) {
+          const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
+          const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
+          if (res?.fenced) return { fenced: true };
+          return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+        }
+
+        ticketClaimed = true;
+        writeWorkerLease({ repo: repoName, ticket: ticketId, owner, pid: process.pid, dir: leasesDir, now: nowFn() });
+        leaseHeartbeat = setInterval(() => {
+          try {
+            renewWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir, now: Date.now() });
+          } catch {}
+        }, LEASE_HEARTBEAT_MS);
+        leaseHeartbeat?.unref?.();
+      }
     }
 
     const adapterKey = adapterOverride ?? spec.adapter;
@@ -1450,10 +1556,10 @@ export function reapExpiredLeases(db, { now = () => Date.now(), policyVersion = 
   });
 }
 
-/** Claim and execute one run, or null when nothing is QUEUED. */
+/** Claim and execute one run, or return a typed refusal/null without execution. */
 export async function runOnce(db, registry, adapters, opts = {}) {
   const claim = claimNext(db, opts);
-  if (!claim) return null;
+  if (!claim || claim.refused) return claim;
   return executeClaimed(db, registry, adapters, claim, opts);
 }
 

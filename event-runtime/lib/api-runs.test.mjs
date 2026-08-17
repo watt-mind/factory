@@ -85,6 +85,116 @@ describe("list views carry repos[] (OPS-356)", () => {
   });
 });
 
+describe("ticket journey join (WM-595)", () => {
+  test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-dispatch",
+          subject: "WM-595",
+          payload: {
+            repo: "factory",
+            ticket: "WM-595",
+            ticketTitle: "Ticket journey",
+            ticketState: "In Review",
+            ticketCreatedAt: "2026-01-01T09:00:00.000Z",
+          },
+        }),
+      );
+      const spec = (input, agent = "dispatch@1") =>
+        JSON.stringify({
+          schemaVersion: "factory.run-spec/v1",
+          runId: "ignored",
+          agent,
+          input,
+          inputHash: "sha256:input",
+          workspace: { type: "none" },
+          adapter: "fake",
+          promptVersion: "test",
+          policyVersion: PV,
+          outputContract: "test/v1",
+          capabilities: [],
+          timeoutSeconds: 60,
+          maxAttempts: 1,
+          idempotencyKey: "ignored",
+        });
+      s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+      ).run(
+        "run_ticket",
+        "ticket-key",
+        spec({ repo: "factory", ticket: "WM-595" }),
+        "sha256:ticket",
+        "COMPLETED",
+        "2026-01-01T10:00:00.000Z",
+        "2026-01-01T10:10:00.000Z",
+      );
+      s.db.query(
+        `INSERT INTO results
+           (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, ?, '{}', '{}', ?)`,
+      ).run(
+        "run_ticket",
+        JSON.stringify({
+          terminalState: "completed",
+          artifact: {
+            outcome: "PR_OPEN",
+            ticket: "WM-595",
+            prUrl: "https://github.com/watt-mind/factory/pull/595",
+          },
+        }),
+        "sha256:result-ticket",
+        "2026-01-01T10:10:00.000Z",
+      );
+      s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+      ).run(
+        "run_merge",
+        "merge-key",
+        spec({ repo: "factory", pr: 595 }, "merge-apply@1"),
+        "sha256:merge",
+        "COMPLETED",
+        "2026-01-01T11:00:00.000Z",
+        "2026-01-01T11:01:00.000Z",
+      );
+      s.db.query(
+        `INSERT INTO results
+           (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, ?, '{}', '{}', ?)`,
+      ).run(
+        "run_merge",
+        JSON.stringify({ terminalState: "completed", artifact: { pr: 595, outcome: "MERGED" } }),
+        "sha256:result-merge",
+        "2026-01-01T11:01:00.000Z",
+      );
+
+      const response = await fetch(s.url("/runs?ticket=WM-595"));
+      expect(response.status).toBe(200);
+      const journey = await response.json();
+      expect(journey.ticket).toEqual({
+        id: "WM-595",
+        title: "Ticket journey",
+        state: "In Review",
+        createdAt: "2026-01-01T09:00:00.000Z",
+        url: "https://linear.app/watt-mind/issue/WM-595",
+      });
+      expect(journey.events.map((event) => event.eventId)).toContain("ticket-dispatch");
+      expect(journey.runs.map((run) => run.run.runId)).toEqual(["run_ticket", "run_merge"]);
+      expect(journey.activity).toBe(true);
+
+      const unknown = await fetch(s.url("/runs?ticket=WM-999"));
+      expect((await unknown.json()).activity).toBe(false);
+      const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
+      expect(invalid.status).toBe(422);
+    } finally {
+      s.close();
+    }
+  });
+});
+
 describe("watched flow and operator verbs (§12, §13, §15)", () => {
   let s;
   let flowProposalId;

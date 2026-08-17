@@ -27,6 +27,8 @@ export function CommandPalette({
   onJumpAgent,
   onJumpWorker,
   onJumpProject,
+  onJumpTicket,
+  onJumpPr,
 }: {
   actions: PaletteAction[];
   onJumpRun: (runId: string) => void;
@@ -35,11 +37,15 @@ export function CommandPalette({
   onJumpAgent: (ref: string) => void;
   onJumpWorker: (id: string) => void;
   onJumpProject?: (name: string) => void;
+  onJumpTicket?: (ticketId: string) => void;
+  onJumpPr?: (number: number) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const [hasMoreBelow, setHasMoreBelow] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
   const contextActions = useContextActions();
@@ -65,8 +71,18 @@ export function CommandPalette({
   const agents = useQuery({ queryKey: ["agents"], queryFn: api.agents, enabled: open });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, enabled: open });
   const repos = useQuery({ queryKey: ["repos"], queryFn: api.repos, enabled: open });
+  const typedTicket = /^[A-Z][A-Z0-9]{1,9}-\d+$/.test(search.trim().toUpperCase())
+    ? search.trim().toUpperCase()
+    : null;
+  // `#541`, `PR 541`, `pr:541` — a PR journey jump (WM-640). Inlined like the
+  // ticket pattern above: importing subjectJourney here would pull the whole
+  // journey module into the entry chunk.
+  const prMatch = onJumpPr ? search.trim().match(/^(?:#|pr[:#\s-]?|pull\/)(\d{1,7})$/i) : null;
+  const typedPr = prMatch ? Number(prMatch[1]) : null;
   const resultCount =
     actions.length +
+    (typedTicket ? 1 : 0) +
+    (typedPr ? 1 : 0) +
     contextActions.length +
     (runs.data?.runs?.length ?? 0) +
     (proposals.data?.proposals?.length ?? 0) +
@@ -96,6 +112,10 @@ export function CommandPalette({
   }, [open, resultCount, updateOverflow]);
 
   useEffect(() => {
+    if (!open) setSearch("");
+  }, [open]);
+
+  useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "k" || !(e.metaKey || e.ctrlKey)) return;
       e.preventDefault();
@@ -108,6 +128,14 @@ export function CommandPalette({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const input = searchRef.current;
+    const syncSearch = () => setSearch(input?.value ?? "");
+    input?.addEventListener("input", syncSearch);
+    return () => input?.removeEventListener("input", syncSearch);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -163,7 +191,10 @@ export function CommandPalette({
           className="outline-none focus:outline-none focus-visible:outline-none"
         >
         <Command.Input
+          ref={searchRef}
           autoFocus
+          value={search}
+          onValueChange={setSearch}
           placeholder="Type a command…"
           className="w-full border-0 border-b border-(--border) bg-transparent px-4 py-3 text-[14px] text-(--text) outline-none ring-0 placeholder:text-(--text-faint) focus:border-(--accent) focus:outline-none focus:ring-0"
         />
@@ -223,6 +254,53 @@ export function CommandPalette({
                 </Command.Item>
               ))}
           </Command.Group>
+          {typedTicket && onJumpTicket && (
+            <Command.Group heading="Tickets">
+              <Command.Item
+                value={`ticket ${typedTicket} open journey`}
+                onSelect={() => {
+                  setOpen(false);
+                  setSearch("");
+                  onJumpTicket(typedTicket);
+                }}
+                className={PALETTE_ITEM_CLASS}
+              >
+                <span>Open ticket <span className="mono">{typedTicket}</span></span>
+                <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">ticket journey</span>
+              </Command.Item>
+              {/* The question behind most ticket lookups (WM-594): the journey
+                  already lists every planner decision and names the blocking
+                  reason in its next-action line, so it is the answer. */}
+              <Command.Item
+                value={`ticket ${typedTicket} why isn't running decisions`}
+                onSelect={() => {
+                  setOpen(false);
+                  setSearch("");
+                  onJumpTicket(typedTicket);
+                }}
+                className={PALETTE_ITEM_CLASS}
+              >
+                <span>Why isn't <span className="mono">{typedTicket}</span> running?</span>
+                <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">planner decisions</span>
+              </Command.Item>
+            </Command.Group>
+          )}
+          {typedPr && onJumpPr && (
+            <Command.Group heading="Pull requests">
+              <Command.Item
+                value={`pr #${typedPr} pull request ${search.trim()} open journey`}
+                onSelect={() => {
+                  setOpen(false);
+                  setSearch("");
+                  onJumpPr(typedPr);
+                }}
+                className={PALETTE_ITEM_CLASS}
+              >
+                <span>Open PR <span className="mono">#{typedPr}</span></span>
+                <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">PR journey</span>
+              </Command.Item>
+            </Command.Group>
+          )}
           {(proposals.data?.proposals ?? []).length > 0 && (
             <Command.Group heading="Proposals">
           {(proposals.data?.proposals ?? []).map((p) => (
