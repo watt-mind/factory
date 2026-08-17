@@ -397,6 +397,56 @@ describe("worker", () => {
     expect(runState(db, spec.runId)).toBe("TIMED_OUT");
   });
 
+  test("timeout accepts a valid result.json written before the adapter hangs (WM-538)", async () => {
+    const db = openDb(":memory:");
+    const writesThenHangs = {
+      async execute({ workspaceDir, timeoutMs }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          artifact: {
+            repos: [{ name: "late", triage: 1, agentReady: 2, inProgress: 0, blocked: 0 }],
+            recommendedAction: "dispatch",
+          },
+          evidence: { queries: ["fake"] },
+        }));
+        await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+        return { exitCode: null, timedOut: true };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "writes-then-hangs", timeoutSeconds: 0.01 }));
+
+    const summary = await runOnce(db, registry, { "writes-then-hangs": writesThenHangs }, opts());
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(summary.reasonCode).toBe("ok");
+    expect(runState(db, spec.runId)).toBe("COMPLETED");
+    expect(lifecycleOf(db, spec.runId)).toContainEqual(expect.objectContaining({
+      to_state: "VERIFYING",
+      reason: "late_completion_after_timeout",
+    }));
+    expect(db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId)).toBeTruthy();
+    expect(db.query(`SELECT * FROM outbox`).all()).toHaveLength(1);
+  });
+
+  test("timeout ignores an invalid result.json and remains TIMED_OUT", async () => {
+    const db = openDb(":memory:");
+    const invalidThenTimesOut = {
+      async execute({ workspaceDir }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), "{}\n");
+        return { exitCode: null, timedOut: true };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "invalid-then-timeout" }));
+
+    const summary = await runOnce(db, registry, { "invalid-then-timeout": invalidThenTimesOut }, opts());
+
+    expect(summary.terminalState).toBe("TIMED_OUT");
+    expect(summary.reasonCode).toBe("timeout");
+    expect(runState(db, spec.runId)).toBe("TIMED_OUT");
+    expect(db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId)).toBeNull();
+  });
+
   test("crash with maxAttempts 2: FAILED then auto re-QUEUED; second claim has higher fencing token", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["crash"] }, maxAttempts: 2 }));
