@@ -13,7 +13,7 @@
  */
 import type { ScheduleItem } from "./api";
 import { eventNodeId, runNodeId } from "./graph/chainModel";
-import { formatDuration } from "./ticketJourney";
+import { formatDuration } from "./subjectJourney";
 import type { ChainEvent, ChainRun, ChainView, InboxItem, LifecycleEvent, Proposal, RunDetail } from "./types";
 
 // ---------------------------------------------------------------------------
