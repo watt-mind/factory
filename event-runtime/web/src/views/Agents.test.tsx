@@ -2,7 +2,8 @@ import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Agents, adapterText, modelText, routeModel, tierText } from "./Agents";
+import { Agents, adapterText, agentTabCounts, modelText, routeModel, tierText } from "./Agents";
+import { EMPTY_VALUE, formatDurationSeconds } from "../components/AgentHoverCard";
 import { api } from "../api";
 import type { AgentDef, AgentEventRoute, AgentsView } from "../types";
 
@@ -109,14 +110,31 @@ describe("row roll-ups across routes (WM-211)", () => {
 
   test("an agent nothing routes to shows a dash — nothing resolves, whatever it declares", () => {
     const orphan = stubAgent("orphan", { eventTypes: [], modelTier: "strong" });
-    expect(adapterText(orphan)).toBe("-");
-    expect(modelText(orphan)).toBe("-");
+    expect(adapterText(orphan)).toBe(EMPTY_VALUE);
+    expect(modelText(orphan)).toBe(EMPTY_VALUE);
     expect(tierText(orphan)).toBe("strong");
   });
 
   test("tier falls back to override when a definition names an exact id instead of a tier", () => {
     expect(tierText(stubAgent("x", { modelTier: null, model: "haiku" }))).toBe("override");
-    expect(tierText(stubAgent("x", { modelTier: null, model: null }))).toBe("-");
+    expect(tierText(stubAgent("x", { modelTier: null, model: null }))).toBe(EMPTY_VALUE);
+  });
+});
+
+describe("Agents registry presentation (WM-551)", () => {
+  test("humanizes timeout seconds and counts mutation-safety tabs", () => {
+    expect(formatDurationSeconds(2700)).toBe("45m");
+    expect(formatDurationSeconds(2100)).toBe("35m");
+    expect(formatDurationSeconds(600)).toBe("10m");
+    expect(formatDurationSeconds(90)).toBe("1m 30s");
+    expect(formatDurationSeconds(null)).toBe(EMPTY_VALUE);
+    expect(
+      agentTabCounts([
+        stubAgent("dispatch", { mutating: true }),
+        stubAgent("reaper"),
+        stubAgent("report"),
+      ]),
+    ).toEqual({ ALL: 3, MUTATING: 1, READ_ONLY: 2 });
   });
 });
 
@@ -202,7 +220,7 @@ describe("Agents detail pane (WM-211)", () => {
     await withAgents(agents, async () => {
       const { getByText, getAllByText } = renderAgents("pi-smoke@1");
       await waitFor(() => {
-        expect(getByText("modelTier")).toBeTruthy();
+        expect(getByText("model tier")).toBeTruthy();
       });
       // The tier reads the same in the row cell and the detail pane, by design.
       expect(getAllByText("light").length).toBeGreaterThan(0);
@@ -224,7 +242,7 @@ describe("Agents detail pane (WM-211)", () => {
     await withAgents(agents, async () => {
       const { getByText, getAllByText } = renderAgents("reaper@1");
       await waitFor(() => {
-        expect(getByText("modelTier")).toBeTruthy();
+        expect(getByText("model tier")).toBeTruthy();
       });
       expect(getAllByText("n/a").length).toBeGreaterThan(0);
       expect(getByText(/adapter command/)).toBeTruthy();

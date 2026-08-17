@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys } from "../hooks";
+import { useDisplayOptions, useListKeys, useTabKeys } from "../hooks";
 import {
   buildSections,
   cycleColumnSort,
@@ -35,6 +35,11 @@ import {
   copyLink,
 } from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
+import {
+  AgentMutationBadge,
+  EMPTY_VALUE,
+  formatDurationSeconds,
+} from "../components/AgentHoverCard";
 import { eventsHash } from "../hash";
 import { setContextActions } from "../palette";
 
@@ -57,10 +62,24 @@ const MODEL_ADAPTERS = new Set(["claude", "pi"]);
  * so "sort by tier" and "group by tier" cannot disagree. `override` is not a
  * tier but reads as one here: it is what a definition says instead of a tier.
  */
-const TIER_ORDER = ["strong", "standard", "light", "override", "-"] as const;
+const TIER_ORDER = ["strong", "standard", "light", "override", EMPTY_VALUE] as const;
 
-/** No tier, no override, nothing to say — one dash, used everywhere. */
-const DASH = "-";
+const AGENT_TABS = ["ALL", "MUTATING", "READ_ONLY"] as const;
+type AgentTab = (typeof AGENT_TABS)[number];
+
+const AGENT_TAB_LABELS: Record<AgentTab, string> = {
+  ALL: "All",
+  MUTATING: "Mutating",
+  READ_ONLY: "Read-only",
+};
+
+const matchesAgentTab = (agent: AgentDef, tab: AgentTab): boolean =>
+  tab === "ALL" || (tab === "MUTATING" ? agent.mutating : !agent.mutating);
+
+export function agentTabCounts(rows: AgentDef[]): Record<AgentTab, number> {
+  const mutating = rows.filter((agent) => agent.mutating).length;
+  return { ALL: rows.length, MUTATING: mutating, READ_ONLY: rows.length - mutating };
+}
 
 const uniq = (values: string[]) => [...new Set(values)];
 
@@ -79,10 +98,11 @@ export const routeModel = (r: AgentEventRoute): string =>
  * truth; picking one adapter to show would be a lie the table cannot flag.
  */
 export const adapterText = (a: AgentDef): string =>
-  uniq(a.eventTypes.map((r) => r.adapter)).join(", ") || DASH;
+  uniq(a.eventTypes.map((r) => r.adapter)).join(", ") || EMPTY_VALUE;
 
 /** Declared intent. An exact-id override answers for a definition that names no tier. */
-export const tierText = (a: AgentDef): string => a.modelTier ?? (a.model ? "override" : DASH);
+export const tierText = (a: AgentDef): string =>
+  a.modelTier ?? (a.model ? "override" : EMPTY_VALUE);
 
 /** Sort key for the Tier column: TIER_ORDER's position, unknowns last. */
 const tierRank = (a: AgentDef): number => {
@@ -96,7 +116,7 @@ const tierRank = (a: AgentDef): number => {
  * declaration, so the fact is not lost.
  */
 export const modelText = (a: AgentDef): string =>
-  uniq(a.eventTypes.map(routeModel)).join(", ") || DASH;
+  uniq(a.eventTypes.map(routeModel)).join(", ") || EMPTY_VALUE;
 
 /** Grouping/ordering/columns for the registry table (OPS-493/OPS-492). */
 const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
@@ -168,11 +188,21 @@ export function Agents({
   const rows = query.data?.agents ?? [];
   const contracts = query.data?.contracts ?? {};
 
+  const tabCounts = agentTabCounts(rows);
+  const mutatingCount = tabCounts.MUTATING;
+  const [tab, setTab] = useState<AgentTab>("ALL");
+  const selectTab = (next: AgentTab) => {
+    setTab(next);
+    if (focusAgentRef) onSelectAgent(null);
+  };
+  useTabKeys(AGENT_TABS, tab, selectTab);
+
   const [filter, setFilter] = useState("");
+  const byTab = useMemo(() => rows.filter((agent) => matchesAgentTab(agent, tab)), [rows, tab]);
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((a) =>
+    if (!q) return byTab;
+    return byTab.filter((a) =>
       [
         a.ref,
         a.id,
@@ -186,7 +216,7 @@ export function Agents({
         ...a.eventTypes.map((t) => t.type),
       ].some((v) => v.toLowerCase().includes(q)),
     );
-  }, [rows, filter]);
+  }, [byTab, filter]);
 
   // Display options (OPS-493): partition into sections, order inside them, and
   // feed keyboard navigation only the rows of open sections.
@@ -213,7 +243,12 @@ export function Agents({
   }, [selectedIndex]);
 
   useEffect(() => {
-    if (focusAgentRef) setFilter("");
+    if (!focusAgentRef || visible.some((agent) => agent.ref === focusAgentRef)) return;
+    if (!byTab.some((agent) => agent.ref === focusAgentRef)) setTab("ALL");
+    setFilter("");
+    // A row click updates only focusAgentRef, so inspect visibility at that
+    // transition and preserve the operator's active safety tab and query.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusAgentRef]);
 
   const pendingC = useRef<number>(0);
@@ -257,6 +292,7 @@ export function Agents({
 
   return (
     <div className="flex h-full min-w-0">
+      <div className={`${sel ? "hidden lg:flex" : "flex"} min-h-0 min-w-0 flex-1`}>
       <ListPane
         chrome={
           <>
@@ -266,7 +302,32 @@ export function Agents({
           surface="registry"
           subject={{ label: "Agents", plural: true }}
         />
+        <div className="mb-2 text-[11px] text-(--text-faint)" aria-live="polite">
+          {rows.length} agents · {mutatingCount} mutating · {rows.length - mutatingCount} read-only
+        </div>
         <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap gap-1" role="tablist" aria-label="Agent mutation safety">
+            {AGENT_TABS.map((item, index) => (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                aria-selected={tab === item}
+                onClick={() => selectTab(item)}
+                className={`shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                  tab === item
+                    ? "bg-(--surface-3) text-(--text)"
+                    : "text-(--text-faint) hover:bg-(--surface-1)"
+                }`}
+              >
+                {AGENT_TAB_LABELS[item]}
+                <span className="ml-1.5 tabular-nums text-(--text-faint)">{tabCounts[item]}</span>
+                <span aria-hidden="true" className="mono ml-1 text-[10px] text-(--text-faint) opacity-70">
+                  {index + 1}
+                </span>
+              </button>
+            ))}
+          </div>
           <span className="ml-auto">
             <DisplayOptions
               config={AGENTS_DISPLAY}
@@ -346,9 +407,7 @@ export function Agents({
                   )}
                   {show.has("mutating") && (
                     <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                      <span style={{ color: a.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
-                        {a.mutating ? "mutating" : "read-only"}
-                      </span>
+                      <AgentMutationBadge mutating={a.mutating} />
                     </td>
                   )}
                   {show.has("capabilities") && (
@@ -358,12 +417,14 @@ export function Agents({
                   )}
                   {show.has("timeout") && (
                     <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
-                      {a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : "-"}
+                      <span title={a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : undefined}>
+                        {formatDurationSeconds(a.limits.timeout_seconds)}
+                      </span>
                     </td>
                   )}
                   {show.has("attempts") && (
                     <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
-                      {a.limits.attempts ?? "-"}
+                      {a.limits.attempts ?? EMPTY_VALUE}
                     </td>
                   )}
                   {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
@@ -430,10 +491,11 @@ export function Agents({
           </Section>
         </div>
       </ListPane>
+      </div>
 
       {sel && (
         <DetailPane
-          widthClass="w-[520px]"
+          widthClass="w-full lg:w-[520px]"
           title={
             <div className="flex items-center gap-2 min-w-0">
               <span className="mono truncate" title={sel.ref}>
@@ -453,16 +515,12 @@ export function Agents({
             <KVGroup title="Identity">
               <KV k="id" v={sel.id} />
               <KV k="version" v={String(sel.version)} />
-              <KV k="outputContract" v={sel.outputContract} />
+              <KV k="output contract" v={sel.outputContract} />
             </KVGroup>
             <KVGroup title="Execution">
               <KV
                 k="mutating"
-                v={
-                  <span style={{ color: sel.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
-                    {sel.mutating ? "yes" : "no"}
-                  </span>
-                }
+                v={<AgentMutationBadge mutating={sel.mutating} />}
               />
               <KV
                 k="workspace"
@@ -470,14 +528,14 @@ export function Agents({
               />
               <KV k="capabilities" v={caps(sel)} />
               <KV k="adapter" v={adapterText(sel)} />
-              <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : "-"} />
-              <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : "-"} />
+              <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : EMPTY_VALUE} />
+              <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : EMPTY_VALUE} />
               <KV
-                k="actionRegistry"
+                k="action registry"
                 v={
                   sel.actionRegistry && Object.keys(sel.actionRegistry).length > 0
                     ? Object.keys(sel.actionRegistry).join(", ")
-                    : "-"
+                    : EMPTY_VALUE
                 }
               />
             </KVGroup>
@@ -485,14 +543,14 @@ export function Agents({
                 route actually resolves to is per adapter, and lives on the
                 Event routing lines below — the same split `cli.mjs agents` prints. */}
             <KVGroup title="Model">
-              <KV k="modelTier" v={sel.modelTier ?? "-"} />
+              <KV k="model tier" v={sel.modelTier ?? EMPTY_VALUE} />
               <KV
                 k="model override"
                 v={
                   sel.model ? (
                     <span title="Exact model id — resolved verbatim, whatever the tier says.">{sel.model}</span>
                   ) : (
-                    "-"
+                    EMPTY_VALUE
                   )
                 }
               />
@@ -500,9 +558,13 @@ export function Agents({
             <KVGroup title="Limits">
               <KV
                 k="timeout"
-                v={sel.limits.timeout_seconds != null ? `${sel.limits.timeout_seconds}s` : "-"}
+                v={
+                  <span title={sel.limits.timeout_seconds != null ? `${sel.limits.timeout_seconds}s` : undefined}>
+                    {formatDurationSeconds(sel.limits.timeout_seconds)}
+                  </span>
+                }
               />
-              <KV k="attempts" v={String(sel.limits.attempts ?? "-")} />
+              <KV k="attempts" v={String(sel.limits.attempts ?? EMPTY_VALUE)} />
             </KVGroup>
           </Section>
 
@@ -525,7 +587,8 @@ export function Agents({
           )}
 
           <Section title={`Prompt · ${sel.promptFile}`} card={false}>
-            <div className="mb-1.5 flex justify-end">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-(--text-faint)">Markdown source</span>
               <Button onClick={() => copyText(sel.prompt, "prompt")}>Copy prompt</Button>
             </div>
             <pre className="mono max-h-96 overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-3 leading-relaxed whitespace-pre-wrap">
