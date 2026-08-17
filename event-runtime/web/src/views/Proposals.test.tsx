@@ -1,7 +1,7 @@
 import "../test-dom";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { Proposals } from "./Proposals";
+import { filterOpenProposals, humanizeReason, Proposals } from "./Proposals";
 import { api } from "../api";
 import {
   changeInput,
@@ -457,6 +457,94 @@ describe("Proposals component harness: filter retention", () => {
   });
 });
 
+describe("Proposals expiration and reason presentation (WM-547)", () => {
+  test("humanizeReason maps known reason codes and makes unknown codes readable", () => {
+    expect(humanizeReason("auto_approval_ineligible:proposal_expired")).toBe(
+      "Auto-approval not eligible — proposal expired",
+    );
+    expect(humanizeReason("custom_reason:needs_operator_review")).toBe(
+      "custom reason:needs operator review",
+    );
+  });
+
+  test("filterOpenProposals keeps TTL-expired proposals out of Open", () => {
+    const now = Date.now();
+    const expired = stubProposal("prop_expired", "open", {
+      created_at: new Date(now - 10_000).toISOString(),
+      ttl_seconds: 1,
+    });
+    const active = stubProposal("prop_active", "open", {
+      created_at: new Date(now - 1_000).toISOString(),
+      ttl_seconds: 300,
+    });
+
+    expect(filterOpenProposals([expired, active], now, false).map((p) => p.id)).toEqual([
+      "prop_active",
+    ]);
+    expect(filterOpenProposals([expired, active], now, true).map((p) => p.id)).toEqual([
+      "prop_expired",
+    ]);
+  });
+
+  test("expired detail disables approval with a reason and the Expired filter can be cleared", async () => {
+    const now = Date.now();
+    const rawReason = "auto_approval_ineligible:proposal_expired";
+    const expired = stubProposal("prop_expired", "open", {
+      agent: "expired-agent",
+      created_at: new Date(now - 10_000).toISOString(),
+      ttl_seconds: 1,
+      reason: rawReason,
+      spec: createRunSpecFixture("run_expired"),
+    });
+    const active = stubProposal("prop_active", "open", {
+      agent: "active-agent",
+      created_at: new Date(now).toISOString(),
+      ttl_seconds: 300,
+    });
+
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [expired, active] }),
+        proposalHistory: async () => ({ proposals: [] }),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const r = renderProposals({ focusProposalId: expired.id });
+        const approve = await waitFor(
+          () => r.getByRole("button", { name: /^Approve/ }) as HTMLButtonElement,
+        );
+
+        expect(approve.disabled).toBe(true);
+        expect(approve.parentElement?.getAttribute("title")).toBe(
+          "This proposal has expired and can no longer be approved.",
+        );
+        expect(r.getAllByText("Auto-approval not eligible — proposal expired").length).toBeGreaterThan(0);
+        expect(r.getAllByTitle(rawReason).length).toBeGreaterThan(0);
+        expect(r.getByText("Safety & blast radius")).toBeTruthy();
+
+        const expiredRow = r.getAllByText("expired-agent").find((node) => node.closest("tr"))?.closest("tr");
+        expect(
+          Array.from(expiredRow?.querySelectorAll("td") ?? []).some(
+            (cell) =>
+              cell.classList.contains("min-w-24") &&
+              cell.classList.contains("truncate") &&
+              cell.classList.contains("whitespace-nowrap"),
+          ),
+        ).toBe(true);
+
+        act(() => {
+          fireEvent.click(r.getByRole("button", { name: /^Expired/ }));
+        });
+        await waitFor(() => {
+          expect(r.queryByText("expired-agent")).toBeNull();
+          expect(r.getByText("active-agent")).toBeTruthy();
+        });
+      },
+    );
+  });
+});
+
 describe("Proposals component harness: cross-tab reveal", () => {
   test("switches tab to History when focusProposalId is a decided proposal", async () => {
     const pOpen = stubProposal("prop_open_1", "open", { agent: "agent-open" });
@@ -615,8 +703,18 @@ describe("Proposals component harness: cross-tab reveal", () => {
 
   test("focusExpired prop sets open tab, filters to expired proposals, and calls onFocusExpiredConsumed", async () => {
     const onFocusExpiredConsumed = mock(() => {});
-    const pExpired = stubProposal("prop_exp", "open", { expired: true, agent: "agent-expired" });
-    const pActive = stubProposal("prop_act", "open", { expired: false, agent: "agent-active" });
+    const pExpired = stubProposal("prop_exp", "open", {
+      expired: true,
+      agent: "agent-expired",
+      created_at: new Date(Date.now() - 10_000).toISOString(),
+      ttl_seconds: 1,
+    });
+    const pActive = stubProposal("prop_act", "open", {
+      expired: false,
+      agent: "agent-active",
+      created_at: new Date().toISOString(),
+      ttl_seconds: 300,
+    });
 
     await withApi(
       {
@@ -792,6 +890,8 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     const p2 = stubProposal("prop_2", "open", { agent: "security-scan" });
     const replacement = stubProposal("prop_1b", "open", {
       agent: "triage-scan",
+      created_at: new Date(Date.now() - 10_000).toISOString(),
+      ttl_seconds: 1,
       spec: createRunSpecFixture("run_prop_1b", { timeoutSeconds: 900, agent: "triage-scan" }),
     });
     api.proposals = async () => ({ proposals: [p1, p2] });
@@ -823,6 +923,11 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     expect(approveCalls).toEqual(["prop_1"]);
     expect(r.getByText(/re-planned against current state/i)).toBeTruthy();
     expect(r.getByText(/nothing runs until you approve the new proposal explicitly/i)).toBeTruthy();
+    const approveReplacement = r.getByRole("button", { name: /Approve new proposal/i }) as HTMLButtonElement;
+    expect(approveReplacement.disabled).toBe(true);
+    expect(approveReplacement.parentElement?.getAttribute("title")).toBe(
+      "This replacement proposal has expired and can no longer be approved.",
+    );
   });
 
   test("repo context shows a persistent caption that the list is scoped to that repo", async () => {

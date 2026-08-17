@@ -117,7 +117,7 @@ export function ApprovalSafetyCard({
   const mutHue = risk.mutating ? "var(--hue-err)" : "var(--hue-ok)";
 
   return (
-    <div className="mb-3 rounded-md border border-(--border) bg-(--surface-0) p-3 text-[12px]">
+    <div className="mb-3 min-w-0 rounded-md border border-(--border) bg-(--surface-0) p-3 text-[12px]">
       <div className="mb-2 flex items-center justify-between border-b border-(--border) pb-2">
         <div className="flex gap-2">
           <span
@@ -213,7 +213,7 @@ export function ApprovalRiskDetails({ proposal, agent }: { proposal: Proposal; a
         <KV k="ttl" v={<Countdown createdAt={proposal.created_at} ttlSeconds={proposal.ttl_seconds} />} />
       </div>
       <ApprovalSafetyCard proposal={proposal} agent={agent} />
-      <div className="mb-3 max-h-[38vh] overflow-auto">
+      <div className="mb-3 min-w-0 max-h-[38vh] overflow-x-auto overflow-y-auto">
         <Disclosure label="immutable RunSpec" defaultOpen>
           <JsonBlock value={proposal.spec} />
         </Disclosure>
