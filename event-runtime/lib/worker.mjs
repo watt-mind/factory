@@ -680,6 +680,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
+        // The plan/verify gate refuses tickets whose Owned Paths cannot be parsed
+        // (owned_paths_unknown). The demo stub is a synthetic ticket, so give it
+        // a narrow, explicit scope that never intersects real escalate_paths.
+        description: "## Owned Paths\n- demo/**\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
