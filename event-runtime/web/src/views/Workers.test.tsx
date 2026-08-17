@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  CapacityBand,
   Workers,
   capacityFromWorkers,
   defaultWorkerTab,
@@ -104,7 +105,40 @@ describe("worker capacity and draining state (WM-228)", () => {
     expect(workerDisplayState({ ...stubWorker("w_stale", "busy", true), draining: true })).toBe("stale");
   });
 
-  test("shows running/capacity, queue limiter, class caps, and an explicit draining row", async () => {
+  test("uses worker-health hues on the running number only", () => {
+    const capacity: WorkerCapacity = {
+      running: 1,
+      capacity: 2,
+      queued: 0,
+      live: 2,
+      idle: 1,
+      draining: 0,
+      target: 2,
+      min: 1,
+      max: 2,
+      supervisor: "active",
+      source: "worker-policy",
+      limitingFactor: null,
+      classes: [],
+    };
+    const view = render(<CapacityBand capacity={capacity} />);
+    const runningValue = () => view.container.querySelector("[data-stat-value]");
+
+    expect(runningValue()?.textContent).toBe("1");
+    expect(runningValue()?.getAttribute("style")).toContain("var(--hue-ok)");
+    expect(runningValue()?.nextElementSibling?.textContent).toBe(" / 2");
+    expect(runningValue()?.nextElementSibling?.getAttribute("style")).toBeNull();
+
+    view.rerender(
+      <CapacityBand capacity={{ ...capacity, queued: 1, limitingFactor: "at worker max" }} />,
+    );
+    expect(runningValue()?.getAttribute("style")).toContain("var(--hue-warn)");
+
+    view.rerender(<CapacityBand capacity={{ ...capacity, supervisor: "stopped" }} />);
+    expect(runningValue()?.getAttribute("style")).toContain("var(--hue-err)");
+  });
+
+  test("shows four capacity stat cells, queue limiter, class caps, and an explicit draining row", async () => {
     const worker = {
       ...stubWorker("w_drain", "busy"),
       draining: true,
@@ -127,9 +161,20 @@ describe("worker capacity and draining state (WM-228)", () => {
       classes: [{ name: "heavy", running: 1, capacity: 2 }],
     };
     await withWorkers([worker], async () => {
-      const { getByText, getAllByText, getByTitle } = renderWorkers();
-      await waitFor(() => expect(getByText("1 running / 2 capacity")).toBeTruthy());
-      expect(getByText("4 queued runs")).toBeTruthy();
+      const { getByText, getAllByText, getByTitle, getByRole } = renderWorkers();
+      const summary = await waitFor(() => getByRole("region", { name: "Worker pool capacity" }));
+      const statCells = summary.querySelectorAll("[data-stat-card]");
+      expect(statCells).toHaveLength(4);
+      expect(Array.from(statCells).map((cell) => cell.textContent)).toEqual([
+        "Running1 / 2",
+        "Queued4",
+        "Idle0",
+        "Target0supervisor active",
+      ]);
+      expect(statCells[0]?.querySelector("[data-stat-value]")?.textContent).toBe("1");
+      expect(statCells[0]?.querySelector("[data-stat-value]")?.getAttribute("style")).toContain(
+        "var(--hue-warn)",
+      );
       expect(getByText("at worker max")).toBeTruthy();
       expect(getByText("heavy 1/2")).toBeTruthy();
       expect(getAllByText("draining").length).toBeGreaterThan(0);
