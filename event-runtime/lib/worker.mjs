@@ -680,6 +680,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
+        // The claim gate fails closed on tickets whose Owned Paths do not
+        // parse (owned_paths_unknown, WM-575); a stub ticket must carry a
+        // parseable section or the demo stub refuses every dispatch.
+        description: "## Owned Paths\n- demo/**\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
