@@ -363,19 +363,25 @@ adapter_banner() { # <adapter from /health>
 # sum of three sequential timeouts.
 term_daemon() { # <pidfile> <label>
   if pid_alive "$1"; then
-    info "stopping $2 (pid $(cat "$1"))"
-    kill "$(cat "$1")" 2>/dev/null || true
+    local pid
+    pid="$(cat "$1")"
+    info "stopping $2 (pid $pid)"
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   fi
 }
 
 await_daemon() { # <pidfile> <label>
+  local pid
+  pid="$(cat "$1" 2>/dev/null || true)"
   for _ in {1..30}; do
     pid_alive "$1" || break
     sleep 0.1
   done
   if pid_alive "$1"; then
     warn "$2 ignored SIGTERM — killing"
-    kill -9 "$(cat "$1")" 2>/dev/null || true
+    if [[ -n "$pid" ]]; then
+      kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+    fi
   fi
   rm -f "$1"
 }

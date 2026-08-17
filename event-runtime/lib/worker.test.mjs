@@ -1147,6 +1147,16 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       path.join(repoDir, "bin", "worktree-up-broken.sh"),
       `#!/bin/bash\necho "dependency install failed" >&2\nexit 12\n`,
     );
+    writeFileSync(
+      path.join(repoDir, "bin", "worktree-up-startup-crash.sh"),
+      `#!/bin/bash\n` +
+      `mkdir -p "${wtRoot}/$1/.factory/run"\n` +
+      `echo "RegistryError: event type test: model_tier strong has no mapping" > "${wtRoot}/$1/.factory/run/serve.log"\n` +
+      `echo "warn: event runtime log (${wtRoot}/$1/.factory/run/serve.log):" >&2\n` +
+      `cat "${wtRoot}/$1/.factory/run/serve.log" >&2\n` +
+      `echo "error: event runtime died during startup on 7400 — see ${wtRoot}/$1/.factory/run/serve.log" >&2\n` +
+      `exit 1\n`,
+    );
 
     mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
     writeFileSync(path.join(factoryRoot, "config", "policy.yaml"), "{}\n");
@@ -1172,6 +1182,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         `  - name: wt-broken-up\n    path: ${repoDir}\n    github: watt-mind/wt-broken-up\n    base: develop\n` +
         `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
         `    worktree_up: bin/worktree-up-broken.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n` +
+        `  - name: wt-startup-crash\n    path: ${repoDir}\n    github: watt-mind/wt-startup-crash\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
+        `    worktree_up: bin/worktree-up-startup-crash.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n`,
     );
     previousReposRoot = process.env.FACTORY_REPOS_ROOT;
@@ -1541,11 +1555,13 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       `#!/usr/bin/env bash\nexec ${JSON.stringify(path.join(repoRoot, "bin", "worktree-up.sh"))} "$@" --no-seed\n`,
     );
 
+    const testPortBase = 18400 + Math.floor(Math.random() * 1000) * 2;
+
     const bunStubLines = [
       "#!/usr/bin/env node",
       "const fs = require(\"fs\");",
       "const path = require(\"path\");",
-      "const { spawnSync } = require(\"child_process\");",
+      "const { spawn } = require(\"child_process\");",
       `const stateDir = process.env.WM334_LINEAR_STATE_DIR || ${JSON.stringify(linearStateDir)}`,
       `const realBun = process.env.WM334_REAL_BUN || ${JSON.stringify(realBun)}`,
       "const args = process.argv.slice(2);",
@@ -1596,13 +1612,6 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       "  console.log(\"[]\");",
       "  process.exit(0);",
       "}",
-      "if (args[0] === \"-e\" || args[0] === \"--eval\") {",
-      "  const result = spawnSync(realBun, args, {",
-      "    stdio: \"inherit\",",
-      "    env: process.env,",
-      "  });",
-      "  process.exit(result.status ?? 0);",
-      "}",
       "if (args.includes(\"install\")) {",
       "  process.exit(0);",
       "}",
@@ -1610,28 +1619,23 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       "  console.log(\"entry chunk exceeds budget\");",
       "  process.exit(1);",
       "}",
-      "const result = spawnSync(realBun, args, {",
+      "const child = spawn(realBun, args, {",
       "  stdio: \"inherit\",",
       "  env: process.env,",
       "});",
-      "process.exit(result.status ?? 0);",
+      "process.on(\"SIGTERM\", () => child.kill(\"SIGTERM\"));",
+      "process.on(\"SIGINT\", () => child.kill(\"SIGINT\"));",
+      "process.on(\"SIGHUP\", () => child.kill(\"SIGHUP\"));",
+      "child.on(\"exit\", (code, signal) => {",
+      "  if (signal) {",
+      "    try { process.kill(process.pid, signal); } catch {}",
+      "  }",
+      "  process.exit(code ?? 0);",
+      "});",
     ];
     write(path.join(stubDir, "bun"), bunStubLines.join("\n") + "\n");
 
-    const expectedHomeJson = JSON.stringify(expectedHome);
-    const curlStubLines = [
-      "#!/usr/bin/env bash",
-      "set -euo pipefail",
-      `expected_home=${expectedHomeJson}`,
-      'if [[ "$*" == *"/health"* ]]; then',
-      '  printf "%s\\n" "{\\\"env\\\":{\\\"home\\\":\\\"$expected_home\\\",\\\"adapter\\\":\\\"fake\\\"}}"',
-      "  exit 0",
-      "fi",
-      "exit 0",
-    ];
-    write(path.join(stubDir, "curl"), curlStubLines.join("\n") + "\n");
-
-    for (const filePath of [path.join(stubDir, "bun"), path.join(stubDir, "curl"), worktreeUp]) {
+    for (const filePath of [path.join(stubDir, "bun"), worktreeUp]) {
       execFileSync("chmod", ["+x", filePath]);
     }
 
@@ -1651,26 +1655,19 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         `    verify: printf 'entry chunk exceeds budget\\n' \\n  >&2; exit 1\n` +
         `    escalate_paths: []\n`,
     );
-    mkdirSync(path.join(tmpRoot, "config"), { recursive: true });
-    write(path.join(tmpRoot, "config", "policy.yaml"),
-      [
-        "models:",
-        "  fake:",
-        "    strong: default",
-        "    standard: default",
-        "    light: default",
-        "  pi:",
-        "    strong: default",
-        "    standard: default",
-        "    light: default",
-      ].join("\n") + "\n",
-    );
+    const basePolicy = readFileSync(path.join(repoRoot, "config", "policy.yaml"), "utf8");
+    const testPolicy = basePolicy.includes("  fake:")
+      ? basePolicy
+      : basePolicy.replace(/^models:\n/m, "models:\n  fake:\n    strong: default\n    standard: default\n    light: default\n");
+    write(path.join(tmpRoot, "config", "policy.yaml"), testPolicy);
 
     const originalEnv = {
       FACTORY_REPOS_ROOT: process.env.FACTORY_REPOS_ROOT,
       FACTORY_SKIP_FETCH: process.env.FACTORY_SKIP_FETCH,
       FACTORY_BASE_BRANCH: process.env.FACTORY_BASE_BRANCH,
       FACTORY_WT_ROOT: process.env.FACTORY_WT_ROOT,
+      FACTORY_PORT_BASE: process.env.FACTORY_PORT_BASE,
+      FACTORY_PORT_SPAN: process.env.FACTORY_PORT_SPAN,
       PATH: process.env.PATH,
       WM334_LINEAR_STATE_DIR: process.env.WM334_LINEAR_STATE_DIR,
       WM334_REAL_BUN: process.env.WM334_REAL_BUN,
@@ -1681,6 +1678,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       process.env.FACTORY_SKIP_FETCH = "1";
       process.env.FACTORY_BASE_BRANCH = baseBranch;
       process.env.FACTORY_WT_ROOT = worktreeRoot;
+      process.env.FACTORY_PORT_BASE = String(testPortBase);
+      process.env.FACTORY_PORT_SPAN = "50";
       process.env.PATH = `${path.join(stubDir)}:${process.env.PATH}`;
       process.env.WM334_LINEAR_STATE_DIR = linearStateDir;
       process.env.WM334_REAL_BUN = realBun;
@@ -1827,6 +1826,28 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(summary.reasonCode).toBe("workspace_provisioning_error");
     expect(summary.error).toContain("dependency install failed");
     expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ?`).get(spec.runId).reason_code).toBe("workspace_provisioning_error");
+  });
+
+  test("worktree_up daemon startup failure surfaces serve.log in provisioning error message", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-crash-locks-"));
+    const observingAdapter = { async execute() { return { exitCode: 0, timedOut: false }; } };
+
+    const spec = queueRun(db, makeDispatchSpec({ input: { repo: "wt-startup-crash", ticket: "WM-733" } }));
+    const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-733", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    }));
+
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("workspace_provisioning_error");
+    expect(summary.error).toContain("RegistryError: event type test: model_tier strong has no mapping");
+    expect(summary.error).toContain("event runtime died during startup on 7400");
   });
 
   test("rollback Linear ticket state to Todo on crash, timeout, and contract violation", async () => {

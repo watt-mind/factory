@@ -194,6 +194,14 @@ fi
 # the loser dies with SQLITE_BUSY (OPS-376). Health up ⇒ serve owns a settled
 # DB, so the worker joins an existing WAL.
 #
+dump_daemon_log() { # <logfile> <label>
+  local logfile="$1" label="$2"
+  if [[ -f "$logfile" ]]; then
+    warn "$label log ($logfile):"
+    cat "$logfile" >&2
+  fi
+}
+
 # Ownership, not liveness (OPS-460): a stranger answering /health must not
 # count as ready. If our recorded pid died at bind, say so from serve.log
 # instead of adopting the process that won the port.
@@ -203,16 +211,19 @@ for _ in {1..50}; do
   HEALTH_JSON=""
   if ! pid_alive "$RUN_DIR/serve.pid"; then
     rm -f "$RUN_DIR/ports"
+    dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
     die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
   fi
   sleep 0.1
 done
 if ! pid_alive "$RUN_DIR/serve.pid"; then
   rm -f "$RUN_DIR/ports"
+  dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
 fi
 if [[ -z "$HEALTH_JSON" ]]; then
   rm -f "$RUN_DIR/ports"
+  dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   HEALTH_JSON=$(curl -sf -m 2 "http://127.0.0.1:$API_PORT/health") \
     || die "control API never came up on $API_PORT — see $RUN_DIR/serve.log"
 fi

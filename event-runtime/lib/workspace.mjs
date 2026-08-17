@@ -120,7 +120,9 @@ function materializeWorktree({ workspaceDir, input, checkoutDir }) {
     env: { ...process.env, FACTORY_WORKTREE_REPORT: reportPath },
   });
   if (up.status !== 0) {
-    const why = (up.stderr || up.stdout || "").trim().split("\n").pop() || `exit ${up.status}`;
+    const stderr = (up.stderr || "").trim();
+    const stdout = (up.stdout || "").trim();
+    const why = stderr || stdout || `exit ${up.status}`;
     throw new WorktreeError(`worktree_up failed for ${repoName}/${ticket}: ${why}`);
   }
 
