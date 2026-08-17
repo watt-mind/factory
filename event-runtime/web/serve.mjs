@@ -24,6 +24,16 @@ if (!existsSync(path.join(DIST, "index.html"))) {
   process.exit(1);
 }
 
+function fatalProcessError(kind, error) {
+  console.error(`[web] ${kind}:`, error);
+  // A process-level failure may leave Bun.serve in an unknown state. Exit
+  // non-zero so live-stack's supervisor replaces this process cleanly.
+  process.exit(1);
+}
+
+process.on("uncaughtException", (error, origin) => fatalProcessError(`uncaughtException (${origin})`, error));
+process.on("unhandledRejection", (reason) => fatalProcessError("unhandledRejection", reason));
+
 Bun.serve({
   hostname: HOST,
   port: WEB_PORT,
@@ -38,17 +48,31 @@ Bun.serve({
       const bodyless = req.method === "GET" || req.method === "HEAD";
       const headers = bodyless ? new Headers(req.headers) : req.headers;
       const init = { method: req.method, headers };
-      if (bodyless) {
-        // Drain any non-standard incoming payload so a keep-alive connection
-        // remains aligned for the client's next request. Its framing headers
-        // must not describe a body that the upstream request intentionally omits.
-        await req.arrayBuffer();
-        headers.delete("content-length");
-        headers.delete("transfer-encoding");
-      } else {
-        init.body = req.body;
+      try {
+        if (bodyless) {
+          // Drain any non-standard incoming payload so a keep-alive connection
+          // remains aligned for the client's next request. Its framing headers
+          // must not describe a body that the upstream request intentionally omits.
+          await req.arrayBuffer();
+          headers.delete("content-length");
+          headers.delete("transfer-encoding");
+        } else {
+          init.body = req.body;
+        }
+        return await fetch(target, init);
+      } catch (error) {
+        // Backend restarts are expected during deploys and watch-mode reloads.
+        // Keep the static server alive and give clients an explicit retryable
+        // response instead of allowing Bun's rejected fetch to escape.
+        console.error(`[web] ${req.method} ${url.pathname} upstream unavailable:`, error);
+        return new Response(JSON.stringify({ error: "event runtime temporarily unavailable" }), {
+          status: 503,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "retry-after": "1",
+          },
+        });
       }
-      return fetch(target, init);
     }
 
     // Static, confined to dist/ — reject traversal rather than resolving it.

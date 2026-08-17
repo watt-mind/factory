@@ -8,6 +8,7 @@ const WEB_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DIST_INDEX = path.join(WEB_DIR, "dist", "index.html");
 
 let api;
+let apiPort;
 let proxy;
 let webPort;
 let createdDistIndex = false;
@@ -52,30 +53,16 @@ beforeAll(async () => {
     createdDistIndex = true;
   }
 
-  api = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(req) {
-      const url = new URL(req.url);
-      received.push({
-        method: req.method,
-        pathname: url.pathname,
-        body: await req.text(),
-        marker: req.headers.get("x-proxy-test"),
-      });
-      return new Response("forwarded", {
-        status: 201,
-        headers: { "x-upstream-method": req.method },
-      });
-    },
-  });
-
+  // Start the proxy while its upstream port is deliberately closed. The
+  // recovery test opens an API on this same port after proving a failed fetch
+  // neither escapes nor kills the static server.
+  apiPort = reservePort();
   webPort = reservePort();
   proxy = Bun.spawn(["bun", path.join(WEB_DIR, "serve.mjs")], {
     cwd: WEB_DIR,
     env: {
       ...process.env,
-      FACTORY_EVENT_PORT: String(api.port),
+      FACTORY_EVENT_PORT: String(apiPort),
       FACTORY_EVENT_WEB_PORT: String(webPort),
     },
     stdout: "pipe",
@@ -106,6 +93,40 @@ afterAll(async () => {
 });
 
 describe("event-runtime web API proxy", () => {
+  test("returns 503 while the API is down, stays alive, then recovers", async () => {
+    const unavailable = await requestProxy("GET", "/health");
+
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers["content-type"]).toContain("application/json");
+    expect(JSON.parse(unavailable.body)).toEqual({
+      error: "event runtime temporarily unavailable",
+    });
+    expect(proxy.exitCode).toBe(null);
+
+    api = Bun.serve({
+      hostname: "127.0.0.1",
+      port: apiPort,
+      async fetch(req) {
+        const url = new URL(req.url);
+        received.push({
+          method: req.method,
+          pathname: url.pathname,
+          body: await req.text(),
+          marker: req.headers.get("x-proxy-test"),
+        });
+        return new Response("forwarded", {
+          status: url.pathname === "/health" ? 200 : 201,
+          headers: { "x-upstream-method": req.method },
+        });
+      },
+    });
+
+    const recovered = await requestProxy("GET", "/health");
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toBe("forwarded");
+    expect(proxy.exitCode).toBe(null);
+  });
+
   test.each([
     ["GET", undefined],
     ["GET", "ignored get payload"],

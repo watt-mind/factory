@@ -218,6 +218,18 @@ case "$ACTION" in
       fi
     fi
 
+    # Keep the web endpoint available if serve.mjs exits on an unexpected
+    # process-level failure. The supervisor only runs while the API daemon is
+    # alive, so `factory down` cannot turn into a restart race.
+    if pid_alive "$RUN_DIR/web-supervisor.pid"; then
+      info "web supervisor already running (pid $(cat "$RUN_DIR/web-supervisor.pid"))"
+    else
+      info "starting web supervisor"
+      spawn_daemon "$RUN_DIR/web-supervisor.pid" "$RUN_DIR/web.log" "$REPO" \
+        env FACTORY_RUN_DIR="$RUN_DIR" FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+        bash "$REPO/bin/live-stack.sh" __supervise-web "$DEV"
+    fi
+
     # 5. Wait for web server (vite has to boot a dep-optimize pass on a cold cache)
     WEB_TRIES=30
     if [[ "$DEV" -eq 1 ]]; then WEB_TRIES=150; fi
@@ -250,6 +262,41 @@ case "$ACTION" in
     printf '  status:  factory events status\n'
     printf '  tail:    factory tail\n'
     printf '  down:    factory down\n\n'
+    ;;
+
+  __supervise-web)
+    # The static server normally survives API restarts. If an unrelated
+    # uncaught process error does terminate it, keep the UI reachable while the
+    # API daemon is still alive. A bounded one-second check avoids crash-looping
+    # while still recovering before the next operator pulse.
+    WEB_DEV="${1:-0}"
+    WEB_CHILD_PID=""
+    # A replacement stays in this supervisor's process group rather than being
+    # detached. `factory down` can therefore stop the whole group atomically,
+    # including a child spawned just before SIGTERM reaches this shell.
+    trap 'if [[ -n "$WEB_CHILD_PID" ]]; then kill -TERM "$WEB_CHILD_PID" 2>/dev/null || true; fi; exit 0' TERM INT
+    while pid_alive "$RUN_DIR/serve.pid"; do
+      if ! pid_alive "$RUN_DIR/web.pid"; then
+        printf '%s [web-supervisor] web server down; restarting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if [[ "$WEB_DEV" -eq 1 ]]; then
+          (
+            cd "$REPO/event-runtime/web"
+            exec env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+              bunx vite --host 127.0.0.1 --port "$WEB_PORT" --strictPort
+          ) >>"$RUN_DIR/web.log" 2>&1 &
+        else
+          (
+            cd "$REPO/event-runtime/web"
+            exec env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+              bun "$REPO/event-runtime/web/serve.mjs"
+          ) >>"$RUN_DIR/web.log" 2>&1 &
+        fi
+        WEB_CHILD_PID=$!
+        printf '%s\n' "$WEB_CHILD_PID" >"$RUN_DIR/web.pid"
+      fi
+      sleep "${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
+    done
+    printf '%s [web-supervisor] event runtime stopped; supervisor exiting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     ;;
 
   __supervise-worker)
@@ -310,6 +357,12 @@ case "$ACTION" in
       if pid_alive "$RUN_DIR/worker.pid"; then
         warn "worker pool still draining after ${POOL_WAIT}s — stopping it anyway; the reaper requeues any lease left behind"
       fi
+    fi
+    # Stop and reap the web supervisor before terminating the web process, or
+    # it could observe the planned shutdown as a crash and replace the daemon.
+    if [[ -f "$RUN_DIR/web-supervisor.pid" ]]; then
+      term_daemon "$RUN_DIR/web-supervisor.pid" "web supervisor"
+      await_daemon "$RUN_DIR/web-supervisor.pid" "web supervisor"
     fi
     term_daemon "$RUN_DIR/web.pid" "web server"
     term_daemon "$RUN_DIR/worker.pid" "worker"
