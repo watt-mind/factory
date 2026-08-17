@@ -1069,7 +1069,7 @@ export function Proposals({
           close={<Button onClick={() => onSelectProposal(null)}>Close</Button>}
         >
 
-          <Section title="Proposal">
+          <Section title="Proposal" icons>
             <KV k="id" v={sel.id} />
             {sel.agent && (
               <KV
@@ -1115,7 +1115,7 @@ export function Proposals({
           </Section>
 
           {sel.eventId && (
-            <Section title="Origin event">
+            <Section title="Origin event" icons>
               <KV
                 k="eventId"
                 v={

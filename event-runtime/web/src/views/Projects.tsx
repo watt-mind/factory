@@ -597,7 +597,7 @@ export function Projects({
               </div>
             </Section>
 
-            <Section id="project-configuration" title="Configuration">
+            <Section id="project-configuration" title="Configuration" icons>
               <KV k="Name" v={sel.name} />
               {sel.project && <KV k="Project" v={sel.project} />}
               {sel.team && <KV k="Team" v={sel.team} />}

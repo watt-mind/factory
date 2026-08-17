@@ -81,7 +81,16 @@ function vendorChunk(id: string): string | undefined {
 // rather than on a change. A ratchet that trips on noise sends whoever hits it
 // hunting a bug they did not introduce. If a future raise buys less headroom than
 // this, split the entry instead of moving the number again.
-const ENTRY_CHUNK_BUDGET_BYTES = 500 * 1000;
+//
+// WM-483 re-baselined to 550 kB on 2026-08-17. The attribute-icon registry
+// (`components/attrIcons.tsx`, §5.2 tier 4) hangs off `KV` in `ui.tsx`, which
+// every eager view imports, so its ~35 Radix glyphs land in the entry by design:
+// 488.48 kB → 522.66 kB. Tree-shaking was verified first (only the imported
+// glyphs appear in the output; the package is `sideEffects: false`), and the
+// vendor split is unchanged. The operator accepted the larger entry for one
+// consistent icon set over per-route duplication. Slack is ~27 kB (5%), the same
+// proportion as the WM-332 raise.
+const ENTRY_CHUNK_BUDGET_BYTES = 550 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {

@@ -1,17 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import {
-  CodeIcon,
-  Component1Icon,
-  Crosshair2Icon,
-  CubeIcon,
-  DesktopIcon,
-  LightningBoltIcon,
-  ListBulletIcon,
-  LockClosedIcon,
-  Pencil1Icon,
-  ReloadIcon,
-  TimerIcon,
-} from "@radix-ui/react-icons";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useDisplayOptions, useListKeys } from "../hooks";
@@ -460,20 +447,19 @@ export function Agents({
           close={<Button onClick={() => onSelectAgent(null)}>Close</Button>}
         >
 
-          <Section title="Definition">
-            {/* Grouped + attribute icons per §5.2 tier 4 (WM-482). Identity
-                rows carry no icon — an id is text and a word already fits —
-                but reserve the slot so label text starts at one x across the
-                whole panel (ux-critic finding, WM-482). */}
+          <Section title="Definition" icons>
+            {/* Grouped + attribute icons per §5.2 tier 4 (WM-482). Glyphs
+                resolve from the registry by label (WM-483); identity rows are
+                unmapped there and reserve an empty slot so label text starts
+                at one x across the whole panel. */}
             <KVGroup title="Identity">
-              <KV k="id" icon={null} v={sel.id} />
-              <KV k="version" icon={null} v={String(sel.version)} />
-              <KV k="outputContract" icon={null} v={sel.outputContract} />
+              <KV k="id" v={sel.id} />
+              <KV k="version" v={String(sel.version)} />
+              <KV k="outputContract" v={sel.outputContract} />
             </KVGroup>
             <KVGroup title="Execution">
               <KV
                 k="mutating"
-                icon={<Pencil1Icon />}
                 v={
                   <span style={{ color: sel.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
                     {sel.mutating ? "yes" : "no"}
@@ -482,16 +468,14 @@ export function Agents({
               />
               <KV
                 k="workspace"
-                icon={<CubeIcon />}
                 v={`${sel.workspace.type}${sel.workspace.retainOnFailure ? " · retain on failure" : ""}`}
               />
-              <KV k="capabilities" icon={<LockClosedIcon />} v={caps(sel)} />
-              <KV k="adapter" icon={<Component1Icon />} v={adapterText(sel)} />
-              <KV k="hosts" icon={<DesktopIcon />} v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : "-"} />
-              <KV k="command" icon={<CodeIcon />} v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : "-"} />
+              <KV k="capabilities" v={caps(sel)} />
+              <KV k="adapter" v={adapterText(sel)} />
+              <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : "-"} />
+              <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : "-"} />
               <KV
                 k="actionRegistry"
-                icon={<ListBulletIcon />}
                 v={
                   sel.actionRegistry && Object.keys(sel.actionRegistry).length > 0
                     ? Object.keys(sel.actionRegistry).join(", ")
@@ -503,10 +487,9 @@ export function Agents({
                 route actually resolves to is per adapter, and lives on the
                 Event routing lines below — the same split `cli.mjs agents` prints. */}
             <KVGroup title="Model">
-              <KV k="modelTier" icon={<LightningBoltIcon />} v={sel.modelTier ?? "-"} />
+              <KV k="modelTier" v={sel.modelTier ?? "-"} />
               <KV
                 k="model override"
-                icon={<Crosshair2Icon />}
                 v={
                   sel.model ? (
                     <span title="Exact model id — resolved verbatim, whatever the tier says.">{sel.model}</span>
@@ -519,10 +502,9 @@ export function Agents({
             <KVGroup title="Limits">
               <KV
                 k="timeout"
-                icon={<TimerIcon />}
                 v={sel.limits.timeout_seconds != null ? `${sel.limits.timeout_seconds}s` : "-"}
               />
-              <KV k="attempts" icon={<ReloadIcon />} v={String(sel.limits.attempts ?? "-")} />
+              <KV k="attempts" v={String(sel.limits.attempts ?? "-")} />
             </KVGroup>
           </Section>
 

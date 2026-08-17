@@ -430,6 +430,23 @@ describe("KV attribute icons and unset values (WM-482)", () => {
     expect(r.getByTitle("version").querySelector("[aria-hidden]")).toBeNull();
   });
 
+  test("<Section icons> resolves KV glyphs from the registry and reserves the slot for unmapped labels (WM-483)", () => {
+    const r = render(
+      <Section title="Run" icons>
+        <KV k="adapter" v="pi" />
+        <KV k="runId" v="run_1" />
+      </Section>,
+    );
+    expect(r.getByTitle("adapter").querySelector("i[aria-hidden] svg")).toBeTruthy();
+    const slot = r.getByTitle("runId").querySelector("i[aria-hidden]");
+    expect(slot).toBeTruthy();
+    expect(slot!.querySelector("svg")).toBeNull();
+    cleanup();
+    // Without the opt-in nothing changes for the ~100 existing KV call sites.
+    const bare = render(<Section title="Run"><KV k="adapter" v="pi" /></Section>);
+    expect(bare.getByTitle("adapter").querySelector("i[aria-hidden]")).toBeNull();
+  });
+
   test("a null icon reserves the slot so labels in the same group align", () => {
     const r = render(<KV k="model override" v="-" icon={null} />);
     expect(r.getByTitle("model override").querySelector("[aria-hidden]")).toBeTruthy();

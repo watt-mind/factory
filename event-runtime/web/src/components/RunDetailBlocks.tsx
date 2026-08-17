@@ -481,7 +481,7 @@ export function RunDetailBlocks({
 
   return (
     <>
-      <Section title="Run">
+      <Section title="Run" icons>
         <KV
           k="agent"
           v={

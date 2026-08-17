@@ -356,19 +356,50 @@ no shared set. Every rule below is checkable in review.
    - It takes the label's color (`--text-faint` in `KV`), never a state hue.
      Hue still means state (below); an attribute icon in `--hue-err` is a
      state claim it cannot back.
-   - **One glyph, one meaning, app-wide.** The mapping lives with the first
-     use and later uses import the same glyph: `Pencil1Icon` = mutating,
-     `CubeIcon` = workspace, `LockClosedIcon` = capabilities,
-     `Component1Icon` = adapter, `DesktopIcon` = hosts, `CodeIcon` =
-     command, `ListBulletIcon` = action registry, `LightningBoltIcon` =
-     model tier, `Crosshair2Icon` = exact model override, `TimerIcon` =
-     timeout, `ReloadIcon` = attempts. Add to this list in the same PR that
-     adds the glyph.
-   - Identity rows (`id`, `version`, contract) carry **no** icon — an
-     identifier is text, and a word already fits — but they pass
-     `icon={null}` so the slot is reserved and label text starts at one x
-     down the whole panel. Rule: once any row in a `Section` has an icon,
-     every `KV` in that section reserves the slot (real icon or `null`).
+   - **One glyph, one meaning, app-wide — resolved by label, never by hand.**
+     The registry is `components/attrIcons.tsx`. A `<Section icons>` opts
+     its `KV` rows in; each row looks its glyph up by normalised label
+     (`modelTier` ≡ `model tier` ≡ `model-tier`; `input.<field>` ≡ `input`),
+     so `adapter` wears the same icon on Runs, Workers, Agents, and Proposals
+     by construction (WM-483). Views do not pass `icon=` themselves except to
+     override deliberately. Current map:
+
+     | Glyph              | Attribute(s)                                                        |
+     | ------------------ | ------------------------------------------------------------------- |
+     | `PersonIcon`       | agent, decided by                                                   |
+     | `Component1Icon`   | adapter                                                             |
+     | `Pencil1Icon`      | mutating                                                            |
+     | `CubeIcon`         | workspace                                                           |
+     | `LockClosedIcon`   | capabilities                                                        |
+     | `DesktopIcon`      | host, hosts                                                         |
+     | `CodeIcon`         | command                                                             |
+     | `ListBulletIcon`   | actionRegistry                                                      |
+     | `PlayIcon`         | execution, execution mode                                           |
+     | `SewingPinIcon`    | placement                                                           |
+     | `GearIcon`         | worker, workerId                                                    |
+     | `TargetIcon`       | target                                                              |
+     | `LightningBoltIcon`| model tier                                                          |
+     | `Crosshair2Icon`   | model, model override, model (pinned) — an exact model id           |
+     | `EyeOpenIcon`      | model (observed)                                                    |
+     | `TimerIcon`        | timeout                                                             |
+     | `ReloadIcon`       | attempts                                                            |
+     | `LapTimerIcon`     | ttl, proposal ttl, cadence — an interval, not a moment              |
+     | `FileTextIcon`     | input, input.*                                                      |
+     | `PaperPlaneIcon`   | origin event, event type, type, source, planned/admitted events     |
+     | `ChatBubbleIcon`   | reason, proposal reason, planner reason                             |
+     | `CheckCircledIcon` | approval                                                            |
+     | `ClockIcon`        | created, updated, occurredAt, receivedAt, admittedAt, startedAt, stoppedAt, decided at, last fire, last completed, next due — a moment |
+     | `LoopIcon`         | loop, loop name                                                     |
+     | `UpdateIcon`       | catch-up                                                            |
+     | `ArchiveIcon`      | repository                                                          |
+     | `GitHubLogoIcon`   | GitHub                                                              |
+     | `CommitIcon`       | base branch, deploy branch                                          |
+
+     Add to this table in the same PR that adds the registry row.
+   - Identity rows (`id`, `run`, `version`, hashes, keys, contract) and
+     state rows (`state`, `status`, `decision` — those carry a `StateBadge`)
+     are **not** in the registry. Inside an iconed section they get an empty
+     reserved slot, so label text starts at one x down the whole section.
    - `aria-hidden` on the slot; the label carries the name.
    - Still no icon font, and no second icon package: one library keeps the
      stroke weight and the visual language uniform.
@@ -426,7 +457,7 @@ not in this table is not a placement.
 | Context                    | Position                  | Rule                                                                                                           |
 | -------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | State badge / status label | leading, `gap-1.5`        | Icon then word. Never trailing, never alone.                                                                   |
-| `KV` label (attribute icon)| leading, `gap-1.5`        | Icon then label, in the label column, label color. Once a section has one icon, every row reserves the slot (`icon={null}` for icon-less rows). |
+| `KV` label (attribute icon)| leading, `gap-1.5`        | Icon then label, in the label column, label color. `<Section icons>` opts a section in; every row then resolves from `attrIcons.tsx` by label and unmapped rows keep an empty slot. |
 | Button                     | leading only              | A trailing glyph is reserved for one meaning: `…` = "opens a dialog". Nothing else trails.                     |
 | Table cell                 | leading, baseline-aligned | Same column as its text; a cell is never icon-only unless the header names the meaning and `title` repeats it. |
 | Section / group header     | between chevron and label | Chevron → dot/icon → label → count, in that order (`GroupHeaderRow`).                                          |
@@ -509,8 +540,9 @@ Before a PR introduces one, in this order:
 1. Would a word do? Then use the word.
 2. Is it in the approved glyph table? Use exactly that glyph for exactly that
    meaning. If not, and it is a state, it is an OPS-498 SVG icon. If it names
-   an attribute, it is a Radix icon from the tier-4 mapping (or a new entry
-   added to that mapping in the same PR). If none of these, this section
+   an attribute, it comes from the tier-4 registry (`attrIcons.tsx`) via
+   `<Section icons>` — add a registry row + table entry in the same PR rather
+   than passing `icon=` by hand. If none of these, this section
    changes first (own PR), then the code.
 3. Does it appear in at least two places, or is it a one-off decoration? A
    one-off is not added.
