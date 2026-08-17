@@ -5,6 +5,8 @@ import { Events } from "./Events";
 import {
   changeInput,
   createEventFixture,
+  createProposalFixture,
+  createRunListItemFixture,
   createStatusFixture,
   renderWithClient,
   restoreApi,
@@ -791,5 +793,108 @@ describe("Events copy chords and hints (WM-233)", () => {
         expect(written).toBe(window.location.href);
       },
     );
+  });
+});
+
+describe("Planner decisions explain themselves (WM-594)", () => {
+  const noopEvent = stubEvent("evt_noop_1", "noop", {
+    source: "linear",
+    subject: "WM-542",
+    proposalId: "prop_noop_1",
+    envelope: { schemaVersion: "factory.event/v1", eventId: "evt_noop_1", type: "dispatch.requested", source: "linear", payload: { ticket: "WM-542" } },
+  });
+  const liveEvent = stubEvent("evt_noop_2", "noop", {
+    source: "linear",
+    subject: "WM-543",
+    proposalId: "prop_noop_2",
+    envelope: { schemaVersion: "factory.event/v1", eventId: "evt_noop_2", type: "dispatch.requested", source: "linear", payload: { ticket: "WM-543" } },
+  });
+  const refusedEvent = stubEvent("evt_planned_1", "planned", {
+    source: "linear",
+    subject: "WM-544",
+    proposalId: "prop_run_1",
+    runId: "run_refused_1",
+  });
+  const plainEvent = stubEvent("evt_admitted_1", "admitted");
+  const proposals = [
+    createProposalFixture({ id: "prop_noop_1", decision: "noop", status: "resolved", reason: "owned_paths_overlap", eventId: "evt_noop_1", eventSource: "linear", runId: null }),
+    createProposalFixture({ id: "prop_noop_2", decision: "noop", status: "resolved", reason: "ticket_dispatch_already_live:run_held-99:same_ticket_worktree_held", eventId: "evt_noop_2", eventSource: "linear", runId: null }),
+    createProposalFixture({ id: "prop_run_1", decision: "run", status: "approved", eventId: "evt_planned_1", eventSource: "linear", runId: "run_refused_1" }),
+  ];
+  const runs = [
+    createRunListItemFixture({ runId: "run_refused_1", state: "REFUSED", reasonCode: "needs_human", eventId: "evt_planned_1", eventSource: "linear" }),
+  ];
+  const apiWith = () => ({
+    events: async () => ({ events: [noopEvent, liveEvent, refusedEvent, plainEvent] }),
+    proposalHistory: async () => ({ proposals }),
+    runs: async () => ({ runs }),
+    status: async () => createStatusFixture(),
+  });
+
+  test("the event pane shows a decision row under status, humanized with the raw code in title", async () => {
+    await withApi(apiWith(), async () => {
+      const onJumpRun = mock(() => {});
+      const r = renderEvents({ focusEvent: { source: "linear", eventId: "evt_noop_2" }, onJumpRun });
+      const row = await waitFor(() => {
+        const el = r.container.querySelector('[data-testid="event-decision"]');
+        if (!el) throw new Error("decision row not rendered");
+        return el as HTMLElement;
+      });
+      expect(row.textContent).toContain("noop");
+      expect(row.textContent).toContain("A dispatch for this ticket is already live");
+      expect(row.getAttribute("title")).toBe("ticket_dispatch_already_live:run_held-99:same_ticket_worktree_held");
+      // The run reference in the reason is a jump link.
+      // Once on the decision row, once in the Decisions block headline.
+      fireEvent.click(r.getAllByTitle("Open run run_held-99")[0]);
+      expect(onJumpRun).toHaveBeenCalledWith("run_held-99");
+      // And the ticket's Decisions block is on the pane (lazy chunk — await it).
+      expect(await r.findByText("Decisions")).toBeTruthy();
+    });
+  });
+
+  test("a planned event whose run was refused reads `refused · Needs human`", async () => {
+    await withApi(apiWith(), async () => {
+      const r = renderEvents({ focusEvent: { source: "linear", eventId: "evt_planned_1" } });
+      const row = await waitFor(() => {
+        const el = r.container.querySelector('[data-testid="event-decision"]');
+        if (!el) throw new Error("decision row not rendered");
+        return el as HTMLElement;
+      });
+      expect(row.textContent).toContain("refused");
+      expect(row.textContent).toContain("Needs human");
+      // The list badge for that row carries the same answer as its tooltip.
+      const cell = r.container.querySelector('td[title="evt_planned_1"]')!.closest("tr")!;
+      expect(cell.querySelector('[data-decision="refused"]')?.getAttribute("title")).toBe("refused · Needs human\nneeds_human");
+    });
+  });
+
+  test("noop badges carry the humanized reason as tooltip; reason:<code> filters the list", async () => {
+    await withApi(apiWith(), async () => {
+      const r = renderEvents();
+      await waitFor(() => {
+        const badge = r.container.querySelector('td[title="evt_noop_1"]')?.closest("tr")?.querySelector('[data-decision="noop"]');
+        if (!badge?.getAttribute("title")) throw new Error("tooltip not joined yet");
+        expect(badge.getAttribute("title")).toBe("noop · Owned paths overlap\nowned_paths_overlap");
+      });
+      expect(r.container.querySelector('td[title="evt_admitted_1"]')).toBeTruthy();
+
+      const filterInput = r.getByLabelText("Filter events") as HTMLInputElement;
+      act(() => {
+        changeInput(filterInput, "reason:owned_paths_overlap");
+      });
+      await waitFor(() => {
+        expect(r.container.querySelector('td[title="evt_noop_1"]')).toBeTruthy();
+        expect(r.container.querySelector('td[title="evt_noop_2"]')).toBeNull();
+        expect(r.container.querySelector('td[title="evt_admitted_1"]')).toBeNull();
+      });
+      // The refused run's reason code is a reason too.
+      act(() => {
+        changeInput(filterInput, "reason:needs_human");
+      });
+      await waitFor(() => {
+        expect(r.container.querySelector('td[title="evt_planned_1"]')).toBeTruthy();
+        expect(r.container.querySelector('td[title="evt_noop_1"]')).toBeNull();
+      });
+    });
   });
 });

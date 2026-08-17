@@ -27,6 +27,11 @@ jobs:
       # PR runs need connected history between base and head so `git log
       # base..head` (gitleaks --log-opts) can walk it — start shallow and
       # deepen only as far as needed to connect the two endpoints.
+      # Push runs (WM-620) do the same against `github.event.before`: in a
+      # depth-1 clone `git log -1` emits the whole tree as added, so gitleaks
+      # scanned ~6 MB per develop push and tripped on pre-existing text.
+      # `before` is all zeros on branch creation and empty on
+      # workflow_dispatch — those fall back to a depth-1 checkout.
       - name: Checkout (no action download)
         shell: bash
         env:
@@ -34,6 +39,7 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
@@ -41,6 +47,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
 
+          zeros="0000000000000000000000000000000000000000"
           if [ -n "${BASE_SHA:-}" ]; then
             git fetch -q --depth=50 origin "$SHA" "$BASE_SHA"
             git checkout -q "$SHA"
@@ -53,6 +60,22 @@ jobs:
               fi
               depth=$((depth * 4))
               git fetch -q --deepen="$depth" origin "$SHA" "$BASE_SHA"
+            done
+          elif [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "$zeros" ]; then
+            # `before` is normally the parent (or first parent of a merge) of
+            # SHA, so depth 2 covers the common single-commit push; deepen
+            # from SHA only if the pushed range is longer.
+            git fetch -q --depth=2 origin "$SHA"
+            git checkout -q "$SHA"
+            depth=2
+            while ! git rev-parse -q --verify "${BEFORE_SHA}^{commit}" >/dev/null 2>&1; do
+              if [ "$depth" -ge 2000 ]; then
+                echo "::warning::could not reach before $BEFORE_SHA from head $SHA within $depth commits; falling back to full history"
+                git fetch -q --unshallow origin || git fetch -q origin "$SHA" "$BEFORE_SHA"
+                break
+              fi
+              depth=$((depth * 4))
+              git fetch -q --deepen="$depth" origin "$SHA"
             done
           else
             git fetch -q --depth 1 origin "$SHA"
@@ -97,15 +120,23 @@ jobs:
         env:
           GITLEAKS_BIN: ${{ steps.gitleaks-bin.outputs.bin }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # .gitleaks.toml at repo root is auto-loaded by gitleaks if present.
+          # .gitleaks.toml at repo root is auto-loaded by gitleaks if present;
+          # it allowlists the known false positives so the `-1` fallback (a
+          # depth-1 clone, whole tree as one diff) is clean too (WM-620).
+          zeros="0000000000000000000000000000000000000000"
           if [ -n "${BASE_SHA:-}" ]; then
             log_opts="${BASE_SHA}..${SHA}"
+          elif [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "$zeros" ] \
+            && git rev-parse -q --verify "${BEFORE_SHA}^{commit}" >/dev/null 2>&1; then
+            log_opts="${BEFORE_SHA}..${SHA}"
           else
             log_opts="-1"
           fi
+          echo "gitleaks log opts: $log_opts"
           "$GITLEAKS_BIN" git --no-banner --redact --log-opts="$log_opts"
 
   semgrep:

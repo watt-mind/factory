@@ -43,6 +43,21 @@ const VALID_ARTIFACT = {
   recommendedAction: "dispatch",
 };
 
+const VALID_DECISION = {
+  schemaVersion: "factory.decision-request/v1",
+  question: "May I proceed within the ticket's owned paths?",
+  recommended: "authorise",
+  options: [
+    {
+      id: "authorise",
+      label: "Authorise",
+      effect: "authorise",
+      scope: { paths: ["event-runtime/lib/verify.mjs"], summary: "Apply the scoped change." },
+    },
+    { id: "dismiss", label: "Dismiss", effect: "dismiss" },
+  ],
+};
+
 describe("verifyResult", () => {
   test("valid completed result → result + receipt with recomputed hashes", () => {
     const evidence = { queries: ["q1"] };
@@ -305,6 +320,52 @@ describe("verifyResult", () => {
     expect(out.result.attempt).toBe(2);
     expect(out.result.artifact).toBeUndefined();
     expect(out.result.artifactHash).toBeUndefined();
+  });
+
+  test("refused with a valid decision → decision retained", () => {
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      decision: VALID_DECISION,
+    });
+    const spec = makeSpec({ repo: "factory", ticket: "WM-389" });
+    const out = verifyResult({ spec, def, registry, workspaceDir: dir, attempt: 1 });
+    expect(out.kind).toBe("refused");
+    expect(out.result.decision).toEqual(VALID_DECISION);
+    expect(out.result.decisionErrors).toBeUndefined();
+  });
+
+  test("refused with an invalid decision → refusal retained with decision errors", () => {
+    const decision = { ...VALID_DECISION, recommended: "missing" };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      decision,
+    });
+    const spec = makeSpec({ repo: "factory", ticket: "WM-389" });
+    const out = verifyResult({ spec, def, registry, workspaceDir: dir, attempt: 1 });
+    expect(out.kind).toBe("refused");
+    expect(out.result.decision).toBeUndefined();
+    expect(out.result.decisionErrors).toBeArray();
+    expect(out.result.decisionErrors[0]).toContain("recommended");
+  });
+
+  test("completed with a decision → ContractViolation", () => {
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+      decision: VALID_DECISION,
+    });
+    try {
+      verifyResult({ spec: makeSpec(), def, registry, workspaceDir: dir, attempt: 1 });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toEqual(["decision_not_allowed_on_completed_result"]);
+    }
   });
 
   test("refused with an unknown reasonCode → ContractViolation", () => {

@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { policyVersion } from "../lib/config.mjs";
 import { openDb } from "../lib/db.mjs";
 import {
   CLI,
@@ -27,6 +28,8 @@ import {
   spawnWorker,
   waitFor,
 } from "./test-helpers.mjs";
+
+const WORKER_POLICY_VERSION = policyVersion();
 
 describe("work command", () => {
   test("work rejects an unsafe idle poll interval", () => {
@@ -164,8 +167,8 @@ describe("work command", () => {
       inputHash: hashJson(input),
       workspace: { type: "ephemeral", retainOnFailure: true },
       adapter: "command", // real adapter that lacks command template for status-report
-      promptVersion: "git:test",
-      policyVersion: "git:test",
+      promptVersion: WORKER_POLICY_VERSION,
+      policyVersion: WORKER_POLICY_VERSION,
       outputContract: "factory.status-report/v1",
       capabilities: ["linear:read"],
       timeoutSeconds: 5,
@@ -679,8 +682,8 @@ describe("work --reload-on-change (WM-213)", () => {
       inputHash: hashJson(input),
       workspace: { type: "ephemeral", retainOnFailure: false },
       adapter: "fake",
-      promptVersion: "git:test",
-      policyVersion: "git:test",
+      promptVersion: WORKER_POLICY_VERSION,
+      policyVersion: WORKER_POLICY_VERSION,
       outputContract: "factory.status-report/v1",
       capabilities: ["linear:read"],
       timeoutSeconds: 4,
@@ -710,6 +713,12 @@ describe("work --reload-on-change (WM-213)", () => {
       now: Date.now(),
     });
     db.close();
+    // Keep the queue non-empty when the first run finishes. The worker must
+    // reload at that boundary rather than claiming this run with old code.
+    await seedRun(home, {
+      runId: "run_reload_waiting",
+      input: { repos: ["ok"] },
+    });
 
     const box = spawnWorker(
       ["--adapter-override", "fake", "--poll-ms", "50", "--reload-on-change"],
@@ -737,6 +746,7 @@ describe("work --reload-on-change (WM-213)", () => {
       expect(box.out.indexOf("run_reload_busy → ")).toBeLessThan(
         box.out.indexOf("reloading worker"),
       );
+      expect(box.out).not.toContain("claimed run_reload_waiting");
       // And exactly one deferral line, however many intervals it spanned.
       expect(box.out.split("reload deferred until").length - 1).toBe(1);
     } finally {

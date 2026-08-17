@@ -11,6 +11,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
+import { workerPassthroughArgs } from "./supervise.mjs";
 import {
   CLI,
   DEAD_PORT,
@@ -29,6 +30,30 @@ import {
 } from "./test-helpers.mjs";
 
 describe("supervise (WM-226)", () => {
+  test("passes reload and worker-shaping flags through to every pool slot (WM-613)", () => {
+    expect(
+      workerPassthroughArgs([
+        "--workers",
+        "1:2",
+        "--adapter-override",
+        "fake",
+        "--poll-ms",
+        "50",
+        "--reload-on-change",
+        "--label",
+        "node=lab",
+      ]),
+    ).toEqual([
+      "--adapter-override",
+      "fake",
+      "--poll-ms",
+      "50",
+      "--reload-on-change",
+      "--label",
+      "node=lab",
+    ]);
+  });
+
   test("rejects bounds and intervals it cannot honour, naming the flag", () => {
     expect(runCli(["supervise", "--workers", "3:1", "--once"]).all).toContain(
       "min (3) cannot exceed max (1)",

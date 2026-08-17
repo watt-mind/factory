@@ -1,12 +1,23 @@
 import "../test-dom";
-import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup } from "@testing-library/react";
-import { RunDetailBlocks, isCancellable, modelTierText, pinnedModelText } from "./RunDetailBlocks";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { api } from "../api";
+import { ARTIFACT_RAW_KEY } from "./ArtifactView";
+import { RunDetailBlocks, eventTicket, isCancellable, modelTierText, pinnedModelText } from "./RunDetailBlocks";
+import { TicketDecisions, buildTicketDecisions, decisionHeadline } from "./TicketDecisions";
 import {
+  createAgentsFixture,
+  createEventFixture,
   createLifecycleEventFixture,
+  createProposalFixture,
   createRunDetailFixture,
+  createRunListItemFixture,
+  createRunSpecFixture,
   renderWithClient,
   restoreApi,
+  stubApi,
 } from "../test-render";
 import type { RunDetail, RunState } from "../types";
 
@@ -278,5 +289,162 @@ describe("pinnedModelText / modelTierText (WM-221)", () => {
     expect(modelTierText({ adapter: "fake", modelTier: null, model: null })).toBe("n/a");
     // A declared tier survives even where the adapter cannot use it.
     expect(modelTierText({ adapter: "command", modelTier: "light", model: null })).toBe("light");
+  });
+});
+
+describe("artifact position renders the agent's view (WM-455)", () => {
+  const TRIAGE_VIEW = JSON.parse(readFileSync(path.resolve(import.meta.dir, "../../../agents/triage-scan.view.json"), "utf8"));
+  const triageAgent = {
+    ref: "triage-scan@1",
+    id: "triage-scan",
+    outputSchema: { title: "triage plan" },
+    outputView: TRIAGE_VIEW,
+  };
+  const artifact = {
+    recommendation: "TRIAGE",
+    repo: "factory",
+    summary: "One issue is ready.",
+    plan: [{ issueId: "WM-7", action: "label-agent-ready", reason: "Complete." }],
+  };
+  const withArtifact = () =>
+    createRunDetailFixture({
+      run: { state: "COMPLETED", spec: { agent: "triage-scan@1" } } as RunDetail["run"],
+      result: { terminalState: "COMPLETED", reasonCode: null, artifact },
+    });
+
+  afterEach(() => localStorage.removeItem(ARTIFACT_RAW_KEY));
+
+  test("with a view from /agents: summary, status, plan table with an issue chip, and a Raw toggle back to JSON", async () => {
+    stubApi({ agents: mock(async () => createAgentsFixture({ agents: [triageAgent] as never })) });
+    const r2 = renderBlocks(withArtifact());
+    expect(await r2.findByText("One issue is ready.")).toBeTruthy();
+    expect(r2.getByText("TRIAGE")).toBeTruthy();
+    expect((r2.getByRole("link", { name: "WM-7" }) as HTMLAnchorElement).getAttribute("href")).toBe(
+      "https://linear.app/watt-mind/issue/WM-7",
+    );
+    fireEvent.click(r2.getByRole("button", { name: "Raw" }));
+    expect(r2.queryByRole("table")).toBeNull();
+    const pre = Array.from(r2.container.querySelectorAll("pre")).find((el) => el.textContent?.includes('"issueId": "WM-7"'));
+    expect(pre).toBeTruthy();
+    expect(localStorage.getItem(ARTIFACT_RAW_KEY)).toBe("1");
+  });
+
+  test("no view for the agent → the JSON block, unchanged, and no toggle", async () => {
+    stubApi({ agents: mock(async () => createAgentsFixture({ agents: [{ ...triageAgent, outputView: null }] as never })) });
+    const r = renderBlocks(withArtifact());
+    await waitFor(() => expect(api.agents).toHaveBeenCalled());
+    expect(r.queryByRole("group", { name: "Artifact rendering" })).toBeNull();
+    expect(r.queryByRole("table")).toBeNull();
+    const pre = Array.from(r.container.querySelectorAll("pre")).find((el) => el.textContent?.includes('"issueId": "WM-7"'));
+    expect(pre).toBeTruthy();
+  });
+});
+
+describe("Ticket decisions (WM-594)", () => {
+  const T = "WM-542";
+  const t = (offsetSeconds: number) => new Date(Date.UTC(2026, 7, 17, 12, 0, offsetSeconds)).toISOString();
+  const dispatchEvent = (eventId: string, status: string, at: string, subject: string | null = T) =>
+    createEventFixture({
+      source: "linear",
+      eventId,
+      type: "dispatch.requested",
+      subject,
+      status,
+      admittedAt: at,
+      envelope: { schemaVersion: "factory.event/v1", eventId, type: "dispatch.requested", source: "linear", payload: { ticket: T } },
+    });
+  const fixture = () => {
+    const events = [
+      dispatchEvent("evt_plan", "planned", t(0)),
+      dispatchEvent("evt_noop", "noop", t(60)),
+      dispatchEvent("evt_other", "noop", t(70), "WM-999"),
+      dispatchEvent("evt_refused", "planned", t(120)),
+      // Names the ticket only in the payload — subject is a repo.
+      { ...dispatchEvent("evt_payload_only", "admitted", t(200), "factory/repo") },
+    ];
+    const proposals = [
+      createProposalFixture({ id: "prop_plan", decision: "run", status: "approved", created_at: t(1), eventId: "evt_plan", eventSource: "linear", runId: "run_ok" }),
+      createProposalFixture({ id: "prop_noop", decision: "noop", status: "resolved", reason: "owned_paths_overlap", created_at: t(61), eventId: "evt_noop", eventSource: "linear", runId: null }),
+      createProposalFixture({ id: "prop_other", decision: "noop", status: "resolved", reason: "ticket_assigned", created_at: t(71), eventId: "evt_other", eventSource: "linear", runId: null }),
+      createProposalFixture({ id: "prop_refused", decision: "run", status: "approved", created_at: t(121), eventId: "evt_refused", eventSource: "linear", runId: "run_refused" }),
+      // Attached to no listed event; its spec input names the ticket.
+      createProposalFixture({ id: "prop_spec", decision: "noop", status: "resolved", reason: "ticket_security", created_at: t(150), eventId: "evt_missing", eventSource: "chain", runId: null, spec: { ...createRunSpecFixture("run_x"), input: { ticket: T } } }),
+    ];
+    const runs = [
+      createRunListItemFixture({ runId: "run_ok", state: "COMPLETED", reasonCode: "ok", eventId: "evt_plan", eventSource: "linear", updated_at: t(30) }),
+      createRunListItemFixture({ runId: "run_refused", state: "REFUSED", reasonCode: "needs_human", eventId: "evt_refused", eventSource: "linear", updated_at: t(130) }),
+    ];
+    return { events, proposals, runs };
+  };
+
+  test("eventTicket reads the subject, then payload.ticket", () => {
+    expect(eventTicket(dispatchEvent("e", "noop", t(0)))).toBe(T);
+    expect(eventTicket(dispatchEvent("e", "noop", t(0), "factory/repo"))).toBe(T);
+    expect(eventTicket(createEventFixture({ subject: "factory/repo" }))).toBeNull();
+  });
+
+  test("joins events, proposals and refused runs for one ticket, oldest first", () => {
+    const decisions = buildTicketDecisions(T, fixture());
+    // The planner said yes to evt_refused (planned), then the gate said no (refused): both are decisions.
+    expect(decisions.map((d) => [d.outcome, d.reason])).toEqual([
+      ["planned", null],
+      ["noop", "owned_paths_overlap"],
+      ["planned", null],
+      ["refused", "needs_human"],
+      ["noop", "ticket_security"],
+      ["admitted", null],
+    ]);
+    // Excludes WM-999, carries the joins for jump links.
+    expect(decisions.some((d) => d.reason === "ticket_assigned")).toBe(false);
+    expect(decisions[1]).toMatchObject({ proposalId: "prop_noop", event: { eventId: "evt_noop" } });
+    expect(decisions[3]).toMatchObject({ runId: "run_refused", event: { eventId: "evt_refused" } });
+    expect(decisions[5]).toMatchObject({ event: { eventId: "evt_payload_only" }, proposalId: null });
+  });
+
+  test("the headline is the latest decision, humanized", () => {
+    const decisions = buildTicketDecisions(T, fixture());
+    const now = Date.parse(t(260));
+    expect(decisionHeadline(decisions[1], now)).toBe("noop · Owned paths overlap · 3m ago");
+    expect(decisionHeadline(decisions[3], now)).toBe("refused · Needs human · 2m ago");
+  });
+
+  test("renders collapsed with the latest decision, expands to the full list with reason links", async () => {
+    const f = fixture();
+    stubApi({
+      events: mock(async () => ({ events: f.events })),
+      proposalHistory: mock(async () => ({ proposals: f.proposals })),
+      runs: mock(async () => ({ runs: f.runs })),
+    });
+    const onJumpRun = mock(() => {});
+    const r = renderWithClient(<TicketDecisions ticket={T} now={Date.parse(t(260))} onJumpRun={onJumpRun} />);
+    const toggle = await r.findByRole("button", { name: /Show all 6 planner decisions for WM-542/ });
+    expect(r.getByText("6 decisions")).toBeTruthy();
+    // Collapsed: only the headline (latest = the admitted event awaiting the planner).
+    expect(r.getByText("awaiting the planner")).toBeTruthy();
+    expect(r.queryByRole("list", { name: "Planner decisions for WM-542" })).toBeNull();
+    fireEvent.click(toggle);
+    const list = r.getByRole("list", { name: "Planner decisions for WM-542" });
+    expect(list.querySelectorAll("li").length).toBe(6);
+    expect(r.getByText("Owned paths overlap")).toBeTruthy();
+    expect(r.getByText("Needs human")).toBeTruthy();
+    // The run reference on the refused decision jumps to the run.
+    fireEvent.click(r.getAllByTitle("run_refused")[0]);
+    expect(onJumpRun).toHaveBeenCalledWith("run_refused");
+  });
+
+  test("RunDetailBlocks renders the Decisions block for a run whose input names a ticket", async () => {
+    const f = fixture();
+    stubApi({
+      events: mock(async () => ({ events: f.events })),
+      proposalHistory: mock(async () => ({ proposals: f.proposals })),
+      runs: mock(async () => ({ runs: f.runs })),
+    });
+    const r = renderBlocks(detailWith("REFUSED", { repo: "factory", ticket: T }));
+    // TicketDecisions is a lazy chunk (bundle budget) — await the Suspense boundary.
+    expect(await r.findByText("Decisions")).toBeTruthy();
+    await r.findByText("6 decisions");
+    cleanup();
+    const r2 = renderBlocks(detailWith("RUNNING", { repo: "factory" }));
+    expect(r2.queryByText("Decisions")).toBeNull();
   });
 });

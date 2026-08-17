@@ -10,6 +10,7 @@ export const NAV = [
   { key: "events", label: "Events", go: "e" },
   { key: "proposals", label: "Proposals", go: "p" },
   { key: "runs", label: "Runs", go: "r" },
+  { key: "tickets", label: "Tickets", go: "k" },
   { key: "projects", label: "Projects", go: "f" },
   { key: "agents", label: "Agents", go: "t" },
   { key: "artifacts", label: "Artifacts", go: "y" },

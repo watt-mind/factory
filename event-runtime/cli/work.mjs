@@ -18,6 +18,7 @@ import { newWorkerId } from "../lib/ids.mjs";
 import { loadRegistry } from "../lib/registry.mjs";
 import {
   claimNext,
+  checkoutPolicyVersion,
   CODE_RELOAD_EXIT,
   codeStamp,
   createReloadWatcher,
@@ -148,9 +149,9 @@ export default async function work(args) {
    * run so the deferral is logged while it is still true, and the loop top is
    * the idle boundary where acting on it is safe.
    */
-  function reloadWanted() {
+  function reloadWanted({ force = false } = {}) {
     if (!watcher || draining) return false;
-    const r = watcher.check(inFlight);
+    const r = watcher.check(inFlight, { force });
     if (r.action === "deferred") {
       if (r.first)
         log(
@@ -186,11 +187,22 @@ export default async function work(args) {
         const claim = claimNext(db, {
           owner: workerId,
           policyVersion: pv,
+          registryVersion: pv,
+          currentRegistryVersion: checkoutPolicyVersion,
           labels,
           adapters: adapterOverride ? null : adapterNames,
           ...(adapterOverride ? { adapterOverride } : {}),
         });
         if (!claim) {
+          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          continue;
+        }
+        if (claim.refused) {
+          log(
+            `refused ${claim.runId} (${claim.reasonCode}, retryable): worker registry ${claim.workerRegistryVersion}, checkout registry ${claim.checkoutRegistryVersion}, run prompt ${claim.spec.promptVersion}, run policy ${claim.spec.policyVersion}`,
+          );
+          if (claim.reloadRequired)
+            return finish("registry_stale", CODE_RELOAD_EXIT);
           await new Promise((resolve) => setTimeout(resolve, pollMs));
           continue;
         }
@@ -207,6 +219,12 @@ export default async function work(args) {
         log(
           `${claim.runId} → ${summary?.terminalState ?? "?"} (${summary?.reasonCode ?? "-"})`,
         );
+        // Force a fresh code stamp after every completed run. Without this,
+        // an interval-gated check can immediately claim from a hot queue using
+        // the registry snapshot from before the checkout changed.
+        inFlight = null;
+        if (reloadWanted({ force: true }))
+          return finish("code_reload", CODE_RELOAD_EXIT);
       } catch (err) {
         log(`worker error: ${err.message}`);
         await new Promise((resolve) => setTimeout(resolve, 1000));

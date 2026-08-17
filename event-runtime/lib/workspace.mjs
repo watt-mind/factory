@@ -11,9 +11,11 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { Database } from "bun:sqlite";
+import { leaseDir, liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { canonicalJson } from "./canonical.mjs";
 import { materializeArtifact } from "./artifacts.mjs";
-import { artifactsRoot } from "./config.mjs";
+import { artifactsRoot, dbPath, FACTORY_ROOT } from "./config.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 import { findPriorResumeContext } from "./transcripts.mjs";
@@ -121,6 +123,78 @@ export function resolveInputRef(input, expr) {
  * worker that dies and restarts must still know what to tear down.
  */
 const WORKTREE_MARKER = ".worktree.json";
+const ACTIVE_RUN_STATES = new Set(["PROPOSED", "APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING"]);
+
+/**
+ * Return competing runtime ownership for a ticket, excluding the run currently
+ * provisioning its own workspace. The shared worker lease is the fast local
+ * liveness signal; the run ledger closes the gap where a worker is non-terminal
+ * but its lease heartbeat has not yet appeared (WM-627).
+ */
+export function detectWorktreeOwnershipConflict({
+  repo,
+  ticket,
+  runId,
+  attempt,
+  databasePath = dbPath(),
+  leases = liveWorkerLeases(repo),
+} = {}) {
+  let currentLeaseOwner = null;
+  const runs = [];
+  if (existsSync(databasePath)) {
+    let db;
+    try {
+      db = new Database(databasePath, { readonly: true });
+      currentLeaseOwner = db
+        .query(`SELECT lease_owner FROM attempts WHERE run_id = ? AND attempt = ?`)
+        .get(runId, attempt)?.lease_owner ?? null;
+      for (const row of db.query(`SELECT run_id, state, spec_json FROM runs`).all()) {
+        if (row.run_id === runId || !ACTIVE_RUN_STATES.has(row.state)) continue;
+        let input;
+        try { input = JSON.parse(row.spec_json)?.input; } catch { continue; }
+        if (input?.repo === repo && input?.ticket === ticket) {
+          runs.push({ runId: row.run_id, state: row.state });
+        }
+      }
+    } catch (err) {
+      return { reason: `runtime ownership ledger unreadable: ${err.message}`, runs: [], leases: [] };
+    } finally {
+      db?.close();
+    }
+  }
+
+  const competingLeases = leases
+    .filter((lease) => lease?.repo === repo && lease?.ticket === ticket)
+    .filter((lease) => currentLeaseOwner ? lease.owner !== currentLeaseOwner : lease.pid !== process.pid)
+    .map((lease) => ({ owner: lease.owner, pid: lease.pid }));
+  if (runs.length === 0 && competingLeases.length === 0) return null;
+  return { reason: "ticket has a non-terminal run or live worker lease", runs, leases: competingLeases };
+}
+
+function commentOnPreservedWorktree({ ticket, preservation }) {
+  const text = `Recovered an abandoned dirty worktree before re-dispatch: preserved its uncommitted changes at \`${preservation.ref}\` (commit ${preservation.commit}, ${preservation.push === "pushed" ? "pushed to origin" : "kept locally because push failed"}).`;
+  const result = spawnSync("bun", [path.join(FACTORY_ROOT, "tools", "linear.mjs"), "comment", ticket, text], {
+    cwd: FACTORY_ROOT,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(String(result.stderr || result.stdout || `Linear comment exited ${result.status}`).trim());
+  }
+  return { status: "posted" };
+}
+
+function readPreservationReport(reportPath) {
+  if (!existsSync(reportPath)) return null;
+  const report = JSON.parse(readFileSync(reportPath, "utf8"));
+  if (
+    typeof report?.ref !== "string" || !report.ref.startsWith("wip/")
+    || !/^[0-9a-f]{40}$/.test(report.commit)
+    || !["pushed", "local_only"].includes(report.push)
+  ) {
+    throw new Error("expected ref, 40-character commit, and pushed|local_only push status");
+  }
+  return report;
+}
 
 /**
  * Tier-2 mutating workspace (docs/event-runtime-dispatch.md §5, WM-108):
@@ -137,7 +211,16 @@ const WORKTREE_MARKER = ".worktree.json";
  * repo's declared `verify` command rides along in the returned record — the
  * §9 verifier runs it as ordinary code, never trusting the agent's report.
  */
-function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
+function materializeWorktree({
+  workspaceDir,
+  input,
+  checkoutDir,
+  timeoutMs,
+  runId,
+  attempt,
+  ownershipConflict,
+  preservationComment,
+}) {
   const repoName = input?.repo;
   const ticket = input?.ticket;
   if (!repoName || !ticket) {
@@ -150,6 +233,15 @@ function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
     );
   }
   const worktreePath = path.join(repo.worktreeRoot, ticket);
+  if (existsSync(worktreePath)) {
+    const conflict = ownershipConflict({ repo: repoName, ticket, runId, attempt });
+    if (conflict) {
+      throw new WorktreeError(
+        `worktree_in_use: ${repoName}/${ticket} at ${worktreePath} is owned by a live run or lease`,
+        conflict,
+      );
+    }
+  }
   const record = {
     repo: repoName,
     ticket,
@@ -167,10 +259,21 @@ function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
   // worktree already exists. It reports that condition out-of-band and still
   // exits zero; a non-zero exit remains a provisioning failure.
   const reportPath = path.join(workspaceDir, ".worktree-up.json");
+  const preservationPath = path.join(workspaceDir, ".worktree-preservation.json");
+  rmSync(preservationPath, { force: true });
   const up = spawnSync("/bin/bash", [repo.worktreeUp, ticket], {
     cwd: repo.path,
     encoding: "utf8",
-    env: { ...process.env, FACTORY_WORKTREE_REPORT: reportPath },
+    env: {
+      ...process.env,
+      FACTORY_WORKTREE_REPORT: reportPath,
+      FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
+      FACTORY_WORKTREE_PRESERVATION_REPORT: preservationPath,
+      // Revalidated by factory's worktree-up while it holds the per-ticket
+      // lifecycle lock, narrowing the ownership-check/preservation race.
+      FACTORY_WORKTREE_EXPECTED_LEASE_FILE: path.join(leaseDir(), `${repoName}-${ticket}.json`),
+      FACTORY_WORKTREE_EXPECTED_LEASE_PID: String(process.pid),
+    },
     timeout: timeoutMs,
   });
   // A timeout surfaces as up.error, not a non-zero status, so both are failures
@@ -195,6 +298,24 @@ function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
     throw new WorktreeError(`worktree_up reported success for ${repoName}/${ticket} but did not create ${worktreePath}`);
   }
 
+  let preservation = null;
+  try {
+    preservation = readPreservationReport(preservationPath);
+  } catch (err) {
+    throw new WorktreeError(`worktree_up wrote an invalid preservation report for ${repoName}/${ticket}: ${err.message}`);
+  }
+  if (preservation) {
+    record.preservedWip = preservation;
+    writeFileSync(path.join(workspaceDir, WORKTREE_MARKER), `${canonicalJson(record)}\n`, "utf8");
+    try {
+      record.preservedWip.comment = preservationComment({ ticket, repo: repoName, preservation });
+    } catch (err) {
+      record.preservedWip.comment = { status: "failed", error: err.message };
+      writeFileSync(path.join(workspaceDir, WORKTREE_MARKER), `${canonicalJson(record)}\n`, "utf8");
+      throw new WorktreeError(`preserved ${repoName}/${ticket} at ${preservation.ref} but could not post the Linear comment: ${err.message}`);
+    }
+  }
+
   let baseline = null;
   if (existsSync(reportPath)) {
     try {
@@ -215,14 +336,20 @@ function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
   // The agent contract points it at input.json, so runtime-discovered context
   // must be present there rather than hidden in an implementation marker.
   // Keep the run spec immutable; this is workspace-local execution context.
-  if (baseline) {
-    const enrichedInput = {
-      ...input,
-      baseline: {
+  if (baseline || preservation) {
+    const enrichedInput = { ...input };
+    if (baseline) {
+      enrichedInput.baseline = {
         ...baseline,
         guidance: `The ${baseline.check} check already fails at this commit. If your ticket is unrelated, do not fix it; if it is related, use this as the starting point.`,
-      },
-    };
+      };
+    }
+    if (preservation) {
+      enrichedInput.worktreeRecovery = {
+        ...record.preservedWip,
+        guidance: `An abandoned prior attempt was preserved at ${preservation.ref} before this clean re-dispatch.`,
+      };
+    }
     writeFileSync(path.join(workspaceDir, "input.json"), `${canonicalJson(enrichedInput)}\n`, "utf8");
   }
   return record;
@@ -237,6 +364,8 @@ export function createWorkspace({
   artifactStore = artifactsRoot(),
   worktreeTimeoutMs = worktreeScriptTimeoutMs(),
   adapter = null,
+  worktreeOwnershipConflict = detectWorktreeOwnershipConflict,
+  worktreePreservationComment = commentOnPreservedWorktree,
 }) {
   // Lease loss can leave the prior attempt's scratch directory behind. Read
   // recognized harness session metadata before creating the new attempt;
@@ -284,6 +413,10 @@ export function createWorkspace({
         input,
         checkoutDir: workspace.checkoutDir ?? "repo",
         timeoutMs: worktreeTimeoutMs,
+        runId,
+        attempt,
+        ownershipConflict: worktreeOwnershipConflict,
+        preservationComment: worktreePreservationComment,
       });
     } catch (err) {
       if (err instanceof WorktreeError) throw err;

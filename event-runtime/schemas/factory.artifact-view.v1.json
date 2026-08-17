@@ -1,0 +1,90 @@
+{
+  "title": "factory.artifact-view/v1 — sidecar rendering hints over an agent's output schema (docs/event-runtime-artifact-views.md §2.2)",
+  "description": "A closed hint vocabulary, not a layout language. Per-`as` key applicability (table→columns/groupBy/expand, keyvalue→keys, list→itemLabel, code→language) and the pointer→schema drift check are enforced by lib/artifact-view.mjs, because lib/schema.mjs has no conditional keywords.",
+  "type": "object",
+  "required": ["schemaVersion", "sections"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "factory.artifact-view/v1" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "summary": {
+      "type": "string",
+      "pattern": "^(/|$)",
+      "description": "RFC 6901 pointer into the artifact to a string rendered first, as prose"
+    },
+    "status": {
+      "type": "object",
+      "required": ["path", "tone"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "tone": {
+          "type": "object",
+          "description": "artifact value → tone",
+          "additionalProperties": { "enum": ["ok", "warn", "error", "muted", "neutral"] }
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["path", "as"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "pattern": "^(/|$)" },
+          "as": { "enum": ["table", "keyvalue", "list", "badge", "code", "prose"] },
+          "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "columns": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "table only: item properties shown as columns, in order"
+          },
+          "groupBy": {
+            "type": "string",
+            "minLength": 1,
+            "description": "table only: item property whose value groups the rows"
+          },
+          "expand": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "table only: item properties shown only in the row's expanded state"
+          },
+          "keys": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "keyvalue only: subset of the object's properties, in order"
+          },
+          "itemLabel": {
+            "type": "string",
+            "minLength": 1,
+            "description": "list only: pointer relative to each item naming the text shown"
+          },
+          "language": {
+            "type": "string",
+            "minLength": 1,
+            "description": "code only: syntax hint"
+          },
+          "formats": {
+            "type": "object",
+            "description": "column/key (or \"\" for the section value itself) → format",
+            "additionalProperties": {
+              "enum": ["issue", "pr", "url", "sha", "repo", "run", "duration", "datetime", "state", "bytes", "count"]
+            }
+          },
+          "tone": {
+            "type": "object",
+            "description": "table/keyvalue/list: column/key → (value → tone); badge: value → tone",
+            "additionalProperties": { "type": ["string", "object"] }
+          }
+        }
+      }
+    }
+  }
+}

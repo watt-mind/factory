@@ -14,6 +14,7 @@ import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import { reposRoot } from "./repos.mjs";
+import { validateArtifactView } from "./artifact-view.mjs";
 
 export class RegistryError extends Error {
   constructor(message) {
@@ -23,6 +24,41 @@ export class RegistryError extends Error {
 }
 
 const PINNED_FIELDS = ["prompt", "input_schema", "output_schema"];
+
+/** Agent definition files: every `agents/*.json` except the view sidecars. */
+const VIEW_SUFFIX = ".view.json";
+const isDefinitionFile = (name) => name.endsWith(".json") && !name.endsWith(VIEW_SUFFIX);
+
+/**
+ * Artifact-view sidecar (WM-454, docs/event-runtime-artifact-views.md §2):
+ * `agents/<name>.view.json` beside `agents/<name>.json`, optional. Loaded
+ * and validated against the definition's output schema; a view that does
+ * not parse or does not fit its schema is a configuration anomaly (surfaced
+ * in /status.anomalies.configuration) and the agent is served WITHOUT a
+ * view — never a load failure, never a rendering crash. Views are not part
+ * of the definition pin (§2.3): a rendering tweak is not a contract change.
+ * @returns {{ file: string|null, view: object|null, anomaly: string|null }}
+ */
+function loadArtifactView(root, defFile, def) {
+  const rel = path.relative(root, defFile).replace(/\.json$/, VIEW_SUFFIX);
+  const abs = path.join(root, rel);
+  if (!existsSync(abs)) return { file: null, view: null, anomaly: null };
+  let view;
+  try {
+    view = JSON.parse(readFileSync(abs, "utf8"));
+  } catch (err) {
+    return { file: rel, view: null, anomaly: `artifact view ${rel} for ${def.ref} is unparseable: ${err.message}` };
+  }
+  const check = validateArtifactView(view, def.outputSchema);
+  if (!check.valid) {
+    return {
+      file: rel,
+      view: null,
+      anomaly: `artifact view ${rel} for ${def.ref} does not fit ${def.output_schema} (served without a view): ${check.errors.join("; ")}`,
+    };
+  }
+  return { file: rel, view, anomaly: null };
+}
 
 // ---------------------------------------------------------------------------
 // Model-tier routing (WM-135). Definitions declare INTENT — a tier from a
@@ -199,11 +235,19 @@ function loadAgentDef(root, file) {
  */
 export function loadRegistry({ root = RUNTIME_ROOT, modelTiers = loadModelTierMap() } = {}) {
   const agents = new Map();
+  const views = new Map();
+  const anomalies = [];
   const agentsDir = path.join(root, "agents");
-  for (const name of readdirSync(agentsDir).filter((n) => n.endsWith(".json")).sort()) {
-    const def = loadAgentDef(root, path.join(agentsDir, name));
+  for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
+    const defFile = path.join(agentsDir, name);
+    const def = loadAgentDef(root, defFile);
     if (agents.has(def.ref)) throw new RegistryError(`duplicate agent definition ${def.ref}`);
     agents.set(def.ref, def);
+    const { file, view, anomaly } = loadArtifactView(root, defFile, def);
+    if (anomaly) anomalies.push(anomaly);
+    // Kept off the definition object so receipts' defHash and the pinned
+    // identity never see the view (§2.3).
+    views.set(def.ref, { file, view });
   }
 
   const eventTypes = JSON.parse(readFileSync(path.join(root, "event-types.json"), "utf8"));
@@ -341,7 +385,12 @@ export function loadRegistry({ root = RUNTIME_ROOT, modelTiers = loadModelTierMa
     }
   }
 
-  return { root, agents, eventTypes, schemas, edges, schedules, modelTiers };
+  return { root, agents, views, anomalies, eventTypes, schemas, edges, schedules, modelTiers };
+}
+
+/** The artifact view for a registered agent: `{ file, view }`, both null when the agent has none. */
+export function getArtifactView(registry, ref) {
+  return registry.views?.get(ref) ?? { file: null, view: null };
 }
 
 export function getAgent(registry, ref) {
@@ -358,7 +407,7 @@ export function getEventType(registry, type) {
 export function updatePins({ root = RUNTIME_ROOT } = {}) {
   const changed = [];
   const agentsDir = path.join(root, "agents");
-  for (const name of readdirSync(agentsDir).filter((n) => n.endsWith(".json")).sort()) {
+  for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
     const file = path.join(agentsDir, name);
     const def = JSON.parse(readFileSync(file, "utf8"));
     const pins = {};

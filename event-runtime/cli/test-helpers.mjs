@@ -11,6 +11,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { policyVersion } from "../lib/config.mjs";
 import { openDb } from "../lib/db.mjs";
 
 export const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
@@ -279,8 +280,8 @@ export async function seedRun(home, { runId, input = {}, timeoutSeconds = 5 }) {
     inputHash: hashJson(input),
     workspace: { type: "ephemeral", retainOnFailure: false },
     adapter: "fake",
-    promptVersion: "git:test",
-    policyVersion: "git:test",
+    promptVersion: policyVersion(),
+    policyVersion: policyVersion(),
     outputContract: "factory.status-report/v1",
     capabilities: ["linear:read"],
     timeoutSeconds,

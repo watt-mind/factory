@@ -1,6 +1,6 @@
 /** Agent and repository registry endpoints. */
 import { readFileSync } from "node:fs";
-import { resolveModel } from "./registry.mjs";
+import { getArtifactView, resolveModel } from "./registry.mjs";
 import { RepoError, reposView } from "./repos.mjs";
 
 export function agentsView(registry) {
@@ -20,6 +20,10 @@ export function agentsView(registry) {
       inputSchema: def.inputSchema,
       outputSchemaFile: def.output_schema,
       outputSchema: def.outputSchema,
+      // Artifact-view sidecar (WM-454): null when the agent has none or its
+      // view failed the drift check (then /status names the anomaly).
+      outputViewFile: getArtifactView(registry, def.ref).file,
+      outputView: getArtifactView(registry, def.ref).view,
       pins: def.pins,
       command: def.command ?? null,
       actionRegistry: def.actionRegistry ?? null,

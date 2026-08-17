@@ -260,4 +260,34 @@ describe("CommandPalette", () => {
     expect(overlayClasses).toContain("bg-black/40");
     expect(overlayClasses).toContain("[[data-theme=light]_&]:bg-black/20");
   });
+
+  test("`#541`, `PR 541` and `pr:541` offer the PR journey; a bare number does not (WM-640)", async () => {
+    const jumps: number[] = [];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchInterval: false } } });
+    const r = render(
+      <QueryClientProvider client={client}>
+        <CommandPalette
+          actions={ACTIONS}
+          onJumpRun={NOOP}
+          onJumpProposal={NOOP}
+          onJumpEvent={NOOP}
+          onJumpAgent={NOOP}
+          onJumpWorker={NOOP}
+          onJumpPr={(n) => jumps.push(n)}
+        />
+      </QueryClientProvider>,
+    );
+    for (const typed of ["#541", "PR 541", "pr:541"]) {
+      chordK();
+      // The palette re-mounts its input on every open — query it each round.
+      fireEvent.input(r.getByPlaceholderText("Type a command…"), { target: { value: typed } });
+      const item = await r.findByText("#541", { selector: "span.mono" });
+      fireEvent.click(item.closest("[cmdk-item]")!);
+    }
+    expect(jumps).toEqual([541, 541, 541]);
+    chordK();
+    fireEvent.input(r.getByPlaceholderText("Type a command…"), { target: { value: "541" } });
+    await r.findByText("No matching command");
+    expect(r.queryByText("#541", { selector: "span.mono" }) == null).toBe(true);
+  });
 });

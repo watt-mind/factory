@@ -105,6 +105,205 @@ function eventsView(db, status) {
   });
 }
 
+const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+
+function objectNamesTicket(value, ticket) {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((entry) => objectNamesTicket(entry, ticket));
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      /^(ticket|ticketId|issue|issueId|linearId)$/i.test(key) &&
+      typeof entry === "string" &&
+      entry.toUpperCase() === ticket
+    )
+      return true;
+    if (entry && typeof entry === "object" && objectNamesTicket(entry, ticket))
+      return true;
+  }
+  return false;
+}
+
+function parseObject(json) {
+  try {
+    const value = JSON.parse(json);
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function collectPrRefs(value, refs = { numbers: new Set(), urls: new Set() }) {
+  if (!value || typeof value !== "object") return refs;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectPrRefs(entry, refs);
+    return refs;
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") {
+      const match = entry.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)(?:$|[/?#])/);
+      if (match) {
+        refs.urls.add(entry);
+        refs.numbers.add(Number(match[1]));
+      }
+    }
+    if (/^(pr|prNumber|pullRequest|pullRequestNumber)$/i.test(key)) {
+      const number = Number(entry);
+      if (Number.isInteger(number) && number > 0) refs.numbers.add(number);
+    }
+    if (entry && typeof entry === "object") collectPrRefs(entry, refs);
+  }
+  return refs;
+}
+
+function hasPrRef(value, refs) {
+  const own = collectPrRefs(value);
+  for (const number of own.numbers) if (refs.numbers.has(number)) return true;
+  for (const url of own.urls) if (refs.urls.has(url)) return true;
+  return false;
+}
+
+function namedString(values, names) {
+  for (const value of values) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    for (const name of names) {
+      if (typeof value[name] === "string" && value[name].trim()) return value[name].trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Everything the ticket journey needs in one bounded server-side join. The
+ * existing `/runs` route carries `?ticket=` so this stays inside the run API
+ * module and does not add another top-level router branch. Matching starts on
+ * explicit ticket fields (never arbitrary prose), then closes over linked
+ * event/proposal/run ids and PR references emitted by dispatch/merge results.
+ */
+export function ticketJourneyView(db, rawTicket, options = {}) {
+  const ticket = String(rawTicket ?? "").trim().toUpperCase();
+  if (!TICKET_ID.test(ticket)) return null;
+
+  const eventRows = db.query(`SELECT * FROM events ORDER BY admitted_at, rowid`).all();
+  const proposalRows = db.query(`SELECT * FROM proposals ORDER BY created_at, rowid`).all();
+  const runRows = db.query(`SELECT * FROM runs ORDER BY created_at, rowid`).all();
+  const resultRows = db.query(`SELECT * FROM results ORDER BY rowid`).all();
+  const resultByRun = new Map();
+  for (const row of resultRows) {
+    const result = parseObject(row.result_json);
+    if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
+    resultByRun.get(row.run_id).push(result);
+  }
+
+  const events = new Set();
+  const proposals = new Set();
+  const runs = new Set();
+  for (const row of eventRows) {
+    const envelope = parseObject(row.envelope_json);
+    if (
+      String(row.subject ?? "").toUpperCase() === ticket ||
+      objectNamesTicket(envelope, ticket)
+    )
+      events.add(`${row.source}\0${row.event_id}`);
+  }
+  for (const row of proposalRows) {
+    const spec = parseObject(row.spec_json);
+    if (objectNamesTicket(spec.input, ticket)) proposals.add(row.id);
+  }
+  for (const row of runRows) {
+    const spec = parseObject(row.spec_json);
+    const results = resultByRun.get(row.run_id) ?? [];
+    if (
+      objectNamesTicket(spec.input, ticket) ||
+      results.some((result) => objectNamesTicket(result, ticket))
+    )
+      runs.add(row.run_id);
+  }
+
+  // Link closure catches runs that name only their proposal/event and events
+  // whose payload names only a PR emitted by the original dispatch attempt.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of proposalRows) {
+      const eventKey = `${row.event_source}\0${row.event_id}`;
+      if (
+        proposals.has(row.id) ||
+        events.has(eventKey) ||
+        (row.run_id && runs.has(row.run_id))
+      ) {
+        if (!proposals.has(row.id)) { proposals.add(row.id); changed = true; }
+        if (!events.has(eventKey)) { events.add(eventKey); changed = true; }
+        if (row.run_id && !runs.has(row.run_id)) { runs.add(row.run_id); changed = true; }
+      }
+    }
+  }
+
+  const prRefs = { numbers: new Set(), urls: new Set() };
+  for (const runId of runs) {
+    for (const result of resultByRun.get(runId) ?? []) collectPrRefs(result, prRefs);
+  }
+  if (prRefs.numbers.size || prRefs.urls.size) {
+    for (const row of runRows) {
+      const spec = parseObject(row.spec_json);
+      const results = resultByRun.get(row.run_id) ?? [];
+      if (hasPrRef(spec.input, prRefs) || results.some((result) => hasPrRef(result, prRefs)))
+        runs.add(row.run_id);
+    }
+    for (const row of eventRows) {
+      if (hasPrRef(parseObject(row.envelope_json), prRefs))
+        events.add(`${row.source}\0${row.event_id}`);
+    }
+  }
+
+  const matchedEvents = eventsView(db).filter((event) =>
+    events.has(`${event.source}\0${event.eventId}`),
+  );
+  const matchedProposals = proposalHistory(db).filter((proposal) => proposals.has(proposal.id));
+  const matchedRuns = [...runs]
+    .map((runId) => runView(db, runId, options))
+    .filter(Boolean)
+    .sort((a, b) => a.run.created_at.localeCompare(b.run.created_at));
+
+  const metadata = [
+    ...matchedEvents.map((event) => event.envelope?.payload),
+    ...matchedProposals.map((proposal) => proposal.spec?.input),
+    ...matchedRuns.map((run) => run.run.spec?.input),
+    ...matchedRuns.map((run) => run.result?.artifact),
+  ];
+  const title = namedString(metadata, ["ticketTitle", "linearTitle", "issueTitle"]);
+  const recordedState = namedString(metadata, ["ticketState", "linearState", "issueState"]);
+  const createdAt = namedString(metadata, ["ticketCreatedAt", "linearCreatedAt", "issueCreatedAt"]);
+  const active = matchedRuns.find((run) =>
+    ["QUEUED", "LEASED", "RUNNING", "VERIFYING"].includes(run.run.state),
+  );
+  const merged = matchedRuns.some((run) =>
+    /merged/i.test(JSON.stringify(run.result?.artifact ?? {})),
+  );
+  const inferredState = merged
+    ? "Done"
+    : active
+      ? "In Progress"
+      : matchedProposals.some((proposal) => proposal.decision === "noop")
+        ? "Todo"
+        : matchedRuns.length
+          ? "In Review"
+          : null;
+
+  return {
+    ticket: {
+      id: ticket,
+      title,
+      state: recordedState ?? inferredState,
+      createdAt,
+      url: `https://linear.app/watt-mind/issue/${encodeURIComponent(ticket)}`,
+    },
+    activity: matchedEvents.length > 0 || matchedProposals.length > 0 || matchedRuns.length > 0,
+    events: matchedEvents,
+    proposals: matchedProposals,
+    runs: matchedRuns,
+  };
+}
+
 function runsView(db, state) {
   const where = state ? `WHERE r.state = ?` : ``;
   const rows = db
@@ -390,6 +589,12 @@ export async function handleRunApiRoute({
   }
 
   if (route === "GET /runs") {
+    const ticket = url.searchParams.get("ticket");
+    if (ticket) {
+      const journey = ticketJourneyView(db, ticket, { artifactsDir });
+      if (!journey) return send(422, { error: "ticket must look like WM-123" });
+      return send(200, journey);
+    }
     return send(200, { runs: runsView(db, url.searchParams.get("state")) });
   }
 

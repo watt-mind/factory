@@ -15,6 +15,7 @@ import {
   planEvent,
   policyMaxConcurrentMerges,
   worktreeDispatchAutoEligibility,
+  worktreeMergeFixEligibility,
 } from "./planner.mjs";
 import { loadRegistry } from "./registry.mjs";
 
@@ -551,6 +552,70 @@ describe("planEvent worktree gate (WM-108)", () => {
     eventId: `wt-${JSON.stringify(payload)}`,
     correlationId: null,
     payload,
+  });
+
+  test("a gate-declared merge-fix agent bypasses dispatch-only planning checks", () => {
+    withReposRoot(`repos:\n  - name: repairable\n    path: /tmp/nowhere\n    base: develop\n`, () => {
+      const synthetic = syntheticRegistry();
+      synthetic.agents.set("test-worktree@1", {
+        ...synthetic.agents.get("test-worktree@1"),
+        gate: "merge-fix",
+      });
+      const db = openDb(":memory:");
+      const ref = admit(db, dispatchEnvelope({ repo: "repairable", ticket: "WM-500" }));
+      const outcome = planEvent(db, synthetic, ref, {
+        now: NOW,
+        dispatch: { fetchTicket: () => { throw new Error("dispatch gate must not run"); } },
+      });
+      expect(outcome.decision).toBe("run");
+    });
+  });
+
+  test("merge-fix eligibility expects assigned review tickets and returns merge-fix typed refusals", () => {
+    const payload = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      pr: 42,
+      ticket: "WM-500",
+      headSha: "a".repeat(40),
+      ownedPaths: ["event-runtime/lib/worker.mjs"],
+    };
+    const ticket = {
+      identifier: payload.ticket,
+      state: { name: "In Review" },
+      assignee: { id: "reviewer" },
+      labels: { nodes: [{ name: "ai:needs-review" }] },
+      description: "## Owned Paths\n- event-runtime/lib/**\n",
+    };
+    const eligible = worktreeMergeFixEligibility(payload, {
+      fetchTicket: () => ticket,
+      fetchPullRequest: () => ({ state: "OPEN", headRefOid: payload.headSha }),
+      fetchNonTerminalRuns: () => [],
+      now: NOW,
+    });
+    expect(eligible.ok).toBe(true);
+
+    expect(worktreeMergeFixEligibility(payload, {
+      fetchTicket: () => ({ ...ticket, labels: { nodes: [{ name: "ai:escalated" }] } }),
+      fetchPullRequest: () => ({ state: "OPEN", headRefOid: payload.headSha }),
+      now: NOW,
+    }).refusal.reason).toBe("merge_fix_ticket_escalated");
+    expect(worktreeMergeFixEligibility(payload, {
+      fetchTicket: () => ticket,
+      fetchPullRequest: () => ({ state: "OPEN", headRefOid: "b".repeat(40) }),
+      now: NOW,
+    }).refusal.reason).toBe("merge_fix_pr_moved");
+    expect(worktreeMergeFixEligibility(payload, {
+      fetchTicket: () => ticket,
+      fetchPullRequest: () => ({ state: "OPEN", headRefOid: payload.headSha }),
+      fetchNonTerminalRuns: () => [{ runId: "run_other", state: "RUNNING" }],
+      now: NOW,
+    }).refusal.reason).toBe("merge_fix_run_active");
+    expect(worktreeMergeFixEligibility({ ...payload, ownedPaths: ["outside/scope.mjs"] }, {
+      fetchTicket: () => ticket,
+      fetchPullRequest: () => ({ state: "OPEN", headRefOid: payload.headSha }),
+      now: NOW,
+    }).refusal.reason).toBe("merge_fix_owned_paths_moved");
   });
 
   test("a repo with no worktree scripts declared → typed human_needed at plan time, no run", () => {

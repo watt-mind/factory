@@ -2,13 +2,20 @@ import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Overview, groupJournalEntries, formatActivityGroup, buildAnomalyRows } from "./Overview";
+import {
+  Overview,
+  groupJournalEntries,
+  formatActivityGroup,
+  buildAnomalyRows,
+  groupDeadLetters,
+  stripAnomalyKindPrefix,
+} from "./Overview";
 import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import { changeInput } from "../test-render";
-import type { AdmittedEvent, JournalEntry, Proposal, RunListItem, StatusView } from "../types";
+import type { AdmittedEvent, EventFocus, JournalEntry, Proposal, RunListItem, StatusView } from "../types";
 
 afterEach(() => {
   cleanup();
@@ -221,6 +228,39 @@ describe("groupJournalEntries (WM-100)", () => {
   });
 });
 
+describe("anomaly normalization (WM-548)", () => {
+  test("groups dead letters only when source and error message both match", () => {
+    const groups = groupDeadLetters([
+      { source: "chain", eventId: "chain-run_1", lastError: "duplicate key" },
+      { source: "chain", eventId: "chain-run_2", lastError: "duplicate key" },
+      { source: "chain", eventId: "chain-run_3", lastError: "timeout" },
+      { source: "github", eventId: "delivery_1", lastError: "duplicate key" },
+    ]);
+
+    expect(groups.map((group) => [group.source, group.errorMessage, group.events.length])).toEqual([
+      ["chain", "duplicate key", 2],
+      ["chain", "timeout", 1],
+      ["github", "duplicate key", 1],
+    ]);
+    expect(groups[0]!.events.map((event) => event.eventId)).toEqual(["chain-run_1", "chain-run_2"]);
+  });
+
+  test("strips a redundant kind prefix without altering unrelated text", () => {
+    expect(stripAnomalyKindPrefix("configuration", "configuration: FACTORY_EVENT_SECRET is unset")).toBe(
+      "FACTORY_EVENT_SECRET is unset",
+    );
+    expect(
+      stripAnomalyKindPrefix(
+        "dead_letter",
+        "dead-lettered (chain, chain-run_123): UNIQUE constraint failed",
+      ),
+    ).toBe("chain, chain-run_123: UNIQUE constraint failed");
+    expect(stripAnomalyKindPrefix("proposal", "expired open proposal prop_123")).toBe(
+      "expired open proposal prop_123",
+    );
+  });
+});
+
 describe("Overview activity feed rendering (WM-100)", () => {
   test("renders one grouped row per run span with the collapsed transition count", async () => {
     const origStatus = api.status;
@@ -349,8 +389,8 @@ describe("Overview keyboard navigation (WM-292)", () => {
       const view = renderOverview();
       await waitFor(() => view.getByText(/Anomalies · 2 active issues/));
 
-      const first = view.getByText("expired open proposal").closest('[tabindex="-1"]');
-      const second = view.getByText(/dead-lettered \(github, evt_dead\)/).closest('[tabindex="-1"]');
+      const first = view.getByRole("button", { name: "expired open" }).closest('[tabindex="-1"]');
+      const second = view.getByRole("button", { name: /github.*planner failed/ }).closest('[tabindex="-1"]');
       expect(first).toBeTruthy();
       expect(second).toBeTruthy();
 
@@ -392,7 +432,9 @@ describe("Overview anomaly deck (WM-95)", () => {
       expect(getByText(/agent: triage-scan/)).toBeTruthy();
       expect(getByText(/human_needed/)).toBeTruthy();
       expect(getByText(/ambiguous repo pin/)).toBeTruthy();
-      expect(getByText(/origin github\/evt-789/)).toBeTruthy();
+      const originId = queryByTitle("evt-789");
+      expect(originId).toBeTruthy();
+      expect(originId?.parentElement?.textContent).toBe("origin github/evt-789");
 
       // Raw id is demoted to secondary, copyable text rather than the primary label.
       const idNode = queryByTitle(`${stubProposal.id} — click to copy`);
@@ -482,6 +524,57 @@ describe("Overview anomaly deck (WM-95)", () => {
     }
   });
 
+  test("collapses matching dead letters, expands short event ids, and confirms bulk actions with the count", async () => {
+    const originals = {
+      status: api.status,
+      proposals: api.proposals,
+      outbox: api.outbox,
+      journal: api.journal,
+    };
+    const eventIds = [
+      "chain-run_abcdef123456",
+      "chain-run_bcdefa234567",
+      "chain-run_cdefab345678",
+    ];
+    api.status = async () =>
+      baseStatus({
+        deadLettered: [
+          ...eventIds.map((eventId) => ({ source: "chain", eventId, lastError: "duplicate key" })),
+          { source: "chain", eventId: "chain-run_timeout123456", lastError: "timeout" },
+        ],
+      });
+    api.proposals = async () => ({ proposals: [] });
+    api.outbox = async () => ({ outbox: [] });
+    api.journal = async () => ({ entries: [], head: 0 });
+    const onJumpEvents = mock((_focus: EventFocus) => {});
+
+    try {
+      const view = renderOverview({ kind: "all" }, { onJumpEvents });
+      const group = await waitFor(() =>
+        view.getByRole("button", { name: /3 dead-lettered.*chain.*duplicate key/ }),
+      );
+
+      expect(view.getByText(/Anomalies · 2 active issues · \(4 events\)/)).toBeTruthy();
+      expect(group.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(group);
+      expect(group.getAttribute("aria-expanded")).toBe("true");
+
+      const firstEvent = view.getByTitle(eventIds[0]!);
+      expect(firstEvent.textContent).toBe(shortId(eventIds[0]!));
+      fireEvent.click(firstEvent);
+      expect(onJumpEvents).toHaveBeenCalledWith({ source: "chain", eventId: eventIds[0] });
+
+      fireEvent.click(view.getByRole("button", { name: "Archive all" }));
+      expect(view.getByText("Archive 3 dead-lettered events?")).toBeTruthy();
+      expect(view.getByRole("button", { name: "Archive 3 events" })).toBeTruthy();
+    } finally {
+      api.status = originals.status;
+      api.proposals = originals.proposals;
+      api.outbox = originals.outbox;
+      api.journal = originals.journal;
+    }
+  });
+
   test("archives dead letters and releases stalled worker leases, removing both rows (WM-326)", async () => {
     const mutableApi = api as typeof api & {
       archive: (source: string, eventId: string) => Promise<{ archived: boolean }>;
@@ -524,10 +617,14 @@ describe("Overview anomaly deck (WM-95)", () => {
       const view = renderOverview();
       await waitFor(() => view.getByRole("button", { name: "Archive" }));
 
+      expect(view.getByRole("button", { name: /github.*historical failure/ })).toBeTruthy();
       view.getByRole("button", { name: "Archive" }).click();
-      await waitFor(() => expect(view.queryByText(/dead-lettered \(github, dead-1\)/)).toBeNull());
+      await waitFor(() =>
+        expect(view.queryByRole("button", { name: /github.*historical failure/ })).toBeNull(),
+      );
 
-      view.getByRole("button", { name: "Release lease" }).click();
+      const releaseLease = await waitFor(() => view.getByRole("button", { name: "Release lease" }));
+      releaseLease.click();
       await waitFor(() => view.getByText(/Doctor: All systems nominal/));
       expect(view.queryByText(/stalled worker worker-1/)).toBeNull();
     } finally {
@@ -901,7 +998,7 @@ describe("buildAnomalyRows (WM-205)", () => {
         "proposal",
         "proposals piling up for schedule reconcile-bj29: 4 open proposals (threshold 3)",
       ],
-      ["configuration", "configuration: policyVersion is unknown"],
+      ["configuration", "policyVersion is unknown"],
     ]);
 
     rows[0]!.links[0]!.go();
