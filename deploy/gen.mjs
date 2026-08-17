@@ -19,6 +19,9 @@ import path from "node:path";
 import { loadSchedule, toSeconds, ROOT } from "../lib/schedule.mjs";
 const OUT = path.join(ROOT, "deploy", "launchd");
 const DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+// Resolve at job runtime so committed plists are identical whether rendered from
+// the deployed checkout, a disposable ticket worktree, or a CI checkout.
+const DEPLOY_ROOT = '"${FACTORY_ROOT:-$HOME/Develop/factory}"';
 
 const expand = (p) => p.replace(/^~/, homedir());
 
@@ -35,7 +38,7 @@ export function launchdPath(environmentPath = process.env.PATH, home = homedir()
 export function plist(job, defaults, environmentPath = launchdPath()) {
   const label = `${defaults.label_prefix}.${job.name}`;
   const logDir = expand(defaults.log_dir || "~/Library/Logs");
-  const args = ["/bin/bash", "-lc", `cd ${ROOT} && ${job.command}`];
+  const args = ["/bin/bash", "-lc", `cd ${DEPLOY_ROOT} && ${job.command}`];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
