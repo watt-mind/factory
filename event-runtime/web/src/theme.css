@@ -2,10 +2,10 @@
 @import "@fontsource-variable/inter/opsz.css";
 
 /*
- * Three theme tokens, everything else derived (webui spec §5.1, after
- * Linear's redesign). Dark is the default; light and high-contrast only
- * re-declare the three tokens — every surface, border, and text shade below
- * is computed, never hand-picked per theme.
+ * Three color tokens drive text, borders, and state hues (webui spec §5.1,
+ * after Linear's redesign). Dark is the default. Light additionally declares
+ * explicit semantic surfaces: mixing toward its dark contrast token cannot
+ * produce the white main canvas between the two grey chrome/card steps.
  */
 :root {
   --base: oklch(0.16 0.007 260);
@@ -42,12 +42,22 @@
 
   /* meaningful color: state hues derived from the accent by hue rotation,
      sharing its lightness/chroma so badges sit consistently on any theme */
+  --hue-accent: var(--accent);
   --hue-ok: oklch(from var(--accent) l c 150);
   --hue-warn: oklch(from var(--accent) l c 75);
   --hue-err: oklch(from var(--accent) l c 25);
   --hue-verify: oklch(from var(--accent) l c 310);
   --hue-info: var(--accent);
   --hue-idle: color-mix(in oklch, var(--text-faint) 100%, transparent);
+}
+
+/* A white canvas between soft-grey chrome and slightly deeper raised surfaces
+   restores the same three-step hierarchy that dark gets from its mixes. */
+[data-theme="light"] {
+  --surface-0: oklch(0.965 0.003 260);
+  --surface-1: oklch(1 0 0);
+  --surface-2: oklch(0.94 0.004 260);
+  --surface-3: oklch(0.9 0.006 260);
 }
 
 body {
@@ -74,18 +84,18 @@ body {
     font-size: 11.5px;
   }
 
+  /* Table banding is intentionally a semantic surface rather than a separate
+     colour, so row text keeps the same contrast contract in every theme. */
+  tbody > tr:nth-child(even):not(.row-selected):not(.row-wash-err):not(.row-wash-warn) {
+    background: color-mix(in oklch, var(--surface-2) 70%, var(--surface-1));
+  }
+
   /* Status washes on inbox rows — declared before .row-selected so selection wins. */
   .row-wash-err {
     background: color-mix(in oklch, var(--hue-err) 6%, transparent);
   }
   .row-wash-warn {
     background: color-mix(in oklch, var(--hue-warn) 6%, transparent);
-  }
-
-  /* Row selection ring used by keyboard navigation. */
-  .row-selected {
-    background: color-mix(in oklch, var(--accent) 16%, var(--surface-0));
-    box-shadow: inset 3px 0 0 var(--accent);
   }
 
   /* Prevent list/data table cells from breaking into multiple lines across tables */
@@ -98,6 +108,14 @@ body {
     font-size: 11px;
     color: var(--text-faint);
   }
+}
+
+/* Selection must beat table hover/background utilities, which Tailwind emits
+   after the components layer. Keeping this paint-only rule unlayered preserves
+   the accent wash for every selected table row. */
+.row-selected {
+  background: color-mix(in oklch, var(--hue-accent) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--hue-accent);
 }
 
 :focus-visible {
