@@ -93,6 +93,42 @@ export function shortId(id: string): string {
   return body.length <= 8 ? id : id.slice(0, sep + 1) + body.slice(0, 8);
 }
 
+/**
+ * A model id that keeps its distinguishing name visible in narrow columns.
+ * The provider prefix is allowed to shrink away first; the full id remains in
+ * the tooltip. Sentinel values such as `n/a` and `-` render unchanged.
+ */
+export function ModelCell({
+  model,
+  className = "",
+  title = model,
+}: {
+  model: string;
+  className?: string;
+  title?: string;
+}) {
+  const slash = model.indexOf("/");
+  if (slash <= 0 || slash === model.length - 1) {
+    return (
+      <span className={`mono block max-w-full truncate ${className}`} title={title}>
+        {model}
+      </span>
+    );
+  }
+
+  const provider = model.slice(0, slash + 1);
+  const name = model.slice(slash + 1);
+  return (
+    <span className={`mono block min-w-0 max-w-full ${className}`} title={title}>
+      <span className="sr-only">{model}</span>
+      <span aria-hidden="true" className="flex min-w-0 max-w-full items-baseline">
+        <span className="min-w-0 truncate text-(--text-faint)">{provider}</span>
+        <span className="max-w-full shrink-0 truncate">{name}</span>
+      </span>
+    </span>
+  );
+}
+
 export function copyText(text: string, label: string) {
   navigator.clipboard.writeText(text);
   notify(`Copied ${label}`, "info");

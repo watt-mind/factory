@@ -46,6 +46,7 @@ import {
   DetailPane,
   JumpLink,
   ListEmpty,
+  ModelCell,
   notify,
   StateBadge,
   STATE_HUES,
@@ -779,17 +780,8 @@ export function Runs({
                     </td>
                   )}
                   {show.has("model") && (
-                    <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
-                      title={
-                        rowModel(r) === "n/a"
-                          ? `The ${r.adapter} adapter runs a fixed argv, not a model.`
-                          : r.model && r.model !== "default"
-                            ? `Pinned into the RunSpec at plan time${r.modelTier ? ` from model_tier "${r.modelTier}"` : ""} — open the run for the model it was observed on.`
-                            : "This run pinned no model, so the CLI picked — open the run for the one it was observed on."
-                      }
-                    >
-                      {rowModel(r)}
+                    <td className="max-w-40 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <ModelCell model={rowModel(r)} className="text-(--text-faint)" />
                     </td>
                   )}
                   {show.has("attempts") && (
