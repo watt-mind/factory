@@ -467,6 +467,8 @@ export interface StatusView {
   workers: { live: number; busy: number; stale: number };
   /** Absent only when the UI is talking to a pre-WM-228 control API. */
   capacity?: WorkerCapacity;
+  /** Human inbox counts (WM-285); absent on a pre-inbox control API. */
+  inbox?: { open: number; acked: number; byKind?: Record<string, number> };
   /** Artifact store rollup; `orphans` counts files no result references. Cached ~10s server-side (`at` = when computed). */
   artifacts: { files: number; bytes: number; orphans: number; orphanBytes: number; at?: string };
   anomalies: {
@@ -539,3 +541,50 @@ export interface JanitorResult {
   skippedApplyReason?: string;
 }
 
+
+/** The kinds the inbox ledger accepts (lib/inbox.mjs INBOX_KINDS). */
+export type InboxKind =
+  | "BLOCKED"
+  | "ESCALATED"
+  | "CI RED"
+  | "SMOKE RED"
+  | "CIRCUIT BREAKER"
+  | "RC READY"
+  | "human_needed"
+  | "decision_needed"
+  | "proposal_expired";
+
+export type InboxStatus = "open" | "acked" | "resolved" | "all";
+
+/** Cross-references an inbox item carries; each is a jump target. */
+export interface InboxRefs {
+  runId?: string;
+  proposalId?: string;
+  eventSource?: string;
+  eventId?: string;
+  issue?: string;
+  pr?: string;
+  repo?: string;
+}
+
+/** Telegram projection record written by deliverInboxItem; absent = not attempted. */
+export interface InboxDelivery {
+  telegram?: { sent_at: string; exit_code: number | null; error: string | null };
+}
+
+/** One row of the human inbox ledger (GET /inbox). */
+export interface InboxItem {
+  id: string;
+  kind: InboxKind | string;
+  severity: string;
+  title: string;
+  body: string | null;
+  refs: InboxRefs;
+  /** `cli`, `serve:notify`, or `agent:<runId>`. */
+  source: string;
+  createdAt: string;
+  ackedAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  delivery: InboxDelivery;
+}

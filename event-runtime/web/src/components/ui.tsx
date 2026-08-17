@@ -145,17 +145,22 @@ type CopyActionButtonProps = {
   label: string;
   chord: string;
   onClick: () => void;
+  quiet?: boolean;
   children: ReactNode;
 };
 
-function CopyActionButton({ label, chord, onClick, children }: CopyActionButtonProps) {
+function CopyActionButton({ label, chord, onClick, quiet = false, children }: CopyActionButtonProps) {
   return (
     <button
       type="button"
       title={`${label} · ${chord}`}
       aria-label={`${label} (${chord})`}
       onClick={onClick}
-      className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1)"
+      className={
+        quiet
+          ? "mono cursor-pointer rounded-sm text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent)"
+          : "inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-(--text-faint) transition-colors hover:text-(--text) focus-visible:text-(--text) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:ring-offset-(--surface-1)"
+      }
     >
       {children}
     </button>
@@ -169,13 +174,40 @@ export function CopyActions({
   idChord = "c",
   cli,
   cliLabel = "CLI command",
+  variant = "icons",
 }: {
   id: string;
   idLabel: string;
   idChord?: string;
   cli?: string;
   cliLabel?: string;
+  /** Quiet text links suit the utility row below a detail header; icons remain
+   *  the compact default for inline use on other surfaces. */
+  variant?: "icons" | "quiet";
 }) {
+  if (variant === "quiet") {
+    return (
+      <div className="inline-flex items-center gap-1.5" role="group" aria-label="Copy actions">
+        <span>copy:</span>
+        <CopyActionButton label={`Copy ${idLabel}`} chord={idChord} onClick={() => copyText(id, idLabel)} quiet>
+          id
+        </CopyActionButton>
+        <span aria-hidden="true">·</span>
+        {cli !== undefined && (
+          <>
+            <CopyActionButton label={`Copy ${cliLabel}`} chord="c i" onClick={() => copyText(cli, cliLabel)} quiet>
+              CLI
+            </CopyActionButton>
+            <span aria-hidden="true">·</span>
+          </>
+        )}
+        <CopyActionButton label="Copy link" chord="c l" onClick={copyLink} quiet>
+          link
+        </CopyActionButton>
+      </div>
+    );
+  }
+
   return (
     <div className="inline-flex items-center gap-1" role="group" aria-label="Copy actions">
       <CopyActionButton label={`Copy ${idLabel}`} chord={idChord} onClick={() => copyText(id, idLabel)}>

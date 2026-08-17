@@ -82,10 +82,24 @@ function vendorChunk(id: string): string | undefined {
 // hunting a bug they did not introduce. If a future raise buys less headroom than
 // this, split the entry instead of moving the number again.
 //
-// WM-548 re-baselined to 570 kB on 2026-08-17. Overview dead-letter anomaly
-// grouping and bulk confirmation dialogs increased the entry chunk to 554 kB.
-// Vendor chunk split remains clean (@xyflow at 197 kB). Headroom is ~16 kB.
-const ENTRY_CHUNK_BUDGET_BYTES = 570 * 1000;
+// WM-483 re-baselined to 550 kB on 2026-08-17. The attribute-icon registry
+// (`components/attrIcons.tsx`, §5.2 tier 4) hangs off `KV` in `ui.tsx`, which
+// every eager view imports, so its ~35 Radix glyphs land in the entry by design:
+// 488.48 kB → 522.66 kB. Tree-shaking was verified first (only the imported
+// glyphs appear in the output; the package is `sideEffects: false`), and the
+// vendor split is unchanged. The operator accepted the larger entry for one
+// consistent icon set over per-route duplication. Slack is ~27 kB (5%), the same
+// proportion as the WM-332 raise.
+//
+// WM-286 re-baselined to 575 kB on 2026-08-17. develop had crept to ~548 kB
+// through the polish round (#512 context strip, #518 trace errors, #519
+// artifacts) — 2 kB of slack, i.e. the same 0.4% drift WM-332 warned about —
+// and the Inbox view's eager-path additions (route + nav badge in App.tsx,
+// three api client calls, the Overview "Waiting on you" tile; the view itself
+// is a lazy chunk) took the entry to 550.29 kB. Vendor split verified: xyflow
+// still 197.04 kB, elk still its own chunk. Slack ~25 kB (4.5%). If the next
+// raise buys less than this, split Overview's stage cards instead.
+const ENTRY_CHUNK_BUDGET_BYTES = 575 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {

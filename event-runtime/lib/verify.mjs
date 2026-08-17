@@ -74,6 +74,9 @@ function normalizeFailureOutput(output) {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
+    // Lifecycle scripts emit recoverable, run-varying diagnostics as warn:.
+    // They are evidence, not part of the underlying failure signature.
+    .filter((line) => !/^warn:\s*/i.test(line))
     // Runners repeat these for unrelated failures; they are not evidence that
     // the same underlying check remains red.
     .filter((line) => !/^(\$ |bun test|error: script |error: ".*" exited|exited with code)/i.test(line));

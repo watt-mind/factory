@@ -6,6 +6,8 @@ import type {
   ApproveOutcome,
   CancelOutcome,
   EnvIdentity,
+  InboxItem,
+  InboxStatus,
   JournalView,
   OutboxRow,
   JanitorResult,
@@ -120,6 +122,14 @@ export const api = {
     call<JanitorResult>("POST", `/repos/${encodeURIComponent(name)}/janitor`, { apply }),
   // The worker registry: which processes are alive, where, and what they run.
   workers: () => call<{ workers: Worker[] }>("GET", "/workers"),
+  // Human inbox ledger (WM-285): everything waiting on the operator, by status.
+  inbox: (status: InboxStatus = "open") =>
+    call<{ items: InboxItem[] }>("GET", `/inbox?status=${encodeURIComponent(status)}`),
+  // Ack = "seen"; 404 unknown item, 409 already resolved.
+  ackInbox: (id: string) => call<{ item: InboxItem }>("POST", `/inbox/${encodeURIComponent(id)}/ack`, {}),
+  // Resolve = "dealt with"; idempotent on the ledger, 404 unknown item.
+  resolveInbox: (id: string, reason?: string) =>
+    call<{ item: InboxItem }>("POST", `/inbox/${encodeURIComponent(id)}/resolve`, reason ? { reason } : {}),
   // The schedule registry: recurring loops, cadence, timing, and health.
   schedules: () => call<{ schedules: ScheduleItem[] }>("GET", "/schedules"),
   // Trigger an ad-hoc run. Explicit PR numbers are accepted only by merge schedules.

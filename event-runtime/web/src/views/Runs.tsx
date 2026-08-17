@@ -895,7 +895,7 @@ export function Runs({
 
       {sel && (
         <DetailPane
-          widthClass="w-[460px]"
+          widthClass="fixed inset-0 z-20 w-full sm:static sm:z-auto sm:w-[460px]"
           title={
             <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
               <button
@@ -977,6 +977,7 @@ export function Runs({
               idLabel="run id"
               cli={`bun event-runtime/cli.mjs inspect ${sel.runId}`}
               cliLabel="CLI inspect command"
+              variant="quiet"
             />
           }
           close={<Button onClick={() => onSelectRun(null)}>Close</Button>}

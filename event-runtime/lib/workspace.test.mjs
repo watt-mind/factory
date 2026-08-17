@@ -80,7 +80,11 @@ describe("worktree workspaces (WM-108)", () => {
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-up-broken.sh"),
-      `#!/bin/bash\necho "template failed to build" >&2\nexit 7\n`,
+      `#!/bin/bash\necho "starting worktree setup"\nprintf '\\033[33mwarn:\\033[0m recorded port 7740 is occupied — allocating a free pair\\n' >&2\nprintf '\\033[33mwarn:\\033[0m web port 7741 is occupied — trying next pair\\n' >&2\necho "fatal: template failed to build" >&2\nexit 7\n`,
+    );
+    writeFileSync(
+      path.join(repoDir, "bin", "worktree-up-warnings-only.sh"),
+      `#!/bin/bash\necho "warn: recovered once" >&2\necho "warn: recovered twice" >&2\nexit 8\n`,
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-up-empty.sh"),
@@ -100,7 +104,7 @@ describe("worktree workspaces (WM-108)", () => {
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-down-refuse.sh"),
-      `#!/bin/bash\necho "refusing: dirty tree" >&2\nexit 1\n`,
+      `#!/bin/bash\necho "warn: cleanup probe used fallback" >&2\necho "fatal: refusing dirty tree" >&2\nexit 1\n`,
     );
 
     mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
@@ -112,6 +116,9 @@ describe("worktree workspaces (WM-108)", () => {
         `    worktree_root: ${wtRoot}\n    verify: echo verified\n` +
         `  - name: broken-up\n    path: ${repoDir}\n    base: develop\n` +
         `    worktree_up: bin/worktree-up-broken.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n` +
+        `  - name: warnings-only-up\n    path: ${repoDir}\n    base: develop\n` +
+        `    worktree_up: bin/worktree-up-warnings-only.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n` +
         `  - name: empty-up\n    path: ${repoDir}\n    base: develop\n` +
         `    worktree_up: bin/worktree-up-empty.sh\n    worktree_down: bin/worktree-down.sh\n` +
@@ -205,11 +212,16 @@ describe("worktree workspaces (WM-108)", () => {
     expect(destroyWorkspace(dir)).toBe(true);
   });
 
-  test("a refusing worktree_down (dirty tree) is surfaced even when retention was requested", () => {
+  test("a refusing worktree_down retains everything, with a filtered reason and raw evidence", () => {
     const { dir } = make("refusing-down", "WM-4", "run_wt4");
     expect(destroyWorkspace(dir, { retain: true })).toBe(false);
     expect(existsSync(dir)).toBe(true);
     expect(existsSync(path.join(wtRoot, "WM-4"))).toBe(true);
+    const { downFailure } = JSON.parse(readFileSync(path.join(dir, ".worktree.json"), "utf8"));
+    expect(downFailure.reason).toBe("fatal: refusing dirty tree");
+    expect(downFailure.reason).not.toContain("warn:");
+    expect(downFailure.stderr).toContain("warn: cleanup probe used fallback");
+    expect(downFailure.stderr).toContain("fatal: refusing dirty tree");
   });
 
   test("a timed-out worktree_down retains the workspace without hanging", () => {
@@ -244,14 +256,44 @@ describe("worktree workspaces (WM-108)", () => {
     expect(destroyWorkspace(dir)).toBe(true);
   });
 
-  test("a failing worktree_up is a typed provisioning error carrying the script's last line", () => {
+  test("a failing worktree_up excludes warnings from its reason and preserves raw evidence", () => {
+    const root = tmpRoot();
+    const workspaceDir = path.join(root, "run_wt8-a1");
     try {
-      make("broken-up", "WM-8", "run_wt8");
+      createWorkspace({
+        root,
+        runId: "run_wt8",
+        attempt: 1,
+        input: { repo: "broken-up", ticket: "WM-8" },
+        workspace: { type: "worktree" },
+      });
       throw new Error("expected WorktreeError");
     } catch (err) {
       expect(err).toBeInstanceOf(WorktreeError);
       expect(err.code).toBe("workspace_provisioning_error");
-      expect(err.message).toContain("template failed to build");
+      expect(err.message).toContain("fatal: template failed to build");
+      expect(err.message).not.toContain("warn:");
+      expect(err.evidence.status).toBe(7);
+      expect(err.evidence.stdout).toBe("starting worktree setup\n");
+      expect(err.evidence.stderr).toContain("warn:");
+      expect(err.evidence.stderr).toContain("recorded port 7740");
+      const { upFailure } = JSON.parse(readFileSync(path.join(workspaceDir, ".worktree.json"), "utf8"));
+      expect(upFailure.reason).toBe("fatal: template failed to build");
+      expect(upFailure.status).toBe(7);
+      expect(upFailure.stdout).toBe(err.evidence.stdout);
+      expect(upFailure.stderr).toBe(err.evidence.stderr);
+    }
+  });
+
+  test("a worktree_up failure with only warnings reports an explicit no-error fallback", () => {
+    try {
+      make("warnings-only-up", "WM-12", "run_wt12");
+      throw new Error("expected WorktreeError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorktreeError);
+      expect(err.message).toContain("exit 8, no error output");
+      expect(err.message).not.toContain("warn:");
+      expect(err.evidence.stderr).toContain("warn: recovered once");
     }
   });
 

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { hashJson, sha256Hex } from "./canonical.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
-import { ContractViolation, verifyResult } from "./verify.mjs";
+import { ContractViolation, normalizeFailureOutput, verifyResult } from "./verify.mjs";
 
 const registry = loadRegistry();
 const def = getAgent(registry, "factory-status-report@1");
@@ -392,6 +392,17 @@ describe("verifyResult", () => {
     });
     expect(() => verifyResult({ spec: makeSpec(), def, registry, workspaceDir: dir, attempt: 1 }))
       .toThrow(ContractViolation);
+  });
+});
+
+describe("failure normalization", () => {
+  test("drops ANSI-colored warn lines so run-varying diagnostics do not change the signature", () => {
+    expect(normalizeFailureOutput(
+      "\u001b[33mwarn:\u001b[0m recorded ports 7740 / 7741 are occupied\nentry chunk exceeds budget\n",
+    )).toEqual(["entry chunk exceeds budget"]);
+    expect(normalizeFailureOutput(
+      "warn: recorded ports 8120 / 8121 are occupied\nentry chunk exceeds budget\n",
+    )).toEqual(["entry chunk exceeds budget"]);
   });
 });
 

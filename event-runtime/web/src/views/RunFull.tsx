@@ -306,8 +306,8 @@ export function RunFull({
   }, [d?.run.runId, d?.run.state, attemptsExhausted, connected, canApprove, selProposal]);
 
   return (
-    <div className="flex h-full min-w-0 flex-col">
-      <header className="sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-(--border) bg-(--surface-1) px-6 py-3">
+    <div className="fixed inset-0 z-20 flex h-full min-w-0 flex-col overflow-hidden bg-(--surface-0) sm:static sm:z-auto">
+      <header className="sticky top-0 z-10 flex shrink-0 flex-col items-stretch gap-2 border-b border-(--border) bg-(--surface-1) px-6 py-3">
         <div className="flex min-w-0 flex-wrap items-center gap-3">
           <nav aria-label="Breadcrumb" className="flex items-center gap-2">
             <ol className="flex min-w-0 flex-wrap items-center gap-2 list-none p-0 m-0 text-[13px]">
@@ -341,95 +341,91 @@ export function RunFull({
               </li>
             </ol>
           </nav>
-          {d && (
-            <span className="text-[12px] text-(--text-faint)">
-              <AgentHoverCard
-                agentRef={d.run.spec.agent}
-                onJumpAgent={onJumpAgent}
-              />{" "}
-              · {d.run.spec.adapter} · {d.run.attempts}/{d.run.spec.maxAttempts}{" "}
-              attempts
-            </span>
-          )}
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-3">
-          {d && (
-            <div className="flex items-center gap-1.5">
-              {canApprove && selProposal && (
-                <Button
-                  disabled={!connected || approve.isPending}
-                  onClick={() => setConfirmApprove(true)}
+        {/* Lifecycle verbs stay left; navigation stays right. This keeps the
+            destructive action visually distinct and limits the row to the
+            actions that change or leave the current run. */}
+        <div className="flex min-h-7 flex-wrap items-center justify-between gap-1.5">
+          <div className="flex items-center gap-1.5">
+            {canApprove && selProposal && (
+              <Button
+                disabled={!connected || approve.isPending}
+                onClick={() => setConfirmApprove(true)}
+              >
+                Approve…{" "}
+                <span
+                  className="mono ml-1 text-(--text-faint)"
+                  aria-hidden="true"
                 >
-                  Approve…{" "}
-                  <span
-                    className="mono ml-1 text-(--text-faint)"
-                    aria-hidden="true"
-                  >
-                    a
-                  </span>
-                </Button>
-              )}
-              {selProposal && onJumpProposal && (
-                <Button onClick={() => onJumpProposal(selProposal.id)}>
-                  Open proposal
-                </Button>
-              )}
-              {isCancellable(d.run.state) && (
-                <Button
-                  variant="danger"
-                  disabled={!connected || cancel.isPending}
-                  onClick={() => setConfirm("cancel")}
+                  a
+                </span>
+              </Button>
+            )}
+            {d && isCancellable(d.run.state) && (
+              <Button
+                variant="danger"
+                disabled={!connected || cancel.isPending}
+                onClick={() => setConfirm("cancel")}
+              >
+                Cancel{" "}
+                <span
+                  className="mono ml-1 text-(--text-faint)"
+                  aria-hidden="true"
                 >
-                  Cancel{" "}
-                  <span
-                    className="mono ml-1 text-(--text-faint)"
-                    aria-hidden="true"
-                  >
-                    x
-                  </span>
+                  x
+                </span>
+              </Button>
+            )}
+            {d && d.run.state === "FAILED" &&
+              (attemptsExhausted ? (
+                <Button
+                  disabled={!connected}
+                  onClick={() => setConfirm("force-retry")}
+                >
+                  Force retry…
                 </Button>
-              )}
-              {d.run.state === "FAILED" &&
-                (attemptsExhausted ? (
-                  <Button
-                    disabled={!connected}
-                    onClick={() => setConfirm("force-retry")}
-                  >
-                    Force retry…
-                  </Button>
-                ) : (
-                  <Button
-                    disabled={!connected || retry.isPending}
-                    onClick={() =>
-                      retry.mutate({ id: d.run.runId, force: false })
-                    }
-                  >
-                    Retry
-                  </Button>
-                ))}
-            </div>
-          )}
-          {onJumpChain && chainKey && (
-            <Button
-              onClick={() => onJumpChain(chainKey, `run:${runId}`)}
-            >
-              View chain
+              ) : (
+                <Button
+                  disabled={!connected || retry.isPending}
+                  onClick={() =>
+                    retry.mutate({ id: d.run.runId, force: false })
+                  }
+                >
+                  Retry
+                </Button>
+              ))}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {selProposal && onJumpProposal && (
+              <Button onClick={() => onJumpProposal(selProposal.id)}>
+                Open proposal
+              </Button>
+            )}
+            {onJumpChain && chainKey && (
+              <Button
+                onClick={() => onJumpChain(chainKey, `run:${runId}`)}
+              >
+                View chain
+              </Button>
+            )}
+            <Button onClick={() => toggleRunPin(runId)}>
+              <span>Open in tab</span>
+              <span
+                aria-hidden="true"
+                className="mono ml-1 text-(--text-faint) text-[10px]"
+              >
+                p
+              </span>
             </Button>
-          )}
-          <Button onClick={() => toggleRunPin(runId)}>
-            <span>Open in tab</span>
-            <span
-              aria-hidden="true"
-              className="mono ml-1 text-(--text-faint) text-[10px]"
-            >
-              p
-            </span>
-          </Button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
           <CopyActions
             id={runId}
             idLabel="run id"
             cli={`bun event-runtime/cli.mjs inspect ${runId}`}
             cliLabel="CLI inspect command"
+            variant="quiet"
           />
         </div>
       </header>
