@@ -11,7 +11,7 @@
  * view already searched — because that is what pasting an id expects to do.
  */
 
-import type { AdmittedEvent, Proposal, RunListItem } from "./types";
+import type { AdmittedEvent, InboxItem, Proposal, RunListItem } from "./types";
 
 /** What a field accessor may return: one value, several, or nothing. */
 export type FieldValue = string | null | undefined | readonly (string | null | undefined)[];
@@ -330,6 +330,35 @@ export const RUN_FACETS: FilterFacets<RunListItem, RunFilterContext> = {
   values: {
     state: RUN_STATES,
     adapter: ADAPTERS,
+  },
+};
+
+export const INBOX_FACETS: FilterFacets<InboxItem, undefined> = {
+  fields: {
+    kind: (item) => item.kind,
+    repo: (item) => item.refs.repo,
+    issue: (item) => item.refs.issue,
+  },
+  flags: {
+    open: {
+      help: "Not acknowledged or resolved.",
+      test: (item) => !item.ackedAt && !item.resolvedAt,
+    },
+    acked: {
+      help: "Acknowledged but not resolved.",
+      test: (item) => !!item.ackedAt && !item.resolvedAt,
+    },
+    resolved: {
+      help: "Resolved inbox item.",
+      test: (item) => !!item.resolvedAt,
+    },
+  },
+  text: (item) => [item.title, item.body],
+  values: {
+    kind: [
+      "decision_needed", "proposal_expired", "BLOCKED", "ESCALATED", "human_needed",
+      "CI RED", "SMOKE RED", "CIRCUIT BREAKER", "RC READY",
+    ],
   },
 };
 

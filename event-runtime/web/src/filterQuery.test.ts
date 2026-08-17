@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   EVENT_FACETS,
+  INBOX_FACETS,
   PROPOSAL_FACETS,
   RUN_FACETS,
   chipHelp,
@@ -13,7 +14,7 @@ import {
   proposalRunState,
   removeFilterToken,
 } from "./filterQuery";
-import type { AdmittedEvent, Proposal, RunListItem } from "./types";
+import type { AdmittedEvent, InboxItem, Proposal, RunListItem } from "./types";
 
 const run = (over: Partial<RunListItem> = {}): RunListItem => ({
   runId: "run_48ac91",
@@ -50,6 +51,22 @@ const event = (over: Partial<AdmittedEvent> = {}): AdmittedEvent => ({
   ...over,
 });
 
+const inboxItem = (over: Partial<InboxItem> = {}): InboxItem => ({
+  id: "inbox_1",
+  kind: "BLOCKED",
+  severity: "normal",
+  title: "BLOCKED WM-616: choose the list layout",
+  body: "Inbox chrome needs parity with Runs",
+  refs: { repo: "factory", issue: "WM-616" },
+  source: "agent:run_1",
+  createdAt: "2026-08-14T09:00:00.000Z",
+  ackedAt: null,
+  resolvedAt: null,
+  resolvedBy: null,
+  delivery: {},
+  ...over,
+});
+
 const proposal = (over: Partial<Proposal> = {}): Proposal => ({
   id: "prop_8f12",
   decision: "run",
@@ -76,6 +93,8 @@ const matchEvent = (input: string, row = event()) =>
   matchesFilterQuery(row, parseFilterQuery(input, EVENT_FACETS), EVENT_FACETS, undefined);
 const matchProposal = (input: string, row = proposal(), runStates = new Map<string, string>()) =>
   matchesFilterQuery(row, parseFilterQuery(input, PROPOSAL_FACETS), PROPOSAL_FACETS, { runStates });
+const matchInbox = (input: string, row = inboxItem()) =>
+  matchesFilterQuery(row, parseFilterQuery(input, INBOX_FACETS), INBOX_FACETS, undefined);
 
 describe("parseFilterQuery", () => {
   test("keyed tokens, flags and leftover words, each keeping its offsets", () => {
@@ -233,6 +252,16 @@ describe("matchesFilterQuery", () => {
     expect(matchProposal("is:stale", proposal({ status: "approved" }), new Map([["run_48ac91", "COMPLETED"]]))).toBe(false);
     expect(matchProposal("is:stale", proposal({ status: "rejected" }), new Map([["run_48ac91", "FAILED"]]))).toBe(false);
     expect(matchProposal("is:stale", proposal({ status: "expired" }), new Map([["run_48ac91", "CANCELLED"]]))).toBe(false);
+  });
+
+  test("Inbox facets cover kind, status, references, and title/body text", () => {
+    expect(matchInbox("kind:blocked repo:factory issue:WM-616 is:open")).toBe(true);
+    expect(matchInbox("chrome parity")).toBe(true);
+    expect(matchInbox("repo:bj29")).toBe(false);
+    expect(matchInbox("is:acked")).toBe(false);
+    expect(matchInbox("is:acked", inboxItem({ ackedAt: "2026-08-14T10:00:00.000Z" }))).toBe(true);
+    expect(matchInbox("is:resolved", inboxItem({ resolvedAt: "2026-08-14T11:00:00.000Z" }))).toBe(true);
+    expect(matchInbox("is:open", inboxItem({ ackedAt: "2026-08-14T10:00:00.000Z" }))).toBe(false);
   });
 
   test("Proposals keyed fields cover the columns the list shows", () => {
