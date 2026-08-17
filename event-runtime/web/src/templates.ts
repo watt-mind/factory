@@ -14,6 +14,28 @@ export interface TriggerTemplate {
   envelope: Record<string, unknown>;
 }
 
+export interface TriggerTemplateGroup {
+  /** Domain prefix including its trailing dot, or "other" for unprefixed types. */
+  domain: string;
+  templates: TriggerTemplate[];
+}
+
+/** Group templates by event-type domain, with deterministic group and item order. */
+export function groupTemplates(templates: TriggerTemplate[]): TriggerTemplateGroup[] {
+  const groups = new Map<string, TriggerTemplate[]>();
+  const sorted = [...templates].sort((a, b) => a.eventType.localeCompare(b.eventType));
+  for (const template of sorted) {
+    const separator = template.eventType.indexOf(".");
+    const domain = separator > 0 ? template.eventType.slice(0, separator + 1) : "other";
+    const group = groups.get(domain) ?? [];
+    group.push(template);
+    groups.set(domain, group);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([domain, grouped]) => ({ domain, templates: grouped }));
+}
+
 /** A plausible starting value for one schema property — never a lie, just a seed. */
 function seedFor(name: string, schema: any, nowMs: number = Date.now()): unknown {
   if (!schema || typeof schema !== "object") return "";
