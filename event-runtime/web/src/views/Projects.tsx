@@ -382,7 +382,7 @@ export function Projects({
             <ScopeCaption
               context={context}
               surface="registry"
-              subject={{ label: "registry", plural: false }}
+              subject={{ label: "Projects", plural: true }}
             />
             <div className="mb-3">
               <FilterInput

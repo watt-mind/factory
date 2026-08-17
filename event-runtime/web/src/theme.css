@@ -123,6 +123,12 @@ body {
   outline-offset: 2px;
 }
 
+/* Route changes focus the landmark for screen-reader context, but the landmark
+   itself is not an interactive control and must not inherit the global ring. */
+main[tabindex="-1"]:focus-visible {
+  outline: none;
+}
+
 ::selection {
   background: color-mix(in oklch, var(--accent) 30%, transparent);
 }
