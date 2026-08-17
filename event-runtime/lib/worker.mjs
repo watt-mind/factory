@@ -22,7 +22,7 @@ import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
-import { worktreeDispatchGate } from "./planner.mjs";
+import { worktreeDispatchAutoEligibility } from "./planner.mjs";
 import { closeOpenProposalForRun } from "./proposals.mjs";
 import { computeDefHash, createReceipt, verifyDefHash } from "./receipts.mjs";
 import { traceRecorder } from "./trace.mjs";
@@ -45,6 +45,7 @@ export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
 
 /** Claim-lock contention is deferred independently from execution attempts. */
 export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = 8;
+export const DEFAULT_MAX_TRANSIENT_GATE_REQUEUES = 3;
 export const CLAIM_LOCK_BACKOFF_BASE_MS = 25;
 export const CLAIM_LOCK_BACKOFF_MAX_MS = 1_000;
 
@@ -58,7 +59,7 @@ function workerSubprocessTimeoutMs() {
     : DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS;
 }
 
-const ENVIRONMENT_FAILURES = new Set(["adapter_error", "lease_expired"]);
+const ENVIRONMENT_FAILURES = new Set(["adapter_error", "lease_expired", "linear_unconfigured"]);
 const AGENT_FAILURES = new Set(["contract_violation"]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
@@ -218,7 +219,7 @@ export function claimNext(db, { owner, now = () => Date.now(), policyVersion = "
     let row = null;
     let spec = null;
     for (const candidate of candidates) {
-      const backoff = /^claim_lock_contention:\d+:backoff_(\d+)ms$/.exec(candidate.queue_reason ?? "");
+      const backoff = /^(?:claim_lock_contention:\d+|dispatch_gate_transient:[^:]+:\d+):backoff_(\d+)ms$/.exec(candidate.queue_reason ?? "");
       if (backoff && Date.parse(candidate.queued_at) + Number(backoff[1]) > claimNow) continue;
       const candidateSpec = JSON.parse(candidate.spec_json);
       if (!satisfiesPlacement(labels, candidateSpec.placement)) continue;
@@ -332,6 +333,57 @@ function deferClaimLockContention(db, {
     db.query(`UPDATE runs SET attempts = ? WHERE run_id = ?`).run(attempt - 1, runId);
     return { requeued: true, contentions: contentionNumber, backoffMs };
   });
+}
+
+/**
+ * A plan-time eligibility proof makes a contradictory claim-time Linear read
+ * distinguishable from a real gate refusal. Defer those reads without spending
+ * an execution attempt, with the same durable not-before mechanism as the
+ * machine-local claim lock.
+ */
+function deferTransientDispatchGate(db, {
+  runId, attempt, fencingToken, owner, policyVersion, now, reasonCode,
+  maxRequeues = DEFAULT_MAX_TRANSIENT_GATE_REQUEUES,
+  random = Math.random,
+}) {
+  return txImmediate(db, () => {
+    const currentNow = resolveNow(now);
+    if (!assertCurrentToken(db, runId, fencingToken)) {
+      recordFencedAttempt(db, { runId, attempt, actor: owner, policyVersion, now: currentNow });
+      return { fenced: true };
+    }
+    const prior = Number(db.query(
+      `SELECT COUNT(*) AS n FROM lifecycle_events
+       WHERE run_id = ? AND reason GLOB ?`,
+    ).get(runId, `dispatch_gate_transient:${reasonCode}:*`)?.n ?? 0);
+    if (prior >= maxRequeues) return { exhausted: true, requeues: prior };
+
+    const requeueNumber = prior + 1;
+    const backoffMs = claimLockBackoffMs(requeueNumber, random);
+    transition(db, {
+      runId, to: "QUEUED", expectFrom: "RUNNING", actor: owner,
+      reason: `dispatch_gate_transient:${reasonCode}:${requeueNumber}:backoff_${backoffMs}ms`,
+      attempt, policyVersion, now: currentNow,
+    });
+    db.query(`DELETE FROM attempts WHERE run_id = ? AND attempt = ?`).run(runId, attempt);
+    db.query(`UPDATE runs SET attempts = ? WHERE run_id = ?`).run(attempt - 1, runId);
+    return { requeued: true, requeues: requeueNumber, backoffMs };
+  });
+}
+
+function hasPlanTimeDispatchEvidence(spec) {
+  return Boolean(spec?.approvalPolicy?.dispatchEvidence?.ticket?.descriptionHash);
+}
+
+function contradictsPlanTimeOwnedPaths(spec, gateResult) {
+  const planned = spec?.approvalPolicy?.dispatchEvidence?.ticket;
+  const current = gateResult?.evidence?.ticket;
+  return Boolean(
+    planned?.descriptionHash &&
+    planned.ownedPathsParsed === true &&
+    current?.ownedPathsParsed === false &&
+    current.descriptionHash !== planned.descriptionHash
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +513,35 @@ export function createReloadWatcher({
 
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
 
+/**
+ * Resolve Linear credentials the same way the CLI does: process env first,
+ * then the operator's shared env file. The resolved value is copied into the
+ * supplied env so every Linear CLI child inherits it; it is never logged.
+ */
+export function resolveLinearApiKey({
+  env = process.env,
+  envFile = path.join(homedir(), "Develop", "hdkiller", ".env"),
+} = {}) {
+  if (env.LINEAR_API_KEY) return env.LINEAR_API_KEY;
+  if (!existsSync(envFile)) return null;
+
+  try {
+    for (const line of readFileSync(envFile, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+      const idx = trimmed.indexOf("=");
+      if (trimmed.slice(0, idx).trim() !== "LINEAR_API_KEY") continue;
+      const value = trimmed.slice(idx + 1).trim().replace(/^['"]|['"]$/g, "");
+      if (!value) return null;
+      env.LINEAR_API_KEY = value;
+      return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /** Execute one bounded Linear CLI operation; exported for timeout regression tests. */
 export function runLinearCli(
   args,
@@ -567,7 +648,7 @@ const ACTIVE_EXECUTIONS = new Map();
  */
 export async function executeClaimed(db, registry, adapters, claim, {
   workspacesRoot, artifactStore = artifactsRoot(), now = () => Date.now(), policyVersion = "unknown", adapterOverride, env = {},
-  dispatch,
+  dispatch, resolveLinearKey = resolveLinearApiKey,
 } = {}) {
   const { runId, attempt, fencingToken, spec } = claim;
   const owner = db
@@ -587,13 +668,22 @@ export async function executeClaimed(db, registry, adapters, claim, {
   let attemptUsage = { adapter: adapterOverride ?? spec.adapter };
 
   let dispatchOpts = dispatch;
-  if (!dispatchOpts && process.env.FACTORY_EVENT_HOME && !process.env.LINEAR_API_KEY) {
+  const explicitDispatchStub = !dispatchOpts && (
+    process.env.FACTORY_DISPATCH_STUB === "1" ||
+    adapterOverride === "fake" ||
+    spec.adapter === "fake"
+  );
+  if (explicitDispatchStub) {
     dispatchOpts = {
       fetchTicket: () => ({
         identifier: ticketId,
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
+        // The claim gate fails closed on tickets whose Owned Paths do not
+        // parse (owned_paths_unknown, WM-575); a stub ticket must carry a
+        // parseable section or the demo stub refuses every dispatch.
+        description: "## Owned Paths\n- demo/**\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
@@ -601,6 +691,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
       unclaimTicket: () => true,
     };
   }
+  const linearConfigured = dispatchOpts || !isWorktree || !repoName || !ticketId
+    ? true
+    : Boolean(resolveLinearKey());
 
   const locksDir = dispatchOpts?.locksDir ?? defaultLocksDir();
   const leasesDir = dispatchOpts?.leasesDir ?? leaseDir();
@@ -665,14 +758,14 @@ export async function executeClaimed(db, registry, adapters, claim, {
     def = getAgent(registry, spec.agent);
   } catch {}
 
-  const refuseTerminal = (reasonCode, checks = ["dispatch_gate"], { causeTyped = false } = {}) =>
+  const refuseTerminal = (reasonCode, checks = ["dispatch_gate"], { causeTyped = false, detail = null } = {}) =>
     txImmediate(db, () => {
       const currentNow = nowFn();
       if (!assertCurrentToken(db, runId, fencingToken)) {
         recordFencedAttempt(db, { runId, attempt, actor: owner, policyVersion, now: currentNow });
         return { fenced: true };
       }
-      const journalReason = causeTyped ? typedFailureReason(reasonCode) : reasonCode;
+      const journalReason = causeTyped ? typedFailureReason(reasonCode) : (detail ?? reasonCode);
       transition(db, {
         runId, to: "VERIFYING", expectFrom: "RUNNING",
         actor: owner, reason: journalReason, attempt, policyVersion, now: currentNow,
@@ -731,6 +824,18 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
 
     if (isWorktree && repoName && ticketId) {
+      if (!linearConfigured) {
+        const res = failTerminal("FAILED", "linear_unconfigured", "linear_unconfigured");
+        stopCancellationMonitor();
+        if (res?.fenced) return { fenced: true };
+        return {
+          runId,
+          attempt,
+          terminalState: "FAILED",
+          reasonCode: "linear_unconfigured",
+        };
+      }
+
       const lockAcquired = acquireClaimLock(lockFile, { pid: process.pid, now: nowFn(), isAlive: isAliveFn });
       if (!lockAcquired) {
         const deferred = deferClaimLockContention(db, {
@@ -757,17 +862,49 @@ export async function executeClaimed(db, registry, adapters, claim, {
         return { runId, attempt, terminalState: "REFUSED", reasonCode: "claim_lock_starvation", receipt: res?.receipt };
       }
 
-      let gateRefusal = null;
+      const deferTransientGate = (reasonCode) => {
+        releaseClaimLock(lockFile);
+        const deferred = deferTransientDispatchGate(db, {
+          runId, attempt, fencingToken, owner, policyVersion, now: nowFn,
+          reasonCode,
+          maxRequeues: Number.isInteger(dispatchOpts?.maxTransientGateRequeues)
+            ? Math.max(0, dispatchOpts.maxTransientGateRequeues)
+            : DEFAULT_MAX_TRANSIENT_GATE_REQUEUES,
+          random: dispatchOpts?.random ?? Math.random,
+        });
+        if (deferred?.fenced) return { fenced: true };
+        if (deferred?.requeued) {
+          return {
+            runId, attempt, terminalState: "QUEUED", reasonCode,
+            requeueAfterMs: deferred.backoffMs,
+          };
+        }
+        const res = refuseTerminal(reasonCode, ["dispatch_gate", "transient_retry_exhausted"]);
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+      };
+
+      let gateResult;
       try {
-        gateRefusal = worktreeDispatchGate(spec.input, dispatchOpts);
+        gateResult = worktreeDispatchAutoEligibility(spec.input, dispatchOpts);
       } catch (err) {
+        if (hasPlanTimeDispatchEvidence(spec) && String(err?.message ?? err).startsWith("linear_read_failed:")) {
+          return deferTransientGate("linear_read_failed");
+        }
         releaseClaimLock(lockFile);
         throw err;
       }
 
-      if (gateRefusal) {
+      if (!gateResult.ok) {
+        const gateRefusal = gateResult.refusal;
+        if (
+          gateRefusal.reason === "owned_paths_unknown" &&
+          contradictsPlanTimeOwnedPaths(spec, gateResult)
+        ) {
+          return deferTransientGate("owned_paths_unknown");
+        }
         releaseClaimLock(lockFile);
-        const res = refuseTerminal(gateRefusal.reason, ["dispatch_gate"]);
+        const res = refuseTerminal(gateRefusal.reason, ["dispatch_gate"], { detail: gateRefusal.detail });
         if (res?.fenced) return { fenced: true };
         return { runId, attempt, terminalState: "REFUSED", reasonCode: gateRefusal.reason, receipt: res?.receipt };
       }
@@ -1175,6 +1312,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
     if (res?.fenced) return { fenced: true };
     return { runId, attempt, terminalState: "FAILED", reasonCode, error: err?.message };
   } finally {
+    stopCancellationMonitor();
     if (leaseHeartbeat) clearInterval(leaseHeartbeat);
     if (ticketClaimed) {
       try { releaseWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir }); } catch {}
@@ -1378,12 +1516,28 @@ export function forceFailRun(db, runId, { actor = "operator", reason = "operator
  * Operator retry (§13): FAILED → QUEUED, or recovery from VERIFYING. Only
  * agent-caused failures spend maxAttempts; environment attempts remain retryable.
  * Retrying past the agent budget requires the explicit force override.
+ *
+ * REFUSED is immutable in the lifecycle journal. Give the operator the exact
+ * fresh watched-dispatch command instead of leaking an IllegalTransition.
  */
 export function retryRun(db, runId, { actor, force = false, now = () => Date.now(), policyVersion } = {}) {
   const currentNow = resolveNow(now);
   const row = db.query(`SELECT state, spec_json, attempts FROM runs WHERE run_id = ?`).get(runId);
   if (!row) throw new Error(`unknown run ${runId}`);
   const spec = JSON.parse(row.spec_json);
+  if (row.state === "REFUSED") {
+    const reasonCode = db.query(
+      `SELECT reason_code FROM attempts WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`,
+    ).get(runId)?.reason_code ?? "unknown_refusal";
+    const payload = JSON.stringify({ repo: spec.input?.repo, ticket: spec.input?.ticket });
+    const command = `factory dispatch event factory.dispatch.requested --payload '${payload}' --watch`;
+    const sensitive = ["ticket_security", "ticket_escalated", "escalate_paths_intersect"].includes(reasonCode);
+    throw new Error(
+      `refused_run_not_retryable: ${runId} was refused by ${reasonCode}; ` +
+      `${sensitive ? "human review is required before a fresh watched dispatch; " : "submit a fresh watched dispatch with: "}` +
+      command,
+    );
+  }
   if (!force && (failureCount(db, runId, "agent_error") >= spec.maxAttempts || failureCount(db, runId, "fatal") > 0)) {
     throw new Error("attempts_exhausted");
   }
