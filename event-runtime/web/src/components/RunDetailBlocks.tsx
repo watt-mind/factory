@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { Suspense, lazy, useState, type ReactNode } from "react";
 import { api, artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import { dur } from "../heartbeat";
@@ -20,8 +20,15 @@ import {
   shortId,
 } from "./ui";
 import { AgentHoverCard } from "./AgentHoverCard";
-import { ArtifactPanel } from "./ArtifactView";
 import { attrIcon } from "./attrIcons";
+
+/**
+ * The artifact view renderer (WM-455) is fetched on demand: RunDetailBlocks
+ * is on the eager Runs path and the entry chunk is budgeted
+ * (vite.config.ts); until the chunk lands the JSON block below stands in,
+ * which is also exactly what an agent without a view gets.
+ */
+const ArtifactPanel = lazy(() => import("./ArtifactView").then((m) => ({ default: m.ArtifactPanel })));
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
 export const isCancellable = (state: RunState) => !TERMINAL.includes(state) && state !== "VERIFYING";
@@ -717,11 +724,17 @@ export function RunDetailBlocks({
         >
           {d.result.artifact !== undefined ? (
             <Disclosure label="artifact" defaultOpen>
-              <ArtifactPanel
-                artifact={d.result.artifact}
-                schema={agentDef?.outputSchema}
-                view={agentDef?.outputView}
-              />
+              {agentDef?.outputView ? (
+                <Suspense fallback={<JsonBlock value={d.result.artifact} />}>
+                  <ArtifactPanel
+                    artifact={d.result.artifact}
+                    schema={agentDef.outputSchema}
+                    view={agentDef.outputView}
+                  />
+                </Suspense>
+              ) : (
+                <JsonBlock value={d.result.artifact} />
+              )}
             </Disclosure>
           ) : (
             <Disclosure label="result" defaultOpen>

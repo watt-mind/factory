@@ -209,7 +209,8 @@ const CELL = "border-b border-(--border) px-3 py-1.5 align-top";
 function ExpandedRow({ row, colSpan, onJumpRun }: { row: TableRow; colSpan: number; onJumpRun?: (id: string) => void }) {
   return (
     <tr>
-      <td colSpan={colSpan} className="border-b border-(--border) bg-(--surface-1) px-3 py-2">
+      {/* theme.css pins `table td` to nowrap for list tables; expanded detail is prose. */}
+      <td colSpan={colSpan} className="border-b border-(--border) bg-(--surface-1) px-3 py-2 whitespace-normal">
         <div className="grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 text-[11.5px]">
           {row.expand.map((cell) => (
             <Fragment key={cell.key}>
@@ -273,7 +274,10 @@ function Rows({
                 </td>
               )}
               {row.cells.map((cell) => (
-                <td key={cell.key} className={`${CELL} ${wideColumn(cell) ? "" : "whitespace-nowrap"}`}>
+                <td
+                  key={cell.key}
+                  className={`${CELL} ${wideColumn(cell) ? "min-w-[10rem] whitespace-normal [overflow-wrap:anywhere]" : "whitespace-nowrap"}`}
+                >
                   <Value f={cell.value} tone={cell.tone} onJumpRun={onJumpRun} />
                 </td>
               ))}
