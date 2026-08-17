@@ -76,6 +76,11 @@ interface ParsedTheme {
   textDim: OklchColor;
   textFaint: OklchColor;
   surface0: OklchColor;
+  surface1: OklchColor;
+  surface2: OklchColor;
+  surface3: OklchColor;
+  hueAccent: OklchColor;
+  hueWarn: OklchColor;
   border: OklchColor;
   borderStrong: OklchColor;
 }
@@ -98,8 +103,22 @@ function resolveThemesFromCss(): Record<"dark" | "light" | "contrast", ParsedThe
     return m ? m[1].trim() : null;
   }
 
+  function extractAllBlocks(selector: string): string {
+    const blocks: string[] = [];
+    let from = 0;
+    while (true) {
+      const startIdx = css.indexOf(selector, from);
+      if (startIdx === -1) break;
+      const openBrace = css.indexOf("{", startIdx);
+      const closeBrace = css.indexOf("}", openBrace);
+      blocks.push(css.slice(openBrace + 1, closeBrace));
+      from = closeBrace + 1;
+    }
+    return blocks.join("\n");
+  }
+
   const rootBlock = extractBlock(":root");
-  const lightBlock = extractBlock('[data-theme="light"]');
+  const lightBlock = extractAllBlocks('[data-theme="light"]');
   const contrastBlock = extractBlock('[data-theme="contrast"]');
   const sharedBlock = extractBlock("[data-theme]");
 
@@ -114,6 +133,11 @@ function resolveThemesFromCss(): Record<"dark" | "light" | "contrast", ParsedThe
   const textFaintPct = parseMixPct(extractVar(sharedBlock, "text-faint")!, "contrast");
   const borderPct = parseMixPct(extractVar(sharedBlock, "border")!, "base");
   const borderStrongPct = parseMixPct(extractVar(sharedBlock, "border-strong")!, "base");
+  const surfacePcts = {
+    surface1: parseMixPct(extractVar(sharedBlock, "surface-1")!, "base"),
+    surface2: parseMixPct(extractVar(sharedBlock, "surface-2")!, "base"),
+    surface3: parseMixPct(extractVar(sharedBlock, "surface-3")!, "base"),
+  };
 
   function buildTheme(block: string, defaultOnAccent: string): ParsedTheme {
     const baseStr = extractVar(block, "base")!;
@@ -135,12 +159,24 @@ function resolveThemesFromCss(): Record<"dark" | "light" | "contrast", ParsedThe
       onAccent = parseOklch(onAccentStr);
     }
 
+    const surface = (name: "surface-0" | "surface-1" | "surface-2" | "surface-3"): OklchColor => {
+      const explicit = extractVar(block, name);
+      if (explicit) return parseOklch(explicit);
+      if (name === "surface-0") return base;
+      return mixOklch(base, contrast, surfacePcts[name.replace("-", "") as keyof typeof surfacePcts]);
+    };
+
     return {
       base,
       contrast,
       accent,
       onAccent,
-      surface0: base,
+      surface0: surface("surface-0"),
+      surface1: surface("surface-1"),
+      surface2: surface("surface-2"),
+      surface3: surface("surface-3"),
+      hueAccent: accent,
+      hueWarn: { ...accent, h: 75 },
       text: mixOklch(contrast, base, textPct),
       textDim: mixOklch(contrast, base, textDimPct),
       textFaint: mixOklch(contrast, base, textFaintPct),
@@ -196,5 +232,37 @@ describe("Theme contrast & accessibility (OPS-447, OPS-338)", () => {
 
     expect(contrastBtnCr).toBeGreaterThanOrEqual(darkBtnCr);
     expect(contrastBtnCr).toBeGreaterThanOrEqual(lightBtnCr);
+  });
+
+  test("light theme has white main between soft-grey chrome and deeper raised surfaces (WM-558)", () => {
+    const light = themes.light;
+    expect(light.surface0.l).toBeCloseTo(0.965, 3);
+    expect(light.surface0.c).toBeCloseTo(0.003, 3);
+    expect(light.surface1.l).toBe(1);
+    expect(light.surface2.l).toBeLessThan(light.surface0.l);
+    expect(light.surface0.l).toBeLessThan(light.surface1.l);
+  });
+
+  test("light theme chips and zebra-row content clear non-text contrast (>= 3:1) (WM-558)", () => {
+    const light = themes.light;
+    // These percentages mirror App's LIVE and nav count recipes, ContextTabs'
+    // active In flight token, and theme.css's zebra row recipe.
+    const liveWash = mixOklch(light.hueWarn, light.surface1, 0.15);
+    const inFlightWash = mixOklch(light.hueAccent, light.base, 0.25);
+    const sidebarAccentWash = mixOklch(light.hueAccent, light.surface1, 0.12);
+    const sidebarWarnWash = mixOklch(light.hueWarn, light.surface1, 0.12);
+    const zebra = mixOklch(light.surface2, light.surface1, 0.7);
+
+    expect(contrastRatio(light.hueWarn, liveWash)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(light.text, inFlightWash)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(light.hueAccent, sidebarAccentWash)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(light.hueWarn, sidebarWarnWash)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(light.textDim, zebra)).toBeGreaterThanOrEqual(3);
+  });
+
+  test("row treatments use semantic zebra surfaces and accent-hued 2px selection (WM-558)", () => {
+    const css = fs.readFileSync(path.resolve(__dirname, "theme.css"), "utf-8");
+    expect(css).toMatch(/tbody\s*>\s*tr:nth-child\(even\)[^{]*\{[^}]*var\(--surface-2\)/s);
+    expect(css).toMatch(/\.row-selected\s*\{[^}]*var\(--hue-accent\)\s+1[2-6]%,\s*transparent[^}]*inset\s+2px\s+0\s+0\s+var\(--hue-accent\)/s);
   });
 });
