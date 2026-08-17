@@ -535,11 +535,13 @@ function mergeStateOf(verdict: ScanVerdict): string | null {
   return null;
 }
 
-function refusalOf(run: JourneyRun): { code: string; at: string } | null {
-  const refused = run.run.state === "REFUSED" || /refused/i.test(String(run.result?.terminalState ?? ""));
-  if (!refused) return null;
+/** A refused or failed run, with the code the runtime recorded for it. */
+function refusalOf(run: JourneyRun): { verb: "refused" | "failed"; code: string; at: string } | null {
+  const terminal = String(run.result?.terminalState ?? "");
+  const verb = run.run.state === "REFUSED" || /refused/i.test(terminal) ? "refused" : run.run.state === "FAILED" || /failed/i.test(terminal) ? "failed" : null;
+  if (!verb) return null;
   const code: string | null = run.result?.reasonCode ?? lifecycleSorted(run).at(-1)?.reason ?? null;
-  return { code: code ?? "refused", at: resultAt(run) };
+  return { verb, code: code ?? verb, at: resultAt(run) };
 }
 
 /** The object inside `value` that names `pr` (`{pr: 541, headSha, …}`), else the value itself when it names the PR another way. */
@@ -588,7 +590,7 @@ function repoOfSource(source: SubjectJourneySource): string | null {
  * `headSha`) — no new recording. Rendered muted with a `↔` prefix so the
  * refusal they explain reads directly under them.
  */
-function concurrentRows(source: SubjectJourneySource, prOfSubject: number | null): TimelineItem[] {
+function concurrentRows(source: SubjectJourneySource, prOfSubject: number | null, subjectTicket: string | null): TimelineItem[] {
   const rows: TimelineItem[] = [];
   const windows = source.runs
     .filter((run) => RUN_FAMILY.scan.test(run.run.spec.agent) || RUN_FAMILY.fix.test(run.run.spec.agent))
@@ -599,7 +601,13 @@ function concurrentRows(source: SubjectJourneySource, prOfSubject: number | null
   const others = [...source.runs, ...(source.contextRuns ?? [])].filter((run) => {
     if (seen.has(run.run.runId) || RUN_FAMILY.merge.test(run.run.spec.agent)) return false;
     seen.add(run.run.runId);
-    return true;
+    // Only chains that touched *this* subject: the subject's own ticket, or a
+    // run whose result names the PR. The server-side ticket join can carry
+    // neighbours (other tickets' dispatches sharing a scan) — they are not
+    // concurrent activity on this subject.
+    const ticket = ticketOfRun(run);
+    if (subjectTicket && ticket === subjectTicket) return true;
+    return prOfSubject != null && prNumbersIn(run.result).includes(prOfSubject);
   });
   for (const { run: windowRun, window } of windows) {
     for (const other of others) {
@@ -732,7 +740,10 @@ export function subjectJourney(kind: SubjectKind, id: string, source: SubjectJou
         });
       }
     }
-    const checksGreen = nestedValue(event.envelope, /^(checksGreen|ciGreen)$/i);
+    // On a PR journey the scan artifact already carries the CI verdict and the
+    // merge decision for this PR; repeating them from the request event that
+    // copies the plan would double every row.
+    const checksGreen = kind === "pr" ? null : nestedValue(event.envelope, /^(checksGreen|ciGreen)$/i);
     if (typeof checksGreen === "boolean") {
       timeline.push({
         id: `ci:event:${event.source}:${event.eventId}`,
@@ -748,7 +759,7 @@ export function subjectJourney(kind: SubjectKind, id: string, source: SubjectJou
     const landed = /merge-landed/i.test(event.type);
     // Only decisions to merge are merge rows; scan ticks, fix and escalate
     // requests already have their own event row.
-    if (landed || /merge-apply/i.test(event.type) || (typeof action === "string" && /merge/i.test(action))) {
+    if (landed || (kind === "ticket" && (/merge-apply/i.test(event.type) || (typeof action === "string" && /merge/i.test(action))))) {
       const mergeSha = shortSha(nestedValue(event.envelope, /^mergeCommitSha$/i));
       timeline.push({
         id: `merge:event:${event.source}:${event.eventId}`,
@@ -825,7 +836,7 @@ export function subjectJourney(kind: SubjectKind, id: string, source: SubjectJou
         durationMs: null,
       });
     }
-    const ci = checkLabel(run);
+    const ci = kind === "pr" ? checkLabel({ ...run, result: { artifact: prEntryIn(artifact, prOfSubject!) ?? {} } }) : checkLabel(run);
     if (ci) {
       timeline.push({
         id: `ci:${run.run.runId}`,
@@ -883,12 +894,13 @@ export function subjectJourney(kind: SubjectKind, id: string, source: SubjectJou
     }
     const refusal = refusalOf(run);
     if (refusal) {
+      const reason = (humanizeWithCode(refusal.code) ?? refusal.code).replace(/\s+/g, " ");
       timeline.push({
         id: `refusal:${run.run.runId}`,
         kind: "decision",
         at: refusal.at,
-        label: `${agentShort(run.run.spec.agent)} refused · ${humanizeWithCode(refusal.code) ?? refusal.code}`,
-        detail: run.run.runId,
+        label: `${agentShort(run.run.spec.agent)} ${refusal.verb} · ${reason.length > 160 ? `${reason.slice(0, 159)}…` : reason}`,
+        detail: reason.length > 160 ? `${run.run.runId} · ${reason}` : run.run.runId,
         href: runHref(run.run.runId),
         durationMs: null,
       });
@@ -911,7 +923,7 @@ export function subjectJourney(kind: SubjectKind, id: string, source: SubjectJou
     });
   }
 
-  timeline.push(...concurrentRows(source, prOfSubject));
+  timeline.push(...concurrentRows(source, prOfSubject, kind === "ticket" ? subject.id : prTicket));
 
   if (kind === "ticket" && /^done$/i.test(subject.state ?? "")) {
     const at = timeline.map((item) => item.at).filter((value) => validDate(value) != null).sort().at(-1) ?? earliest;

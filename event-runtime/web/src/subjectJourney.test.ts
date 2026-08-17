@@ -193,6 +193,30 @@ describe("buildTicketJourney", () => {
   });
 });
 
+describe("buildTicketJourney concurrent rows", () => {
+  test("only the ticket's own runs interleave as ↔ rows; neighbours the server join carried do not", () => {
+    const { scan, fix, dispatch } = prFixture();
+    const neighbour: JourneyRun = {
+      ...dispatch,
+      run: { ...dispatch.run, runId: "run_neighbour", spec: { agent: "dispatch@1", adapter: "pi", input: { repo: "factory", ticket: "WM-547" } } },
+      result: { terminalState: "completed", artifact: { outcome: "PR_OPEN", ticket: "WM-547", prUrl: "https://github.com/watt-mind/factory/pull/504" } },
+    };
+    const source: TicketJourneySource = {
+      ticket: { id: "WM-627", title: null, state: "In Review", createdAt: null, url: "https://linear.app/watt-mind/issue/WM-627" },
+      activity: true,
+      events: [],
+      proposals: [],
+      runs: [neighbour, dispatch, scan, fix],
+    };
+    const journey = buildTicketJourney(source);
+    const concurrent = journey.timeline.filter((item) => item.kind === "concurrent").map((item) => item.label);
+    expect(concurrent).toEqual(["↔ WM-627 dispatch pushed 7b2b695 (run_dispatch)"]);
+    expect(journey.timeline.map((item) => item.label)).toContain("merge-fix refused · PR head moved since the scan (merge_fix_pr_moved)");
+    // Ticket-journey PR rows route to the PR journey.
+    expect(journey.timeline.find((item) => item.label === "PR #541 opened")?.href).toBe("#/prs/541");
+  });
+});
+
 describe("ticket journey helpers", () => {
   test("formats durations and ticket ids without guessing from prose", () => {
     expect(formatDuration(3_720_000)).toBe("1h 2m");
@@ -237,7 +261,7 @@ function prFixture(): { source: SubjectJourneySource; scan: JourneyRun; fix: Jou
         repo: "factory",
         github: "watt-mind/factory",
         base: "develop",
-        plan: [],
+        plan: [{ pr: 529, headSha: "69b0d96d58a5ab7fc0294e069ff78246ccd5e559", ticket: "WM-613", action: "merge_pr", checksGreen: true, mergeable: true }],
         fix: [
           {
             pr: 541,
@@ -357,6 +381,8 @@ describe("subjectJourney(pr)", () => {
     expect(opened?.label).toBe("PR #541 opened");
     expect(opened?.href).toBe("https://github.com/watt-mind/factory/pull/541");
     expect(journey.runCount).toBe(3);
+    // #529's green checks in the same scan artifact are not #541's.
+    expect(labels).not.toContain("CI checks green");
   });
 
   test("a same-ticket run without a push artifact still surfaces as concurrent activity from its overlap", () => {

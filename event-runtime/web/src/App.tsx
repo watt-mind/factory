@@ -358,7 +358,7 @@ export function App() {
 
   const viewLabel =
     NAV.find((n) => n.key === view)?.label ??
-    (view === "run" ? "Run" : view === "chain" ? "Chain" : "Overview");
+    (view === "run" ? "Run" : view === "chain" ? "Chain" : view === "prs" ? "PR" : "Overview");
 
   useEffect(() => {
     const id = route.length > 1 ? route[route.length - 1] : null;
@@ -527,7 +527,7 @@ export function App() {
               <button
                 key={n.key}
                 type="button"
-                aria-current={view === n.key || (n.key === "runs" && view === "run") ? "page" : undefined}
+                aria-current={view === n.key || (n.key === "runs" && view === "run") || (n.key === "tickets" && view === "prs") ? "page" : undefined}
                 aria-describedby={badge.count > 0 ? `nav-badge-${n.key}` : undefined}
                 onClick={() => navigate(n.key)}
                 className={`flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-[13px] ${
