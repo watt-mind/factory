@@ -542,16 +542,19 @@ function GroupRows({
             aria-selected={item.id === selectedId}
             className={`cursor-pointer hover:bg-(--surface-1) ${item.id === selectedId ? "row-selected" : ""}`}
           >
-            <td className={`${tdCls} w-36`}>
+            <td className={`${tdCls} w-32`}>
               <StateBadge state={item.kind} hues={INBOX_KIND_HUES} dot={false} />
             </td>
-            <td className={`${tdCls} max-w-0`}>
+            {/* Title is the decision text: it truncates last. `max-w-0` lets it
+                shrink-to-fit, `min-w-40` stops it collapsing to a glyph when
+                the pane opens at ~1100px — Refs gives up width first. */}
+            <td className={`${tdCls} min-w-40 max-w-0`}>
               <div className="truncate text-(--text)" title={item.title}>{item.title}</div>
             </td>
             <td className={`${tdCls} w-16 text-(--text-faint)`}>
               <Ago iso={item.createdAt} now={now} />
             </td>
-            <td className={`${tdCls} w-56`}>
+            <td className={`${tdCls} w-40 max-w-40`}>
               <RefChips item={item} onJumpRun={onJumpRun} onJumpProposal={onJumpProposal} onJumpEvent={onJumpEvent} />
             </td>
             <td className={`${tdCls} w-12`}>
@@ -591,5 +594,6 @@ function RefChips({
   if (r.issue) chips.push(<JumpLink key="issue" className={chip} href={`${LINEAR_ISSUE_URL}${encodeURIComponent(r.issue)}`} title="Open in Linear">{r.issue}</JumpLink>);
   if (r.pr) chips.push(<JumpLink key="pr" className={chip} href={r.pr} title={r.pr}>PR</JumpLink>);
   if (chips.length === 0) return <span className="text-(--text-faint)">-</span>;
-  return <div className="flex flex-wrap gap-1">{chips}</div>;
+  // One line, clipped: a row must stay one row high; the pane lists every ref in full.
+  return <div className="flex gap-1 overflow-hidden whitespace-nowrap [&>*]:shrink-0">{chips}</div>;
 }
