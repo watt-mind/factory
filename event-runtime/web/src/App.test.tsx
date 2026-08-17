@@ -81,6 +81,16 @@ beforeEach(() => {
       });
     }
     if (url.includes("/api/repos")) return jsonResponse({ repos: [] });
+    if (url.includes("/api/runs?ticket=")) {
+      const ticket = new URL(url, "http://localhost").searchParams.get("ticket") ?? "WM-0";
+      return jsonResponse({
+        ticket: { id: ticket, title: null, state: null, createdAt: null, url: `https://linear.app/watt-mind/issue/${ticket}` },
+        activity: false,
+        events: [],
+        proposals: [],
+        runs: [],
+      });
+    }
     // Views poll their own endpoints; an empty list keeps them quiet.
     return jsonResponse([]);
   }) as typeof fetch;
@@ -315,7 +325,7 @@ describe("context strip fast jump chords (WM-235)", () => {
     expect(utils.queryByPlaceholderText(/search event types/i)).toBeNull();
   });
 
-  test("view chords (g o, g e, g p, g r) still work alongside context chords", async () => {
+  test("view chords (including g k ticket picker) still work alongside context chords", async () => {
     window.location.hash = "#/overview";
     const utils = renderApp();
     await waitFor(() => {
@@ -341,6 +351,14 @@ describe("context strip fast jump chords (WM-235)", () => {
       fireEvent.keyDown(document.body, { key: "r" });
     });
     expect(window.location.hash).toBe("#/runs");
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "g" });
+      fireEvent.keyDown(document.body, { key: "k" });
+    });
+    expect(window.location.hash).toBe("#/tickets");
+    const ticketInput = await utils.findByRole("textbox", { name: "Ticket id" });
+    expect(document.activeElement === ticketInput).toBe(true);
   });
 
   test("`g` prefix arms and displays GoPrefixHint legend with context chords", async () => {
@@ -360,6 +378,42 @@ describe("context strip fast jump chords (WM-235)", () => {
     expect(utils.container.textContent).toContain("0 All");
     expect(utils.container.textContent).toContain("1–9 repos");
     expect(utils.container.textContent).toContain("i In flight");
+  });
+});
+
+describe("ticket journey navigation (WM-595)", () => {
+  test("exact ticket-id chips in detail panes navigate to the ticket journey", async () => {
+    const utils = renderApp();
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.title = "WM-542";
+    chip.textContent = "WM-542";
+    utils.getByRole("main").appendChild(chip);
+
+    await waitFor(() => {
+      fireEvent.click(chip);
+      expect(window.location.hash).toBe("#/tickets/WM-542");
+    });
+  });
+
+  test("exact ticket values in JSON are exposed as keyboard-navigable journey links", async () => {
+    const utils = renderApp();
+    const value = document.createElement("span");
+    value.textContent = '"WM-400"';
+    utils.getByRole("main").appendChild(value);
+    const link = await utils.findByRole("link", { name: "Open ticket WM-400" });
+    fireEvent.keyDown(link, { key: "Enter" });
+    expect(window.location.hash).toBe("#/tickets/WM-400");
+  });
+
+  test("typing a ticket id in the command palette offers its journey", async () => {
+    const utils = renderApp();
+    fireEvent.keyDown(document.body, { key: "k", metaKey: true });
+    const input = utils.getByPlaceholderText("Type a command…");
+    fireEvent.input(input, { target: { value: "WM-595" } });
+    const command = await utils.findByText("WM-595", { selector: "span.mono" });
+    fireEvent.click(command.closest("[cmdk-item]")!);
+    expect(window.location.hash).toBe("#/tickets/WM-595");
   });
 });
 
