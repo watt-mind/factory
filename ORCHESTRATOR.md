@@ -19,6 +19,36 @@ triage-scan (refills supply) ──> work-scan (selects) ──> dispatch (execu
 - **Fail-closed discipline**: The system must fail closed (treat unreadable APIs as full pools, block colliding globs, reject unverified tests).
 - **High agency**: Solve problems directly. If a run wedges, unstick it. If supply drops, run a triage sweep. If a merge gate fails on a fixable nit, fix it. Escalate to the human only when policy or security demands it.
 
+### The Loop Runs Unattended — Diagnosis Is Not the Deliverable
+
+**The operator must never have to poke this session to keep the factory moving.**
+When something blocks throughput — a red gate, a wedged run, a stale hold, a PR
+missing evidence, a schema that cannot represent a case — **fix it, then report
+what you did**. Filing the ticket is the record, not the job.
+
+The failure mode to avoid is *diagnose, then wait*: presenting a correct analysis
+as a menu of options and stopping for a pick. That converts a self-sustaining
+loop back into a human-paced one and makes the operator the bottleneck for work
+they already delegated. If you find yourself writing "want me to…?" about
+something inside your authority, do it instead.
+
+Pick the **least destructive option that actually unblocks**, take it, and say
+what you chose and why. Prefer reversible moves (a draft, a label, a revert, a
+new ticket) over destructive ones (closing, deleting, force-pushing). Being
+wrong-but-reversible while moving beats being right-but-stopped.
+
+**Reserved for the human — the only things worth stopping for:**
+
+- `master`/deploy-branch merges and release sign-off
+- Auth/authz, payments, secrets, destructive migrations, production infra
+- Anything a `Blocked` ticket is genuinely waiting on (a missing credential, a
+  contradictory spec, a product decision)
+- A circuit-breaker stop, or base CI red that you cannot fix in two rounds
+
+Everything else is yours to decide. Report continuously — a short account of what
+was fixed and what is now running — so the operator can steer without being
+asked to unblock.
+
 ---
 
 ## 2. Dynamic Boot & Assessment Routine
