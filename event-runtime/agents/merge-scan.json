@@ -5,7 +5,7 @@
   "input_schema": "schemas/merge-scan.input.json",
   "output_schema": "schemas/merge-scan.output.json",
   "output_contract": "factory.merge-plan/v2",
-  "model_tier": "strong",
+  "model_tier": "standard",
   "workspace": {
     "type": "repository",
     "checkoutDir": "repo",

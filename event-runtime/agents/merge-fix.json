@@ -5,7 +5,7 @@
   "input_schema": "schemas/merge-fix.input.json",
   "output_schema": "schemas/merge-fix.output.json",
   "output_contract": "factory.merge-fix-result/v1",
-  "model_tier": "strong",
+  "model_tier": "standard",
   "gate": "merge-fix",
   "workspace": {
     "type": "worktree",
