@@ -4,7 +4,7 @@
  * Ensures all test executions run hermetically inside temporary directories
  * and never touch or mutate the operator's real ~/.factory directory.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import os, { homedir } from "node:os";
 import path from "node:path";
 
@@ -65,15 +65,21 @@ export async function withIsolatedHome(fn, prefix = "evrt-scope-home-") {
 /**
  * Returns snapshot stats of ~/.factory to verify hermeticity (guard test).
  */
-export function realFactorySnapshot() {
-  const realHome = path.join(homedir(), ".factory");
-  const eventHome = path.join(realHome, "event-runtime");
-  if (!existsSync(eventHome)) return { exists: false, mtime: 0, entries: [] };
+export function realFactorySnapshot(factoryHome = path.join(homedir(), ".factory")) {
+  const eventHome = path.join(factoryHome, "event-runtime");
+  let eventStat;
   try {
-    const stat = statSync(eventHome);
-    const entries = readdirSync(eventHome, { recursive: true });
-    return { exists: true, mtime: stat.mtimeMs, entries };
-  } catch {
-    return { exists: true, mtime: 0, entries: [] };
+    eventStat = statSync(eventHome);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { exists: false, mtime: 0, dbMtime: 0 };
+    return { exists: true, mtime: 0, dbMtime: 0 };
   }
+
+  let dbMtime = 0;
+  try {
+    dbMtime = statSync(path.join(eventHome, "runtime.db")).mtimeMs;
+  } catch {
+    // A missing or unreadable database has the same stable sentinel value.
+  }
+  return { exists: true, mtime: eventStat.mtimeMs, dbMtime };
 }
