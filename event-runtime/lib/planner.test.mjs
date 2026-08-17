@@ -672,6 +672,60 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("lease-loss retry accepts only the factory viewer's surviving In Progress claim (WM-621)", () => {
+    withReposRoot(
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+      () => {
+        const claimedTicket = (assignee) => ({
+          identifier: "WM-621",
+          state: { name: "In Progress" },
+          assignee,
+          labels: { nodes: [{ name: "ai:in-progress" }, { name: "agent:claude-code" }] },
+          description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+        });
+        const baseDispatch = {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchViewer: () => ({ id: "factory-user", name: "Factory" }),
+          fetchInFlight: () => [],
+          claimedRetry: { runId: "run_same", priorAttempt: 1, reasonCode: "lease_expired" },
+        };
+
+        const resumed = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-621" },
+          { ...baseDispatch, fetchTicket: () => claimedTicket({ id: "factory-user" }) },
+        );
+        expect(resumed.ok).toBe(true);
+        expect(resumed.evidence.checks).toMatchObject({
+          ticket_claim_retry: true,
+          ticket_in_progress_retry: true,
+          ticket_in_progress_label_retry: true,
+        });
+
+        const foreign = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-621" },
+          { ...baseDispatch, fetchTicket: () => claimedTicket({ id: "someone-else" }) },
+        );
+        expect(foreign.refusal).toMatchObject({ decision: "noop", reason: "ticket_assigned" });
+
+        const ownAssignedTodo = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-621" },
+          {
+            ...baseDispatch,
+            fetchTicket: () => ({
+              ...claimedTicket({ id: "factory-user" }),
+              state: { name: "Todo" },
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+            }),
+          },
+        );
+        expect(ownAssignedTodo.refusal).toMatchObject({ decision: "noop", reason: "ticket_assigned" });
+      },
+    );
+  });
+
   test("a genuine sensitive-path refusal names the intersecting configured globs", () => {
     withReposRoot(
       `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +

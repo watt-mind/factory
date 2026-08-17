@@ -1,14 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { keyGuard, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
+  buildSections,
   cycleColumnSort,
-  defaultDisplayState,
+  flattenSections,
+  grouped,
+  removeCustomColumn,
   sortRows,
+  toggleCollapsed,
+  visibleColumns,
   type DisplayConfig,
+  type DisplayState,
 } from "../displayOptions";
+import { DisplayOptions, exportJson } from "../components/DisplayOptions";
+import { CustomCell } from "../components/CustomCell";
+import { INBOX_FACETS, matchesFilterQuery, parseFilterQuery } from "../filterQuery";
 import type { InboxItem } from "../types";
 import {
   Ago,
@@ -17,8 +26,11 @@ import {
   CopyActions,
   DetailPane,
   Dialog,
+  FilterInput,
+  GroupHeaderRow,
   JumpLink,
   KV,
+  ListEmpty,
   ListPane,
   Section,
   StateBadge,
@@ -73,6 +85,48 @@ export const INBOX_KIND_HUES: Record<string, string> = Object.fromEntries(
   INBOX_GROUPS.flatMap((g) => g.kinds.map((k) => [k, g.hue])),
 );
 
+const INBOX_GROUP_HUES = Object.fromEntries(
+  [...INBOX_GROUPS, OTHER_GROUP].map((group) => [group.label, group.hue]),
+);
+
+/** Shared display grammar for Inbox: triage grouping and oldest-first age are the operator defaults. */
+export const INBOX_DISPLAY: DisplayConfig<InboxItem> = {
+  view: "inbox",
+  groups: [
+    {
+      key: "attention",
+      label: "Group (Decide/Red/Ready)",
+      get: (item) => groupOf(item.kind).label,
+      order: [...INBOX_GROUPS.map((group) => group.label), OTHER_GROUP.label],
+      hue: INBOX_GROUP_HUES,
+    },
+    { key: "kind", label: "Kind", get: (item) => item.kind, hue: INBOX_KIND_HUES },
+    { key: "repo", label: "Repo", get: (item) => item.refs.repo ?? "—" },
+  ],
+  sorts: [
+    { key: "age", label: "Age", get: (item) => item.createdAt, column: "age" },
+    { key: "kind", label: "Kind", get: (item) => item.kind, column: "kind" },
+  ],
+  columns: [
+    { key: "kind", label: "Kind" },
+    { key: "title", label: "Title" },
+    { key: "age", label: "Age" },
+    { key: "refs", label: "Refs" },
+    { key: "sent", label: "Sent" },
+  ],
+  defaults: { groupBy: "attention", sortBy: "age", sortDir: "asc" },
+};
+
+/** Keep one identity column visible while allowing every Inbox property to be toggled. */
+export function ensureInboxColumn(state: DisplayState): DisplayState {
+  const visibleBuiltIn = INBOX_DISPLAY.columns.some((column) => !state.hiddenColumns.includes(column.key));
+  const visibleCustom = state.customColumns.some(
+    (path) => !state.hiddenColumns.includes(`custom:${path}`),
+  );
+  if (visibleBuiltIn || visibleCustom) return state;
+  return { ...state, hiddenColumns: state.hiddenColumns.filter((key) => key !== "title") };
+}
+
 export type InboxItemStatus = Exclude<InboxTab, "all">;
 
 export function itemStatus(item: InboxItem): InboxItemStatus {
@@ -107,34 +161,6 @@ const DELIVERY_HUES: Record<DeliveryState, string> = {
   sent: "var(--hue-ok)",
   failed: "var(--hue-err)",
   none: "var(--hue-idle)",
-};
-
-const refSortValue = (item: InboxItem): string => {
-  const r = item.refs;
-  return [r.runId, r.proposalId, r.eventSource, r.eventId, r.issue, r.pr, r.repo]
-    .filter((value): value is string => Boolean(value))
-    .join(" ");
-};
-
-const INBOX_SORT: DisplayConfig<InboxItem> = {
-  view: "inbox",
-  groups: [],
-  sorts: [
-    { key: "kind", label: "Kind", get: (item) => item.kind, column: "kind" },
-    { key: "title", label: "Title", get: (item) => item.title, column: "title" },
-    // Age increases as the creation timestamp recedes, so negate the timestamp:
-    // aria-sort="ascending" must mean the displayed ages are ascending too.
-    { key: "age", label: "Age", get: (item) => -Date.parse(item.createdAt), column: "age" },
-    { key: "refs", label: "Refs", get: refSortValue, column: "refs" },
-    { key: "sent", label: "Sent", get: (item) => deliveryState(item), column: "sent" },
-  ],
-  columns: [
-    { key: "kind", label: "Kind" },
-    { key: "title", label: "Title" },
-    { key: "age", label: "Age" },
-    { key: "refs", label: "Refs" },
-    { key: "sent", label: "Sent" },
-  ],
 };
 
 /** Group in triage order, oldest first inside a group; empty groups are dropped. */
@@ -281,19 +307,34 @@ export function Inbox({
   const items = query.data?.items ?? [];
 
   const [tab, setTab] = useState<InboxTab>("open");
-  const [sort, setSort] = useState(() => defaultDisplayState(INBOX_SORT));
+  const [filter, setFilter] = useState("");
   const counts = useMemo(() => {
     const c: Record<InboxTab, number> = { open: 0, acked: 0, resolved: 0, all: items.length };
     for (const it of items) c[itemStatus(it)] += 1;
     return c;
   }, [items]);
 
-  const visibleGroups = useMemo(
-    () => groupItems(items.filter((it) => matchesTab(it, tab)))
-      .map(({ group, items: rows }) => ({ group, items: sortRows(rows, INBOX_SORT, sort) })),
-    [items, tab, sort],
+  const byTab = useMemo(() => items.filter((item) => matchesTab(item, tab)), [items, tab]);
+  const parsed = useMemo(() => parseFilterQuery(filter, INBOX_FACETS), [filter]);
+  const filtered = useMemo(
+    () => byTab.filter((item) => matchesFilterQuery(item, parsed, INBOX_FACETS, undefined)),
+    [byTab, parsed],
   );
-  const visible = useMemo(() => visibleGroups.flatMap((g) => g.items), [visibleGroups]);
+  const [display, updateDisplay] = useDisplayOptions(INBOX_DISPLAY);
+  const setDisplay = (next: DisplayState | ((state: DisplayState) => DisplayState)) => {
+    updateDisplay((state) => ensureInboxColumn(typeof next === "function" ? next(state) : next));
+  };
+  const sections = useMemo(
+    () => buildSections(filtered, INBOX_DISPLAY, display),
+    [filtered, display],
+  );
+  const visible = useMemo(
+    () => flattenSections(sections, display.collapsed),
+    [sections, display.collapsed],
+  );
+  const cols = visibleColumns(INBOX_DISPLAY, display);
+  const show = useMemo(() => new Set(cols.map((column) => column.key)), [cols]);
+
   const selectionEnabled = tab === "open" || tab === "acked";
   const actionableVisible = selectionEnabled ? visible : [];
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -542,7 +583,13 @@ export function Inbox({
   ]);
 
   const tdCls = "border-b border-(--border) px-3 py-1.5 whitespace-nowrap";
-  const openEmpty = tab === "open" && visible.length === 0 && query.isSuccess;
+  const openEmpty = tab === "open" && byTab.length === 0 && !filter.trim() && query.isSuccess;
+  const handleExport = () => {
+    const sorted = sortRows(filtered, INBOX_DISPLAY, display);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    exportJson(`inbox-export-${dateStr}.json`, sorted);
+    notify(`Exported ${sorted.length} inbox item${sorted.length === 1 ? "" : "s"} to JSON`, "info");
+  };
 
   return (
     <div className="flex h-full min-w-0">
@@ -552,7 +599,7 @@ export function Inbox({
             <>
               <h1 className="display mb-4 text-lg font-semibold">Inbox</h1>
               <div className="mb-3 flex flex-wrap items-center gap-2">
-                <div className="flex gap-1" role="tablist" aria-label="Inbox status">
+                <div className="flex min-w-0 flex-1 flex-wrap gap-1" role="tablist" aria-label="Inbox status">
                   {INBOX_TABS.map((t, idx) => (
                     <button
                       key={t}
@@ -575,6 +622,23 @@ export function Inbox({
                     </button>
                   ))}
                 </div>
+                <span className="ml-auto">
+                  <DisplayOptions
+                    config={INBOX_DISPLAY}
+                    state={display}
+                    onChange={setDisplay}
+                    onExport={filtered.length > 0 ? handleExport : undefined}
+                    rows={byTab}
+                  />
+                </span>
+                <FilterInput
+                  value={filter}
+                  onChange={setFilter}
+                  placeholder="kind:… is:open repo:… issue:…"
+                  label="Filter inbox"
+                  query={parsed}
+                  facets={INBOX_FACETS}
+                />
               </div>
             </>
           }
@@ -617,58 +681,130 @@ export function Inbox({
                       />
                     </th>
                   )}
-                  {INBOX_SORT.columns.map((column) => {
-                    const field = INBOX_SORT.sorts.find((candidate) => candidate.column === column.key)!;
+                  {cols.map((column) => {
+                    const sort = INBOX_DISPLAY.sorts.find((field) => field.column === column.key);
+                    const isCustom = column.isCustom || column.key.startsWith("custom:");
+                    const customPath = column.key.replace(/^custom:/, "");
+                    const isCurrentSort = isCustom
+                      ? display.sortBy === column.key
+                      : sort && display.sortBy === sort.key;
                     return (
                       <Th
                         key={column.key}
                         label={column.label}
                         title={column.key === "sent" ? "Telegram delivery: sent, failed, or not attempted" : undefined}
-                        dir={sort.sortBy === field.key ? sort.sortDir : null}
-                        naturalDir={field.defaultDir ?? "asc"}
-                        onSort={() => setSort((state) => cycleColumnSort(INBOX_SORT, state, column.key))}
+                        dir={isCurrentSort ? display.sortDir : null}
+                        naturalDir={sort?.defaultDir ?? "asc"}
+                        onSort={sort || isCustom
+                          ? () => setDisplay((state) => cycleColumnSort(INBOX_DISPLAY, state, column.key))
+                          : undefined}
+                        onRemove={isCustom
+                          ? () => setDisplay((state) => removeCustomColumn(state, customPath))
+                          : undefined}
                       />
                     );
                   })}
                 </tr>
               </thead>
               <tbody>
-                {query.isPending && !query.data && (
-                  <tr>
-                    <td colSpan={5 + (selectionEnabled ? 1 : 0)} className="px-3 py-8 text-center text-(--text-faint)">Loading inbox…</td>
-                  </tr>
-                )}
-                {query.isError && !query.data && (
-                  <tr>
-                    <td colSpan={5 + (selectionEnabled ? 1 : 0)} className="px-3 py-8 text-center text-(--text-faint)">
-                      Cannot reach the control API — the inbox will appear when it is up.
-                    </td>
-                  </tr>
-                )}
-                {query.isSuccess && visible.length === 0 && (
-                  <tr>
-                    <td colSpan={5 + (selectionEnabled ? 1 : 0)} className="px-3 py-8 text-center text-(--text-faint)">
-                      {tab === "acked" ? "No acked items." : tab === "resolved" ? "No resolved items yet." : "The ledger is empty."}
-                    </td>
-                  </tr>
-                )}
-                {visibleGroups.map(({ group, items: rows }) => (
-                  <GroupRows
-                    key={group.id}
-                    group={group}
-                    rows={rows}
-                    now={now}
-                    selectedId={sel?.id ?? null}
-                    bulkSelectedIds={selectedIds}
-                    selectionEnabled={selectionEnabled}
-                    onToggleSelection={toggleSelect}
-                    onSelect={onSelectItem}
-                    onJumpRun={onJumpRun}
-                    onJumpProposal={onJumpProposal}
-                    onJumpEvent={onJumpEvent}
-                    tdCls={tdCls}
+                {(() => {
+                  const renderRow = (item: InboxItem) => {
+                    const delivery = deliveryState(item);
+                    return (
+                      <tr
+                        key={item.id}
+                        onClick={() => onSelectItem(item.id)}
+                        aria-selected={item.id === sel?.id}
+                        className={`cursor-pointer hover:bg-(--surface-1) ${item.id === sel?.id ? "row-selected" : ""}`}
+                      >
+                        {selectionEnabled && (
+                          <td className={`${tdCls} w-8`} onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              aria-label={`Select inbox item ${item.id}`}
+                              checked={selectedIds.has(item.id)}
+                              onChange={() => toggleSelect(item.id)}
+                              className="cursor-pointer"
+                            />
+                          </td>
+                        )}
+                        {show.has("kind") && (
+                          <td className={`${tdCls} w-32`}>
+                            <StateBadge state={item.kind} hues={INBOX_KIND_HUES} dot={false} />
+                          </td>
+                        )}
+                        {show.has("title") && (
+                          <td className={`${tdCls} min-w-40 max-w-0`}>
+                            <div className="truncate text-(--text)" title={item.title}>{displayTitle(item)}</div>
+                          </td>
+                        )}
+                        {show.has("age") && (
+                          <td className={`${tdCls} w-16 text-(--text-faint)`}>
+                            <Ago iso={item.createdAt} now={now} />
+                          </td>
+                        )}
+                        {show.has("refs") && (
+                          <td className={`${tdCls} w-40 max-w-40`}>
+                            <RefChips
+                              item={item}
+                              onJumpRun={onJumpRun}
+                              onJumpProposal={onJumpProposal}
+                              onJumpEvent={onJumpEvent}
+                            />
+                          </td>
+                        )}
+                        {show.has("sent") && (
+                          <td className={`${tdCls} w-12`}>
+                            <span
+                              role="img"
+                              aria-label={deliveryText(item)}
+                              title={deliveryText(item)}
+                              className="inline-block size-2 rounded-full"
+                              style={{ background: DELIVERY_HUES[delivery] }}
+                            />
+                          </td>
+                        )}
+                        {cols.filter((column) => column.isCustom || column.key.startsWith("custom:")).map((column) => (
+                          <CustomCell key={column.key} row={item} path={column.key.replace(/^custom:/, "")} />
+                        ))}
+                      </tr>
+                    );
+                  };
+                  if (!grouped(display)) return sections[0]?.rows.map(renderRow);
+                  return sections.map((section) => {
+                    const collapsed = display.collapsed.includes(section.key);
+                    return (
+                      <Fragment key={section.key}>
+                        <GroupHeaderRow
+                          colSpan={Math.max(cols.length + (selectionEnabled ? 1 : 0), 1)}
+                          section={section}
+                          collapsed={collapsed}
+                          onToggle={() => setDisplay((state) => toggleCollapsed(state, section.key))}
+                        />
+                        {!collapsed && section.rows.map(renderRow)}
+                      </Fragment>
+                    );
+                  });
+                })()}
+                {filtered.length === 0 && (
+                  <ListEmpty
+                    colSpan={Math.max(cols.length + (selectionEnabled ? 1 : 0), 1)}
+                    query={query}
+                    filtered={byTab.length > 0}
+                    onClear={filter.trim() ? () => setFilter("") : undefined}
+                    noun="inbox items"
+                    empty={
+                      tab === "acked"
+                        ? "No acked items."
+                        : tab === "resolved"
+                          ? "No resolved items yet."
+                          : tab === "open"
+                            ? "Nothing waiting on you."
+                            : "The ledger is empty."
+                    }
+                    escHint={Boolean(filter.trim())}
                   />
-                ))}
+                )}
               </tbody>
             </table>
           )}
@@ -849,97 +985,6 @@ export function Inbox({
   );
 }
 
-function GroupRows({
-  group,
-  rows,
-  now,
-  selectedId,
-  bulkSelectedIds,
-  selectionEnabled,
-  onToggleSelection,
-  onSelect,
-  onJumpRun,
-  onJumpProposal,
-  onJumpEvent,
-  tdCls,
-}: {
-  group: InboxGroup;
-  rows: InboxItem[];
-  now: number;
-  selectedId: string | null;
-  bulkSelectedIds: Set<string>;
-  selectionEnabled: boolean;
-  onToggleSelection: (id: string) => void;
-  onSelect: (id: string) => void;
-  onJumpRun: (runId: string) => void;
-  onJumpProposal: (id: string) => void;
-  onJumpEvent: (source: string, eventId: string) => void;
-  tdCls: string;
-}) {
-  return (
-    <>
-      <tr>
-        <td
-          colSpan={5 + (selectionEnabled ? 1 : 0)}
-          className="sticky top-7 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1 text-[11px] font-medium"
-          style={{ color: group.hue }}
-        >
-          <span aria-hidden="true" className="mr-1.5 inline-block size-1.5 rounded-full align-middle" style={{ background: group.hue }} />
-          {group.label}
-          <span className="ml-1.5 tabular-nums text-(--text-faint)">{rows.length}</span>
-        </td>
-      </tr>
-      {rows.map((item) => {
-        const d = deliveryState(item);
-        return (
-          <tr
-            key={item.id}
-            onClick={() => onSelect(item.id)}
-            aria-selected={item.id === selectedId}
-            className={`cursor-pointer hover:bg-(--surface-1) ${item.id === selectedId ? "row-selected" : ""}`}
-          >
-            {selectionEnabled && (
-              <td className={`${tdCls} w-8`} onClick={(e) => e.stopPropagation()}>
-                <input
-                  type="checkbox"
-                  aria-label={`Select inbox item ${item.id}`}
-                  checked={bulkSelectedIds.has(item.id)}
-                  onChange={() => onToggleSelection(item.id)}
-                  className="cursor-pointer"
-                />
-              </td>
-            )}
-            <td className={`${tdCls} w-32`}>
-              <StateBadge state={item.kind} hues={INBOX_KIND_HUES} dot={false} />
-            </td>
-            {/* Title is the decision text: it truncates last. `max-w-0` lets it
-                shrink-to-fit, `min-w-40` stops it collapsing to a glyph when
-                the pane opens at ~1100px — Refs gives up width first. */}
-            <td className={`${tdCls} min-w-40 max-w-0`}>
-              <div className="truncate text-(--text)" title={item.title}>{displayTitle(item)}</div>
-            </td>
-            <td className={`${tdCls} w-16 text-(--text-faint)`}>
-              <span className="tabular-nums" title={item.createdAt}>{inboxAge(item.createdAt, now)}</span>
-            </td>
-            <td className={`${tdCls} w-72 max-w-72`}>
-              <RefChips item={item} onJumpRun={onJumpRun} onJumpProposal={onJumpProposal} onJumpEvent={onJumpEvent} />
-            </td>
-            <td className={`${tdCls} w-12`}>
-              <span
-                role="img"
-                aria-label={deliveryText(item)}
-                title={deliveryText(item)}
-                className="inline-block size-2 rounded-full"
-                style={{ background: DELIVERY_HUES[d] }}
-              />
-            </td>
-          </tr>
-        );
-      })}
-    </>
-  );
-}
-
 function PrRef({ item, className }: { item: InboxItem; className?: string }) {
   const ref = item.refs.pr!;
   const href = prHref(item);
@@ -950,7 +995,6 @@ function PrRef({ item, className }: { item: InboxItem; className?: string }) {
     <span className={`mono ${className ?? ""}`} title={ref}>{ref}</span>
   );
 }
-
 /** Every ref is one click from the thing it is about; nothing here selects the row. */
 function RefChips({
   item,

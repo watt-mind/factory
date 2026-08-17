@@ -150,6 +150,18 @@ function fetchTicketDefault(ticketId) {
   }
 }
 
+function fetchViewerDefault() {
+  try {
+    const out = execFileSync("bun", [linearCli(), "raw", "query{ viewer{ id name } }"], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    return JSON.parse(out)?.viewer ?? null;
+  } catch (err) {
+    const stderr = String(err?.stderr ?? "");
+    throw new Error(`linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`);
+  }
+}
+
 function fetchPullRequestDefault(payload) {
   try {
     return JSON.parse(execFileSync(
@@ -338,10 +350,12 @@ function refusal(reason, evidence, decision = "noop", detail = null) {
  */
 export function worktreeDispatchAutoEligibility(payload, {
   fetchTicket = fetchTicketDefault,
+  fetchViewer = fetchViewerDefault,
   fetchInFlight = fetchInFlightDefault,
   countLeases = (repoName) => liveWorkerLeases(repoName).length,
   maxInFlightFallback,
   budgetRefusal = defaultBudgetRefusal,
+  claimedRetry = null,
   now = Date.now(),
 } = {}) {
   const evidence = {
@@ -391,12 +405,53 @@ export function worktreeDispatchAutoEligibility(payload, {
   evidence.ticket = evidenceTicket(ticket, payload?.ticket);
   if (!ticket) return refusal("ticket_not_found", evidence, "human_needed");
   evidence.checks.ticket_found = true;
-  if (ticket.assignee) return refusal("ticket_assigned", evidence);
-  evidence.checks.ticket_unassigned = true;
-  if (ticket.state?.name !== "Todo") return refusal("ticket_not_todo", evidence);
-  evidence.checks.ticket_todo = true;
-  if (!evidence.ticket.labels.includes("ai:agent-ready")) return refusal("ticket_not_agent_ready", evidence);
-  evidence.checks.ticket_agent_ready = true;
+
+  // A lease-loss retry is the one exception to the ordinary Todo/unassigned
+  // admission rule. The prior attempt already performed the Linear claim, so
+  // its durable state is expected to be In Progress and assigned. Accept that
+  // state only when the worker proves this is the same run's lease-expired
+  // attempt and Linear still names the factory's own viewer identity.
+  const canResumeClaim = Boolean(
+    claimedRetry?.runId &&
+    Number.isInteger(claimedRetry?.priorAttempt) &&
+    claimedRetry.priorAttempt > 0 &&
+    claimedRetry?.reasonCode === "lease_expired"
+  );
+  let retryClaimedByFactory = false;
+  let resumingOwnClaim = false;
+  if (ticket.assignee) {
+    if (!canResumeClaim) return refusal("ticket_assigned", evidence);
+    const viewer = fetchViewer();
+    if (!viewer?.id || ticket.assignee.id !== viewer.id) return refusal("ticket_assigned", evidence);
+    retryClaimedByFactory = true;
+  } else {
+    evidence.checks.ticket_unassigned = true;
+  }
+
+  if (ticket.state?.name !== "Todo") {
+    if (!(retryClaimedByFactory && ticket.state?.name === "In Progress")) {
+      return refusal("ticket_not_todo", evidence);
+    }
+    resumingOwnClaim = true;
+    evidence.checks.ticket_claim_retry = true;
+    evidence.checks.ticket_in_progress_retry = true;
+    evidence.ticket.claimedRetryRunId = claimedRetry.runId;
+  } else {
+    // Assignment alone is not a surviving factory claim. Requiring the state
+    // transition as well prevents an own-assigned Todo ticket from bypassing
+    // the normal claim mutation and its read-back concurrency control.
+    if (retryClaimedByFactory) return refusal("ticket_assigned", evidence);
+    evidence.checks.ticket_todo = true;
+  }
+
+  if (!evidence.ticket.labels.includes("ai:agent-ready")) {
+    if (!(resumingOwnClaim && evidence.ticket.labels.includes("ai:in-progress"))) {
+      return refusal("ticket_not_agent_ready", evidence);
+    }
+    evidence.checks.ticket_in_progress_label_retry = true;
+  } else {
+    evidence.checks.ticket_agent_ready = true;
+  }
   if (evidence.ticket.labels.includes("ai:escalated")) {
     return refusal("ticket_escalated", evidence);
   }

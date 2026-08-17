@@ -1981,6 +1981,101 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(sum5.reasonCode).toBe("ticket_claim_lost");
   });
 
+  test("lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-claim-retry-locks-"));
+    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-claim-retry-leases-"));
+    const spec = queueRun(db, makeDispatchSpec({
+      input: { repo: "wt-worker", ticket: "WM-621" },
+    }));
+    let now = T0;
+    let ticket = readyDispatchTicket("WM-621");
+    let claimCalls = 0;
+    let unclaimCalls = 0;
+    let adapterCalls = 0;
+    let releaseFirst;
+    let releaseSecond;
+    let markFirstStarted;
+    let markSecondStarted;
+    const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+    const secondStarted = new Promise((resolve) => { markSecondStarted = resolve; });
+    const firstRelease = new Promise((resolve) => { releaseFirst = resolve; });
+    const secondRelease = new Promise((resolve) => { releaseSecond = resolve; });
+    const retryAdapter = {
+      async execute(args) {
+        adapterCalls += 1;
+        if (adapterCalls === 1) {
+          markFirstStarted();
+          await firstRelease;
+          return { exitCode: 1, timedOut: false };
+        }
+        markSecondStarted();
+        await secondRelease;
+        return dispatchFakeAdapter.execute(args);
+      },
+    };
+    const o = opts({
+      now: () => now,
+      workspacesRoot: freshRoot(),
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => ticket,
+        fetchViewer: () => ({ id: "factory-user", name: "Factory" }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => {
+          claimCalls += 1;
+          ticket = readyDispatchTicket("WM-621", {
+            state: { name: "In Progress" },
+            assignee: { id: "factory-user", name: "Factory" },
+            labels: { nodes: [{ name: "ai:in-progress" }, { name: "agent:claude-code" }] },
+          });
+          return { ok: true };
+        },
+        unclaimTicket: () => {
+          unclaimCalls += 1;
+          ticket = readyDispatchTicket("WM-621");
+          return true;
+        },
+      },
+    });
+
+    const firstClaim = claimNext(db, o);
+    const firstExecution = executeClaimed(db, registry, { fake: retryAdapter }, firstClaim, o);
+    let retryExecution;
+    try {
+      await firstStarted;
+      expect(claimCalls).toBe(1);
+      expect(ticket.state.name).toBe("In Progress");
+
+      now = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
+      expect(reapExpiredLeases(db, { now, policyVersion: "test" })).toBe(1);
+      expect(runState(db, spec.runId)).toBe("QUEUED");
+
+      retryExecution = runOnce(db, registry, { fake: retryAdapter }, o);
+      await secondStarted;
+      expect(claimCalls).toBe(1);
+      expect(lifecycleOf(db, spec.runId)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ to_state: "RUNNING", attempt: 2 }),
+      ]));
+
+      releaseFirst();
+      expect(await firstExecution).toEqual({ fenced: true });
+      expect(unclaimCalls).toBe(0);
+      expect(ticket.state.name).toBe("In Progress");
+      expect(liveWorkerLeases("wt-worker", { dir: leaseDir, now })).toHaveLength(1);
+
+      releaseSecond();
+      const retried = await retryExecution;
+      expect(retried).toMatchObject({ attempt: 2, terminalState: "COMPLETED" });
+    } finally {
+      releaseFirst();
+      releaseSecond();
+      await Promise.allSettled([firstExecution, retryExecution].filter(Boolean));
+    }
+  });
+
   test("claim-time Linear read failure contradicting plan evidence requeues with backoff", async () => {
     const db = openDb(":memory:");
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-transient-linear-"));

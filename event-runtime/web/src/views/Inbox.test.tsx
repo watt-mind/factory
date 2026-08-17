@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Inbox,
@@ -18,9 +18,11 @@ import {
 import { api } from "../api";
 import { clearToasts, ToastContainer } from "../components/ui";
 import type { InboxItem } from "../types";
+import { changeInput } from "../test-render";
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
 });
 
 function item(overrides: Partial<InboxItem> & Pick<InboxItem, "id" | "kind">): InboxItem {
@@ -146,8 +148,9 @@ let ledger: InboxItem[] = [];
 
 beforeEach(() => {
   clearToasts();
+  localStorage.clear();
   ledger = [
-    item({ id: "inbox_open_1", kind: "BLOCKED", title: "BLOCKED WM-1: decide X", createdAt: T0, refs: { runId: "run_a", issue: "WM-1" } }),
+    item({ id: "inbox_open_1", kind: "BLOCKED", title: "BLOCKED WM-1: decide X", body: "Choose a safe recovery", createdAt: T0, refs: { runId: "run_a", issue: "WM-1", repo: "factory" } }),
     item({ id: "inbox_open_2", kind: "CI RED", title: "CI RED WM-2/PR #9", createdAt: T1, refs: { pr: "https://github.com/watt-mind/factory/pull/9" } }),
     item({ id: "inbox_acked_1", kind: "ESCALATED", title: "ESCALATED merge", createdAt: T0, ackedAt: T1 }),
     item({ id: "inbox_resolved_1", kind: "RC READY", title: "RC READY factory", createdAt: T0, ackedAt: T1, resolvedAt: T2, resolvedBy: "operator" }),
@@ -210,52 +213,70 @@ describe("Inbox view", () => {
     expect(view.getByText("Red")).toBeTruthy();
   });
 
-  test("column headers cycle ascending, descending, and default order while keyboard selection follows rendered rows", async () => {
-    ledger = [
-      item({ id: "inbox_middle", kind: "BLOCKED", title: "Mike", createdAt: T0 }),
-      item({ id: "inbox_zulu", kind: "ESCALATED", title: "Zulu", createdAt: T1 }),
-      item({ id: "inbox_alpha", kind: "human_needed", title: "Alpha", createdAt: T2 }),
-    ];
-    const onSelectItem = mock(() => {});
-    const { view } = renderInbox({ onSelectItem });
-    await waitFor(() => view.getByText("Alpha"));
+  test("filters with inbox facets and free text, with an Esc-hinted empty state", async () => {
+    const { view } = renderInbox();
+    const input = await waitFor(() => view.getByLabelText("Filter inbox")) as HTMLInputElement;
 
+    act(() => changeInput(input, "kind:blocked repo:factory issue:WM-1 is:open"));
+    expect(view.getByText("decide X")).toBeTruthy();
+    expect(view.queryByText("WM-2/PR #9")).toBeNull();
+
+    act(() => changeInput(input, "safe recovery"));
+    expect(view.getByText("decide X")).toBeTruthy();
+
+    act(() => changeInput(input, "kind:no-such-kind"));
+    expect(view.getByText("No inbox items match this filter.")).toBeTruthy();
+    expect(view.getByText("Esc clears the filter")).toBeTruthy();
+  });
+
+  test("Display groups by kind or none and shared group headers collapse rows", async () => {
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("decide X"));
+
+    const decide = view.getByRole("button", { name: /Decide 1/ });
+    expect(decide.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(decide);
+    expect(decide.getAttribute("aria-expanded")).toBe("false");
+    expect(view.queryByText("decide X")).toBeNull();
+
+    fireEvent.click(view.getByRole("button", { name: /Display/ }));
+    const chooseGroup = (name: string) => {
+      fireEvent.click(view.getByRole("combobox", { name: "Group by" }));
+      fireEvent.mouseDown(within(view.getByRole("listbox", { name: "Group by options" })).getByRole("option", { name }));
+    };
+    chooseGroup("Kind");
+    expect(view.getByRole("button", { name: /BLOCKED 1/ })).toBeTruthy();
+    expect(view.getByRole("button", { name: /CI RED 1/ })).toBeTruthy();
+
+    chooseGroup("No grouping");
+    expect(view.queryByRole("button", { name: /BLOCKED 1/ })).toBeNull();
+    expect(view.getByText("decide X")).toBeTruthy();
+    expect(view.getByText("WM-2/PR #9")).toBeTruthy();
+  });
+
+  test("Kind and Age headers are sortable and persist ordering through display state", async () => {
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("decide X"));
+    const age = view.getByRole("button", { name: "Age" }).closest("th")!;
+    expect(age.getAttribute("aria-sort")).toBe("ascending");
+    fireEvent.click(view.getByRole("button", { name: "Kind" }));
+    expect(view.getByRole("button", { name: "Kind" }).closest("th")?.getAttribute("aria-sort")).toBe("ascending");
+    const persisted = JSON.parse(localStorage.getItem("evrt-display-inbox") ?? "{}");
+    expect(persisted.sortBy).toBe("kind");
+  });
+
+  test("keeps Title visible when every display property is toggled off", async () => {
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("decide X"));
+    fireEvent.click(view.getByRole("button", { name: /Display/ }));
+    const dialog = view.getByRole("dialog", { name: "Display options" });
     for (const label of ["Kind", "Title", "Age", "Refs", "Sent"]) {
-      const header = view.getByRole("columnheader", { name: new RegExp(label) });
-      expect(header.getAttribute("aria-sort")).toBe("none");
-      expect(header.querySelector("button")).toBeTruthy();
+      fireEvent.click(within(dialog).getByRole("button", { name: label }));
     }
-
-    const renderedTitles = () => Array.from(view.container.querySelectorAll("tbody tr[aria-selected]"))
-      .map((row) => row.querySelector("td:nth-child(3)")?.textContent);
-    const titleHeader = view.getByRole("columnheader", { name: /Title/ });
-    expect(renderedTitles()).toEqual(["Mike", "Zulu", "Alpha"]);
-
-    fireEvent.click(view.getByRole("button", { name: /Title/ }));
-    expect(titleHeader.getAttribute("aria-sort")).toBe("ascending");
-    expect(renderedTitles()).toEqual(["Alpha", "Mike", "Zulu"]);
-    act(() => {
-      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
-    });
-    expect(onSelectItem).toHaveBeenLastCalledWith("inbox_alpha");
-
-    fireEvent.click(view.getByRole("button", { name: /Title/ }));
-    expect(titleHeader.getAttribute("aria-sort")).toBe("descending");
-    expect(renderedTitles()).toEqual(["Zulu", "Mike", "Alpha"]);
-
-    fireEvent.click(view.getByRole("button", { name: /Title/ }));
-    expect(titleHeader.getAttribute("aria-sort")).toBe("none");
-    expect(renderedTitles()).toEqual(["Mike", "Zulu", "Alpha"]);
-
-    const ageHeader = view.getByRole("columnheader", { name: /Age/ });
-    fireEvent.click(view.getByRole("button", { name: /Age/ }));
-    expect(ageHeader.getAttribute("aria-sort")).toBe("ascending");
-    expect(renderedTitles()).toEqual(["Alpha", "Zulu", "Mike"]);
-    fireEvent.click(view.getByRole("button", { name: /Age/ }));
-    expect(ageHeader.getAttribute("aria-sort")).toBe("descending");
-    expect(renderedTitles()).toEqual(["Mike", "Zulu", "Alpha"]);
-    fireEvent.click(view.getByRole("button", { name: /Age/ }));
-    expect(ageHeader.getAttribute("aria-sort")).toBe("none");
+    expect(view.getByRole("columnheader", { name: "Title" })).toBeTruthy();
+    expect(view.getByText("decide X")).toBeTruthy();
+    const persisted = JSON.parse(localStorage.getItem("evrt-display-inbox") ?? "{}");
+    expect(persisted.hiddenColumns).not.toContain("title");
   });
 
   test("empty Open tab is a sentence, not a table", async () => {

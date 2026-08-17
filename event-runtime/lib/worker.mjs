@@ -427,6 +427,27 @@ function hasPlanTimeDispatchEvidence(spec) {
   return Boolean(spec?.approvalPolicy?.dispatchEvidence?.ticket?.descriptionHash);
 }
 
+/**
+ * A reaped lease leaves the Linear claim in place. Prove from the attempt
+ * ledger that this new attempt belongs to the same run and immediately follows
+ * a lease-expired claim before relaxing the Todo/unassigned dispatch gate.
+ */
+function claimedRetryFor(db, runId, attempt) {
+  if (!Number.isInteger(attempt) || attempt <= 1) return null;
+  const priorAttempt = attempt - 1;
+  const prior = db.query(
+    `SELECT terminal_state, reason_code FROM attempts WHERE run_id = ? AND attempt = ?`,
+  ).get(runId, priorAttempt);
+  if (prior?.terminal_state !== "FAILED" || prior?.reason_code !== "lease_expired") return null;
+  const requeue = db.query(
+    `SELECT reason FROM lifecycle_events
+     WHERE run_id = ? AND to_state = 'QUEUED' AND attempt = ?
+     ORDER BY seq DESC LIMIT 1`,
+  ).get(runId, priorAttempt);
+  if (requeue?.reason !== "retry:environment") return null;
+  return { runId, priorAttempt, reasonCode: "lease_expired" };
+}
+
 function contradictsPlanTimeOwnedPaths(spec, gateResult) {
   const planned = spec?.approvalPolicy?.dispatchEvidence?.ticket;
   const current = gateResult?.evidence?.ticket;
@@ -729,12 +750,29 @@ export async function executeClaimed(db, registry, adapters, claim, {
   let checkoutPath = null;
   let checkoutBaseline = null;
   let worktreeRecord = null;
+  const cleanupWorkspace = ({ retainWorkspace = false } = {}) => {
+    if (!workspaceDir) return;
+    const fenced = !assertCurrentToken(db, runId, fencingToken);
+    if (fenced && spec.workspace?.type === "worktree") {
+      // A newer attempt for this run uses the same delegated worktree. Remove
+      // only the stale attempt's teardown marker so destroyWorkspace cleans its
+      // wrapper directory without invoking worktree_down under the live retry.
+      try { unlinkSync(path.join(workspaceDir, ".worktree.json")); } catch {}
+    }
+    destroyWorkspace(workspaceDir, {
+      retain: retainWorkspace,
+      checkout: fenced ? null : checkoutPath,
+      repoName,
+    });
+  };
   const repoName = spec.input?.repoPin?.repo ?? spec.input?.repo ?? null;
   const ticketId = spec.input?.ticket ?? null;
   const isWorktree = spec.workspace?.type === "worktree";
 
   let leaseHeartbeat = null;
   let ticketClaimed = false;
+  const ticketLeaseOwner = `${owner}:${runId}:${fencingToken}`;
+  const mayMutateClaimedTicket = () => ticketClaimed && assertCurrentToken(db, runId, fencingToken);
   let attemptUsage = { adapter: adapterOverride ?? spec.adapter };
 
   let dispatchOpts = dispatch;
@@ -983,7 +1021,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
             now: nowFn,
           });
         } else {
-          gateResult = worktreeDispatchAutoEligibility(spec.input, dispatchOpts);
+          gateResult = worktreeDispatchAutoEligibility(spec.input, {
+            ...(dispatchOpts ?? {}),
+            claimedRetry: claimedRetryFor(db, runId, attempt),
+          });
         }
       } catch (err) {
         if (gate === "dispatch" && hasPlanTimeDispatchEvidence(spec) && String(err?.message ?? err).startsWith("linear_read_failed:")) {
@@ -1014,25 +1055,34 @@ export async function executeClaimed(db, registry, adapters, claim, {
         // verb here would reject the valid run as ticket_assigned.
         releaseClaimLock(lockFile);
       } else {
-        let claimRes;
-        try {
-          claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
-        } finally {
+        // The retry gate has already re-read and authenticated the surviving
+        // claim. Do not run the mutating claim command again: besides being
+        // redundant, that could steal the ticket if ownership changed in the
+        // narrow interval after the gate read.
+        const resumedClaim = gateResult.evidence?.checks?.ticket_claim_retry === true;
+        if (!resumedClaim) {
+          let claimRes;
+          try {
+            claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
+          } finally {
+            releaseClaimLock(lockFile);
+          }
+
+          if (!claimRes?.ok) {
+            const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
+            const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
+            if (res?.fenced) return { fenced: true };
+            return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+          }
+        } else {
           releaseClaimLock(lockFile);
         }
 
-        if (!claimRes?.ok) {
-          const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
-          const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
-          if (res?.fenced) return { fenced: true };
-          return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
-        }
-
         ticketClaimed = true;
-        writeWorkerLease({ repo: repoName, ticket: ticketId, owner, pid: process.pid, dir: leasesDir, now: nowFn() });
+        writeWorkerLease({ repo: repoName, ticket: ticketId, owner: ticketLeaseOwner, pid: process.pid, dir: leasesDir, now: nowFn() });
         leaseHeartbeat = setInterval(() => {
           try {
-            renewWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir, now: Date.now() });
+            renewWorkerLease({ repo: repoName, ticket: ticketId, owner: ticketLeaseOwner, dir: leasesDir, now: Date.now() });
           } catch {}
         }, LEASE_HEARTBEAT_MS);
         leaseHeartbeat?.unref?.();
@@ -1054,7 +1104,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
     const adapter = adapters[adapterKey];
     if (!adapter) {
       const res = failTerminal("FAILED", "unknown_adapter", "unknown_adapter");
-      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
+      cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode: "unknown_adapter" };
     }
@@ -1062,7 +1112,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
 
     if (!verifyDefHash(spec, def)) {
       const refusedRes = refuseTerminal("agent_definition_mismatch", ["def_hash_mismatch"], { causeTyped: true });
-      destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+      cleanupWorkspace();
       if (refusedRes?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "REFUSED", reasonCode: "agent_definition_mismatch", receipt: refusedRes.receipt };
     }
@@ -1099,10 +1149,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
     if (outcome?.usage) attemptUsage = { adapter: adapterKey, ...outcome.usage };
 
     if (abortController.signal.aborted) {
-      if (ticketClaimed) {
+      if (mayMutateClaimedTicket()) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "cancelled", log: null }); } catch {}
       }
-      if (workspaceDir) destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+      cleanupWorkspace();
       const res = txImmediate(db, () => {
         const currentNow = nowFn();
         if (!assertCurrentToken(db, runId, fencingToken)) {
@@ -1139,33 +1189,33 @@ export async function executeClaimed(db, registry, adapters, claim, {
       }
 
       if (!lateCompletion) {
-        if (ticketClaimed) {
+        if (mayMutateClaimedTicket()) {
           try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "timeout", log: null }); } catch {}
         }
         const res = failTerminal("TIMED_OUT", "timeout", "timeout");
-        destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
+        cleanupWorkspace({ retainWorkspace: retain });
         if (res?.fenced) return { fenced: true };
         return { runId, attempt, terminalState: "TIMED_OUT", reasonCode: "timeout" };
       }
     }
     const denial = policyDenials[0];
     if (!lateCompletion && denial) {
-      if (ticketClaimed) {
+      if (mayMutateClaimedTicket()) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `policy_denied:${denial.tool}`, log: null }); } catch {}
       }
       const reasonCode = `policy_denied:${denial.tool}`;
       const res = failTerminal("FAILED", reasonCode, reasonCode);
-      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
+      cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
     if (!lateCompletion && exitCode !== 0) {
-      if (ticketClaimed) {
+      if (mayMutateClaimedTicket()) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `agent_exit_${exitCode}`, log: null }); } catch {}
       }
       const reasonCode = `agent_exit_${exitCode}`;
       const res = failTerminal("FAILED", reasonCode, reasonCode);
-      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
+      cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
@@ -1176,7 +1226,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
     if (!isWorktree && !def.mutating && checkoutPath && (checkoutBaseline === null || repositoryStatus(checkoutPath) !== checkoutBaseline)) {
       const reasonCode = "workspace_integrity_violation";
       const res = failTerminal("FAILED", reasonCode, reasonCode);
-      destroyWorkspace(workspaceDir, { retain: true, checkout: checkoutPath, repoName });
+      cleanupWorkspace({ retainWorkspace: true });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
@@ -1195,7 +1245,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
       return { ok: true };
     });
     if (toVerifying?.fenced) {
-      destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+      cleanupWorkspace();
       return { fenced: true };
     }
 
@@ -1208,7 +1258,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
       if (!(err instanceof ContractViolation)) throw err;
       const reasonCode = err.reasonCode === "baseline_red" ? "baseline_red" : "contract_violation";
       const failureReason = `${reasonCode}: ${err.violations.join(", ")}`;
-      if (ticketClaimed) {
+      if (mayMutateClaimedTicket()) {
         if (reasonCode === "baseline_red") {
           try {
             blockTicketFn({
@@ -1248,13 +1298,13 @@ export async function executeClaimed(db, registry, adapters, claim, {
         }
         return { ok: true };
       });
-      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
+      cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
 
     if (verified.kind === "refused") {
-      if (ticketClaimed) {
+      if (mayMutateClaimedTicket()) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: `refused: ${verified.reasonCode}`, log: null }); } catch {}
       }
       const collected = [];
@@ -1307,7 +1357,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         finishAttempt(db, runId, attempt, "REFUSED", verified.reasonCode, currentNow, attemptUsage);
         return { ok: true, receipt };
       });
-      destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+      cleanupWorkspace();
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "REFUSED", reasonCode: verified.reasonCode, receipt: res.receipt };
     }
@@ -1369,18 +1419,18 @@ export async function executeClaimed(db, registry, adapters, claim, {
     });
 
     if (published.fenced) {
-      destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+      cleanupWorkspace();
       return { fenced: true };
     }
-    destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+    cleanupWorkspace();
     return { runId, attempt, terminalState: "COMPLETED", reasonCode: "ok", receipt: published.receipt };
   } catch (err) {
-    if (ticketClaimed) {
+    if (mayMutateClaimedTicket()) {
       try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: err?.message ?? String(err), log: null }); } catch {}
     }
     if (err instanceof IllegalTransition) {
       // Operator moved the run under us (cancel) — stop quietly, publish nothing.
-      if (workspaceDir) destroyWorkspace(workspaceDir, { checkout: checkoutPath, repoName });
+      cleanupWorkspace();
       const state = db.query(`SELECT state FROM runs WHERE run_id = ?`).get(runId)?.state;
       if (state === "CANCELLED") {
         return { cancelled: true };
@@ -1412,16 +1462,14 @@ export async function executeClaimed(db, registry, adapters, claim, {
     } catch {
       // if failTerminal could not transition, continue
     }
-    if (workspaceDir) {
-      destroyWorkspace(workspaceDir, { retain, checkout: checkoutPath, repoName });
-    }
+    cleanupWorkspace({ retainWorkspace: retain });
     if (res?.fenced) return { fenced: true };
     return { runId, attempt, terminalState: "FAILED", reasonCode, error: err?.message };
   } finally {
     stopCancellationMonitor();
     if (leaseHeartbeat) clearInterval(leaseHeartbeat);
     if (ticketClaimed) {
-      try { releaseWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir }); } catch {}
+      try { releaseWorkerLease({ repo: repoName, ticket: ticketId, owner: ticketLeaseOwner, dir: leasesDir }); } catch {}
     }
   }
 }
