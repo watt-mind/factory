@@ -105,6 +105,22 @@ describe("registry", () => {
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
+  test("pack provenance never enters the receipt defHash (WM-470)", () => {
+    // The absolute constant is the whole point: it is develop's defHash for
+    // this definition, whose content WM-470 did not touch. computeDefHash
+    // strips the known runtime-injected fields and hashes the enumerable rest,
+    // so any new enumerable key silently re-hashes every built-in agent and
+    // makes verifyDefHash refuse them with `agent_definition_mismatch`. `pack`
+    // is therefore defined non-enumerably: readable by callers, invisible to
+    // the hash. Do not "update" this constant — a change here means a
+    // provenance break, not a stale expectation.
+    const registry = loadRegistry();
+    const def = registry.agents.get("dispatch@1");
+    expect(def.pack).toBe("event-runtime");
+    expect(Object.keys(def)).not.toContain("pack");
+    expect(computeDefHash(def)).toBe("sha256:323836eeac3c5b7370dc13e83cbe4f0d7cc029155e76ea0fc80672b7a7f973fd");
+  });
+
   test("loads a namespaced filesystem pack and validates the merged maps", () => {
     const registry = loadRegistry({ packRoots: [samplePack()] });
     const def = getAgent(registry, "sample/echo@1");
@@ -243,6 +259,21 @@ describe("registry", () => {
     const def = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...def, mutating: true }));
     expect(() => loadRegistry({ packRoots: [pack] })).toThrow(/config-listed pack.*may not declare mutating: true.*WM-468/);
+  });
+
+  test("a pack agent that merely omits mutating is not refused by the pack rule (WM-470)", () => {
+    // The pack restriction is on the declaration, not on its absence: only an
+    // explicit `mutating: true` is refused (docs/kernel-and-packs.md). The
+    // kernel's §14 admission rule is separate and still applies to every root,
+    // so an omitting def must additionally be enforceable by construction.
+    const pack = tempPack();
+    const defFile = path.join(pack.path, "agents", "echo.json");
+    const { mutating: _mutating, ...def } = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify(def));
+    expect(() => loadRegistry({ packRoots: [pack] })).not.toThrow(/may not declare mutating: true/);
+    writeFileSync(defFile, JSON.stringify({ ...def, command: ["true"] }));
+    const registry = loadRegistry({ packRoots: [pack] });
+    expect(getAgent(registry, "sample/echo@1").mutating).toBeUndefined();
   });
 
   test("pack manifest and pins fail closed, and explicit pack pinning repairs drift", () => {

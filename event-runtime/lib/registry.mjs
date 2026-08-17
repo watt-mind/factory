@@ -349,7 +349,7 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
   for (const field of ["id", "version", ...PINNED_FIELDS, "workspace", "capabilities", "limits"]) {
     if (def[field] === undefined) throw new RegistryError(`${source}: missing "${field}"`);
   }
-  if (!builtIn && def.mutating !== false) {
+  if (!builtIn && def.mutating === true) {
     throw new RegistryError(
       `${source}: config-listed pack "${pack.name}" may not declare mutating: true (WM-468 decision 4; non-bare packs are read-only)`,
     );
@@ -446,15 +446,29 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     throw new RegistryError(`${source}: loader returned no prompt path for "${def.prompt}"`);
   }
   const localRef = `${def.id}@${def.version}`;
-  return {
+  const loaded = {
     ...def,
     pins,
-    pack: pack.name,
     ref: pack.namespace ? `${pack.namespace}/${localRef}` : localRef,
     promptPath,
     inputSchema: parseJson(resources.input_schema.bytes, resources.input_schema.source ?? def.input_schema),
     outputSchema: parseJson(resources.output_schema.bytes, resources.output_schema.source ?? def.output_schema),
   };
+  // Which pack supplied the definition is runtime provenance, not definition
+  // content: it is loader-injected and identical for every built-in agent. It
+  // is defined non-enumerably so `computeDefHash` (receipts.mjs), which strips
+  // known runtime-injected fields and hashes the enumerable rest, never sees
+  // it. Adding it enumerably would silently change the attested defHash of
+  // every built-in agent on a zero-pack no-op, and `verifyDefHash` would then
+  // terminally refuse those definitions with `agent_definition_mismatch`.
+  // `def.pack` still reads normally for callers and tests.
+  Object.defineProperty(loaded, "pack", {
+    value: pack.name,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  return loaded;
 }
 
 /**
