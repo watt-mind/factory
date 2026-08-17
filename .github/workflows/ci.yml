@@ -81,19 +81,101 @@ jobs:
 
           exit "$failed"
 
+  fast-unit-tests:
+    name: Fast unit tests
+    needs: shadow-runner-health
+    # All shadow runners are services on the same physical host. The flock
+    # below serializes this job with every integration Verify job across every
+    # workflow run without GitHub concurrency's "replace pending run" behavior.
+    runs-on: [self-hosted, shadow]
+    # Includes time queued on the host-local flock. Keep this comfortably above
+    # the measured multi-PR backlog so serialization cannot create false reds.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Setup bun (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
+            curl -fsSL https://bun.sh/install | bash
+          fi
+          if [ -x "$HOME/.bun/bin/bun" ]; then
+            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+            "$HOME/.bun/bin/bun" --version
+          else
+            bun --version
+          fi
+
+      - name: Acquire host verify lock
+        id: verify-lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          lock="/tmp/factory-verify-host.lock"
+          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-verify-lock.XXXXXX")"
+          ready="$state_dir/ready"
+          mkfifo "$ready"
+
+          # Keep flock alive across subsequent Actions steps. Reading the FIFO
+          # waits on the real lock acquisition rather than sleep-polling. The
+          # final always() step and runner cleanup both release the lock.
+          (
+            flock 9
+            printf 'acquired\n' > "$ready"
+            exec tail -f /dev/null >/dev/null 2>&1
+          ) 9>"$lock" &
+          guardian=$!
+          read -r _ < "$ready"
+          rm -f "$ready"
+
+          echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
+          echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
+          echo "Acquired the shared-host Verify lock on $RUNNER_NAME (guardian $guardian)."
+
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test event-runtime library
+        # Spawn-heavy suites can exceed Bun's 5s default on the shared host.
+        # Explicit liveness bounds declared by individual tests still win.
+        run: bun test --timeout 20000 --max-concurrency=4 event-runtime/lib
+
+      - name: Release host verify lock
+        if: always() && steps.verify-lock.outputs.guardian != ''
+        shell: bash
+        env:
+          GUARDIAN_PID: ${{ steps.verify-lock.outputs.guardian }}
+          LOCK_STATE_DIR: ${{ steps.verify-lock.outputs.state_dir }}
+        run: |
+          kill "$GUARDIAN_PID" 2>/dev/null || true
+          rm -rf "$LOCK_STATE_DIR"
+
   verify:
     name: Verify
-    needs: shadow-runner-health
+    needs: [shadow-runner-health, fast-unit-tests]
     # Self-hosted per project-conventions PC-03 / PC-22 — cloud runners are
     # forbidden, and shadow is the dedicated host runner label.
     runs-on: [self-hosted, shadow]
-    # Runaway guard, not a performance budget: it should trip on a wedged job,
-    # never on a healthy suite under load. Raised 10 -> 25 on 2026-08-15 after
-    # PRs #319 and #325 were both cancelled at 15m0s while green — the suite
-    # grew ~970 -> ~1540 tests in a day and several Verify jobs now share this
-    # host, so wall-clock runs well past solo time (WM-300). Compare against
-    # measured job durations before lowering.
-    timeout-minutes: 25
+    # Includes time queued on the host-local flock. This is a runaway guard,
+    # not a performance budget: serialized PR runs must be allowed to wait for
+    # the shared host without turning healthy tests red (WM-300, WM-600).
+    timeout-minutes: 90
     steps:
       # No `uses:` steps in this job on purpose (WM-573). Every marketplace
       # action is fetched from codeload.github.com at "Set up job", and the
@@ -136,32 +218,19 @@ jobs:
             bun --version
           fi
 
-      - name: Acquire host memory slot
-        id: memory-slot
+      - name: Acquire host verify lock
+        id: verify-lock
         shell: bash
         run: |
           set -euo pipefail
-
-          # The eight shadow-labeled runners are separate services on one 62 GB
-          # host. Each service name ends in 1..8; map those stable names onto
-          # three host-wide flock lanes so no more than three memory-heavy jobs
-          # proceed at once. At the measured 13.7 GB peak this is 41.1 GB,
-          # leaving 20.9 GB (34%) for the host and transient overhead.
-          suffix="${RUNNER_NAME##*-}"
-          if [[ ! "$suffix" =~ ^[0-9]+$ ]]; then
-            echo "::error::Cannot assign a memory slot from runner name '$RUNNER_NAME'."
-            exit 1
-          fi
-          slot=$(( (10#$suffix - 1) % 3 + 1 ))
-          lock="/tmp/factory-verify-memory-slot-${slot}.lock"
-          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-verify-memory.XXXXXX")"
+          lock="/tmp/factory-verify-host.lock"
+          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-verify-lock.XXXXXX")"
           ready="$state_dir/ready"
           mkfifo "$ready"
 
-          # Keep flock alive across subsequent Actions steps. Reading the FIFO
-          # waits on the real lock acquisition rather than sleep-polling. The
-          # final always() step releases it; runner process cleanup also releases
-          # it if a job is cancelled or its shell is killed.
+          # Eight shadow runner services share one physical host. A single flock
+          # serializes test jobs across workflow runs so CPU-heavy spawn suites
+          # cannot starve one another. FIFO readiness avoids sleep-polling.
           (
             flock 9
             printf 'acquired\n' > "$ready"
@@ -173,7 +242,7 @@ jobs:
 
           echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
           echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
-          echo "Acquired host memory slot $slot on $RUNNER_NAME (guardian $guardian)."
+          echo "Acquired the shared-host Verify lock on $RUNNER_NAME (guardian $guardian)."
 
       - name: Install root dependencies
         run: bun install --frozen-lockfile
@@ -189,15 +258,13 @@ jobs:
       - name: Formatting check (prettier)
         run: bun run format:check
 
-      - name: Unit and integration tests
-        # Local full-suite measurement on 2026-08-15: max process RSS fell from
-        # 672,661,504 B to 665,223,168 B (1.1%) at concurrency 4, while wall time
-        # fell from 106.90 s to 100.26 s. A concurrency of 1 reduced local RSS
-        # further but caused the CI runner to lose communication twice during
-        # the suite, so 4 is the measured non-deadlocking floor. The host-wide
-        # service measurement remains the conservative capacity input above
-        # because it includes descendants macOS /usr/bin/time does not aggregate.
-        run: bun test --max-concurrency=4
+      - name: Integration and spawn tests
+        # event-runtime/lib runs in the separately rerunnable fast-unit job.
+        # Busy shared-host spawn suites exceeded Bun's 5s default on unrelated
+        # tests; 20s absorbs host scheduling delay while explicit per-test
+        # liveness bounds remain unchanged. Concurrency 4 is the measured
+        # non-deadlocking floor from WM-300.
+        run: bun test --timeout 20000 --max-concurrency=4 --path-ignore-patterns='event-runtime/lib/**'
 
       # The sandbox harness must at least be installable and importable
       # (WM-312). Asserts on `sdk`, never on `available`: a self-hosted runner
@@ -285,12 +352,12 @@ jobs:
           bun event-runtime/demo/seed.mjs --port "$PORT" --prefix "ci-demo"
           bun event-runtime/demo/verify.mjs --port "$PORT"
 
-      - name: Release host memory slot
-        if: always() && steps.memory-slot.outputs.guardian != ''
+      - name: Release host verify lock
+        if: always() && steps.verify-lock.outputs.guardian != ''
         shell: bash
         env:
-          GUARDIAN_PID: ${{ steps.memory-slot.outputs.guardian }}
-          SLOT_STATE_DIR: ${{ steps.memory-slot.outputs.state_dir }}
+          GUARDIAN_PID: ${{ steps.verify-lock.outputs.guardian }}
+          LOCK_STATE_DIR: ${{ steps.verify-lock.outputs.state_dir }}
         run: |
           kill "$GUARDIAN_PID" 2>/dev/null || true
-          rm -rf "$SLOT_STATE_DIR"
+          rm -rf "$LOCK_STATE_DIR"

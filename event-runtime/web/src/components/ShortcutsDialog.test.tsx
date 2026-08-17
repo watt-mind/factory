@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { modal } from "../hooks";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 
@@ -18,6 +18,7 @@ describe("ShortcutsDialog", () => {
     const r = render(<ShortcutsDialog onClose={() => {}} />);
 
     expect(r.getByText("cycle theme (dark → light → contrast)")).toBeDefined();
+    expect(r.getByText("footer theme button")).toBeDefined();
     expect(r.getByText("copy link to this page")).toBeDefined();
 
     const contextStrip = r.getByRole("region", { name: "Context strip" });
@@ -32,6 +33,27 @@ describe("ShortcutsDialog", () => {
     expect(runTrace.textContent).toContain("toggle follow live trace");
     expect(runTrace.textContent).toContain("c i");
     expect(runTrace.textContent).toContain("copy CLI inspect command");
+  });
+
+  test("focuses the Close button and closes from it", () => {
+    let closed = false;
+    const r = render(<ShortcutsDialog onClose={() => { closed = true; }} />);
+    const close = r.getByRole("button", { name: "Close" });
+
+    expect(document.activeElement).toBe(close);
+    fireEvent.click(close);
+    expect(closed).toBe(true);
+  });
+
+  test("lists the command palette chord exactly once and corrects copy-link", () => {
+    const r = render(<ShortcutsDialog onClose={() => {}} />);
+    const actions = r.getByRole("region", { name: "Actions" });
+    const keys = [...actions.querySelectorAll(".mono")].map((node) => node.textContent);
+
+    expect(keys.filter((key) => key === "⌘K")).toHaveLength(1);
+    expect(keys.filter((key) => key === "c l")).toHaveLength(1);
+    expect(r.getByTestId("shortcuts-scroll").className).toContain("overflow-y-auto");
+    expect(r.getByTestId("shortcuts-scroll-fade").className).toContain("bg-linear-to-t");
   });
 
   test("documents Overview pipeline and anomaly shortcuts (WM-292)", () => {
@@ -64,7 +86,7 @@ describe("ShortcutsDialog", () => {
 
     expect(actions.textContent).toContain("copy selected id / name / ref");
     expect(actions.textContent).toContain("c l");
-    expect(actions.textContent).toContain("copy link to clipboard");
+    expect(actions.textContent).toContain("copy link to this page");
     expect(actions.textContent).toContain("c i / c c");
     expect(actions.textContent).toContain("copy CLI inspect command (Runs)");
     expect(actions.textContent).toContain("c p");

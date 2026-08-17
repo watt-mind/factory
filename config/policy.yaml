@@ -116,9 +116,14 @@ models:
   # levels of one model, not three different models. `-high` is the variant
   # the CLI displays as plain "Cursor Grok 4.6"; `-xhigh` is available if
   # strong should reach higher.
+  # strong/standard use the `-fast` twin (WM-585): merge-scan@2 on cursor
+  # (strong tier) timed out at 900s twice and at 1500s once on 2026.08.17
+  # (run_f8eeb97b, run_7b29aaca, run_4c42f4ce) with 20-25 open PRs on the
+  # non-fast `-high`. `-high-fast` is the same Grok 4.6 High reasoning
+  # effort at a faster serving tier — no capability change, just latency.
   cursor:
-    strong: cursor-grok-4.6-high
-    standard: cursor-grok-4.6-high
+    strong: cursor-grok-4.6-high-fast
+    standard: cursor-grok-4.6-high-fast
     light: cursor-grok-4.6-low-fast
 
 limits:
