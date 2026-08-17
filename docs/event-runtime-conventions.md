@@ -80,6 +80,48 @@ Keep defaults in the options destructuring, not in mutable module globals. Do
 not introduce process-wide singleton clients, clocks, or caches as hidden
 coordination state.
 
+## Module decomposition
+
+Split a module when it is serializing work, not when it crosses an arbitrary
+line-count threshold. The measurable signal is repeated contention: many open
+tickets name the same source or test file in their Owned Paths, preventing
+otherwise independent changes from proceeding in parallel. The current worked
+example is the API pair: `api.test.mjs` is named by nine agent-ready tickets and
+`api.mjs` by eight. The large `api.mjs` and `cli.mjs` splits are warranted by
+that collision pressure, not merely by their 1,300-plus lines.
+
+When that trigger is present, apply these rules:
+
+- **Split by domain, not by layer.** Prefer modules such as `api-runs.mjs`,
+  `api-inbox.mjs`, and `api-metrics.mjs`; do not create cross-cutting
+  `api-controllers.mjs` and `api-services.mjs` layers. A domain split keeps one
+  ticket in one module, while a layer split scatters each change across files
+  and recreates Owned Paths collisions.
+- **Make the original file the composition root.** It retains wiring and
+  route or verb registration only; handler bodies and domain decisions move to
+  the extracted modules. If the root still contains that logic, the split is
+  incomplete.
+- **Keep dependencies explicit.** Pass databases, clocks, clients, and other
+  effects through the existing options-object seams. A split must not introduce
+  module-scoped state: the runtime opens a database per process and tests create
+  their own, so an ambient database, clock, or client breaks both boundaries.
+- **Move tests with the source.** Give every extracted module its own adjacent
+  test file. Extracted tests are as much a part of the split as extracted
+  source; leaving one large test file only relocates the chokepoint. The current
+  nine-ticket contention on `api.test.mjs`, compared with eight on `api.mjs`,
+  demonstrates that the test file can be the more contended half.
+- **Do not import back to the composition root.** That reverse dependency
+  re-couples the modules the split was meant to separate. Move shared helpers
+  to a leaf module that both the root and extracted module can import.
+- **Treat a split as a move, not a redesign.** Preserve behavior, signatures,
+  routes, verbs, status codes, and exit codes so reviewers can assess a
+  relocation. Put behavior changes in a separate commit or ticket.
+
+A split does not introduce classes or service objects. Follow
+[Functional core, imperative shell](#functional-core-imperative-shell) and
+keep the existing module-scoped function style; decomposition changes module
+boundaries, not the programming model.
+
 ## Adapter contract
 
 ### Worker-facing interface
