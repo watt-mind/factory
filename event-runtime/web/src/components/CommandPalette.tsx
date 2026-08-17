@@ -268,6 +268,21 @@ export function CommandPalette({
                 <span>Open ticket <span className="mono">{typedTicket}</span></span>
                 <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">ticket journey</span>
               </Command.Item>
+              {/* The question behind most ticket lookups (WM-594): the journey
+                  already lists every planner decision and names the blocking
+                  reason in its next-action line, so it is the answer. */}
+              <Command.Item
+                value={`ticket ${typedTicket} why isn't running decisions`}
+                onSelect={() => {
+                  setOpen(false);
+                  setSearch("");
+                  onJumpTicket(typedTicket);
+                }}
+                className={PALETTE_ITEM_CLASS}
+              >
+                <span>Why isn't <span className="mono">{typedTicket}</span> running?</span>
+                <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">planner decisions</span>
+              </Command.Item>
             </Command.Group>
           )}
           {typedPr && onJumpPr && (

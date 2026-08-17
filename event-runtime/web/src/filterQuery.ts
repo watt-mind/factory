@@ -333,7 +333,14 @@ export const RUN_FACETS: FilterFacets<RunListItem, RunFilterContext> = {
   },
 };
 
-export const EVENT_FACETS: FilterFacets<AdmittedEvent, undefined> = {
+/**
+ * An event row as the Events view filters it: the admitted event plus the
+ * planner's reason for it (WM-594), joined on the client from the proposal /
+ * refused run — the events API does not carry it, so it is optional here.
+ */
+export type EventFilterRow = AdmittedEvent & { decisionReason?: string | null };
+
+export const EVENT_FACETS: FilterFacets<EventFilterRow, undefined> = {
   fields: {
     event: (e) => e.eventId,
     source: (e) => e.source,
@@ -343,6 +350,7 @@ export const EVENT_FACETS: FilterFacets<AdmittedEvent, undefined> = {
     proposal: (e) => e.proposalId,
     run: (e) => e.runId,
     repo: (e) => e.repos,
+    reason: (e) => e.decisionReason,
   },
   flags: {
     stale: {

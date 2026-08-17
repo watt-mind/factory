@@ -422,7 +422,9 @@ describe("ticket journey navigation (WM-595)", () => {
     fireEvent.keyDown(document.body, { key: "k", metaKey: true });
     const input = utils.getByPlaceholderText("Type a command…");
     fireEvent.input(input, { target: { value: "WM-595" } });
-    const command = await utils.findByText("WM-595", { selector: "span.mono" });
+    // Two items name the ticket (WM-594 adds "Why isn't WM-595 running?"); both open the journey.
+    const [command, why] = await utils.findAllByText("WM-595", { selector: "span.mono" });
+    expect(why.closest("[cmdk-item]")!.textContent).toContain("Why isn't");
     fireEvent.click(command.closest("[cmdk-item]")!);
     expect(window.location.hash).toBe("#/tickets/WM-595");
   });
