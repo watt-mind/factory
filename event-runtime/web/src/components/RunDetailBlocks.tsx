@@ -17,6 +17,7 @@ import {
   copyText,
   shortId,
 } from "./ui";
+import { AgentHoverCard } from "./AgentHoverCard";
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
 export const isCancellable = (state: RunState) => !TERMINAL.includes(state) && state !== "VERIFYING";
@@ -485,12 +486,10 @@ export function RunDetailBlocks({
         <KV
           k="agent"
           v={
-            <JumpLink
-              onClick={() => onJumpAgent(d.run.spec.agent)}
-              title={`Open ${d.run.spec.agent} in Agents`}
-            >
-              {d.run.spec.agent}
-            </JumpLink>
+            <AgentHoverCard
+              agentRef={d.run.spec.agent}
+              onJumpAgent={onJumpAgent}
+            />
           }
         />
         <KV k="adapter" v={d.run.spec.adapter} />

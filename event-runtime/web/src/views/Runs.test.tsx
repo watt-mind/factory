@@ -5,6 +5,7 @@ import { Runs, statesForRunTab } from "./Runs";
 import {
   changeInput,
   createLifecycleEventFixture,
+  createProposalFixture,
   createRunDetailFixture,
   createRunListItemFixture,
   createStatusFixture,
@@ -680,6 +681,79 @@ describe("Runs copy chords and hints (WM-233)", () => {
     ]);
     expect(statesForRunTab("COMPLETED")).toEqual(["COMPLETED"]);
     expect(statesForRunTab("CANCELLED")).toEqual(["CANCELLED"]);
+  });
+
+  test("PROPOSED run shows proposal jump link in table and open & approve actions in detail pane", async () => {
+    const onJumpProposal = mock(() => {});
+    const onSelectRun = mock(() => {});
+    const runId = "run-proposed-1";
+    const propId = "prop-1234567890abcdef";
+
+    const proposedRow = stubListItem(runId, "PROPOSED");
+    const proposal = createProposalFixture({
+      id: propId,
+      runId,
+      status: "open",
+      decision: "run",
+    });
+
+    const approveMock = mock(async (id: string) => ({
+      approved: true as const,
+      runId,
+    }));
+
+    await withApi(
+      {
+        runs: mock(async () => ({ runs: [proposedRow] })),
+        run: mock(async () => stubDetail(runId, "PROPOSED", [])),
+        proposals: mock(async () => ({ proposals: [proposal] })),
+        approve: approveMock,
+        status: mock(async () =>
+          createStatusFixture({
+            runs: { byState: { PROPOSED: 1 } },
+          }),
+        ),
+      },
+      async () => {
+        const r = renderRuns({
+          focusRunId: runId,
+          onJumpProposal,
+          onSelectRun,
+        });
+
+        // Verify "proposal" link is present in the table row and clickable
+        await waitFor(() => {
+          expect(r.getByTitle(`Open proposal ${propId}`)).toBeTruthy();
+        });
+
+        fireEvent.click(r.getByTitle(`Open proposal ${propId}`));
+        expect(onJumpProposal).toHaveBeenCalledWith(propId);
+
+        // Verify detail pane shows "Awaiting Proposal Approval" section and "Approve…" button
+        await waitFor(() => {
+          expect(r.getByText("Awaiting Proposal Approval")).toBeTruthy();
+          expect(r.getAllByRole("button", { name: /Approve…/i }).length).toBeGreaterThan(0);
+        });
+
+        // Click "Approve…" button in the detail pane
+        const approveBtns = r.getAllByRole("button", { name: /Approve…/i });
+        fireEvent.click(approveBtns[0]);
+
+        // Confirmation dialog should open
+        await waitFor(() => {
+          expect(r.getByRole("dialog")).toBeTruthy();
+          expect(r.getByText(/Approve and queue run/i)).toBeTruthy();
+        });
+
+        // Click "Approve and queue" in the dialog
+        const confirmBtn = r.getByRole("button", { name: /Approve and queue/i });
+        fireEvent.click(confirmBtn);
+
+        await waitFor(() => {
+          expect(approveMock).toHaveBeenCalledWith(propId);
+        });
+      },
+    );
   });
 });
 

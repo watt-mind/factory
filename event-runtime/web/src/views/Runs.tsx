@@ -18,6 +18,7 @@ import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
+import { AgentHoverCard } from "../components/AgentHoverCard";
 import {
   BudgetClock,
   IN_FLIGHT,
@@ -33,7 +34,7 @@ import type { OperatorContext } from "../context";
 import { matchesInFlight, matchesRepo } from "../context";
 import { RUN_FACETS, matchesFilterQuery, parseFilterQuery } from "../filterQuery";
 import { decideRevealFilters, formatRevealNotification } from "../reveal";
-import type { RunListItem, RunState } from "../types";
+import type { Proposal, RunListItem, RunState } from "../types";
 import {
   Ago,
   Button,
@@ -228,6 +229,7 @@ export function Runs({
   onFocusStateConsumed,
   onJumpAgent,
   onJumpEvent,
+  onJumpProposal,
   rejumpEpoch,
 }: {
   connected: boolean;
@@ -239,6 +241,7 @@ export function Runs({
   onFocusStateConsumed: () => void;
   onJumpAgent: (ref: string) => void;
   onJumpEvent: (source: string, eventId: string) => void;
+  onJumpProposal?: (id: string) => void;
   rejumpEpoch?: number;
 }) {
   const now = useNow();
@@ -246,7 +249,22 @@ export function Runs({
   const [tab, setTab] = useState<RunTab>("ALL");
   const [filter, setFilter] = useState("");
   const [confirm, setConfirm] = useState<"cancel" | "force-retry" | null>(null);
+  const [confirmApprove, setConfirmApprove] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
+
+  const proposalsQ = useQuery({
+    queryKey: ["proposals", "open"],
+    queryFn: () => api.proposals(),
+    refetchInterval: 2000,
+  });
+
+  const proposalByRunId = useMemo(() => {
+    const map = new Map<string, Proposal>();
+    for (const p of proposalsQ.data?.proposals ?? []) {
+      if (p.runId) map.set(p.runId, p);
+    }
+    return map;
+  }, [proposalsQ.data?.proposals]);
 
   // A project / In-flight filter is client-side; fetching only the active
   // status tab would make every other tab's badge a factory-wide lie.
@@ -440,6 +458,27 @@ export function Runs({
     },
   });
 
+  const approve = useMutation({
+    mutationFn: (proposalId: string) => api.approve(proposalId),
+    onSuccess: (outcome) => {
+      invalidate();
+      queryClient.invalidateQueries({ queryKey: ["proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["status"] });
+      if (outcome.approved && outcome.runId) {
+        notify(`Approved proposal — queued ${outcome.runId}`, "ok");
+      } else if (outcome.replanned && outcome.proposal) {
+        notify(`Proposal expired — re-planned new spec`, "info");
+        if (onJumpProposal) onJumpProposal(outcome.proposal.id);
+      }
+      setConfirmApprove(false);
+    },
+    onError: (err) => {
+      invalidate();
+      queryClient.invalidateQueries({ queryKey: ["proposals"] });
+    },
+  });
+
   const byState = statusQ.data?.runs.byState ?? {};
   const tabCount = (t: RunTab) => {
     if (fetchAll) {
@@ -459,6 +498,22 @@ export function Runs({
     if (selectedId) onSelectRun(null);
   };
   useTabKeys(RUN_TABS, tab, selectTab);
+
+  const d = detail.data;
+  const attemptsExhausted = d ? d.run.attempts >= d.run.spec.maxAttempts : false;
+
+  const selProposal = useMemo(() => {
+    if (sel?.runId && proposalByRunId.has(sel.runId)) return proposalByRunId.get(sel.runId)!;
+    if (d?.run.runId && proposalByRunId.has(d.run.runId)) return proposalByRunId.get(d.run.runId)!;
+    return null;
+  }, [sel?.runId, d?.run.runId, proposalByRunId]);
+
+  const canApprove = Boolean(
+    selProposal &&
+      selProposal.status === "open" &&
+      selProposal.decision === "run" &&
+      (sel?.state === "PROPOSED" || d?.run.state === "PROPOSED"),
+  );
 
   const pendingC = useRef<number>(0);
   useEffect(() => {
@@ -489,6 +544,7 @@ export function Runs({
       else if (filter) setFilter("");
     },
     keys: {
+      a: () => canApprove && connected && !approve.isPending && setConfirmApprove(true),
       // §5 convention: `x` is the destructive verb on the selection — here, cancel.
       x: () => sel && connected && isCancellable(sel.state) && setConfirm("cancel"),
       c: () => {
@@ -531,9 +587,6 @@ export function Runs({
     return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [sel]);
 
-  const d = detail.data;
-  const attemptsExhausted = d ? d.run.attempts >= d.run.spec.maxAttempts : false;
-
   // Offer the selection's verbs in the ⌘K palette (§5).
   useEffect(() => {
     if (!sel) {
@@ -554,6 +607,12 @@ export function Runs({
         setContextActions(copy);
       } else {
         setContextActions([
+          ...(canApprove && selProposal
+            ? [{ label: `Approve proposal ${selProposal.id}…`, hint: "a", run: () => setConfirmApprove(true) }]
+            : []),
+          ...(selProposal && onJumpProposal
+            ? [{ label: `Open proposal ${selProposal.id}`, run: () => onJumpProposal(selProposal.id) }]
+            : []),
           ...(isCancellable(d.run.state)
             ? [{ label: "Cancel run…", hint: "x", run: () => setConfirm("cancel") }]
             : []),
@@ -570,7 +629,7 @@ export function Runs({
     }
     return () => setContextActions([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel?.runId, d?.run.runId, d?.run.state, attemptsExhausted, connected]);
+  }, [sel?.runId, d?.run.runId, d?.run.state, attemptsExhausted, connected, canApprove, selProposal]);
 
   const handleExport = () => {
     const sorted = sortRows(visible, displayConfig, display);
@@ -671,18 +730,36 @@ export function Runs({
                   </td>
                   {show.has("state") && (
                     <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                      <StateBadge state={r.state} />
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
+                        <StateBadge state={r.state} />
+                        {r.state === "PROPOSED" && (() => {
+                          const prop = proposalByRunId.get(r.runId);
+                          if (prop && onJumpProposal) {
+                            return (
+                              <JumpLink
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onJumpProposal(prop.id);
+                                }}
+                                title={`Open proposal ${prop.id}`}
+                                className="text-[11px]"
+                              >
+                                proposal
+                              </JumpLink>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
                       {IN_FLIGHT.includes(r.state) && <RowDeadlines r={r} now={now} />}
                     </td>
                   )}
                   {show.has("agent") && (
                     <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
-                      <JumpLink
-                        onClick={() => onJumpAgent(r.agent)}
-                        title={`Open ${r.agent} in Agents`}
-                      >
-                        {r.agent}
-                      </JumpLink>
+                      <AgentHoverCard
+                        agentRef={r.agent}
+                        onJumpAgent={onJumpAgent}
+                      />
                     </td>
                   )}
                   {show.has("adapter") && (
@@ -844,6 +921,19 @@ export function Runs({
           actions={
             <>
               <div className="flex items-center gap-1.5">
+                {canApprove && selProposal && (
+                  <Button
+                    disabled={!connected || approve.isPending}
+                    onClick={() => setConfirmApprove(true)}
+                  >
+                    Approve… <span className="mono ml-1 text-(--text-faint)" aria-hidden="true">a</span>
+                  </Button>
+                )}
+                {selProposal && onJumpProposal && (
+                  <Button onClick={() => onJumpProposal(selProposal.id)}>
+                    Open proposal
+                  </Button>
+                )}
                 {d && isCancellable(d.run.state) && (
                   <Button
                     variant="danger"
@@ -896,6 +986,35 @@ export function Runs({
           {d && (
             <>
           <RunFailureBanner state={d.run.state} lifecycle={d.lifecycle} />
+          {d.run.state === "PROPOSED" && (
+            <div className="mb-4 rounded-md border border-(--border) bg-(--surface-1) p-3 text-[12px]">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-(--text)">Awaiting Proposal Approval</div>
+                  <div className="text-[11px] text-(--text-dim) mt-0.5">
+                    {selProposal
+                      ? `Proposal ${shortId(selProposal.id)} is open and ready to approve.`
+                      : "This run was proposed and is waiting for proposal approval."}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {selProposal && onJumpProposal && (
+                    <Button onClick={() => onJumpProposal(selProposal.id)}>
+                      Open proposal
+                    </Button>
+                  )}
+                  {canApprove && selProposal && (
+                    <Button
+                      disabled={!connected || approve.isPending}
+                      onClick={() => setConfirmApprove(true)}
+                    >
+                      Approve…
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           <div onClickCapture={handleRunArtifactClick}>
             <RunDetailBlocks
               d={d}
@@ -908,7 +1027,7 @@ export function Runs({
               onRetry={() => retry.mutate({ id: d.run.runId, force: false })}
               onForceRetry={() => setConfirm("force-retry")}
               retryPending={retry.isPending}
-              verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error)}
+              verbError={cancel.error ?? (confirm === "force-retry" ? null : retry.error) ?? approve.error}
               afterLifecycle={
                 /* key: a run switch must reset the feed's cursor and scroll state. */
                 <RunTrace
@@ -923,6 +1042,30 @@ export function Runs({
             </>
           )}
         </DetailPane>
+      )}
+
+      {confirmApprove && selProposal && d && (
+        <Dialog
+          title={`Approve and queue run ${shortId(selProposal.runId ?? d.run.runId)}?`}
+          onClose={() => setConfirmApprove(false)}
+          wide
+        >
+          <div className="mb-3 text-[12px] text-(--text-dim)">
+            Approving proposal <span className="mono font-semibold">{selProposal.id}</span> queues this run for execution.
+          </div>
+          <VerbError error={approve.error} />
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setConfirmApprove(false)}>Not yet</Button>
+            <Button
+              disabled={!connected || approve.isPending}
+              onClick={() => {
+                approve.mutate(selProposal.id);
+              }}
+            >
+              Approve and queue <span className="mono ml-1 opacity-80" aria-hidden="true">↵</span>
+            </Button>
+          </div>
+        </Dialog>
       )}
 
       {confirm === "cancel" && d && (

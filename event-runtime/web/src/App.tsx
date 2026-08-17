@@ -569,6 +569,7 @@ export function App() {
                 onBack={() => navigate(hashPath("runs", fullRunId))}
                 onJumpAgent={jumpToAgent}
                 onJumpEvent={jumpToEvent}
+                onJumpProposal={jumpToProposal}
               />
             </Suspense>
           ) : view === "runs" || view === "run" ? (
@@ -582,6 +583,7 @@ export function App() {
               onFocusStateConsumed={() => setFocusRunState(null)}
               onJumpAgent={jumpToAgent}
               onJumpEvent={jumpToEvent}
+              onJumpProposal={jumpToProposal}
               rejumpEpoch={rejumpEpoch}
             />
           ) : view === "projects" ? (

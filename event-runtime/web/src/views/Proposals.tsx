@@ -22,6 +22,7 @@ import { matchesRepo } from "../context";
 import { PROPOSAL_FACETS, matchesFilterQuery, parseFilterQuery, proposalRunState } from "../filterQuery";
 import { ScopeCaption } from "../components/ContextTabs";
 import { SpecDiff } from "../components/SpecDiff";
+import { AgentHoverCard } from "../components/AgentHoverCard";
 import { decideRevealFilters } from "../reveal";
 import {
   Ago,
@@ -872,12 +873,10 @@ export function Proposals({
                   )}
                   <td className={`${tdCls} max-w-32 truncate`}>
                     {p.agent ? (
-                      <JumpLink
-                        onClick={() => onJumpAgent(p.agent!)}
-                        title={`What is ${p.agent}? Open in Agents`}
-                      >
-                        {p.agent}
-                      </JumpLink>
+                      <AgentHoverCard
+                        agentRef={p.agent}
+                        onJumpAgent={onJumpAgent}
+                      />
                     ) : (
                       <span className="text-(--text-faint)" title="no agent: proposal rejected at planning">
                         —
@@ -1075,9 +1074,10 @@ export function Proposals({
               <KV
                 k="agent"
                 v={
-                  <JumpLink onClick={() => onJumpAgent(sel.agent!)} title={`What is ${sel.agent}? Open in Agents`}>
-                    {sel.agent}
-                  </JumpLink>
+                  <AgentHoverCard
+                    agentRef={sel.agent}
+                    onJumpAgent={onJumpAgent}
+                  />
                 }
               />
             )}
