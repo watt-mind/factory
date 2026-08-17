@@ -734,9 +734,9 @@ describe("Proposals bulk confirm, reject reason, replan halt (WM-141)", () => {
     expect(dialog.textContent).toMatch(/net/);
     expect(dialog.textContent).toMatch(/600s/);
     expect(dialog.textContent).toMatch(/120s/);
-    expect(dialog.querySelectorAll('span[title="adapter"]')).toHaveLength(2);
-    expect(dialog.querySelectorAll('span[title="attempts"]')).toHaveLength(2);
-    expect(dialog.querySelectorAll('span[title="ttl"]')).toHaveLength(2);
+    expect(dialog.querySelectorAll('[title="adapter"]')).toHaveLength(2);
+    expect(dialog.querySelectorAll('[title="attempts"]')).toHaveLength(2);
+    expect(dialog.querySelectorAll('[title="ttl"]')).toHaveLength(2);
     expect(dialog.textContent).toContain("timeoutSeconds");
     expect(dialog.textContent).not.toMatch(/stale-agent/);
 

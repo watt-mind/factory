@@ -30,9 +30,11 @@ Made by the operator, recorded here so nobody relitigates them mid-build:
   `src/components/ui.tsx` — `StateBadge`, `StatTile`, `ListPane`,
   `DetailPane`, `ListEmpty`, `FilterInput`, `Section`, `KV`, `Disclosure`,
   `JsonBlock`, `Button`, `Dialog` (with its own focus trap and Tab cycle),
-  `Countdown`, `Ago`, `JumpLink`, and the toast region. Radix is still in the
-  lockfile, but only transitively beneath `cmdk`. Two later additions round
-  the stack out: `@xyflow/react` + `elkjs` for the graph canvas (§10.13,
+  `Countdown`, `Ago`, `JumpLink`, and the toast region. Radix _primitives_
+  are still in the lockfile only transitively beneath `cmdk`; the one direct
+  Radix dependency is `@radix-ui/react-icons`, the attribute-icon set (§5.2
+  tier 4, WM-482) — icons, not components. Two later additions round the
+  stack out: `@xyflow/react` + `elkjs` for the graph canvas (§10.13,
   code-split off the entry chunk) and `@fontsource-variable/inter` for
   §5.1's typeface.
 - **No authentication.** This narrows §14's "the web-app step requires real
@@ -330,15 +332,45 @@ no shared set. Every rule below is checkable in review.
    `title` + `aria-label`; **no emoji anywhere** in the UI. Adding a glyph to
    this table is a spec change, not a local decision.
 
-3. **Inline SVG icons.** The only tier for _state_ iconography, per OPS-498:
-   14px viewBox, 1.5px stroke (matches the app's hairline weight),
+3. **State icons — inline SVG.** The only tier for _state_ iconography, per
+   OPS-498: 14px viewBox, 1.5px stroke (matches the app's hairline weight),
    `currentColor` fill/stroke so the hue system does the coloring,
    shape-coded per lifecycle state (dashed circle = proposed, half-disc =
    running, disc+check = completed, disc+× = failed, …). Icons sit **left of
    the text label at `gap-1.5` and never replace it** — shape is redundancy
-   for color-blind and peripheral reading, not a substitute for words. No
-   icon font, no icon npm package: hand-rolled inline SVG keeps the bundle
-   honest and the set closed.
+   for color-blind and peripheral reading, not a substitute for words. State
+   shapes stay hand-rolled in `StateIcon` (`ui.tsx`): the set is closed and
+   each shape encodes one lifecycle meaning; a library glyph would not.
+
+4. **Attribute icons — `@radix-ui/react-icons`** (WM-482, 2026-08-17). For
+   _what a thing is_, not _what state it is in_: the workspace, model tier,
+   timeout, adapter, capabilities of a definition. Radix Icons is the one
+   sanctioned package — 15×15 viewBox, ~1px optical weight, `currentColor`,
+   tree-shaken per-icon imports (`import { TimerIcon } from
+   "@radix-ui/react-icons"`). Rendered at **14px** (`size-3.5`) next to
+   12–13px body text — the 15-grid glyph at 14px sits at the label's own
+   optical weight, which is the point: it must not out-shout the word. Rules:
+
+   - An attribute icon **leads its label** (`KV icon=`, `gap-1.5`) and the
+     label is always present. Icon-only attribute rows do not exist.
+   - It takes the label's color (`--text-faint` in `KV`), never a state hue.
+     Hue still means state (below); an attribute icon in `--hue-err` is a
+     state claim it cannot back.
+   - **One glyph, one meaning, app-wide.** The mapping lives with the first
+     use and later uses import the same glyph: `Pencil1Icon` = mutating,
+     `CubeIcon` = workspace, `LockClosedIcon` = capabilities,
+     `Component1Icon` = adapter, `DesktopIcon` = hosts, `CodeIcon` =
+     command, `ListBulletIcon` = action registry, `LightningBoltIcon` =
+     model tier, `Crosshair2Icon` = exact model override, `TimerIcon` =
+     timeout, `ReloadIcon` = attempts. Add to this list in the same PR that
+     adds the glyph.
+   - Identity rows (`id`, `version`, contract) carry **no** icon — an
+     identifier is text, and a word already fits. Within one `KVGroup`
+     either every row has an icon or none does; `icon={null}` reserves the
+     slot when a group is mixed so labels stay aligned.
+   - `aria-hidden` on the slot; the label carries the name.
+   - Still no icon font, and no second icon package: one library keeps the
+     stroke weight and the visual language uniform.
 
    The nav rail stays **text-only** deliberately. An icon rail is deferred
    until the label list outgrows the 52-width rail — icons there would be
@@ -393,6 +425,7 @@ not in this table is not a placement.
 | Context                    | Position                  | Rule                                                                                                           |
 | -------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | State badge / status label | leading, `gap-1.5`        | Icon then word. Never trailing, never alone.                                                                   |
+| `KV` label (attribute icon)| leading, `gap-1.5`        | Icon then label, in the label column, label color. `KVGroup` rows are all-icon or no-icon; `icon={null}` reserves the slot. |
 | Button                     | leading only              | A trailing glyph is reserved for one meaning: `…` = "opens a dialog". Nothing else trails.                     |
 | Table cell                 | leading, baseline-aligned | Same column as its text; a cell is never icon-only unless the header names the meaning and `title` repeats it. |
 | Section / group header     | between chevron and label | Chevron → dot/icon → label → count, in that order (`GroupHeaderRow`).                                          |
@@ -410,7 +443,7 @@ Icon size follows the type size next to it — it is never set independently:
 | Text size        | Icon | Where                                            |
 | ---------------- | ---- | ------------------------------------------------ |
 | 11px (badges)    | 12px | `StateBadge`, table cells, chips                 |
-| 12–13px (body)   | 14px | Default. Buttons, list rows, KV values           |
+| 12–13px (body)   | 14px | Default. Buttons, list rows, KV labels and values (Radix attribute icons render at 14px too) |
 | 14–15px (titles) | 16px | `DetailPane` title, `Dialog` title, empty states |
 
 Chevrons and sort arrows are the exception: 9px, because they are affordance
@@ -474,8 +507,10 @@ Before a PR introduces one, in this order:
 
 1. Would a word do? Then use the word.
 2. Is it in the approved glyph table? Use exactly that glyph for exactly that
-   meaning. If not, and it is a state, it is an OPS-498 SVG icon. If neither,
-   this section changes first (own PR), then the code.
+   meaning. If not, and it is a state, it is an OPS-498 SVG icon. If it names
+   an attribute, it is a Radix icon from the tier-4 mapping (or a new entry
+   added to that mapping in the same PR). If none of these, this section
+   changes first (own PR), then the code.
 3. Does it appear in at least two places, or is it a one-off decoration? A
    one-off is not added.
 4. Placement matches the grammar table; size matches the scale table.

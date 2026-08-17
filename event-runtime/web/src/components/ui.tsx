@@ -1316,18 +1316,47 @@ export function Section({
  */
 const looksLikeIdentifier = (text: string) => !/\s/.test(text);
 
-export function KV({ k, v, mono }: { k: string; v: ReactNode; mono?: boolean }) {
+/**
+ * `-` is the app-wide "unset" value. It is not copyable and it is not
+ * information; render it fainter than the label so a panel with five unset
+ * rows still lets the eye land on the five that are set (WM-482).
+ */
+const isUnset = (v: ReactNode) => v == null || v === "-";
+
+export function KV({
+  k,
+  v,
+  mono,
+  icon,
+}: {
+  k: string;
+  v: ReactNode;
+  mono?: boolean;
+  /**
+   * Attribute icon per §5.2 tier 3b (WM-482): a Radix icon at 14px,
+   * `currentColor`, leading the label at `gap-1.5`. Pass `null` to reserve
+   * the slot on a row without an icon so labels in the same group stay
+   * aligned; omit it entirely in groups that carry no icons.
+   */
+  icon?: ReactNode;
+}) {
   const text = typeof v === "string" ? v : null;
   const copyable = !!text && text !== "-";
   const isMono = mono ?? (text !== null && looksLikeIdentifier(text));
+  const unset = isUnset(v);
   // Fixed label column with the value left-aligned beside it: right-aligning
   // values left a ragged edge (`1/1` next to `multi-dispatch-WM-127`) that the
   // eye had to re-find on every row (WM-136).
   return (
     <div className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] items-baseline gap-3 py-[3px]">
-      <span className="truncate text-(--text-faint)" title={k}>
-        {k}
-      </span>
+      <div className="flex min-w-0 items-center gap-1.5 text-(--text-faint)" title={k}>
+        {icon !== undefined && (
+          <i className="inline-flex size-3.5 shrink-0 items-center justify-center not-italic [&>svg]:size-3.5" aria-hidden="true">
+            {icon}
+          </i>
+        )}
+        <span className="truncate">{k}</span>
+      </div>
       {copyable ? (
         <button
           type="button"
@@ -1341,12 +1370,26 @@ export function KV({ k, v, mono }: { k: string; v: ReactNode; mono?: boolean }) 
         </button>
       ) : (
         <span
-          className={`truncate text-left text-(--text-dim) ${isMono ? "mono" : ""}`}
+          className={`truncate text-left ${unset ? "text-(--text-faint)" : "text-(--text-dim)"} ${isMono ? "mono" : ""}`}
           title={text ?? undefined}
         >
           {v ?? "-"}
         </span>
       )}
+    </div>
+  );
+}
+
+/**
+ * Sub-grouping inside a `Section` of `KV` rows (WM-482). A flat run of
+ * fifteen rows has no landmarks; a faint title plus a hairline every four or
+ * five rows gives the eye somewhere to land without adding a second card.
+ */
+export function KVGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="not-first:mt-2 not-first:border-t not-first:border-(--border) not-first:pt-2">
+      <div className="pb-0.5 text-[11px] font-medium text-(--text-faint)">{title}</div>
+      {children}
     </div>
   );
 }

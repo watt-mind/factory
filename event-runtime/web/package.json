@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.5",
+    "@radix-ui/react-icons": "^1.3.2",
     "@tanstack/react-query": "^5.62.0",
     "@xyflow/react": "^12.11.3",
     "cmdk": "^1.0.4",

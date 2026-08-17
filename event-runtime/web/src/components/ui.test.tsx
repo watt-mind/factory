@@ -2,7 +2,7 @@ import "../test-dom";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { Button, ChipInput, clearToasts, CopyActions, Countdown, DetailPane, Dialog, FilterInput, getValueHue, KV, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
+import { Button, ChipInput, clearToasts, CopyActions, Countdown, DetailPane, Dialog, FilterInput, getValueHue, KV, KVGroup, notify, Section, shortId, StateBadge, SuggestInput, ToastContainer } from "./ui";
 import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
 import { modal } from "../hooks";
 import { changeInput, typeText } from "../test-render";
@@ -409,6 +409,60 @@ describe("KV mono discipline (WM-136)", () => {
     const value = r.getByTitle("sha256:abcdef");
     expect(value.tagName).toBe("BUTTON");
     expect(classes(value)).toContain("truncate");
+  });
+});
+
+describe("KV attribute icons and unset values (WM-482)", () => {
+  test("renders a leading aria-hidden icon slot only when an icon is passed", () => {
+    const r = render(
+      <>
+        <KV k="timeout" v="120s" icon={<svg data-testid="icon" viewBox="0 0 15 15" />} />
+        <KV k="version" v="1" />
+      </>,
+    );
+    const slot = r.getByTestId("icon").parentElement!;
+    expect(slot.getAttribute("aria-hidden")).toBe("true");
+    // Icon precedes the label inside the same label cell (§5.2 placement grammar).
+    const labelCell = slot.parentElement!;
+    expect(labelCell.getAttribute("title")).toBe("timeout");
+    expect(labelCell.firstElementChild).toBe(slot);
+    // A row without `icon` renders no slot at all — groups without icons stay flush.
+    expect(r.getByTitle("version").querySelector("[aria-hidden]")).toBeNull();
+  });
+
+  test("a null icon reserves the slot so labels in the same group align", () => {
+    const r = render(<KV k="model override" v="-" icon={null} />);
+    expect(r.getByTitle("model override").querySelector("[aria-hidden]")).toBeTruthy();
+  });
+
+  test("renders the unset marker fainter than a set value", () => {
+    const r = render(
+      <>
+        <KV k="hosts" v="-" />
+        <KV k="adapter" v={<span>agy</span>} />
+      </>,
+    );
+    const unset = r.getByText("-");
+    expect(classes(unset)).toContain("text-(--text-faint)");
+    expect(unset.tagName).toBe("SPAN"); // never copyable
+    const set = r.getByText("agy").parentElement!;
+    expect(classes(set)).toContain("text-(--text-dim)");
+  });
+
+  test("KVGroup titles the group and separates consecutive groups with a hairline", () => {
+    const r = render(
+      <>
+        <KVGroup title="Identity">
+          <KV k="id" v="a" />
+        </KVGroup>
+        <KVGroup title="Limits">
+          <KV k="timeout" v="1s" />
+        </KVGroup>
+      </>,
+    );
+    expect(r.getByText("Identity")).toBeTruthy();
+    const limits = r.getByText("Limits").parentElement!;
+    expect(classes(limits)).toContain("not-first:border-t");
   });
 });
 
