@@ -63,6 +63,62 @@ function removeTokensFromQuery(filter: string, tokens: readonly FilterToken[]): 
   return next.replace(/\s+/g, " ").trim();
 }
 
+const FACET_PREVIEW_LIMIT = 2;
+
+function FacetChoice({
+  value,
+  count,
+  active,
+  mono = false,
+  onClick,
+}: {
+  value: string;
+  count: number;
+  active: boolean;
+  mono?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      title={value}
+      onClick={onClick}
+      className={`inline-flex min-w-0 max-w-44 items-center rounded-md px-2 py-0.5 text-[11px] transition-colors ${
+        mono ? "mono" : ""
+      } ${
+        active
+          ? "bg-(--surface-3) font-medium text-(--text)"
+          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
+      }`}
+    >
+      <span className="min-w-0 truncate">{value}</span>
+      {count > 0 && (
+        <span className={`${mono ? "font-sans" : ""} ml-1.5 shrink-0 tabular-nums text-(--text-faint)`}>
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function FacetOverflow({ children, count, label }: { children: React.ReactNode; count: number; label: string }) {
+  if (count === 0) return null;
+  return (
+    <details className="relative shrink-0">
+      <summary
+        className="cursor-pointer list-none rounded-md px-2 py-0.5 text-[11px] text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text) [&::-webkit-details-marker]:hidden"
+        title={`Show ${count} more ${label.toLowerCase()}`}
+      >
+        +{count} more
+      </summary>
+      <div className="absolute top-full right-0 z-30 mt-1 flex min-w-56 max-w-80 flex-col items-stretch gap-1 rounded-md border border-(--border-strong) bg-(--surface-1) p-1 shadow-xl">
+        {children}
+      </div>
+    </details>
+  );
+}
+
 function toggleFacetInQuery(filter: string, key: "type" | "source", value: string): string {
   const parsed = parseFilterQuery(filter, EVENT_FACETS);
   const existingTokens = parsed.tokens.filter(
@@ -306,7 +362,6 @@ export function Events({
     [sections, display.collapsed],
   );
   const cols = visibleColumns(displayConfig, display);
-  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
 
   const selectedKey =
     focusEvent?.source && focusEvent?.eventId ? `${focusEvent.source}:${focusEvent.eventId}` : null;
@@ -320,6 +375,13 @@ export function Events({
     () => (selectedKey ? (visible.find((e) => keyOf(e) === selectedKey) ?? null) : null),
     [visible, selectedKey],
   );
+  // The detail pane leaves a compact triage list. Keep the columns needed to
+  // identify and compare events; the complete row remains in Display when the
+  // pane closes, and every field remains available in the pane itself.
+  const listCols = sel
+    ? cols.filter((c) => ["event", "type", "subject", "status", "admitted"].includes(c.key))
+    : cols;
+  const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
@@ -593,61 +655,69 @@ export function Events({
         </div>
 
         {(types.length > 1 || sources.length > 1) && (
-          <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+          <div className="mb-2 flex min-w-0 items-center gap-x-4 whitespace-nowrap text-[11px]">
             {types.length > 1 && (
-              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event types">
-                <span className="text-[11px] font-medium text-(--text-dim)">Type:</span>
-                {types.map((t) => {
+              <div className="flex min-w-0 flex-1 items-center gap-1.5" role="group" aria-label="Event types">
+                <span className="shrink-0 text-[11px] font-medium text-(--text-dim)">Type:</span>
+                {types.slice(0, FACET_PREVIEW_LIMIT).map((t) => {
                   const isPressed = activeTypes.has(t.toLowerCase());
-                  const count = typeCounts[t] ?? 0;
                   return (
-                    <button
+                    <FacetChoice
                       key={t}
-                      type="button"
-                      aria-pressed={isPressed}
+                      value={t}
+                      count={typeCounts[t] ?? 0}
+                      active={isPressed}
                       onClick={() => {
-                        const next = isPressed ? null : t;
                         setFilter((cur) => toggleFacetInQuery(cur, "type", t));
-                        onSelectType(next);
+                        onSelectType(isPressed ? null : t);
                       }}
-                      className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                        isPressed
-                          ? "bg-(--surface-3) text-(--text) font-medium"
-                          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
-                      }`}
-                    >
-                      <span>{t}</span>
-                      {count > 0 && <span className="ml-1.5 tabular-nums text-(--text-faint)">{count}</span>}
-                    </button>
+                    />
                   );
                 })}
+                <FacetOverflow count={Math.max(0, types.length - FACET_PREVIEW_LIMIT)} label="event types">
+                  {types.slice(FACET_PREVIEW_LIMIT).map((t) => {
+                    const isPressed = activeTypes.has(t.toLowerCase());
+                    return (
+                      <FacetChoice
+                        key={t}
+                        value={t}
+                        count={typeCounts[t] ?? 0}
+                        active={isPressed}
+                        onClick={() => {
+                          setFilter((cur) => toggleFacetInQuery(cur, "type", t));
+                          onSelectType(isPressed ? null : t);
+                        }}
+                      />
+                    );
+                  })}
+                </FacetOverflow>
               </div>
             )}
             {sources.length > 1 && (
-              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Event sources">
-                <span className="text-[11px] font-medium text-(--text-dim)">Source:</span>
-                {sources.map((s) => {
-                  const isPressed = activeSources.has(s.toLowerCase());
-                  const count = sourceCounts[s] ?? 0;
-                  return (
-                    <button
+              <div className="flex min-w-0 flex-1 items-center gap-1.5" role="group" aria-label="Event sources">
+                <span className="shrink-0 text-[11px] font-medium text-(--text-dim)">Source:</span>
+                {sources.slice(0, FACET_PREVIEW_LIMIT).map((s) => (
+                  <FacetChoice
+                    key={s}
+                    value={s}
+                    count={sourceCounts[s] ?? 0}
+                    active={activeSources.has(s.toLowerCase())}
+                    mono
+                    onClick={() => setFilter((cur) => toggleFacetInQuery(cur, "source", s))}
+                  />
+                ))}
+                <FacetOverflow count={Math.max(0, sources.length - FACET_PREVIEW_LIMIT)} label="event sources">
+                  {sources.slice(FACET_PREVIEW_LIMIT).map((s) => (
+                    <FacetChoice
                       key={s}
-                      type="button"
-                      aria-pressed={isPressed}
-                      onClick={() => {
-                        setFilter((cur) => toggleFacetInQuery(cur, "source", s));
-                      }}
-                      className={`rounded-md px-2 py-0.5 mono text-[11px] transition-colors ${
-                        isPressed
-                          ? "bg-(--surface-3) text-(--text) font-medium"
-                          : "text-(--text-faint) hover:bg-(--surface-1) hover:text-(--text)"
-                      }`}
-                    >
-                      <span>{s}</span>
-                      {count > 0 && <span className="ml-1.5 font-sans tabular-nums text-(--text-faint)">{count}</span>}
-                    </button>
-                  );
-                })}
+                      value={s}
+                      count={sourceCounts[s] ?? 0}
+                      active={activeSources.has(s.toLowerCase())}
+                      mono
+                      onClick={() => setFilter((cur) => toggleFacetInQuery(cur, "source", s))}
+                    />
+                  ))}
+                </FacetOverflow>
               </div>
             )}
           </div>
@@ -678,10 +748,10 @@ export function Events({
         }
       >
 
-        <table className="w-full border-separate border-spacing-0">
+        <table className="w-full table-fixed border-separate border-spacing-0">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
-              {cols.map((c) => {
+              {listCols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
                 const isCustom = c.isCustom || c.key.startsWith("custom:");
                 const customPath = c.key.replace(/^custom:/, "");
@@ -730,27 +800,25 @@ export function Events({
                       </td>
                     )}
                     {show.has("status") && (
-                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                        <div className="flex items-center whitespace-nowrap">
-                          <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
+                      <td
+                        className="max-w-44 overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                        title={e.lastPlanError ?? proposalReason ?? undefined}
+                      >
+                        <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
+                          <span className="shrink-0">
+                            <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
+                          </span>
                           {e.planFailures > 0 && (
-                            <span className="ml-2 whitespace-nowrap text-[11px] text-(--hue-err)">
-                              {e.planFailures} plan failure{e.planFailures === 1 ? "" : "s"}
+                            <span className="shrink-0 text-[11px] text-(--hue-err)">
+                              {e.planFailures} failure{e.planFailures === 1 ? "" : "s"}
+                            </span>
+                          )}
+                          {(e.lastPlanError || proposalReason) && (
+                            <span className="mono min-w-0 truncate text-(--text-dim)">
+                              {e.lastPlanError ?? proposalReason}
                             </span>
                           )}
                         </div>
-                        {/* Why the event is parked, on the row: `.mono` carries its own
-                            11.5px, so no size utility (it is unlayered and would win).
-                            The detail pane keeps the untruncated error. */}
-                        {e.lastPlanError ? (
-                          <div className="mono mt-0.5 truncate whitespace-nowrap text-(--text-dim)" title={e.lastPlanError}>
-                            {e.lastPlanError}
-                          </div>
-                        ) : proposalReason ? (
-                          <div className="mono mt-0.5 truncate whitespace-nowrap text-(--text-dim)" title={proposalReason}>
-                            {proposalReason}
-                          </div>
-                        ) : null}
                       </td>
                     )}
                     {show.has("admitted") && (
@@ -758,7 +826,7 @@ export function Events({
                         <Ago iso={e.admittedAt} now={now} />
                       </td>
                     )}
-                    {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                    {listCols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
                       <CustomCell key={c.key} row={e} path={c.key.replace(/^custom:/, "")} />
                     ))}
                   </tr>
@@ -770,7 +838,7 @@ export function Events({
                 return (
                   <Fragment key={s.key}>
                     <GroupHeaderRow
-                      colSpan={cols.length}
+                      colSpan={listCols.length}
                       section={s}
                       collapsed={closed}
                       onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
@@ -782,7 +850,7 @@ export function Events({
                             return (
                               <Fragment key={child.key}>
                                 <GroupHeaderRow
-                                  colSpan={cols.length}
+                                  colSpan={listCols.length}
                                   section={child}
                                   collapsed={childClosed}
                                   onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
@@ -799,7 +867,7 @@ export function Events({
             })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={cols.length}
+                colSpan={listCols.length}
                 query={list}
                 filtered={tabScoped.length > 0}
                 onClear={

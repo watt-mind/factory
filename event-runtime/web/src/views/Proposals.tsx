@@ -421,7 +421,6 @@ export function Proposals({
     [sections, display.collapsed],
   );
   const cols = visibleColumns(displayConfig, display);
-  const show = useMemo(() => new Set(cols.map((c) => c.key)), [cols]);
 
   const selectedId = focusProposalId;
   // Keyboard index walks the open sections; the detail pane keys off the row
@@ -431,6 +430,12 @@ export function Proposals({
     () => (selectedId ? (visible.find((p) => p.id === selectedId) ?? null) : null),
     [visible, selectedId],
   );
+  // Keep the selected-row list as a compact audit rail. Open and History expose
+  // different columns, so this union leaves four useful columns in either tab.
+  const listCols = sel
+    ? cols.filter((c) => ["agent", "decision", "ttl", "status", "decided", "origin"].includes(c.key))
+    : cols;
+  const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
 
   /** Agent behind the selected proposal — feeds the shared safety card / approve dialog. */
   const selAgent = useMemo(
@@ -824,7 +829,7 @@ export function Proposals({
         }
       >
 
-        <table className="w-full border-separate border-spacing-0 max-sm:[&_th:nth-child(n+4)]:hidden max-sm:[&_td:nth-child(n+4)]:hidden">
+        <table className="w-full table-fixed border-separate border-spacing-0 max-sm:[&_th:nth-child(n+4)]:hidden max-sm:[&_td:nth-child(n+4)]:hidden">
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
               {tab === "open" && (
@@ -840,7 +845,7 @@ export function Proposals({
                   />
                 </th>
               )}
-              {cols.map((c) => {
+              {listCols.map((c) => {
                 const sort = displayConfig.sorts.find((s) => s.column === c.key);
                 const isCustom = c.isCustom || c.key.startsWith("custom:");
                 const customPath = c.key.replace(/^custom:/, "");
@@ -860,7 +865,7 @@ export function Proposals({
           </thead>
           <tbody>
             {(() => {
-              const totalColSpan = cols.length + (tab === "open" ? 1 : 0);
+              const totalColSpan = listCols.length + (tab === "open" ? 1 : 0);
               const tdCls = "border-b border-(--border) px-3 py-1.5 whitespace-nowrap";
               const renderRow = (p: Proposal) => (
                 <tr
@@ -958,7 +963,7 @@ export function Proposals({
                       {p.reason ?? "-"}
                     </td>
                   )}
-                  {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
+                  {listCols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
                     <CustomCell key={c.key} row={p} path={c.key.replace(/^custom:/, "")} />
                   ))}
                 </tr>
@@ -998,7 +1003,7 @@ export function Proposals({
             })()}
             {visible.length === 0 && (
               <ListEmpty
-                colSpan={cols.length + (tab === "open" ? 1 : 0)}
+                colSpan={listCols.length + (tab === "open" ? 1 : 0)}
                 query={tab === "open" ? query : history}
                 filtered={unfilteredCount > 0}
                 onClear={
