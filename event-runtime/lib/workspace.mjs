@@ -239,12 +239,21 @@ export function createWorkspace({
 
   let worktree = null;
   if (workspace.type === "worktree") {
-    worktree = materializeWorktree({
-      workspaceDir: dir,
-      input,
-      checkoutDir: workspace.checkoutDir ?? "repo",
-      timeoutMs: worktreeTimeoutMs,
-    });
+    try {
+      worktree = materializeWorktree({
+        workspaceDir: dir,
+        input,
+        checkoutDir: workspace.checkoutDir ?? "repo",
+        timeoutMs: worktreeTimeoutMs,
+      });
+    } catch (err) {
+      if (err instanceof WorktreeError) throw err;
+      const repoName = input?.repo ?? "unknown repo";
+      const ticket = input?.ticket ?? "unknown ticket";
+      throw new WorktreeError(
+        `worktree provisioning failed for ${repoName}/${ticket}: ${err?.message ?? String(err)}`,
+      );
+    }
   }
   return { dir, checkout, materialized, worktree };
 }

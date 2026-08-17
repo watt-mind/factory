@@ -61,6 +61,34 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO="$(repo_root)"
+WORKTREE_LIFECYCLE_LOCK=""
+
+try_worktree_lifecycle_lock() { # <ticket>
+  local common root lock holder=""
+  common=$(git -C "$REPO" rev-parse --git-common-dir)
+  [[ "$common" == /* ]] || common="$REPO/$common"
+  root="$common/factory-worktree-locks"
+  lock="$root/$1.lock"
+  mkdir -p "$root"
+  if ! mkdir "$lock" 2>/dev/null; then
+    holder=$(cat "$lock/pid" 2>/dev/null || true)
+    if [[ "$holder" =~ ^[0-9]+$ ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$lock"
+      mkdir "$lock" 2>/dev/null || return 1
+    else
+      return 1
+    fi
+  fi
+  printf '%s\n' "$$" >"$lock/pid"
+  WORKTREE_LIFECYCLE_LOCK="$lock"
+}
+
+release_worktree_lifecycle_lock() {
+  if [[ -n "$WORKTREE_LIFECYCLE_LOCK" && "$(cat "$WORKTREE_LIFECYCLE_LOCK/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "$WORKTREE_LIFECYCLE_LOCK"
+  fi
+  WORKTREE_LIFECYCLE_LOCK=""
+}
 
 if [[ "$HERE" -eq 1 ]]; then
   [[ -z "$TICKET" ]] || die "--here takes no ticket — it provisions the current checkout"
@@ -73,17 +101,60 @@ else
   LABEL="$TICKET"
   BRANCH="$TYPE/$TICKET${SLUG:+-$SLUG}"
 
-  if [[ -d "$WT" ]]; then
-    [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "worktree already exists: $WT"
+  try_worktree_lifecycle_lock "$TICKET" \
+    || die "worktree_lifecycle_busy: another process is provisioning or removing $TICKET"
+  trap release_worktree_lifecycle_lock EXIT
+  trap 'release_worktree_lifecycle_lock; exit 130' INT
+  trap 'release_worktree_lifecycle_lock; exit 143' TERM
+
+  [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "fetching origin/$BASE_BRANCH"
+  if [[ "$NO_FETCH" -eq 1 ]]; then
+    FACTORY_SKIP_FETCH=1 git_fetch "$REPO" "origin" "$BASE_BRANCH"
   else
-    [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "fetching origin/$BASE_BRANCH"
-    if [[ "$NO_FETCH" -eq 1 ]]; then
-      FACTORY_SKIP_FETCH=1 git_fetch "$REPO" "origin" "$BASE_BRANCH"
-    else
-      git_fetch "$REPO" "origin" "$BASE_BRANCH"
+    git_fetch "$REPO" "origin" "$BASE_BRANCH"
+  fi
+
+  BASE_REF="origin/$BASE_BRANCH"
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    BRANCH_SHA=$(git -C "$REPO" rev-parse "refs/heads/$BRANCH") \
+      || die "worktree_branch_inspection_failed: could not resolve branch '$BRANCH'"
+    BASE_SHA=$(git -C "$REPO" rev-parse "$BASE_REF") \
+      || die "worktree_branch_inspection_failed: could not resolve $BASE_REF"
+    UNIQUE_COMMITS=$(git -C "$REPO" rev-list --count "$BASE_REF..$BRANCH") \
+      || die "worktree_branch_inspection_failed: could not compare branch '$BRANCH' with $BASE_REF"
+    if [[ "$UNIQUE_COMMITS" -gt 0 ]]; then
+      die "worktree_branch_has_commits: branch '$BRANCH' has $UNIQUE_COMMITS unique commit(s) beyond $BASE_REF — resume or remove it explicitly before re-dispatch"
     fi
+
+    if [[ -d "$WT" ]]; then
+      CURRENT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+      [[ "$CURRENT_BRANCH" == "$BRANCH" ]] \
+        || die "worktree_branch_mismatch: $WT is on '${CURRENT_BRANCH:-detached HEAD}', expected '$BRANCH'"
+      [[ -z "$(git -C "$WT" status --porcelain)" ]] \
+        || die "worktree_branch_dirty: $WT has uncommitted work — resume or clean it explicitly before re-dispatch"
+      # `merge --ff-only` is non-destructive if another process commits after
+      # inspection; unlike reset --hard, it can never discard that commit.
+      git -C "$WT" merge --ff-only "$BASE_REF" >/dev/null \
+        || die "worktree_branch_update_failed: branch '$BRANCH' changed while moving to $BASE_REF"
+    else
+      # Compare-and-swap the ref so a concurrent commit cannot be overwritten.
+      git -C "$REPO" update-ref "refs/heads/$BRANCH" "$BASE_SHA" "$BRANCH_SHA" \
+        || die "worktree_branch_update_failed: branch '$BRANCH' changed while moving to $BASE_REF"
+    fi
+
+    UNIQUE_COMMITS=$(git -C "$REPO" rev-list --count "$BASE_REF..$BRANCH") \
+      || die "worktree_branch_inspection_failed: could not re-check branch '$BRANCH'"
+    [[ "$UNIQUE_COMMITS" -eq 0 ]] \
+      || die "worktree_branch_has_commits: branch '$BRANCH' gained $UNIQUE_COMMITS unique commit(s) while moving to $BASE_REF — refusing re-dispatch"
+  elif [[ -d "$WT" ]]; then
+    die "worktree_branch_missing: $WT exists but branch '$BRANCH' does not"
+  fi
+
+  if [[ -d "$WT" ]]; then
+    [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "worktree already exists at current $BASE_REF: $WT"
+  else
     [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "creating worktree $WT on $BRANCH"
-    worktree_add "$WT" "$BRANCH" "origin/$BASE_BRANCH" "$REPO"
+    worktree_add "$WT" "$BRANCH" "$BASE_REF" "$REPO"
   fi
 fi
 

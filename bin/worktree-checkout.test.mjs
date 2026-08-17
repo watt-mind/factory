@@ -332,6 +332,167 @@ test("worktree-up --checkout-only creates checkout without daemons and worktree-
   }
 });
 
+test("re-dispatch fast-forwards a deliberately stale branch to the current base", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-stale-"));
+  const ticketId = makeTestTicket("STALE");
+  const branch = `feat/${ticketId}`;
+  const git = (args) => Bun.spawnSync({ cmd: ["git", ...args], cwd: path.resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" });
+
+  try {
+    expect(git(["branch", branch, "origin/develop~1"]).exitCode).toBe(0);
+    const staleSha = git(["rev-parse", branch]).stdout.toString().trim();
+    const baseSha = git(["rev-parse", "origin/develop"]).stdout.toString().trim();
+    expect(staleSha).not.toBe(baseSha);
+
+    const upRes = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(upRes.exitCode).toBe(0);
+    expect(git(["-C", path.join(tempWtRoot, ticketId), "rev-parse", "HEAD"]).stdout.toString().trim()).toBe(baseSha);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    git(["branch", "-D", branch]);
+  }
+});
+
+test("re-dispatch refuses a branch carrying unique commits and names it", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-unique-"));
+  const ticketId = makeTestTicket("UNIQUE");
+  const branch = `feat/${ticketId}`;
+  const expectedPath = path.join(tempWtRoot, ticketId);
+
+  try {
+    const firstUp = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(firstUp.exitCode).toBe(0);
+    writeFileSync(path.join(expectedPath, "unique.txt"), "ticket work\n");
+    expect(Bun.spawnSync({ cmd: ["git", "add", "unique.txt"], cwd: expectedPath }).exitCode).toBe(0);
+    expect(Bun.spawnSync({
+      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "unique ticket commit"],
+      cwd: expectedPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode).toBe(0);
+    expect(Bun.spawnSync({
+      cmd: ["bash", DOWN, ticketId],
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode).toBe(0);
+
+    const secondUp = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(secondUp.exitCode).not.toBe(0);
+    expect(secondUp.stderr.toString()).toContain("worktree_branch_has_commits");
+    expect(secondUp.stderr.toString()).toContain(branch);
+    expect(existsSync(expectedPath)).toBe(false);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
+  }
+});
+
+test("worktree-down --prune removes only clean terminal worktrees and preserves dirty or live trees", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-bin-"));
+  const tickets = [makeTestTicket("TERMINAL"), makeTestTicket("DIRTY"), makeTestTicket("LIVE")];
+  const [terminalTicket, dirtyTicket, liveTicket] = tickets;
+
+  try {
+    for (const ticket of tickets) {
+      const up = Bun.spawnSync({
+        cmd: ["bash", UP, ticket, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(up.exitCode).toBe(0);
+    }
+    writeFileSync(path.join(tempWtRoot, dirtyTicket, "uncommitted.txt"), "do not remove\n");
+    mkdirSync(path.join(tempWtRoot, liveTicket, ".factory", "run"), { recursive: true });
+    writeFileSync(path.join(tempWtRoot, liveTicket, ".factory", "run", "worker.pid"), `${process.pid}\n`);
+
+    writeFileSync(path.join(mockBin, "bun"), "#!/usr/bin/env bash\nprintf '{\"state\":{\"name\":\"Done\"}}\\n'\n", { mode: 0o755 });
+    const pruned = Bun.spawnSync({
+      cmd: ["bash", DOWN, "--prune"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(pruned.exitCode).toBe(0);
+    expect(existsSync(path.join(tempWtRoot, terminalTicket))).toBe(false);
+    expect(existsSync(path.join(tempWtRoot, dirtyTicket))).toBe(true);
+    expect(existsSync(path.join(tempWtRoot, liveTicket))).toBe(true);
+    expect(pruned.stdout.toString()).toContain("pruned 1 terminal worktree");
+  } finally {
+    rmSync(path.join(tempWtRoot, dirtyTicket, "uncommitted.txt"), { force: true });
+    rmSync(path.join(tempWtRoot, liveTicket, ".factory"), { recursive: true, force: true });
+    for (const ticket of tickets) {
+      Bun.spawnSync({ cmd: ["bash", DOWN, ticket, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    }
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    Bun.spawnSync({
+      cmd: ["git", "branch", "-D", ...tickets.map((ticket) => `feat/${ticket}`)],
+      cwd: path.resolve(import.meta.dir, ".."),
+    });
+  }
+});
+
+test("worktree-down --prune recognizes a merged PR for the worktree branch", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-merged-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-merged-bin-"));
+  const ticketId = makeTestTicket("MERGED");
+  const branch = `feat/${ticketId}`;
+
+  try {
+    const up = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(up.exitCode).toBe(0);
+
+    writeFileSync(path.join(mockBin, "bun"), "#!/usr/bin/env bash\nprintf '{\"state\":{\"name\":\"In Review\"}}\\n'\n", { mode: 0o755 });
+    writeFileSync(path.join(mockBin, "gh"), `#!/usr/bin/env bash\n[[ "$*" == *"--head ${branch}"* ]] && printf '1\\n' || printf '0\\n'\n`, { mode: 0o755 });
+    const pruned = Bun.spawnSync({
+      cmd: ["bash", DOWN, "--prune"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(pruned.exitCode).toBe(0);
+    expect(existsSync(path.join(tempWtRoot, ticketId))).toBe(false);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
+  }
+});
+
 test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-conc-"));
   const ticket1 = makeTestTicket("CONCA");

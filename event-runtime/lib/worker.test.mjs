@@ -1177,6 +1177,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       `#!/bin/bash\necho "dependency install failed" >&2\nexit 12\n`,
     );
     writeFileSync(
+      path.join(repoDir, "bin", "worktree-up-link-collision.sh"),
+      `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\nmkdir -p "$(dirname "$FACTORY_WORKTREE_REPORT")/repo"\n`,
+    );
+    writeFileSync(
       path.join(repoDir, "bin", "worktree-up-startup-crash.sh"),
       `#!/bin/bash\n` +
       `mkdir -p "${wtRoot}/$1/.factory/run"\n` +
@@ -1215,6 +1219,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         `  - name: wt-startup-crash\n    path: ${repoDir}\n    github: watt-mind/wt-startup-crash\n    base: develop\n` +
         `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
         `    worktree_up: bin/worktree-up-startup-crash.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n` +
+        `  - name: wt-link-collision\n    path: ${repoDir}\n    github: watt-mind/wt-link-collision\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
+        `    worktree_up: bin/worktree-up-link-collision.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n`,
     );
     previousReposRoot = process.env.FACTORY_REPOS_ROOT;
@@ -1952,6 +1960,31 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("workspace_provisioning_error");
     expect(summary.error).toContain("dependency install failed");
+    expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ?`).get(spec.runId).reason_code).toBe("workspace_provisioning_error");
+  });
+
+  test("filesystem failures after worktree_up remain typed workspace provisioning errors", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-link-collision-locks-"));
+    let executed = false;
+    const observingAdapter = { async execute() { executed = true; return { exitCode: 0, timedOut: false }; } };
+
+    const spec = queueRun(db, makeDispatchSpec({ input: { repo: "wt-link-collision", ticket: "WM-734" } }));
+    const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({ identifier: "WM-734", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    }));
+
+    expect(executed).toBe(false);
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("workspace_provisioning_error");
+    expect(summary.error).toContain("worktree provisioning failed for wt-link-collision/WM-734");
+    expect(summary.error).toContain("EEXIST");
     expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ?`).get(spec.runId).reason_code).toBe("workspace_provisioning_error");
   });
 
