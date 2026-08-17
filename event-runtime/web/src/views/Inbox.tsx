@@ -128,6 +128,98 @@ export function sourceRunId(source: string): string | null {
 
 const LINEAR_ISSUE_URL = "https://linear.app/watt-mind/issue/";
 
+const REPO_GITHUB: Record<string, string> = {
+  bj29: "watt-mind/bakonszegi-coaching",
+  "wm-home": "watt-mind/wm-home",
+  "coach-wattz": "watt-mind/coach",
+  "watts-mobile": "watt-mind/watts-mobile",
+  legalease: "watt-mind/legalease",
+  cashsaas: "hdkiller/cashsaas",
+  proxies: "watt-mind/proxies",
+  hdkiller: "hdkiller/hdkiller",
+  "eslint-config": "watt-mind/eslint-config",
+  factory: "watt-mind/factory",
+};
+
+// Only unambiguous team prefixes belong here. CLNT, CW, and OPS each route to
+// multiple repositories, so a bare issue from those teams must not guess.
+const ISSUE_PREFIX_GITHUB: Record<string, string> = {
+  WM: "watt-mind/factory",
+  LAB: "watt-mind/proxies",
+};
+
+function prNumber(ref: string | undefined): string | null {
+  if (!ref) return null;
+  return /^(?:PR\s*)?#(\d+)$/i.exec(ref.trim())?.[1] ?? /\/pull\/(\d+)(?:[/?#]|$)/.exec(ref)?.[1] ?? null;
+}
+
+function githubRepo(item: InboxItem): string | null {
+  const repo = item.refs.repo?.trim();
+  if (repo) {
+    if (/^[^/\s]+\/[^/\s]+$/.test(repo)) return repo;
+    if (REPO_GITHUB[repo]) return REPO_GITHUB[repo];
+  }
+  const team = /^([A-Z][A-Z0-9]+)-\d+$/i.exec(item.refs.issue ?? "")?.[1]?.toUpperCase();
+  return team ? (ISSUE_PREFIX_GITHUB[team] ?? null) : null;
+}
+
+/** Resolve only real absolute URLs or PR shorthands with a known repository. */
+export function prHref(item: InboxItem): string | null {
+  const ref = item.refs.pr?.trim();
+  if (!ref) return null;
+  if (/^https?:\/\/[^\s]+$/i.test(ref)) return ref;
+  const number = prNumber(ref);
+  const repo = githubRepo(item);
+  return number && repo ? `https://github.com/${repo}/pull/${number}` : null;
+}
+
+function refPrefixIsVisible(prefix: string, item: InboxItem): boolean {
+  const tokens = prefix.split(/\s*\/\s*/);
+  return tokens.every((token) => {
+    if (/^[A-Z][A-Z0-9]+-\d+$/i.test(token)) {
+      return item.refs.issue?.toUpperCase() === token.toUpperCase();
+    }
+    const number = /^(?:PR\s*)?#(\d+)$/i.exec(token)?.[1];
+    return number != null && prNumber(item.refs.pr) === number;
+  });
+}
+
+/** Keep the row focused on the action by removing labels already shown beside it. */
+export function displayTitle(item: InboxItem): string {
+  let title = item.title.trimStart();
+  const knownKinds = [...new Set([item.kind, ...INBOX_GROUPS.flatMap((group) => group.kinds)])]
+    .sort((a, b) => b.length - a.length);
+  for (const kind of knownKinds) {
+    const plain = kind.toLowerCase();
+    const bracketed = `[${plain}]`;
+    const lower = title.toLowerCase();
+    const matched = lower.startsWith(`${plain} `)
+      ? plain.length
+      : lower.startsWith(`${bracketed} `)
+        ? bracketed.length
+        : 0;
+    if (matched) {
+      title = title.slice(matched).trimStart();
+      break;
+    }
+  }
+
+  const refPrefix = /^((?:(?:[A-Z][A-Z0-9]+-\d+)|(?:(?:PR\s*)?#\d+))(?:\s*\/\s*(?:(?:[A-Z][A-Z0-9]+-\d+)|(?:(?:PR\s*)?#\d+)))?)\s*:\s*/i.exec(title);
+  if (refPrefix && refPrefixIsVisible(refPrefix[1], item)) title = title.slice(refPrefix[0].length);
+  return title || item.title;
+}
+
+/** WM-559 will move this precision into shared `Ago`; keep the Inbox local until then. */
+export function inboxAge(iso: string, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  return `${days}d ${hours}h ago`;
+}
+
 const isTypingTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
 
@@ -459,9 +551,7 @@ export function Inbox({
               {sel.refs.issue && (
                 <KV k="issue" v={<JumpLink href={`${LINEAR_ISSUE_URL}${encodeURIComponent(sel.refs.issue)}`} title="Open in Linear">{sel.refs.issue}</JumpLink>} />
               )}
-              {sel.refs.pr && (
-                <KV k="pr" v={<JumpLink href={sel.refs.pr} title="Open pull request">{sel.refs.pr.replace(/^https?:\/\/(www\.)?github\.com\//, "")}</JumpLink>} />
-              )}
+              {sel.refs.pr && <KV k="pr" v={<PrRef item={sel} />} />}
               {sel.refs.repo && <KV k="repo" v={sel.refs.repo} />}
             </Section>
           )}
@@ -549,12 +639,12 @@ function GroupRows({
                 shrink-to-fit, `min-w-40` stops it collapsing to a glyph when
                 the pane opens at ~1100px — Refs gives up width first. */}
             <td className={`${tdCls} min-w-40 max-w-0`}>
-              <div className="truncate text-(--text)" title={item.title}>{item.title}</div>
+              <div className="truncate text-(--text)" title={item.title}>{displayTitle(item)}</div>
             </td>
             <td className={`${tdCls} w-16 text-(--text-faint)`}>
-              <Ago iso={item.createdAt} now={now} />
+              <span className="tabular-nums" title={item.createdAt}>{inboxAge(item.createdAt, now)}</span>
             </td>
-            <td className={`${tdCls} w-40 max-w-40`}>
+            <td className={`${tdCls} w-72 max-w-72`}>
               <RefChips item={item} onJumpRun={onJumpRun} onJumpProposal={onJumpProposal} onJumpEvent={onJumpEvent} />
             </td>
             <td className={`${tdCls} w-12`}>
@@ -573,6 +663,17 @@ function GroupRows({
   );
 }
 
+function PrRef({ item, className }: { item: InboxItem; className?: string }) {
+  const ref = item.refs.pr!;
+  const href = prHref(item);
+  const label = ref.replace(/^https?:\/\/(www\.)?github\.com\//, "");
+  return href ? (
+    <JumpLink className={className} href={href} title="Open pull request">{label}</JumpLink>
+  ) : (
+    <span className={`mono ${className ?? ""}`} title={ref}>{ref}</span>
+  );
+}
+
 /** Every ref is one click from the thing it is about; nothing here selects the row. */
 function RefChips({
   item,
@@ -586,14 +687,29 @@ function RefChips({
   onJumpEvent: (source: string, eventId: string) => void;
 }) {
   const r = item.refs;
-  const chip = "rounded border border-(--border) bg-(--surface-1) px-1 text-[10px]";
-  const chips: React.ReactNode[] = [];
-  if (r.runId) chips.push(<JumpLink key="run" className={chip} onClick={() => onJumpRun(r.runId!)} title={r.runId}>{shortId(r.runId)}</JumpLink>);
-  if (r.proposalId) chips.push(<JumpLink key="prop" className={chip} onClick={() => onJumpProposal(r.proposalId!)} title={r.proposalId}>{shortId(r.proposalId)}</JumpLink>);
-  if (r.eventId && r.eventSource) chips.push(<JumpLink key="event" className={chip} onClick={() => onJumpEvent(r.eventSource!, r.eventId!)} title={r.eventId}>{shortId(r.eventId)}</JumpLink>);
-  if (r.issue) chips.push(<JumpLink key="issue" className={chip} href={`${LINEAR_ISSUE_URL}${encodeURIComponent(r.issue)}`} title="Open in Linear">{r.issue}</JumpLink>);
-  if (r.pr) chips.push(<JumpLink key="pr" className={chip} href={r.pr} title={r.pr}>PR</JumpLink>);
+  const chip = "inline-block max-w-20 truncate rounded border border-(--border) bg-(--surface-1) px-1 align-bottom text-[10px]";
+  const chips: { key: string; description: string; node: React.ReactNode }[] = [];
+  if (r.runId) chips.push({ key: "run", description: `run ${r.runId}`, node: <JumpLink className={chip} onClick={() => onJumpRun(r.runId!)} title={r.runId}>{shortId(r.runId)}</JumpLink> });
+  if (r.proposalId) chips.push({ key: "prop", description: `proposal ${r.proposalId}`, node: <JumpLink className={chip} onClick={() => onJumpProposal(r.proposalId!)} title={r.proposalId}>{shortId(r.proposalId)}</JumpLink> });
+  if (r.eventId) {
+    const event = r.eventSource
+      ? <JumpLink className={chip} onClick={() => onJumpEvent(r.eventSource!, r.eventId!)} title={r.eventId}>{shortId(r.eventId)}</JumpLink>
+      : <span className={`mono ${chip}`} title={r.eventId}>{shortId(r.eventId)}</span>;
+    chips.push({ key: "event", description: `event ${r.eventId}`, node: event });
+  }
+  if (r.issue) chips.push({ key: "issue", description: `issue ${r.issue}`, node: <JumpLink className={chip} href={`${LINEAR_ISSUE_URL}${encodeURIComponent(r.issue)}`} title="Open in Linear">{r.issue}</JumpLink> });
+  if (r.pr) chips.push({ key: "pr", description: `pull request ${r.pr}`, node: <PrRef item={item} className={chip} /> });
   if (chips.length === 0) return <span className="text-(--text-faint)">-</span>;
-  // One line, clipped: a row must stay one row high; the pane lists every ref in full.
-  return <div className="flex gap-1 overflow-hidden whitespace-nowrap [&>*]:shrink-0">{chips}</div>;
+  const visible = chips.slice(0, 3);
+  const hidden = chips.slice(3);
+  return (
+    <div className="flex gap-1 overflow-hidden whitespace-nowrap [&>*]:shrink-0">
+      {visible.map(({ key, node }) => <span key={key} className="contents">{node}</span>)}
+      {hidden.length > 0 && (
+        <span className={`mono ${chip} text-(--text-faint)`} title={hidden.map((ref) => ref.description).join(", ")}>
+          +{hidden.length}
+        </span>
+      )}
+    </div>
+  );
 }
