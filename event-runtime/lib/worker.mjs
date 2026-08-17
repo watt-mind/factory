@@ -58,7 +58,7 @@ function workerSubprocessTimeoutMs() {
     : DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS;
 }
 
-const ENVIRONMENT_FAILURES = new Set(["adapter_error", "lease_expired"]);
+const ENVIRONMENT_FAILURES = new Set(["adapter_error", "lease_expired", "linear_unconfigured"]);
 const AGENT_FAILURES = new Set(["contract_violation"]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
@@ -461,6 +461,35 @@ export function createReloadWatcher({
 
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
 
+/**
+ * Resolve Linear credentials the same way the CLI does: process env first,
+ * then the operator's shared env file. The resolved value is copied into the
+ * supplied env so every Linear CLI child inherits it; it is never logged.
+ */
+export function resolveLinearApiKey({
+  env = process.env,
+  envFile = path.join(homedir(), "Develop", "hdkiller", ".env"),
+} = {}) {
+  if (env.LINEAR_API_KEY) return env.LINEAR_API_KEY;
+  if (!existsSync(envFile)) return null;
+
+  try {
+    for (const line of readFileSync(envFile, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+      const idx = trimmed.indexOf("=");
+      if (trimmed.slice(0, idx).trim() !== "LINEAR_API_KEY") continue;
+      const value = trimmed.slice(idx + 1).trim().replace(/^['"]|['"]$/g, "");
+      if (!value) return null;
+      env.LINEAR_API_KEY = value;
+      return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /** Execute one bounded Linear CLI operation; exported for timeout regression tests. */
 export function runLinearCli(
   args,
@@ -567,7 +596,7 @@ const ACTIVE_EXECUTIONS = new Map();
  */
 export async function executeClaimed(db, registry, adapters, claim, {
   workspacesRoot, artifactStore = artifactsRoot(), now = () => Date.now(), policyVersion = "unknown", adapterOverride, env = {},
-  dispatch,
+  dispatch, resolveLinearKey = resolveLinearApiKey,
 } = {}) {
   const { runId, attempt, fencingToken, spec } = claim;
   const owner = db
@@ -587,7 +616,12 @@ export async function executeClaimed(db, registry, adapters, claim, {
   let attemptUsage = { adapter: adapterOverride ?? spec.adapter };
 
   let dispatchOpts = dispatch;
-  if (!dispatchOpts && process.env.FACTORY_EVENT_HOME && !process.env.LINEAR_API_KEY) {
+  const explicitDispatchStub = !dispatchOpts && (
+    process.env.FACTORY_DISPATCH_STUB === "1" ||
+    adapterOverride === "fake" ||
+    spec.adapter === "fake"
+  );
+  if (explicitDispatchStub) {
     dispatchOpts = {
       fetchTicket: () => ({
         identifier: ticketId,
@@ -601,6 +635,9 @@ export async function executeClaimed(db, registry, adapters, claim, {
       unclaimTicket: () => true,
     };
   }
+  const linearConfigured = dispatchOpts || !isWorktree || !repoName || !ticketId
+    ? true
+    : Boolean(resolveLinearKey());
 
   const locksDir = dispatchOpts?.locksDir ?? defaultLocksDir();
   const leasesDir = dispatchOpts?.leasesDir ?? leaseDir();
@@ -731,6 +768,18 @@ export async function executeClaimed(db, registry, adapters, claim, {
     }
 
     if (isWorktree && repoName && ticketId) {
+      if (!linearConfigured) {
+        const res = failTerminal("FAILED", "linear_unconfigured", "linear_unconfigured");
+        stopCancellationMonitor();
+        if (res?.fenced) return { fenced: true };
+        return {
+          runId,
+          attempt,
+          terminalState: "FAILED",
+          reasonCode: "linear_unconfigured",
+        };
+      }
+
       const lockAcquired = acquireClaimLock(lockFile, { pid: process.pid, now: nowFn(), isAlive: isAliveFn });
       if (!lockAcquired) {
         const deferred = deferClaimLockContention(db, {
