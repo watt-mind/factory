@@ -46,6 +46,7 @@ term_daemon "$RUN_DIR/serve.pid" "event runtime"
 await_daemon "$RUN_DIR/web.pid" "web server"
 await_daemon "$RUN_DIR/worker.pid" "worker"
 await_daemon "$RUN_DIR/serve.pid" "event runtime"
+release_port_reservation "$WT"
 
 if [[ "$HERE" -eq 1 ]]; then
   info "removing demo state $(event_home "$WT")"

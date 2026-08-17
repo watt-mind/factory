@@ -93,6 +93,7 @@ if [[ "$CHECKOUT_ONLY" -eq 1 ]]; then
 fi
 
 command -v bun >/dev/null || die "bun is required (https://bun.sh)"
+command -v lsof >/dev/null || die "lsof is required to verify daemon port ownership"
 
 RUN_DIR="$(run_dir "$WT")"
 HOME_DIR="$(event_home "$WT")"
@@ -121,7 +122,32 @@ record_red_baseline() {
 
 # Resolve API/web ports only after the checkout exists so we can persist them.
 # --here prefers 7391/7392 but follows the same recorded-port reuse and
-# collision fallback path as named ticket worktrees.
+# collision fallback path as named ticket worktrees. If anything after the
+# reservation fails, stop only daemons created by this invocation and release
+# dead partial pid/port state so a retry can claim the pair.
+STARTED_SERVE=0
+STARTED_WORKER=0
+STARTED_WEB=0
+WORKTREE_UP_OK=0
+cleanup_worktree_up() {
+  local code=$?
+  trap - EXIT INT TERM
+  release_port_allocation_lock
+  if [[ "$code" -ne 0 && "$WORKTREE_UP_OK" -ne 1 ]]; then
+    [[ "$STARTED_WEB" -eq 1 ]] && term_daemon "$RUN_DIR/web.pid" "web server"
+    [[ "$STARTED_WORKER" -eq 1 ]] && term_daemon "$RUN_DIR/worker.pid" "worker"
+    [[ "$STARTED_SERVE" -eq 1 ]] && term_daemon "$RUN_DIR/serve.pid" "event runtime"
+    [[ "$STARTED_WEB" -eq 1 ]] && await_daemon "$RUN_DIR/web.pid" "web server"
+    [[ "$STARTED_WORKER" -eq 1 ]] && await_daemon "$RUN_DIR/worker.pid" "worker"
+    [[ "$STARTED_SERVE" -eq 1 ]] && await_daemon "$RUN_DIR/serve.pid" "event runtime"
+    release_worktree_ports_if_idle "$WT"
+  fi
+  exit "$code"
+}
+trap cleanup_worktree_up EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ "$HERE" -eq 1 ]]; then
   preferred="$HERE_API_PORT"
 else
@@ -174,7 +200,6 @@ if port_listening "$API_PORT"; then
   occupant=$(health_field "$(health_json "$API_PORT")" home)
   if [[ "$occupant" != "$HOME_DIR" ]]; then
     if ! pid_alive "$RUN_DIR/serve.pid"; then
-      rm -f "$RUN_DIR/ports"
       die "port $API_PORT is owned by another runtime (env.home=${occupant:-unknown}, this worktree=$HOME_DIR) — refusing to seed"
     fi
   fi
@@ -187,6 +212,7 @@ else
   spawn_daemon "$RUN_DIR/serve.pid" "$RUN_DIR/serve.log" "$WT" \
     env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
     bun event-runtime/cli.mjs serve ${ADAPTER_ARGS[@]+"${ADAPTER_ARGS[@]}"}
+  STARTED_SERVE=1
 fi
 
 # Wait for /health BEFORE starting the worker: on a fresh DB, serve and worker
@@ -210,19 +236,16 @@ for _ in {1..50}; do
   HEALTH_JSON=$(curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" 2>/dev/null) && break
   HEALTH_JSON=""
   if ! pid_alive "$RUN_DIR/serve.pid"; then
-    rm -f "$RUN_DIR/ports"
     dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
     die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
   fi
   sleep 0.1
 done
 if ! pid_alive "$RUN_DIR/serve.pid"; then
-  rm -f "$RUN_DIR/ports"
   dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
 fi
 if [[ -z "$HEALTH_JSON" ]]; then
-  rm -f "$RUN_DIR/ports"
   dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   HEALTH_JSON=$(curl -sf -m 2 "http://127.0.0.1:$API_PORT/health") \
     || die "control API never came up on $API_PORT — see $RUN_DIR/serve.log"
@@ -240,6 +263,7 @@ else
   spawn_daemon "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$WT" \
     env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
     bun event-runtime/cli.mjs work ${ADAPTER_ARGS[@]+"${ADAPTER_ARGS[@]}"}
+  STARTED_WORKER=1
 fi
 
 if pid_alive "$RUN_DIR/web.pid"; then
@@ -249,6 +273,25 @@ else
   spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$WT" \
     env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
     bun event-runtime/web/serve.mjs
+  STARTED_WEB=1
+fi
+
+# A listener alone is insufficient: an alien process could have occupied the
+# adjacent port after allocation. Require the recorded web daemon itself to own
+# the persisted port before reporting the environment ready.
+WEB_PID_PORT=""
+for _ in {1..50}; do
+  if ! pid_alive "$RUN_DIR/web.pid"; then
+    dump_daemon_log "$RUN_DIR/web.log" "web server"
+    die "web server died during startup on $WEB_PORT — see $RUN_DIR/web.log"
+  fi
+  WEB_PID_PORT=$(listen_tcp_port "$RUN_DIR/web.pid" || true)
+  [[ "$WEB_PID_PORT" == "$WEB_PORT" ]] && break
+  sleep 0.1
+done
+if [[ "$WEB_PID_PORT" != "$WEB_PORT" ]]; then
+  dump_daemon_log "$RUN_DIR/web.log" "web server"
+  die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT"
 fi
 
 # ------------------------------------------------------------------- seed ---
@@ -295,6 +338,7 @@ if [[ "$SEED" -eq 1 && ( "$FRESH" -eq 1 || "$RESEED" -eq 1 ) ]]; then
 fi
 
 # ----------------------------------------------------------------- report ---
+WORKTREE_UP_OK=1
 cat <<EOF
 
 $(info "ready — $LABEL")
