@@ -20,7 +20,7 @@
     },
     "plan": {
       "type": "array",
-      "description": "Queue-ordered (priority asc, then createdAt asc) tickets that are dispatchable right now: Todo + ai:agent-ready + unassigned, within the per-repo in-flight cap, Owned Paths mutually disjoint and disjoint from every in-flight ticket's paths. Item order is dispatch order; only the first item chains this run",
+      "description": "Queue-ordered tickets using explicit Linear priority rank Urgent (1), High (2), Medium (3), Low (4), No priority (0), then createdAt ascending. Every item is dispatchable right now: state exactly Todo, label ai:agent-ready present, and assignee null; within the per-repo in-flight cap; Owned Paths mutually disjoint and disjoint from every in-flight ticket's paths. Item order is dispatch order; only the first item chains this run",
       "items": {
         "type": "object",
         "required": ["ticket", "ownedPaths", "reason"],
@@ -29,7 +29,7 @@
           "ticket": {
             "type": "string",
             "pattern": "^[A-Z]+-[0-9]+$",
-            "description": "Linear issue identifier, dispatchable at scan time (assignee field checked, not just labels)"
+            "description": "Linear issue identifier, dispatchable at scan time: state exactly Todo, label ai:agent-ready present, and assignee field null"
           },
           "ownedPaths": {
             "type": "array",
@@ -44,7 +44,7 @@
           "reason": {
             "type": "string",
             "minLength": 1,
-            "description": "One line of why this ticket made the plan at this position (priority, age, path disjointness)"
+            "description": "One line of why this ticket made the plan at this position, naming its priority by label (Urgent, High, Medium, Low, or No priority) rather than only by number, plus age and path disjointness"
           }
         }
       }
@@ -61,7 +61,7 @@
     "readyCandidates": {
       "type": "integer",
       "minimum": 0,
-      "description": "Count of candidate tickets after complete read and assignment/capability filtering, before cap/overlap pruning"
+      "description": "Count after a complete read is filtered to state exactly Todo, label ai:agent-ready present, and assignee null, before cap/overlap pruning"
     },
     "triageBacklog": {
       "type": "integer",

@@ -364,6 +364,26 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(out.kind).toBe("completed");
     expect(out.result.verification.checks).toContain("repo_verify_passed");
   });
+
+  test("a timed-out repository verification fails closed without hanging", () => {
+    const dir = worktreeWorkspace("while :; do :; done", null);
+    const previous = process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
+    process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = "25";
+    const started = Date.now();
+    try {
+      try {
+        verifyResult({ spec: dispatchSpec, def: dispatchDef, registry, workspaceDir: dir, attempt: 1 });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.violations).toEqual(["repo_verify_failed: timed out after 25ms"]);
+        expect(Date.now() - started).toBeLessThan(1_000);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
+      else process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = previous;
+    }
+  });
 });
 
 describe("evidence retention (OPS-206)", () => {

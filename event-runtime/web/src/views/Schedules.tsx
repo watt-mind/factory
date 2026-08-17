@@ -530,7 +530,7 @@ export function Schedules({
               </div>
             )}
 
-            <Section id="schedule-configuration" title="Configuration">
+            <Section id="schedule-configuration" title="Configuration" icons>
               <KV k="loop name" v={<span className="mono">{sel.loop}</span>} />
               <KV
                 k="cadence"
@@ -596,7 +596,7 @@ export function Schedules({
               />
             </Section>
 
-            <Section title="Timing & Clocks">
+            <Section title="Timing & Clocks" icons>
               <KV
                 k="last fire"
                 v={

@@ -26,6 +26,16 @@ import { PathViolation, safeJoin } from "./workspace.mjs";
  */
 export const EVIDENCE_INLINE_LIMIT_BYTES = 256 * 1024;
 
+/** Hard ceiling for the repository-owned verification command (WM-262). */
+export const DEFAULT_REPO_VERIFY_TIMEOUT_MS = 120_000;
+
+function repoVerifyTimeoutMs() {
+  const configured = Number(process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_REPO_VERIFY_TIMEOUT_MS;
+}
+
 export const REFUSAL_REASONS = [
   "missing_input",
   "permission_denied",
@@ -84,7 +94,17 @@ export { normalizeFailureOutput, failureSignature };
  *         | { kind: "completed", result: object, receipt: object }}
  * @throws {ContractViolation} on any contract failure — fail closed.
  */
-export function verifyResult({ spec, def, registry, workspaceDir, attempt, journalHead = null, extraArtifacts = [], worktreeRecord = null }) {
+export function verifyResult({
+  spec,
+  def,
+  registry,
+  workspaceDir,
+  attempt,
+  journalHead = null,
+  extraArtifacts = [],
+  worktreeRecord = null,
+  verifyTimeoutMs = repoVerifyTimeoutMs(),
+}) {
   let raw;
   try {
     raw = readFileSync(path.join(workspaceDir, "result.json"), "utf8");
@@ -103,7 +123,9 @@ export function verifyResult({ spec, def, registry, workspaceDir, attempt, journ
   if (!shape.valid) throw new ContractViolation(shape.errors);
 
   if (candidate.terminalState === "refused") return verifyRefused({ spec, def, candidate, attempt });
-  return verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts, worktreeRecord });
+  return verifyCompleted({
+    spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts, worktreeRecord, verifyTimeoutMs,
+  });
 }
 
 /**
@@ -235,7 +257,17 @@ const SEMANTIC_CHECKS = {
   "factory.work-plan/v1": (candidate) => checkWorkPlan(candidate),
 };
 
-function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalHead, extraArtifacts = [], worktreeRecord = null }) {
+function verifyCompleted({
+  spec,
+  def,
+  candidate,
+  workspaceDir,
+  attempt,
+  journalHead,
+  extraArtifacts = [],
+  worktreeRecord = null,
+  verifyTimeoutMs,
+}) {
   if (candidate.artifact === undefined) throw new ContractViolation(["missing_artifact"]);
 
   const artifactCheck = validate(def.outputSchema, candidate.artifact);
@@ -260,11 +292,18 @@ function verifyCompleted({ spec, def, candidate, workspaceDir, attempt, journalH
     const worktreePath = worktreeRecord.path && existsSync(worktreeRecord.path)
       ? worktreeRecord.path
       : path.join(workspaceDir, "repo");
-    const vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], { cwd: worktreePath, encoding: "utf8" });
-    if (vres.status !== 0) {
+    const vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: verifyTimeoutMs,
+    });
+    if (vres.error?.code === "ETIMEDOUT" || vres.status !== 0) {
       const output = [vres.stdout, vres.stderr].filter(Boolean).join("\n").trim();
-      const why = output.split("\n").filter(Boolean).pop() || `exit ${vres.status}`;
-      const baselineStillRed = matchesRedBaseline(worktreeRecord.baseline, output);
+      const timedOut = vres.error?.code === "ETIMEDOUT";
+      const why = timedOut
+        ? `timed out after ${verifyTimeoutMs}ms`
+        : output.split("\n").filter(Boolean).pop() || `exit ${vres.status}`;
+      const baselineStillRed = !timedOut && matchesRedBaseline(worktreeRecord.baseline, output);
       throw new ContractViolation(
         [`repo_verify_failed: ${why}`],
         { reasonCode: baselineStillRed ? "baseline_red" : "contract_violation" },

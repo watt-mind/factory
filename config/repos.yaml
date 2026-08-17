@@ -182,8 +182,10 @@ repos:
     team: CW
     project: Mobile App
     base: develop
+    worktree_up: bin/worktree-up.sh
+    worktree_down: bin/worktree-down.sh
     worktree_root: ~/Develop/.worktrees/watts-mobile
-    report_only: true            # No isolated worktree lifecycle yet.
+    report_only: true            # Command distribution / janitor cleanup enabled; dispatch pending.
     verify: pnpm typecheck && pnpm lint && pnpm test
     escalate_paths:
       - src/features/subscriptions/**

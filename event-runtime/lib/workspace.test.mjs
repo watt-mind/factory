@@ -87,6 +87,14 @@ describe("worktree workspaces (WM-108)", () => {
       `#!/bin/bash\nexit 0\n`,
     );
     writeFileSync(
+      path.join(repoDir, "bin", "worktree-up-hanging.sh"),
+      `#!/bin/bash\nwhile :; do :; done\n`,
+    );
+    writeFileSync(
+      path.join(repoDir, "bin", "worktree-down-hanging.sh"),
+      `#!/bin/bash\nwhile :; do :; done\n`,
+    );
+    writeFileSync(
       path.join(repoDir, "bin", "worktree-up-red-baseline.sh"),
       `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\nprintf '%s\\n' '{"status":"red","check":"web_build","command":"bun run build:fast","exitCode":1,"output":"entry chunk exceeds budget"}' > "$FACTORY_WORKTREE_REPORT"\n`,
     );
@@ -108,6 +116,12 @@ describe("worktree workspaces (WM-108)", () => {
         `  - name: empty-up\n    path: ${repoDir}\n    base: develop\n` +
         `    worktree_up: bin/worktree-up-empty.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n` +
+        `  - name: hanging-up\n    path: ${repoDir}\n    base: develop\n` +
+        `    worktree_up: bin/worktree-up-hanging.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n` +
+        `  - name: hanging-down\n    path: ${repoDir}\n    base: develop\n` +
+        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down-hanging.sh\n` +
+        `    worktree_root: ${wtRoot}\n` +
         `  - name: red-baseline\n    path: ${repoDir}\n    base: develop\n` +
         `    worktree_up: bin/worktree-up-red-baseline.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n    verify: bun test\n` +
@@ -125,13 +139,14 @@ describe("worktree workspaces (WM-108)", () => {
     else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
   });
 
-  const make = (repo, ticket, runId) =>
+  const make = (repo, ticket, runId, extra = {}) =>
     createWorkspace({
       root: tmpRoot(),
       runId,
       attempt: 1,
       input: { repo, ticket },
       workspace: { type: "worktree" },
+      ...extra,
     });
 
   test("up is delegated to the repo's script; the tree is reachable at ./repo; verify rides along", () => {
@@ -178,6 +193,15 @@ describe("worktree workspaces (WM-108)", () => {
     expect(existsSync(path.join(wtRoot, "WM-4"))).toBe(true);
   });
 
+  test("a timed-out worktree_down retains the workspace without hanging", () => {
+    const { dir } = make("hanging-down", "WM-10", "run_wt10");
+    const started = Date.now();
+    expect(destroyWorkspace(dir, { worktreeTimeoutMs: 25 })).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(existsSync(dir)).toBe(true);
+    expect(existsSync(path.join(wtRoot, "WM-10"))).toBe(true);
+  });
+
   test("a red baseline is recorded in the marker and agent input without aborting workspace creation", () => {
     const { dir, worktree } = make("red-baseline", "WM-5", "run_wt5");
     expect(worktree.baseline).toMatchObject({
@@ -214,6 +238,39 @@ describe("worktree workspaces (WM-108)", () => {
 
   test("a zero-exit script that created no worktree is still a provisioning failure", () => {
     expect(() => make("empty-up", "WM-9", "run_wt9")).toThrow(/did not create/);
+  });
+
+  test("a timed-out worktree_up raises a typed error and leaves teardown facts for the janitor", () => {
+    const root = tmpRoot();
+    const workspaceDir = path.join(root, "run_wt11-a1");
+    const previous = process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+    process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = "25";
+    const started = Date.now();
+    try {
+      try {
+        createWorkspace({
+          root,
+          runId: "run_wt11",
+          attempt: 1,
+          input: { repo: "hanging-up", ticket: "WM-11" },
+          workspace: { type: "worktree" },
+        });
+        throw new Error("expected WorktreeError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(WorktreeError);
+        expect(err.code).toBe("workspace_provisioning_error");
+        expect(err.message).toContain("timed out after 25ms");
+        expect(Date.now() - started).toBeLessThan(1_000);
+        expect(JSON.parse(readFileSync(path.join(workspaceDir, ".worktree.json"), "utf8"))).toMatchObject({
+          repo: "hanging-up",
+          ticket: "WM-11",
+          down: "bin/worktree-down.sh",
+        });
+      }
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      else process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = previous;
+    }
   });
 
   test("a repo with no declared scripts fails typed, not with a crash mid-spawn", () => {

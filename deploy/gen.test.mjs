@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { installPlists, launchdPath, plist } from "./gen.mjs";
+import { ROOT } from "../lib/schedule.mjs";
 
 const defaults = {
   label_prefix: "com.wattmind",
@@ -30,6 +31,15 @@ test("plist includes EnvironmentVariables with a launchd-safe PATH", () => {
     </dict>`);
   expect((rendered.match(/<key>EnvironmentVariables<\/key>/g) ?? []).length).toBe(1);
   expect((rendered.match(/<key>PATH<\/key>/g) ?? []).length).toBe(1);
+});
+
+test("plist does not leak the renderer worktree into ProgramArguments", () => {
+  const rendered = plist(job, defaults, "/usr/bin");
+
+  expect(rendered).toContain(
+    '<string>cd "${FACTORY_ROOT:-$HOME/Develop/factory}" &amp;&amp; bun orchestrator/run.mjs --only triage</string>',
+  );
+  expect(rendered).not.toContain(ROOT);
 });
 
 test("launchdPath uses the macOS toolchain fallback when PATH is missing", () => {

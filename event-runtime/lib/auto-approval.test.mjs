@@ -41,6 +41,7 @@ function seed(
     predecessorInput = input,
     parentRunId = `parent-${id}`,
     seedPredecessor = true,
+    timeoutSeconds = 600,
   } = {},
 ) {
   const mapping = registry.eventTypes[type];
@@ -130,6 +131,7 @@ function seed(
     runId,
     agent: mapping.agent,
     input,
+    timeoutSeconds,
     ...(defaultApprovalPolicy ? { approvalPolicy: defaultApprovalPolicy } : {}),
     ...(runSpec ?? {}),
   };
@@ -593,106 +595,37 @@ describe("chain auto approval (WM-357)", () => {
     ).toContain("merge_owner_not_allowed");
   });
 
-  test("failed and timed-out merge applies remain global holds without a durable resolution", () => {
-    for (const state of ["FAILED", "TIMED_OUT"]) {
+  test("terminal merge applies never hold the barrier", () => {
+    for (const state of [
+      "FAILED",
+      "CANCELLED",
+      "TIMED_OUT",
+      "REFUSED",
+      "COMPLETED",
+    ]) {
       const db = openDb(":memory:");
-      const historical = seedHistoricalApply(db, {
-        id: `uncertain-${state.toLowerCase()}`,
+      seedHistoricalApply(db, {
+        id: `terminal-${state.toLowerCase()}`,
         state,
       });
-      seed(db, {
+      const input = reviewedMergeInput({ pr: 410 });
+      const candidate = seed(db, {
         id: `candidate-after-${state.toLowerCase()}`,
         type: "factory.merge-apply.requested",
-        input: reviewedMergeInput({ pr: 410 }),
+        input,
         predecessorArtifact: {
           recommendation: "MERGE",
-          ...reviewedMergeInput({ pr: 410 }),
+          ...input,
           fix: [],
           escalate: [],
           summary: "next merge candidate",
         },
       });
 
-      expect(autoMerge(db).approved).toEqual([]);
-      expect(openProposals(db, {})[0].reason).toContain(
-        `merge_barrier_uncertain:${historical.runId}`,
-      );
-    }
-  });
-
-  test("a later exact apply and completed verifier supersede the historical PR 409 failure", () => {
-    const db = openDb(":memory:");
-    const input = reviewedMergeInput({ pr: 409, ticket: "WM-430" });
-    seedHistoricalApply(db, {
-      id: "historical-pr-409-failure",
-      runId: "run_14f89ff8-052c-4119-9e0c-fec9bb626fec",
-      input,
-      state: "FAILED",
-    });
-    seedMergeResolution(db, {
-      id: "successful-pr-409-apply",
-      applyRunId: "run_90c6d727-7c1e-4859-98ab-66774df7eaed",
-      verifyRunId: "run_0fca34e9-7b60-4ccb-ba51-7cea9596b0fe",
-      input,
-    });
-    const nextInput = reviewedMergeInput({ pr: 410, ticket: "WM-446" });
-    const candidate = seed(db, {
-      id: "next-merge-after-pr-409",
-      type: "factory.merge-apply.requested",
-      input: nextInput,
-      predecessorArtifact: {
-        recommendation: "MERGE",
-        ...nextInput,
-        fix: [],
-        escalate: [],
-        summary: "next merge can proceed",
-      },
-    });
-
-    expect(autoMerge(db).approved).toEqual([
-      { proposalId: candidate.id, runId: candidate.runId },
-    ]);
-    expect(runState(db, candidate.runId)).toBe("QUEUED");
-  });
-
-  test("a completed apply for a different PR or reviewed head does not clear the hold", () => {
-    const mismatches = [
-      reviewedMergeInput({ pr: 408, ticket: "WM-408" }),
-      reviewedMergeInput({ pr: 409, headSha: "d".repeat(40) }),
-      {
-        ...reviewedMergeInput({ pr: 409 }),
-        github: "watt-mind/other-factory",
-      },
-    ];
-    for (const [index, resolutionInput] of mismatches.entries()) {
-      const db = openDb(":memory:");
-      const historical = seedHistoricalApply(db, {
-        id: `identity-hold-${index}`,
-        input: reviewedMergeInput({ pr: 409 }),
-        state: "FAILED",
-      });
-      seedMergeResolution(db, {
-        id: `identity-mismatch-${index}`,
-        input: resolutionInput,
-      });
-      const nextInput = reviewedMergeInput({ pr: 410 });
-      seed(db, {
-        id: `identity-candidate-${index}`,
-        type: "factory.merge-apply.requested",
-        input: nextInput,
-        predecessorArtifact: {
-          recommendation: "MERGE",
-          ...nextInput,
-          fix: [],
-          escalate: [],
-          summary: "identity mismatch candidate",
-        },
-      });
-
-      expect(autoMerge(db).approved).toEqual([]);
-      expect(openProposals(db, {})[0].reason).toContain(
-        `merge_barrier_uncertain:${historical.runId}`,
-      );
+      expect(autoMerge(db).approved).toEqual([
+        { proposalId: candidate.id, runId: candidate.runId },
+      ]);
+      expect(runState(db, candidate.runId)).toBe("QUEUED");
     }
   });
 
@@ -731,42 +664,43 @@ describe("chain auto approval (WM-357)", () => {
     }
   });
 
-  test("inexact verifier identity or proposal provenance does not clear the hold", () => {
-    const inexactVerifiers = [
-      { verifierInputOverrides: { repo: "other-factory" } },
-      { verifierInputOverrides: { base: "release" } },
-      { verifierInputOverrides: { ticket: "WM-999" } },
-      { verifierInputOverrides: { headRef: "feat/WM-999" } },
-      { proposalDecision: "watch" },
-    ];
-    for (const [index, options] of inexactVerifiers.entries()) {
+  test("in-flight merge applies hold with state and age until their own timeout", () => {
+    for (const state of ["QUEUED", "LEASED", "RUNNING", "VERIFYING"]) {
       const db = openDb(":memory:");
-      const historical = seedHistoricalApply(db, {
-        id: `inexact-verifier-hold-${index}`,
-        state: "FAILED",
+      const active = seedHistoricalApply(db, {
+        id: `active-${state.toLowerCase()}`,
+        state,
       });
-      seedMergeResolution(db, {
-        id: `inexact-verifier-resolution-${index}`,
-        ...options,
-      });
-      const nextInput = reviewedMergeInput({ pr: 410 });
-      seed(db, {
-        id: `inexact-verifier-candidate-${index}`,
+      db.query(`UPDATE runs SET created_at = ? WHERE run_id = ?`).run(
+        new Date(now - 599_000).toISOString(),
+        active.runId,
+      );
+      const input = reviewedMergeInput({ pr: 410 });
+      const candidate = seed(db, {
+        id: `candidate-during-${state.toLowerCase()}`,
         type: "factory.merge-apply.requested",
-        input: nextInput,
+        input,
         predecessorArtifact: {
           recommendation: "MERGE",
-          ...nextInput,
+          ...input,
           fix: [],
           escalate: [],
-          summary: "inexact verifier candidate",
+          summary: "active barrier candidate",
         },
       });
 
       expect(autoMerge(db).approved).toEqual([]);
       expect(openProposals(db, {})[0].reason).toContain(
-        `merge_barrier_uncertain:${historical.runId}`,
+        `merge_barrier_active:${active.runId}:state=${state}:age=599s`,
       );
+
+      db.query(`UPDATE runs SET created_at = ? WHERE run_id = ?`).run(
+        new Date(now - 600_000).toISOString(),
+        active.runId,
+      );
+      expect(autoMerge(db).approved).toEqual([
+        { proposalId: candidate.id, runId: candidate.runId },
+      ]);
     }
   });
 

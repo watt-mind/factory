@@ -19,6 +19,36 @@ triage-scan (refills supply) ──> work-scan (selects) ──> dispatch (execu
 - **Fail-closed discipline**: The system must fail closed (treat unreadable APIs as full pools, block colliding globs, reject unverified tests).
 - **High agency**: Solve problems directly. If a run wedges, unstick it. If supply drops, run a triage sweep. If a merge gate fails on a fixable nit, fix it. Escalate to the human only when policy or security demands it.
 
+### The Loop Runs Unattended — Diagnosis Is Not the Deliverable
+
+**The operator must never have to poke this session to keep the factory moving.**
+When something blocks throughput — a red gate, a wedged run, a stale hold, a PR
+missing evidence, a schema that cannot represent a case — **fix it, then report
+what you did**. Filing the ticket is the record, not the job.
+
+The failure mode to avoid is *diagnose, then wait*: presenting a correct analysis
+as a menu of options and stopping for a pick. That converts a self-sustaining
+loop back into a human-paced one and makes the operator the bottleneck for work
+they already delegated. If you find yourself writing "want me to…?" about
+something inside your authority, do it instead.
+
+Pick the **least destructive option that actually unblocks**, take it, and say
+what you chose and why. Prefer reversible moves (a draft, a label, a revert, a
+new ticket) over destructive ones (closing, deleting, force-pushing). Being
+wrong-but-reversible while moving beats being right-but-stopped.
+
+**Reserved for the human — the only things worth stopping for:**
+
+- `master`/deploy-branch merges and release sign-off
+- Auth/authz, payments, secrets, destructive migrations, production infra
+- Anything a `Blocked` ticket is genuinely waiting on (a missing credential, a
+  contradictory spec, a product decision)
+- A circuit-breaker stop, or base CI red that you cannot fix in two rounds
+
+Everything else is yours to decide. Report continuously — a short account of what
+was fixed and what is now running — so the operator can steer without being
+asked to unblock.
+
 ---
 
 ## 2. Dynamic Boot & Assessment Routine
@@ -167,6 +197,51 @@ The factory automatically merges PRs targeting `develop` once all gates pass.
 3. **Fail-Closed Stance**:
    - If the API (`:7381`) is unreachable or returns 500s, treat the worker pool as **FULL** and hold dispatch until recovery.
 
+4. **Keep the Main Checkout Pullable — a Dirty Tree Is Yours to Clear**:
+
+   The live stack pins `policyVersion` at startup and loads agent definitions
+   once, so **the factory keeps running whatever was on disk when it booted**.
+   After work lands on `develop`, the stack is stale until it is restarted, and
+   it cannot be restarted onto new code if the checkout will not fast-forward.
+   A dirty main checkout therefore silently freezes the factory at an old
+   commit. Clearing it is part of the loop, not a question for the operator.
+
+   ```bash
+   git status --porcelain        # non-empty means dirty
+   git rev-list --count HEAD..origin/develop   # >0 means behind
+   ```
+
+   **Never `git stash`.** The stash stack (`.git/refs/stash`) is repo-global,
+   not per-worktree, so a stash here can be popped into a concurrent agent's
+   worktree — silent cross-session data loss. See the trap table below and
+   `AGENTS.md`. The escape is always a **commit**, never a stash:
+
+   - **Uncommitted work that matters** → commit it on a branch (file the ticket
+     first, per the Linear protocol), push, and open the PR. This is the normal
+     case and it loses nothing.
+   - **Not yours and not obviously disposable** → still commit it to a branch
+     and say so in the report. A branch is recoverable; a discarded diff is not.
+   - **Genuinely disposable build litter** → confirm it is untracked/generated
+     before removing it. Read the diff first; never blanket-`checkout --` a tree
+     you have not looked at.
+
+   Then pull, restart, and confirm the stack came up on the new SHA:
+
+   ```bash
+   git checkout develop && git pull --ff-only
+   bin/live-stack.sh down && bin/live-stack.sh up --workers 3:10
+   curl -sf http://127.0.0.1:7381/health    # policyVersion must be the new SHA
+   ```
+
+   **Restart is required — not optional — when `develop` changed** any of
+   `event-runtime/agents/**`, `event-runtime/schemas/**`,
+   `event-runtime/event-types.json`, `event-runtime/schedules.json`, or
+   `config/**`. Model-tier and routing changes resolve at *plan* time inside
+   `serve`, so a `serve`-only restart is enough for those and leaves running
+   workers untouched; a definition change needs the workers restarted too.
+   Drain first — `bin/live-stack.sh down` finishes in-flight runs — and prefer
+   restarting when no dispatch is mid-flight.
+
 ---
 
 ### Loop 5: Decision & Human Escalation Protocol
@@ -189,6 +264,42 @@ factory notify "<EVENT> <TICKET/PR>: <one answerable sentence>"
 | `RC READY` | Release candidate PR (`develop -> master`) prepared, green, and awaiting human sign-off. |
 
 *Routine updates (claims, routine merges, spec completions) belong in Linear comments and session summaries, never notify.*
+
+---
+
+### Loop 6: Delegate the Long Work — Stay Available to Be Steered
+
+The operator "observes and sets high-level strategy". That only works if the
+session can answer them. A blocking command makes the operator wait on work they
+cannot see, and their steering message queues behind it.
+
+**Delegate to a subagent** anything long-running or output-heavy: full test
+suites (a `bun test` pass is ~200s), `gh run watch`, PR completion, conflict
+resolution, dependency installs, log triage, multi-file investigation. The
+subagent returns a verdict; its raw output never enters your context.
+
+**Keep the decisions inline.** Selecting and dispatching tickets, approving and
+rejecting proposals, judging escalations, and deciding what to fix are cheap and
+are exactly what the operator is steering. This rule is "delegate the waiting",
+not "delegate everything".
+
+Reach for the specialised agent before a general one — each exists so its raw
+output stays out of the caller's context:
+
+| Agent | Use for |
+| :--- | :--- |
+| `factory-ci-doctor` | one red GitHub Actions run — after it fails, never to wait for it |
+| `factory-merge-reviewer` | a PR diff, so the diff never enters the orchestrator |
+| `factory-infra-scout` | anything needing SSH or container output |
+| `factory-ux-critic` | user-facing flows, after verification and before the PR |
+
+The secondary reason is cost: a tool result is re-sent on every later turn, so a
+test log read inline is charged for the rest of the shift — see **Context
+discipline** in `AGENTS.md` for the measurements.
+
+Two failure modes to avoid: spawning a subagent and then re-doing its work
+inline, and reading a subagent's transcript file directly — which puts back
+exactly the payload the delegation removed.
 
 ---
 
