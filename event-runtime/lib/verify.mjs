@@ -26,8 +26,21 @@ import { PathViolation, safeJoin } from "./workspace.mjs";
  */
 export const EVIDENCE_INLINE_LIMIT_BYTES = 256 * 1024;
 
-/** Hard ceiling for the repository-owned verification command (WM-262). */
-export const DEFAULT_REPO_VERIFY_TIMEOUT_MS = 120_000;
+/**
+ * Hang guard for the repository-owned verification command (WM-262), not a
+ * performance budget — it exists to tell "wedged forever" from "running".
+ *
+ * 120s was below the real cost and failed every dispatch (WM-510): this repo's
+ * own `bun test && bun build/emit.mjs --check` measures 196-217s, so nothing
+ * could ever pass. Sized at ~3x the slowest observed run, which leaves room for
+ * a loaded host while staying far under `limits.max_run_minutes: 45` in
+ * config/policy.yaml — the bound that actually caps a wedged run.
+ *
+ * Raise this rather than trimming it to fit: a ceiling that only just fits is
+ * the same outage with a longer fuse. Per-repo tuning goes through
+ * FACTORY_REPO_VERIFY_TIMEOUT_MS.
+ */
+export const DEFAULT_REPO_VERIFY_TIMEOUT_MS = 600_000;
 
 function repoVerifyTimeoutMs() {
   const configured = Number(process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS);
