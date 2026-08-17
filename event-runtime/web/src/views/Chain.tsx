@@ -27,6 +27,7 @@ import {
   buildChainTimeline,
   chainViewModeFromQuery,
   formatDelta,
+  humanizeRunReason,
   loadChainViewMode,
   saveChainViewMode,
   type ChainTimeline,
@@ -226,6 +227,13 @@ export function Chain({
     lastIdentityRef.current = null;
     didInitialFit.current = false;
   }, [correlationId]);
+  // The canvas unmounts in timeline mode; fit it again when it comes back.
+  useEffect(() => {
+    if (timelineOn) {
+      flowRef.current = null;
+      didInitialFit.current = false;
+    }
+  }, [timelineOn]);
 
   useEffect(() => {
     if (!graph) return;
@@ -391,8 +399,10 @@ export function Chain({
 
   return (
     <div className="flex h-full min-w-0">
-      <div className="relative min-w-0 flex-1">
-        <div className="absolute top-4 left-5 z-10 max-w-[60%]">
+      <div className={timelineOn ? "flex min-w-0 flex-1 flex-col" : "relative min-w-0 flex-1"}>
+        {/* Timeline mode keeps the header in flow so scrolled rows never slide under it. */}
+        <div className={timelineOn ? "flex shrink-0 items-start justify-between gap-4 px-5 pt-4 pb-3" : "contents"}>
+        <div className={timelineOn ? "min-w-0 max-w-[60%]" : "absolute top-4 left-5 z-10 max-w-[60%]"}>
           <h1 className="display text-lg font-semibold">Chain</h1>
           <div className="mono truncate text-[11px] text-(--text-faint)" title={correlationId}>
             {correlationId}
@@ -418,7 +428,7 @@ export function Chain({
             </div>
           )}
         </div>
-        <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2">
+        <div className={timelineOn ? "flex shrink-0 flex-col items-end gap-2" : "absolute top-4 right-4 z-10 flex flex-col items-end gap-2"}>
           <div className="flex items-center gap-2">
             <CopyActions id={correlationId} idLabel="correlation id" />
             <Tabs
@@ -456,6 +466,7 @@ export function Chain({
               <div className="text-[11px] text-(--text-faint)">left border = event status / run state</div>
             </div>
           )}
+        </div>
         </div>
         {timelineOn ? (
           <ChainTimelineList
@@ -589,7 +600,16 @@ export function Chain({
                 />
                 <KV k="adapter" v={selected.run.adapter} />
                 <KV k="attempts" v={String(selected.run.attempts)} />
-                {selected.run.reasonCode && <KV k="reason" v={selected.run.reasonCode} />}
+                {selected.run.reasonCode && (
+                  <KV
+                    k="reason"
+                    v={
+                      <span title={selected.run.reasonCode}>
+                        {humanizeRunReason(selected.run.reasonCode)?.text ?? selected.run.reasonCode}
+                      </span>
+                    }
+                  />
+                )}
                 <KV k="depth" v={`${selected.depth} hop${selected.depth === 1 ? "" : "s"} from origin`} />
                 <KV k="created" v={<Ago iso={selected.run.created_at} now={now} />} />
                 <KV k="started" v={<Ago iso={selected.run.startedAt} now={now} />} />
@@ -723,7 +743,7 @@ function ChainTimelineList({
     }
   };
   return (
-    <div className="h-full overflow-auto pt-24 pb-10 pl-5 pr-5">
+    <div className="min-h-0 flex-1 overflow-auto px-5 pt-1 pb-10">
       {rows.length === 0 ? (
         <div className="text-[12px] text-(--text-faint)">{emptyCopy ?? "No steps recorded for this chain yet."}</div>
       ) : (

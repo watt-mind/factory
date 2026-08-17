@@ -399,15 +399,15 @@ export function buildChainTimeline(input: ChainTimelineInput): ChainTimeline {
   for (const run of chain.runs) {
     const nodeId = runNodeId(run.runId);
     const detail = runDetails[run.runId];
-    const refs = dedupeRefs([
-      { kind: "run", label: shortRunId(run.runId), id: run.runId },
-      ...(run.agent ? [{ kind: "agent" as const, label: run.agent, id: run.agent }] : []),
-      ...runRefs(run.runId),
-    ]);
+    // Every lifecycle row links its run; only the terminal row repeats the
+    // PR / ticket it decided about — the actor column already names the agent.
+    const runRef: TimelineRef = { kind: "run", label: shortRunId(run.runId), id: run.runId };
+    const stepRefs = [runRef];
+    const outcomeRefs = dedupeRefs([runRef, ...runRefs(run.runId)]);
     const actorLabel = run.agent ?? shortRunId(run.runId);
     if (!detail) {
       partial = true;
-      drafts.push(...fallbackRunRows(run, nodeId, refs, decidedRuns.has(run.runId), actorLabel));
+      drafts.push(...fallbackRunRows(run, nodeId, stepRefs, decidedRuns.has(run.runId), actorLabel));
       continue;
     }
     const lifecycle = [...detail.lifecycle].sort((a, b) => a.at.localeCompare(b.at) || a.seq - b.seq);
@@ -459,7 +459,7 @@ export function buildChainTimeline(input: ChainTimelineInput): ChainTimeline {
           actor,
           what,
           reason,
-          refs,
+          refs: TERMINAL.has(entry.to_state) ? outcomeRefs : stepRefs,
           muted: false,
         },
       });

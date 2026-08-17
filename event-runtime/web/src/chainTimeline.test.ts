@@ -227,6 +227,8 @@ describe("buildChainTimeline", () => {
     expect(planned.what).toBe("merge-fix@1 → run_643c2c35 (auto-approved: chain-policy@1)");
     expect(planned.nodeId).toBe(`run:${FIX_RUN}`);
     expect(planned.refs.map((r) => r.kind)).toEqual(["proposal", "run", "agent"]);
+    expect(rows[6].refs.map((r) => r.kind)).toEqual(["run"]);
+    expect(rows[7].refs.map((r) => r.kind)).toEqual(["run", "pr", "ticket"]);
     expect(formatDelta(planned.deltaMs)).toBe("+6s");
 
     const leased = rows[6];
