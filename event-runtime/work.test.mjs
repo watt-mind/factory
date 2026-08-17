@@ -1,11 +1,10 @@
 /**
  * Work chain (WM-110): work-scan@1 reads a repo's agent-ready Linear queue
  * against a pinned tree and emits a typed DISPATCH plan; the chain edge feeds
- * the FIRST planned ticket into factory.dispatch.requested, where WM-108's
- * plan-time gate re-checks the world — a stale scan cannot force a dispatch.
- * chain.mjs emits exactly one chain event per run (eventId chain-<runId>), so
- * the rest of the plan rides in the artifact as `deferred`; rolling dispatch
- * comes from re-firing the scan event, never a long-lived loop. Follows the
+ * every planned ticket into factory.dispatch.requested, where WM-108's plan-time
+ * gate re-checks the world — a stale scan cannot force a dispatch.
+ * chain.mjs emits one event per selected plan item; candidates that cannot start
+ * are carried in `deferred` with typed reasons for the next fresh scan. Follows the
  * triage-scan (OPS-229) and merge-scan (WM-109) precedents.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -102,6 +101,10 @@ beforeAll(() => {
       `  - name: lowbad\n    path: ${low}\n    github: watt-mind/lowbad\n    base: develop\n` +
       `    team: WM\n    project: Factory\n    max_in_flight: 3\n` +
       `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
+      `    worktree_root: ${wtRoot}\n    escalate_paths: []\n` +
+      `  - name: contradiction\n    path: ${low}\n    github: watt-mind/contradiction\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    max_in_flight: 3\n` +
+      `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
       `    worktree_root: ${wtRoot}\n    escalate_paths: []\n`,
   );
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
@@ -129,6 +132,47 @@ const SECOND = "WM-602";
 // everything else to the fake.
 // ---------------------------------------------------------------------------
 
+const seenCandidate = (ticket, disposition) => ({ ticket, disposition });
+
+function workScanEvidence(repo) {
+  let candidates;
+  let inFlightSeen = 0;
+  if (["clean", "low"].includes(repo)) {
+    candidates = [];
+  } else if (repo === "lowbad") {
+    candidates = [seenCandidate(FIRST, "selected")];
+  } else if (repo === "contradiction") {
+    // Regression fixture from run_0e25d228: three unassigned ready tickets
+    // were read alongside two in-progress tickets, then reported queue_empty.
+    candidates = [
+      seenCandidate("WM-345", "selected"),
+      seenCandidate("WM-294", "selected"),
+      seenCandidate("WM-131", "selected"),
+    ];
+    inFlightSeen = 2;
+  } else if (repo === "overlap") {
+    candidates = [
+      seenCandidate(FIRST, "owned_paths_overlap"),
+      seenCandidate(SECOND, "owned_paths_overlap"),
+    ];
+  } else if (repo === "cap") {
+    candidates = [
+      seenCandidate(FIRST, "cap_full"),
+      seenCandidate(SECOND, "cap_full"),
+    ];
+    inFlightSeen = 3;
+  } else {
+    candidates = [seenCandidate(FIRST, "selected"), seenCandidate(SECOND, "selected")];
+  }
+  return {
+    commands: ["fake"],
+    candidatesSeen: candidates.length,
+    candidates,
+    inFlightSeen,
+    maxInFlight: 3,
+  };
+}
+
 function workScanArtifact(repo) {
   if (repo === "clean") {
     return {
@@ -138,6 +182,8 @@ function workScanArtifact(repo) {
       plan: [],
       deferred: [],
       summary: "fake: no dispatchable tickets",
+      readyCandidates: 0,
+      triageBacklog: 0,
       noopReason: "queue_empty",
     };
   }
@@ -162,7 +208,7 @@ function workScanArtifact(repo) {
       deferred: [],
       summary: "fake: overlap blocked",
       readyCandidates: 2,
-      triageBacklog: 3,
+      triageBacklog: 0,
       noopReason: "all_overlapping",
     };
   }
@@ -175,7 +221,7 @@ function workScanArtifact(repo) {
       deferred: [],
       summary: "fake: cap blocked",
       readyCandidates: 2,
-      triageBacklog: 3,
+      triageBacklog: 0,
       noopReason: "cap_full",
     };
   }
@@ -191,6 +237,19 @@ function workScanArtifact(repo) {
       readyCandidates: 1,
     };
   }
+  if (repo === "contradiction") {
+    return {
+      recommendation: "NOOP",
+      repo,
+      ticket: null,
+      plan: [],
+      deferred: [],
+      summary: "fake: discarded three ready candidates",
+      triageBacklog: 0,
+      readyCandidates: 3,
+      noopReason: "queue_empty",
+    };
+  }
   return {
     recommendation: "DISPATCH",
     repo,
@@ -199,7 +258,9 @@ function workScanArtifact(repo) {
       { ticket: FIRST, ownedPaths: ["src/feature-a/**"], reason: "fake: priority 1, disjoint" },
       { ticket: SECOND, ownedPaths: ["src/feature-b/**"], reason: "fake: priority 2, disjoint" },
     ],
-    deferred: [SECOND],
+    deferred: [],
+    readyCandidates: 2,
+    triageBacklog: 0,
     summary: `fake work plan for ${repo}`,
   };
 }
@@ -215,7 +276,7 @@ const workFake = {
           terminalState: "completed",
           reasonCode: "ok",
           artifact: workScanArtifact(spec.input.repo),
-          evidence: { commands: ["fake"], candidatesSeen: 2, inFlightSeen: 0 },
+          evidence: workScanEvidence(spec.input.repo),
         }, null, 2)}\n`,
         "utf8",
       );
@@ -364,6 +425,8 @@ describe("work-scan registration (WM-110)", () => {
     const schema = registry.agents.get("work-scan@1").outputSchema;
     expect(schema.properties.plan.items.required).toEqual(["ticket", "ownedPaths", "reason"]);
     expect(schema.properties.plan.items.properties.ticket.pattern).toBe("^[A-Z]+-[0-9]+$");
+    expect(schema.properties.deferred.items.required).toEqual(["ticket", "reason"]);
+    expect(schema.properties.deferred.items.properties.reason.enum).toEqual(["cap_full", "owned_paths_overlap"]);
     expect(schema.properties.noopReason.enum).toEqual(["queue_empty", "cap_full", "all_overlapping"]);
   });
 
@@ -469,7 +532,7 @@ describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () =
       const scanResult = JSON.parse(db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(scan.runId).result_json);
       expect(scanResult.artifact.noopReason).toBe(reason);
       expect(scanResult.artifact.readyCandidates).toBe(2);
-      expect(scanResult.artifact.triageBacklog).toBe(3);
+      expect(scanResult.artifact.triageBacklog).toBe(0);
 
       const chain = resolveChains(db, registry);
       expect(chain).toEqual({ emitted: 0, skipped: 1, errors: [] });
@@ -495,6 +558,21 @@ describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () =
       .query(`SELECT reason FROM lifecycle_events WHERE run_id = ? AND to_state = 'FAILED'`)
       .get(scan.runId);
     expect(journal.reason).toContain("low_supply_readyCandidates_must_be_0");
+  });
+
+  test("three ready tickets plus two in progress cannot complete as queue_empty", async () => {
+    const { db, approveNext } = harness();
+    admitEvent(db, registry, workEnvelope("contradiction", "work-contradiction-1"));
+    const scan = await approveNext("work-scan@1");
+    expect(scan.summary.terminalState).toBe("FAILED");
+    expect(scan.summary.reasonCode).toBe("contract_violation");
+
+    const chain = resolveChains(db, registry);
+    expect(chain).toEqual({ emitted: 0, skipped: 0, errors: [] });
+    const journal = db
+      .query(`SELECT reason FROM lifecycle_events WHERE run_id = ? AND to_state = 'FAILED'`)
+      .get(scan.runId);
+    expect(journal.reason).toContain("queue_empty_candidatesSeen_must_be_0");
   });
 
   test("a NOOP scan chains to nothing — no dispatch proposal exists", async () => {

@@ -210,22 +210,166 @@ function parseProbeBytes(raw) {
   return match ? Number(match[1]) : null;
 }
 
-/** `LOW_SUPPLY` in work-scan must carry exact candidate-count semantics. */
+/**
+ * Work-scan is model-authored, so its individually valid fields still need a
+ * deterministic consistency check (WM-350). The normalized candidate evidence
+ * lets this verifier reconcile identities and dispositions instead of trusting
+ * a summary count or model prose.
+ */
 function checkWorkPlan(candidate) {
-  const artifact = candidate?.artifact;
-  if (artifact?.recommendation !== "LOW_SUPPLY") return [];
+  const { artifact, evidence } = candidate;
   const violations = [];
+  const candidatesSeen = evidence?.candidatesSeen;
+  const candidates = evidence?.candidates;
+  const dispositions = new Set(["selected", "cap_full", "owned_paths_overlap"]);
+
+  if (!Number.isInteger(candidatesSeen) || candidatesSeen < 0) {
+    violations.push("evidence_candidatesSeen_required");
+  }
+  if (!Array.isArray(candidates)) {
+    violations.push("evidence_candidates_required");
+  }
+
+  const normalizedCandidates = [];
+  if (Array.isArray(candidates)) {
+    for (const [index, entry] of candidates.entries()) {
+      const valid = entry !== null
+        && typeof entry === "object"
+        && !Array.isArray(entry)
+        && Object.keys(entry).length === 2
+        && typeof entry.ticket === "string"
+        && /^[A-Z]+-[0-9]+$/.test(entry.ticket)
+        && dispositions.has(entry.disposition);
+      if (!valid) {
+        violations.push(`evidence_candidate_invalid_at_index_${index}`);
+      } else {
+        normalizedCandidates.push(entry);
+      }
+    }
+    const candidateTickets = normalizedCandidates.map((entry) => entry.ticket);
+    if (new Set(candidateTickets).size !== candidateTickets.length) {
+      violations.push("evidence_candidate_tickets_must_be_unique");
+    }
+    if (Number.isInteger(candidatesSeen) && candidatesSeen !== candidates.length) {
+      violations.push(
+        `evidence_candidate_count_mismatch: candidatesSeen ${candidatesSeen} != candidates.length ${candidates.length}`,
+      );
+    }
+  }
 
   if (!Number.isInteger(artifact.readyCandidates) || artifact.readyCandidates < 0) {
-    violations.push("readyCandidates_required_for_low_supply");
-  } else if (artifact.readyCandidates !== 0) {
-    violations.push(`low_supply_readyCandidates_must_be_0 (got ${artifact.readyCandidates})`);
+    violations.push("readyCandidates_required_for_work_plan");
+  } else if (Number.isInteger(candidatesSeen) && artifact.readyCandidates !== candidatesSeen) {
+    violations.push(
+      `candidate_count_mismatch: readyCandidates ${artifact.readyCandidates} != evidence.candidatesSeen ${candidatesSeen}`,
+    );
   }
 
   if (!Number.isInteger(artifact.triageBacklog) || artifact.triageBacklog < 0) {
-    violations.push("triageBacklog_required_for_low_supply");
-  } else if (artifact.triageBacklog < 1) {
-    violations.push(`low_supply_triage_backlog_must_be_at_least_1 (got ${artifact.triageBacklog})`);
+    violations.push("triageBacklog_required_for_work_plan");
+  }
+
+  const planTickets = artifact.plan.map((item) => item.ticket);
+  const deferredTickets = artifact.deferred.map((item) => item.ticket);
+  const accountedTickets = [...planTickets, ...deferredTickets];
+  if (new Set(accountedTickets).size !== accountedTickets.length) {
+    violations.push("work_plan_ticket_accounting_must_be_unique");
+  }
+
+  const expectedTicket = planTickets[0] ?? null;
+  if (artifact.ticket !== expectedTicket) {
+    violations.push(`work_plan_ticket_must_equal_first_plan_ticket (expected ${expectedTicket})`);
+  }
+
+  if (artifact.recommendation === "DISPATCH") {
+    if (artifact.plan.length === 0) violations.push("dispatch_plan_must_not_be_empty");
+    if (Object.hasOwn(artifact, "noopReason")) violations.push("dispatch_must_not_have_noopReason");
+
+    const evidencePlan = normalizedCandidates
+      .filter((entry) => entry.disposition === "selected")
+      .map((entry) => entry.ticket);
+    const evidenceDeferred = normalizedCandidates
+      .filter((entry) => entry.disposition !== "selected")
+      .map((entry) => ({ ticket: entry.ticket, reason: entry.disposition }));
+    if (JSON.stringify(planTickets) !== JSON.stringify(evidencePlan)) {
+      violations.push("dispatch_plan_must_match_candidate_evidence");
+    }
+    if (JSON.stringify(artifact.deferred) !== JSON.stringify(evidenceDeferred)) {
+      violations.push("dispatch_deferred_must_match_candidate_evidence");
+    }
+    if (Number.isInteger(candidatesSeen) && accountedTickets.length !== candidatesSeen) {
+      violations.push(
+        `dispatch_candidate_accounting_mismatch: plan ${artifact.plan.length} + deferred ${artifact.deferred.length} != candidatesSeen ${candidatesSeen}`,
+      );
+    }
+
+    const hasCapDeferral = normalizedCandidates.some((entry) => entry.disposition === "cap_full");
+    if (hasCapDeferral) {
+      const inFlightSeen = evidence?.inFlightSeen;
+      const maxInFlight = evidence?.maxInFlight;
+      if (!Number.isInteger(inFlightSeen) || inFlightSeen < 0
+        || !Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        violations.push("capacity_evidence_required_for_cap_full");
+      } else if (inFlightSeen + artifact.plan.length < maxInFlight) {
+        violations.push(
+          `cap_full_contradicts_capacity: inFlightSeen ${inFlightSeen} + plan ${artifact.plan.length} < maxInFlight ${maxInFlight}`,
+        );
+      }
+    }
+    if (artifact.triageBacklog !== 0) {
+      violations.push(`dispatch_triageBacklog_must_be_0 (got ${artifact.triageBacklog})`);
+    }
+  } else if (artifact.recommendation === "LOW_SUPPLY") {
+    if (artifact.plan.length > 0 || artifact.deferred.length > 0) {
+      violations.push("low_supply_plan_and_deferred_must_be_empty");
+    }
+    if (Object.hasOwn(artifact, "noopReason")) violations.push("low_supply_must_not_have_noopReason");
+    if (artifact.readyCandidates !== 0) {
+      violations.push(`low_supply_readyCandidates_must_be_0 (got ${artifact.readyCandidates})`);
+    }
+    if (Number.isInteger(candidatesSeen) && candidatesSeen !== 0) {
+      violations.push(`low_supply_candidatesSeen_must_be_0 (got ${candidatesSeen})`);
+    }
+    if (normalizedCandidates.length !== 0) violations.push("low_supply_candidates_must_be_empty");
+    if (Number.isInteger(artifact.triageBacklog) && artifact.triageBacklog < 1) {
+      violations.push(`low_supply_triage_backlog_must_be_at_least_1 (got ${artifact.triageBacklog})`);
+    }
+  } else if (artifact.recommendation === "NOOP") {
+    if (artifact.plan.length > 0 || artifact.deferred.length > 0) {
+      violations.push("noop_plan_and_deferred_must_be_empty");
+    }
+    if (!Object.hasOwn(artifact, "noopReason")) {
+      violations.push("noopReason_required_for_noop");
+    } else if (artifact.noopReason === "queue_empty") {
+      if (artifact.readyCandidates !== 0) {
+        violations.push(`queue_empty_readyCandidates_must_be_0 (got ${artifact.readyCandidates})`);
+      }
+      if (Number.isInteger(candidatesSeen) && candidatesSeen !== 0) {
+        violations.push(`queue_empty_candidatesSeen_must_be_0 (got ${candidatesSeen})`);
+      }
+      if (normalizedCandidates.length !== 0) violations.push("queue_empty_candidates_must_be_empty");
+    } else if (artifact.noopReason === "cap_full") {
+      if (normalizedCandidates.length === 0) violations.push("cap_full_candidates_must_not_be_empty");
+      if (normalizedCandidates.some((entry) => entry.disposition !== "cap_full")) {
+        violations.push("cap_full_candidates_must_all_have_cap_full_disposition");
+      }
+      const inFlightSeen = evidence?.inFlightSeen;
+      const maxInFlight = evidence?.maxInFlight;
+      if (!Number.isInteger(inFlightSeen) || inFlightSeen < 0
+        || !Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        violations.push("capacity_evidence_required_for_cap_full");
+      } else if (inFlightSeen < maxInFlight) {
+        violations.push(`cap_full_contradicts_capacity: inFlightSeen ${inFlightSeen} < maxInFlight ${maxInFlight}`);
+      }
+    } else if (artifact.noopReason === "all_overlapping") {
+      if (normalizedCandidates.length === 0) violations.push("all_overlapping_candidates_must_not_be_empty");
+      if (normalizedCandidates.some((entry) => entry.disposition !== "owned_paths_overlap")) {
+        violations.push("all_overlapping_candidates_must_all_have_overlap_disposition");
+      }
+    }
+    if (artifact.triageBacklog !== 0) {
+      violations.push(`noop_triageBacklog_must_be_0 (got ${artifact.triageBacklog})`);
+    }
   }
 
   return violations;

@@ -88,41 +88,161 @@ describe("verifyResult", () => {
     expect(out.receipt.journalHead).toBeNull();
   });
 
-  test("missing LOW_SUPPLY counts violates work-scan semantics", () => {
+  const candidate = (ticket, disposition) => ({ ticket, disposition });
+  const candidateEvidence = (candidates, extra = {}) => ({
+    commands: ["linear queue"],
+    candidatesSeen: candidates.length,
+    candidates,
+    inFlightSeen: 0,
+    maxInFlight: 3,
+    ...extra,
+  });
+
+  const workPlanSpec = {
+    ...makeSpec(),
+    agent: "work-scan@1",
+    outputContract: "factory.work-plan/v1",
+  };
+
+  function verifyWorkPlan(artifact, evidence) {
     const dir = makeWorkspace({
       schemaVersion: "factory.agent-result/v1",
       terminalState: "completed",
-      artifact: {
-        recommendation: "LOW_SUPPLY",
-        repo: "low",
+      artifact,
+      evidence,
+    });
+    return verifyResult({ spec: workPlanSpec, def: workScanDef, registry, workspaceDir: dir, attempt: 1 });
+  }
+
+  test("valid DISPATCH accounts for every candidate through plan or typed deferral", () => {
+    const out = verifyWorkPlan({
+      recommendation: "DISPATCH",
+      repo: "factory",
+      ticket: "WM-345",
+      plan: [
+        { ticket: "WM-345", ownedPaths: ["src/a/**"], reason: "priority Urgent, disjoint" },
+      ],
+      deferred: [
+        { ticket: "WM-294", reason: "owned_paths_overlap" },
+        { ticket: "WM-131", reason: "cap_full" },
+      ],
+      readyCandidates: 3,
+      triageBacklog: 0,
+      summary: "one candidate starts and two are accounted for",
+    }, candidateEvidence([
+      candidate("WM-345", "selected"),
+      candidate("WM-294", "owned_paths_overlap"),
+      candidate("WM-131", "cap_full"),
+    ], { inFlightSeen: 2 }));
+
+    expect(out.kind).toBe("completed");
+    expect(out.result.verification.checks).toContain("evidence_recomputed");
+  });
+
+  test("regression: three ready tickets plus two in progress cannot validate as queue_empty", () => {
+    try {
+      verifyWorkPlan({
+        recommendation: "NOOP",
+        repo: "factory",
         ticket: null,
         plan: [],
         deferred: [],
-        summary: "low supply with missing counts",
-        triageBacklog: 2,
-      },
-    });
-
-    const spec = {
-      ...makeSpec(),
-      agent: "work-scan@1",
-      outputContract: "factory.work-plan/v1",
-    };
-
-    try {
-      verifyResult({ spec, def: workScanDef, registry, workspaceDir: dir, attempt: 1 });
+        noopReason: "queue_empty",
+        readyCandidates: 3,
+        triageBacklog: 0,
+        summary: "incorrectly discarded three ready candidates",
+      }, candidateEvidence([
+        candidate("WM-345", "selected"),
+        candidate("WM-294", "selected"),
+        candidate("WM-131", "selected"),
+      ], { inFlightSeen: 2 }));
       throw new Error("expected ContractViolation");
     } catch (err) {
       expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.violations).toContain("readyCandidates_required_for_low_supply");
+      expect(err.violations).toContain("queue_empty_readyCandidates_must_be_0 (got 3)");
+      expect(err.violations).toContain("queue_empty_candidatesSeen_must_be_0 (got 3)");
+    }
+  });
+
+  test("queue_empty requires complete candidate evidence to agree with the artifact", () => {
+    try {
+      verifyWorkPlan({
+        recommendation: "NOOP",
+        repo: "factory",
+        ticket: null,
+        plan: [],
+        deferred: [],
+        noopReason: "queue_empty",
+        readyCandidates: 0,
+        triageBacklog: 0,
+        summary: "artifact says empty but evidence saw a candidate",
+      }, candidateEvidence([candidate("WM-345", "selected")], { candidatesSeen: 0 }));
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toContain(
+        "evidence_candidate_count_mismatch: candidatesSeen 0 != candidates.length 1",
+      );
+      expect(err.violations).toContain("queue_empty_candidates_must_be_empty");
+    }
+  });
+
+  test("cap_full cannot hide startable candidates when capacity evidence shows a free slot", () => {
+    try {
+      verifyWorkPlan({
+        recommendation: "NOOP",
+        repo: "factory",
+        ticket: null,
+        plan: [],
+        deferred: [],
+        noopReason: "cap_full",
+        readyCandidates: 3,
+        triageBacklog: 0,
+        summary: "incorrectly claims the cap is full",
+      }, candidateEvidence([
+        candidate("WM-345", "cap_full"),
+        candidate("WM-294", "cap_full"),
+        candidate("WM-131", "cap_full"),
+      ], { inFlightSeen: 2, maxInFlight: 3 }));
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toContain(
+        "cap_full_contradicts_capacity: inFlightSeen 2 < maxInFlight 3",
+      );
+    }
+  });
+
+  test("DISPATCH rejects an unaccounted candidate", () => {
+    try {
+      verifyWorkPlan({
+        recommendation: "DISPATCH",
+        repo: "factory",
+        ticket: "WM-345",
+        plan: [
+          { ticket: "WM-345", ownedPaths: ["src/a/**"], reason: "priority Urgent, disjoint" },
+        ],
+        deferred: [{ ticket: "WM-294", reason: "owned_paths_overlap" }],
+        readyCandidates: 3,
+        triageBacklog: 0,
+        summary: "one candidate disappeared",
+      }, candidateEvidence([
+        candidate("WM-345", "selected"),
+        candidate("WM-294", "owned_paths_overlap"),
+        candidate("WM-131", "cap_full"),
+      ], { inFlightSeen: 2 }));
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toContain(
+        "dispatch_candidate_accounting_mismatch: plan 1 + deferred 1 != candidatesSeen 3",
+      );
     }
   });
 
   test("invalid LOW_SUPPLY counts violate work-scan semantics", () => {
-    const dir = makeWorkspace({
-      schemaVersion: "factory.agent-result/v1",
-      terminalState: "completed",
-      artifact: {
+    try {
+      verifyWorkPlan({
         recommendation: "LOW_SUPPLY",
         repo: "low",
         ticket: null,
@@ -131,21 +251,16 @@ describe("verifyResult", () => {
         summary: "low supply with bad counts",
         readyCandidates: 3,
         triageBacklog: 0,
-      },
-    });
-
-    const spec = {
-      ...makeSpec(),
-      agent: "work-scan@1",
-      outputContract: "factory.work-plan/v1",
-    };
-
-    try {
-      verifyResult({ spec, def: workScanDef, registry, workspaceDir: dir, attempt: 1 });
+      }, candidateEvidence([
+        candidate("WM-345", "selected"),
+        candidate("WM-294", "selected"),
+        candidate("WM-131", "selected"),
+      ], { commands: ["linear queue", "linear triage"] }));
       throw new Error("expected ContractViolation");
     } catch (err) {
       expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.violations.some((x) => x.includes("low_supply_readyCandidates_must_be_0"))).toBe(true);
+      expect(err.violations).toContain("low_supply_readyCandidates_must_be_0 (got 3)");
+      expect(err.violations).toContain("low_supply_candidatesSeen_must_be_0 (got 3)");
     }
   });
 

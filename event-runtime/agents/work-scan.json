@@ -24,8 +24,8 @@
   },
   "mutating": false,
   "pins": {
-    "agents/work-scan.md": "sha256:334e0cf401c4e06b98c686d68562c3da20137594613dd542a50e20e48430af04",
+    "agents/work-scan.md": "sha256:80a767e3e8ad8539c079871ffe8cadcf80a12ba67770b6e7ea3c900fc541c45a",
     "schemas/work-scan.input.json": "sha256:3d596ece1e34c9d3a8711596076df67357d8eeec3d29bc5bfb64e02ed4f32c10",
-    "schemas/work-scan.output.json": "sha256:2be46ed08bb9a28f5054b0c37789aa65a046061d2500b0eb8ff7647f11d0d662"
+    "schemas/work-scan.output.json": "sha256:62d81edf5aafc73fe62930be4c3b900107c333e58d4ebeb1f494330882b178e1"
   }
 }
