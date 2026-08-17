@@ -95,15 +95,46 @@ jobs:
     # measured job durations before lowering.
     timeout-minutes: 25
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      # No `uses:` steps in this job on purpose (WM-573). Every marketplace
+      # action is fetched from codeload.github.com at "Set up job", and the
+      # shadow fleet (eight runners, one egress IP, no action archive cache)
+      # got 429 Too Many Requests on actions/checkout for every Verify job on
+      # 2026-08-17 — no repo code ran at all. A plain git fetch of github.sha
+      # is exactly what actions/checkout@v7 did here (shallow, no submodules,
+      # merge commit on pull_request) minus the download that was failing.
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
 
-      # Installs bun rather than assuming the runner has it, so CI doesn't break
-      # the first time this lands on a runner that was never provisioned for it.
-      - name: Setup bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+      # Same reason: oven-sh/setup-bun@v2 is the next codeload download in
+      # line, and it also re-fetched bun-linux-x64.zip from GitHub releases on
+      # every job. The runner user on the shadow host already has bun under
+      # ~/.bun; only install (from bun.sh, not codeload) if it is missing.
+      - name: Setup bun (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
+            curl -fsSL https://bun.sh/install | bash
+          fi
+          if [ -x "$HOME/.bun/bin/bun" ]; then
+            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+            "$HOME/.bun/bin/bun" --version
+          else
+            bun --version
+          fi
 
       - name: Acquire host memory slot
         id: memory-slot
