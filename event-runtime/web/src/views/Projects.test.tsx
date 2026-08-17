@@ -351,6 +351,66 @@ describe("Projects quick dispatch and GitHub chords (WM-294)", () => {
   });
 });
 
+describe("Projects toolbar counts and ordering (WM-560)", () => {
+  test("tab counts partition All and the default order is dispatchable first, then name", async () => {
+    await withApi(
+      {
+        repos: async () => ({
+          repos: [
+            repo({ name: "z-report", reportOnly: true }),
+            repo({ name: "z-dispatch", reportOnly: false }),
+            repo({ name: "a-report", reportOnly: true }),
+            repo({ name: "a-dispatch", reportOnly: false }),
+          ],
+        }),
+      },
+      async () => {
+        const r = renderProjects();
+        await r.findByText("a-dispatch");
+
+        const tabs = r.getAllByRole("tab");
+        const counts = tabs.map((tab) => Number(tab.querySelector(".tabular-nums")?.textContent));
+        expect(counts).toEqual([4, 2, 2]);
+        expect(counts[1] + counts[2]).toBe(counts[0]);
+
+        const rowNames = () =>
+          Array.from(r.container.querySelectorAll("tbody tr td:first-child")).map((cell) => cell.textContent);
+        expect(rowNames()).toEqual(["a-dispatch", "z-dispatch", "a-report", "z-report"]);
+
+        fireEvent.click(r.getByRole("button", { name: "Name" }));
+        expect(rowNames()).toEqual(["a-dispatch", "a-report", "z-dispatch", "z-report"]);
+        fireEvent.click(r.getByRole("button", { name: "Name" }));
+        expect(rowNames()).toEqual(["z-report", "z-dispatch", "a-report", "a-dispatch"]);
+        fireEvent.click(r.getByRole("button", { name: "Name" }));
+        expect(rowNames()).toEqual(["a-dispatch", "z-dispatch", "a-report", "z-report"]);
+      },
+    );
+  });
+
+  test("Worktree Scripts uses the shared faint placeholder when no scripts exist", async () => {
+    await withApi(
+      {
+        repos: async () => ({
+          repos: [
+            repo({
+              hasWorktreeUp: false,
+              hasWorktreeDown: false,
+              hasWorktreeWarm: false,
+            }),
+          ],
+        }),
+      },
+      async () => {
+        const r = renderProjects();
+        await r.findByText("factory");
+        const scriptsCell = r.container.querySelector("tbody tr td:last-child");
+        const placeholder = scriptsCell?.querySelector("span.text-\\(--text-faint\\)");
+        expect(placeholder?.textContent).toBe("—");
+      },
+    );
+  });
+});
+
 describe("Projects mode tabs and hotkeys (WM-234)", () => {
   test("renders mode tabs with role=tab, aria-selected, and numeric hints", async () => {
     await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
