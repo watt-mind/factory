@@ -37,8 +37,20 @@ const sampleAgent: AgentDef = {
   modelTier: "strong",
   model: "claude-3-7-sonnet",
   eventTypes: [
-    { type: "github/issue.opened", agent: "triage-scan" },
-    { type: "github/issue.labeled", agent: "triage-scan" },
+    {
+      type: "github/issue.opened",
+      adapter: "claude",
+      idempotencyScope: "repo",
+      proposalTtlSeconds: null,
+      resolvedModel: "claude-3-7-sonnet",
+    },
+    {
+      type: "github/issue.labeled",
+      adapter: "claude",
+      idempotencyScope: "repo",
+      proposalTtlSeconds: null,
+      resolvedModel: "claude-3-7-sonnet",
+    },
   ],
 };
 

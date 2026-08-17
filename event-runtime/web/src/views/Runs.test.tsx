@@ -697,7 +697,7 @@ describe("Runs copy chords and hints (WM-233)", () => {
       decision: "run",
     });
 
-    const approveMock = mock(async (id: string) => ({
+    const approveMock = mock(async (_id: string) => ({
       approved: true as const,
       runId,
     }));

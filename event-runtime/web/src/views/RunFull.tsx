@@ -25,7 +25,7 @@ import {
 } from "../components/RunDetailBlocks";
 import { handleRunArtifactClick, toggleRunPin } from "./Runs";
 import { AgentHoverCard } from "../components/AgentHoverCard";
-import type { Proposal, RunListItem } from "../types";
+import type { RunListItem } from "../types";
 
 /**
  * Full-page run view (`#/run/:id`, webui doc §10.11) — the trace at a

@@ -109,8 +109,8 @@ export function AgentHoverCard({
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
-  const handleClick = (e: ReactMouseEvent) => {
-    e.stopPropagation();
+  const handleClick = (e?: ReactMouseEvent) => {
+    e?.stopPropagation();
     setOpen(false);
     onJumpAgent?.(agentRef);
   };

@@ -473,7 +473,7 @@ export function Runs({
       }
       setConfirmApprove(false);
     },
-    onError: (err) => {
+    onError: () => {
       invalidate();
       queryClient.invalidateQueries({ queryKey: ["proposals"] });
     },
@@ -738,7 +738,7 @@ export function Runs({
                             return (
                               <JumpLink
                                 onClick={(e) => {
-                                  e.stopPropagation();
+                                  e?.stopPropagation();
                                   onJumpProposal(prop.id);
                                 }}
                                 title={`Open proposal ${prop.id}`}
