@@ -34,6 +34,61 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+import { emitDueTicks } from "./schedules.mjs";
+
+describe("schedule trigger metadata (WM-259)", () => {
+  test("run and trigger return the unchanged next scheduled tick", async () => {
+    const nowMs = Date.parse("2026-08-17T11:35:00.000Z");
+    const scheduleRegistry = {
+      ...registry,
+      schedules: {
+        reaper: {
+          ...registry.schedules.reaper,
+          every: "60m",
+          enabled: true,
+          payload: { repo: "factory" },
+        },
+      },
+    };
+    const s = await makeServer({ registry: scheduleRegistry, now: () => nowMs });
+    try {
+      emitDueTicks(s.db, scheduleRegistry, {
+        now: Date.parse("2026-08-17T11:00:00.000Z"),
+      });
+
+      for (const action of ["run", "trigger"]) {
+        const res = await fetch(s.url(`/schedules/reaper/${action}`), {
+          method: "POST",
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.schedule).toMatchObject({
+          loop: "reaper",
+          repo: "factory",
+          lastSlot: "2026-08-17T11:00:00.000Z",
+          nextDue: "2026-08-17T12:00:00.000Z",
+          stopped: false,
+        });
+      }
+
+      const operatorEvents = s.db
+        .query(`SELECT envelope_json FROM events WHERE source = 'operator' ORDER BY event_id`)
+        .all()
+        .map((row) => JSON.parse(row.envelope_json));
+      expect(operatorEvents).toHaveLength(2);
+      expect(operatorEvents.every((event) => event.payload.repo === "factory")).toBe(true);
+
+      const schedules = await (await fetch(s.url("/schedules"))).json();
+      expect(schedules.schedules[0]).toMatchObject({
+        lastSlot: "2026-08-17T11:00:00.000Z",
+        nextDue: "2026-08-17T12:00:00.000Z",
+        stopped: false,
+      });
+    } finally {
+      s.close();
+    }
+  });
+});
 
 describe("environment identity (webui chip)", () => {
   test("health and status expose the env the server was started with", async () => {

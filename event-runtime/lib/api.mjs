@@ -42,6 +42,7 @@ import { githubWebhookSecret } from "./intake.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { notifyCommand, sendNotification } from "./notify.mjs";
 import { loadRepos } from "./repos.mjs";
+import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
 import { loadWorkerPolicy } from "./workers.mjs";
 
@@ -180,7 +181,31 @@ export function createApi({
         url.pathname === "/schedules" ||
         url.pathname.startsWith("/schedules/")
       ) {
-        const result = await handleScheduleApiRoute(common);
+        const triggerMatch = url.pathname.match(
+          /^\/schedules\/([^/]+)\/(run|trigger)$/,
+        );
+        const scheduleSend = (status, body) => {
+          if (req.method !== "POST" || status !== 200 || !triggerMatch) {
+            return send(status, body);
+          }
+          const loop = decodeURIComponent(triggerMatch[1]);
+          const schedule = scheduleView(db, registry, { now: nowMs }).find(
+            (item) => item.loop === loop,
+          );
+          if (!schedule) return send(status, body);
+          const repo = registry.schedules?.[loop]?.payload?.repo;
+          return send(status, {
+            ...body,
+            schedule: {
+              ...schedule,
+              repo: typeof repo === "string" && repo !== "" ? repo : null,
+            },
+          });
+        };
+        const result = await handleScheduleApiRoute({
+          ...common,
+          send: scheduleSend,
+        });
         if (result !== false) return result;
       }
       if (
