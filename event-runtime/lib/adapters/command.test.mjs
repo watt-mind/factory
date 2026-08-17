@@ -247,10 +247,16 @@ describe("command-adapter registry (OPS-404)", () => {
 
   test("a reaper run planned from a clock tick resolves its argv and executes", async () => {
     const db = openDb(path.join(mkdtempSync(path.join(os.tmpdir(), "evrt-reaper-")), "runtime.db"));
+    // Only the reaper schedule may tick here (WM-629). Spreading the shipped
+    // schedules pulled in every enabled one — e.g. merge-factory — whose
+    // repository-workspace agent makes planAdmittedEvents run pinRepo(), i.e.
+    // a real `git fetch` against ~/.factory/event-runtime/mirrors/factory.git,
+    // twice (planEvent + buildRunSpec). ~1.2 s idle, >5 s under load: 5
+    // VERIFYING failures on 2026-08-17 (WM-616/625/549/618/627, 5003-5390 ms).
+    // The reaper is an ephemeral-workspace command agent: no pin, no git.
     const withReaper = {
       ...registry,
       schedules: {
-        ...registry.schedules,
         reaper: { ...registry.schedules.reaper, enabled: true, approval: "auto" },
       },
     };
