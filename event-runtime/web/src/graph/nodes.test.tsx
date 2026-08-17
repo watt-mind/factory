@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { AgentNode, EventTypeNode, ProposalNode, TerminalNode, nodeAccessibleName } from "./nodes";
 import type { GraphNode } from "./model";
-import { Graph } from "../views/Graph";
+import { Graph, focusedNodeFit } from "../views/Graph";
 import {
   changeInput,
   createAgentsFixture,
@@ -348,6 +348,16 @@ function renderGraph(props: Partial<Parameters<typeof Graph>[0]> = {}) {
 }
 
 describe("Graph view inspect loop", () => {
+  test("deep-link focus fit centres only the requested node at the current zoom", () => {
+    expect(focusedNodeFit("event:gh.failed", 0.8)).toEqual({
+      nodes: [{ id: "event:gh.failed" }],
+      padding: 0.45,
+      duration: 180,
+      minZoom: 0.8,
+      maxZoom: 0.8,
+    });
+  });
+
   test("search input is mounted before layout so / does not leave Graph", async () => {
     await withApi(
       {

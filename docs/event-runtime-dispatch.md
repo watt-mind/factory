@@ -356,10 +356,16 @@ Recorded, not silently decided:
 ## Autonomous develop merge lifecycle (WM-398)
 
 Merge control is a durable runtime chain, not an interactive-orchestrator
-procedure: an enabled singleton schedule runs an independent cold scan;
-mechanical in-scope fixes are SHA/finding-hash pinned and bounded to two rounds;
-a policy-safe plan contains exactly one PR; and deterministic apply rechecks
-head/base SHA, CI, draft, mergeability, and holds immediately before landing.
+procedure. A dispatch `PR_OPEN` completion immediately fans out a scoped
+`factory.merge.requested {repo, prNumbers: [prNumber]}`, and a successful
+pull-request `workflow_run` emits the same scoped request, idempotent per PR
+head SHA. Scoped scans resolve exactly the named PR and never enumerate the
+rest of the queue. The enabled 15-minute singleton schedule remains a full-set
+sweep for missed events and human-opened PRs. Mechanical in-scope fixes are
+SHA/finding-hash pinned and bounded to two rounds; a policy-safe plan contains
+exactly one PR; and deterministic apply rechecks head/base SHA, CI, draft,
+mergeability, and holds immediately before landing. Every stale/pending refresh
+from apply carries that same PR number, preserving O(1) review work.
 Apply never marks Done or deletes the branch. A proven landing emits an exact
 merge-commit event whose deterministic verifier waits boundedly for base CI and
 configured smoke. Only green landing evidence permits exact worktree/head

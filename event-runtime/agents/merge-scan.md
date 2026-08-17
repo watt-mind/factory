@@ -8,7 +8,8 @@ checked out read-only at `./repo` at that SHA. Read
 snapshot. When `prNumbers` is absent, enumerate **all** open PRs and classify
 every base-targeting, non-draft PR as exactly MERGE, FIX, or ESCALATE. When
 `prNumbers` is present, review exactly those PR numbers in the listed repo — do
-not add newer, related, or otherwise open PRs to the scan.
+not enumerate the open-PR set and do not add newer, related, or otherwise open
+PRs to the scan. Selected scans must stay O(the number selected), normally O(1).
 
 Resolve every selected number directly, including numbers absent from an
 open-PR listing. A selected PR that is missing, closed, draft, or targets a

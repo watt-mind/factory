@@ -70,7 +70,9 @@ steal a claim, never queue behind the holder.
    command (`gh pr checks <PR> --watch --fail-fast` for CI); a fixed sleep
    wedges the run until the timeout kills it.
 6. **Push and open a PR** against the repo's base branch with
-   `Fixes <TICKET>` in the body. For a required UX critique, create the PR as a
+   `Fixes <TICKET>` in the body. Record its numeric GitHub PR number as
+   `artifact.prNumber`; this is what scopes the immediate merge review chained
+   from a `PR_OPEN` result. For a required UX critique, create the PR as a
    draft first. Run `gh pr ready <PR>` only after an evidence-backed `SHIP`
    verdict (including a `FIX-FIRST` resolved to `SHIP`). Leave `FIX-FIRST`,
    `NOT-ASSESSED`, and `BLOCKED` PRs in draft for review; skipped critiques may
@@ -132,6 +134,7 @@ report `outcome: "FAILED"`.
     "repo": "bj29",
     "ticket": "CLNT-123",
     "prUrl": "https://github.com/owner/name/pull/42",
+    "prNumber": 42,
     "verification": {
       "command": "cd app && npm run lint && npm run typecheck",
       "passed": true,
@@ -170,7 +173,7 @@ example rather than being left to inference:
 ```
 
 `BLOCKED`, `FAILED`, and `NOT_CLAIMED` are still `terminalState:
-"completed"` — the run determined a typed outcome; `prUrl` is null and
-`verification.command` is null when nothing ran. If Linear itself is
+"completed"` — the run determined a typed outcome; `prUrl` and `prNumber` are
+null and `verification.command` is null when nothing ran. If Linear itself is
 unreachable, refuse:
 `{"schemaVersion": "factory.agent-result/v1", "terminalState": "refused", "reasonCode": "needs_human"}`.

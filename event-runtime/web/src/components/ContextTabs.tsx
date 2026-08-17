@@ -355,7 +355,8 @@ export function ContextTabs({
         </button>
         <div
           role="presentation"
-          className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto"
+          data-context-repos-scroll
+          className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
         >
           {openRepos.map((name, idx) => (
             <div key={name} role="presentation" className={`group ${groupedTabClass(name)}`}>
@@ -438,6 +439,11 @@ export function ContextTabs({
             );
           })}
         </div>
+        <span
+          aria-hidden="true"
+          data-context-filter-divider
+          className="mx-0.5 h-5 w-px shrink-0 bg-(--border)"
+        />
         <button
           type="button"
           data-context-tab={INFLIGHT}
@@ -473,12 +479,13 @@ export function ContextTabs({
           aria-haspopup="listbox"
           aria-controls="repo-picker-listbox"
           aria-label="Open a repo tab"
-          title="Open a repo"
-          className="h-7 w-7 rounded-full text-[14px] text-(--text-dim) outline-none transition-colors hover:bg-(--surface-2) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent)"
+          title="Open a repo tab (g 1–9)"
+          className="flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium text-(--text-dim) outline-none transition-colors hover:bg-(--surface-2) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent)"
           onClick={() => setPicker((open) => !open)}
           onKeyDown={handlePickerTriggerKeyDown}
         >
-          +
+          <span aria-hidden="true" className="text-[14px] leading-none">+</span>
+          <span>Repo</span>
         </button>
         {picker && (
           <div
