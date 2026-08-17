@@ -219,7 +219,7 @@ function agentSingletonEnabled(registry, agentRef) {
 
 function singletonApplies(registry, envelope, agentRef) {
   const loop = envelope.payload?.loop;
-  const schedule = envelope.source === "schedule" && loop ? registry.schedules?.[loop] : null;
+  const schedule = loop ? registry.schedules?.[loop] : null;
   if (schedule && registry.eventTypes?.[schedule.eventType]?.agent === agentRef) {
     return schedule.singleton !== false;
   }
