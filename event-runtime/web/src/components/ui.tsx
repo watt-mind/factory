@@ -1,6 +1,7 @@
 import { createContext, type ReactNode, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { attrIcon } from "./attrIcons";
 import { createPortal } from "react-dom";
+import { ChevronRightIcon } from "@radix-ui/react-icons";
 import { modal, useFocusReturn, useNow } from "../hooks";
 import type { Section, SortDir } from "../displayOptions";
 import { tokenizeJson, TOKEN_CLASSES } from "../highlight";
@@ -702,6 +703,22 @@ export function Th({
   );
 }
 
+/** One disclosure marker everywhere: Radix weight, aligned box, 150ms rotation. */
+export function DisclosureChevron({
+  open,
+  className = "",
+}: {
+  open: boolean;
+  className?: string;
+}) {
+  return (
+    <ChevronRightIcon
+      aria-hidden="true"
+      className={`size-3 shrink-0 text-(--text-faint) transition-transform duration-150 ${open ? "rotate-90" : ""} ${className}`}
+    />
+  );
+}
+
 /**
  * A Linear-style section header row: chevron, state dot, label, count. The
  * whole band is one button (Enter/Space toggle for free, `aria-expanded` for
@@ -734,12 +751,7 @@ export function GroupHeaderRow({
             sub ? "h-7 pl-8" : "h-8"
           }`}
         >
-          <span
-            aria-hidden
-            className={`text-[9px] text-(--text-faint) transition-transform duration-150 ${collapsed ? "" : "rotate-90"}`}
-          >
-            ▶
-          </span>
+          <DisclosureChevron open={!collapsed} />
           {!sub && (
             <span
               aria-hidden
@@ -1236,13 +1248,11 @@ export function Disclosure({
       onToggle={(e) => setOpen(e.currentTarget.open)}
       className="group mb-1.5 list-none"
     >
-      <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-(--text-faint) select-none hover:text-(--text-dim) [&::-webkit-details-marker]:hidden list-none">
-        <span
-          aria-hidden
-          className={`inline-block text-[9px] text-(--text-faint) transition-transform duration-150 ${open ? "rotate-90" : ""}`}
-        >
-          ▶
-        </span>
+      <summary
+        aria-expanded={open}
+        className="flex cursor-pointer items-center gap-1.5 text-[11px] text-(--text-faint) select-none hover:text-(--text-dim) [&::-webkit-details-marker]:hidden list-none"
+      >
+        <DisclosureChevron open={open} />
         <span>{label}</span>
       </summary>
       <div className="mt-1.5">{children}</div>
@@ -1336,12 +1346,7 @@ export function Section({
           aria-expanded={!collapsed}
           className="mb-1.5 flex w-full cursor-pointer items-center gap-1.5 text-left hover:text-(--text-dim)"
         >
-          <span
-            aria-hidden="true"
-            className={`text-[9px] text-(--text-faint) transition-transform ${collapsed ? "" : "rotate-90"}`}
-          >
-            ▶
-          </span>
+          <DisclosureChevron open={!collapsed} />
           {heading}
         </button>
       ) : (

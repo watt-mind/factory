@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialog } from "./ui";
 import { NAV } from "../nav";
 
@@ -9,8 +10,8 @@ const CONTEXT_CHORDS: { chord: string; label: string }[] = [
 
 const ACTIONS: { keys: string; does: string }[] = [
   { keys: "⌘K", does: "command palette" },
-  { keys: "⌘K", does: "copy link to this page" },
-  { keys: "⌘K · footer theme", does: "cycle theme (dark → light → contrast)" },
+  { keys: "c l", does: "copy link to this page" },
+  { keys: "footer theme button", does: "cycle theme (dark → light → contrast)" },
   { keys: "i", does: "inject event" },
   { keys: "/", does: "focus this view's filter (Artifacts, Events, Runs, and other lists)" },
   { keys: "v", does: "display options" },
@@ -30,7 +31,6 @@ const ACTIONS: { keys: string; does: string }[] = [
   { keys: "p", does: "pin / unpin selected run (Runs)" },
   { keys: "z / Enter", does: "reveal selected node on canvas (Graph)" },
   { keys: "c", does: "copy selected id / name / ref" },
-  { keys: "c l", does: "copy link to clipboard" },
   { keys: "c i / c c", does: "copy CLI inspect command (Runs)" },
   { keys: "c p", does: "copy repo path (Projects)" },
   { keys: "d t", does: "dispatch triage scan (Projects)" },
@@ -72,9 +72,47 @@ const TRACE_KEYS: { keys: string; does: string }[] = [
 
 /** Keyboard cheatsheet (Linear's `?`). Spec §5 is the contract; this is the reminder. */
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [hasMoreBelow, setHasMoreBelow] = useState(false);
+
+  const updateOverflow = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setHasMoreBelow(el.scrollHeight - el.scrollTop - el.clientHeight > 4);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    updateOverflow();
+    const resizeObserver = new ResizeObserver(updateOverflow);
+    resizeObserver.observe(el);
+    el.addEventListener("scroll", updateOverflow, { passive: true });
+    return () => {
+      resizeObserver.disconnect();
+      el.removeEventListener("scroll", updateOverflow);
+    };
+  }, [updateOverflow]);
+
   return (
     <Dialog title="Keyboard" onClose={onClose}>
-      <div className="space-y-5 text-[12px] text-(--text-dim)">
+      <div className="-mt-9 mb-3 flex justify-end">
+        <button
+          type="button"
+          autoFocus
+          ref={(node) => node?.setAttribute("autofocus", "")}
+          onClick={onClose}
+          className="rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 py-1 text-[12px] font-medium text-(--text) transition-colors hover:bg-(--surface-3) focus-visible:outline-2 focus-visible:outline-(--accent)"
+        >
+          Close
+        </button>
+      </div>
+      <div className="relative">
+        <div
+          ref={scrollRef}
+          data-testid="shortcuts-scroll"
+          className="max-h-[calc(85vh-5rem)] space-y-5 overflow-y-auto pr-2 pb-8 text-[12px] text-(--text-dim)"
+        >
         <section aria-label="Navigation chords">
           <div className="mb-2 text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">
             Navigation chords
@@ -168,6 +206,12 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
             ))}
           </div>
         </section>
+        </div>
+        <div
+          data-testid="shortcuts-scroll-fade"
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-linear-to-t from-(--surface-1) to-transparent transition-opacity ${hasMoreBelow ? "opacity-100" : "opacity-0"}`}
+        />
       </div>
     </Dialog>
   );
