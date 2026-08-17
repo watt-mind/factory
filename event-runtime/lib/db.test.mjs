@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -362,6 +362,10 @@ describe("txImmediate (OPS-233)", () => {
 });
 
 describe("hermetic execution guard (OPS-425)", () => {
+  const expectRealDbUnchanged = (before, after) => {
+    expect(after.dbMtime).toBe(before.dbMtime);
+  };
+
   test("isolated home directories never mutate the operator's real ~/.factory", () => {
     const before = realFactorySnapshot();
     const isolated = createIsolatedHome("evrt-guard-test-");
@@ -371,8 +375,27 @@ describe("hermetic execution guard (OPS-425)", () => {
     expect(db.query(`SELECT value FROM counters WHERE name = 'guard'`).get().value).toBe(42);
     db.close();
     const after = realFactorySnapshot();
-    if (before.exists && after.exists) {
-      expect(after.mtime).toBe(before.mtime);
+    expectRealDbUnchanged(before, after);
+  });
+
+  test("detects a write to runtime.db in a supplied real-home fixture", () => {
+    const factoryHome = mkdtempSync(path.join(os.tmpdir(), "evrt-real-home-"));
+    const eventHome = path.join(factoryHome, "event-runtime");
+    const dbPath = path.join(eventHome, "runtime.db");
+    try {
+      mkdirSync(eventHome);
+      writeFileSync(dbPath, "before");
+      const oldTime = new Date("2000-01-01T00:00:00.000Z");
+      utimesSync(dbPath, oldTime, oldTime);
+
+      const before = realFactorySnapshot(factoryHome);
+      expect(() => expectRealDbUnchanged(before, realFactorySnapshot(factoryHome))).not.toThrow();
+
+      appendFileSync(dbPath, " after");
+      const after = realFactorySnapshot(factoryHome);
+      expect(() => expectRealDbUnchanged(before, after)).toThrow();
+    } finally {
+      rmSync(factoryHome, { recursive: true, force: true });
     }
   });
 });
