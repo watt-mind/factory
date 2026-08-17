@@ -455,16 +455,18 @@ function isIdempotencyKeyCollision(err) {
 
 function liveRunForInput(db, agentRef, { repo, ticket = null, includeFailed = false }) {
   if (typeof repo !== "string" || (ticket !== null && typeof ticket !== "string")) return null;
+  const versionSeparator = agentRef.lastIndexOf("@");
+  const agentFamily = versionSeparator > 0 ? `${agentRef.slice(0, versionSeparator)}@*` : agentRef;
   return db.query(
     `SELECT run_id, state FROM runs
      WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
        AND (? = 1 OR state <> 'FAILED')
-       AND json_extract(spec_json, '$.agent') = ?
+       AND json_extract(spec_json, '$.agent') GLOB ?
        AND json_extract(spec_json, '$.input.repo') = ?
        AND (? IS NULL OR json_extract(spec_json, '$.input.ticket') = ?)
      ORDER BY created_at ASC, rowid ASC
      LIMIT 1`,
-  ).get(includeFailed ? 1 : 0, agentRef, repo, ticket, ticket);
+  ).get(includeFailed ? 1 : 0, agentFamily, repo, ticket, ticket);
 }
 
 function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
@@ -612,7 +614,11 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     // singleton behavior. PROPOSED remains excluded here (OPS-436); the
     // repo-scoped work-scan reservation above intentionally includes it.
     const inFlight = inFlightRunsForAgent(db, mapping.agent);
-    const singletonBlocked = singletonApplies(registry, envelope, mapping.agent) && inFlight.length > 0;
+    // factory.work.requested already has the stricter repo-scoped reservation
+    // above. Applying the schedule's legacy agent-global singleton as well
+    // would incorrectly serialize unrelated repo queues after PROPOSED.
+    const singletonBlocked = envelope.type !== "factory.work.requested" &&
+      singletonApplies(registry, envelope, mapping.agent) && inFlight.length > 0;
     const mergeCap = envelope.type === "factory.merge.requested" ? policyMaxConcurrentMerges() : null;
     const mergeCapBlocked = mergeCap !== null && inFlight.length >= mergeCap;
     if (singletonBlocked || mergeCapBlocked) {

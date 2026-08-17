@@ -333,19 +333,21 @@ describe("planEvent", () => {
     });
     expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
 
-    // The reservation is repo-scoped, not a global scanner singleton.
+    // The reservation is repo-scoped, not a global scanner singleton — even
+    // after the first scan leaves PROPOSED and schedule singleton applies.
+    transition(db, { runId: first.runId, to: "APPROVED", actor: "test" });
     const otherRepoRef = admit(db, {
       eventId: "work-other-repo",
       type: "factory.work.requested",
       source: "operator",
       correlationId: "work-other-repo",
-      payload: { repo: "bj29" },
+      payload: { repo: "bj29", loop: "work-bj29" },
     });
     expect(planEvent(db, synthetic, otherRepoRef, { now: NOW + 2000, policyVersion: "git:test" }).decision).toBe("run");
 
     // A failed read emitted no dispatch chain and must release the queue; unlike
     // a failed dispatch, a failed scan owns no retained worktree to protect.
-    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+    for (const to of ["QUEUED", "LEASED", "RUNNING", "FAILED"]) {
       transition(db, { runId: first.runId, to, actor: "test" });
     }
     const afterFailureRef = admit(db, {
@@ -369,6 +371,45 @@ describe("planEvent", () => {
       payload: { repo: "factory" },
     });
     expect(planEvent(db, synthetic, nextCycleRef, { now: NOW + 4000, policyVersion: "git:test" }).decision).toBe("run");
+  });
+
+  test("live reservations survive an agent version upgrade (WM-491)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents), eventTypes: { ...registry.eventTypes } };
+    synthetic.agents.set("work-scan@1", {
+      ...registry.agents.get("work-scan@1"),
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const firstRef = admit(db, {
+      eventId: "work-v1",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-v1",
+      payload: { repo: "factory" },
+    });
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+
+    synthetic.eventTypes["factory.work.requested"] = {
+      ...synthetic.eventTypes["factory.work.requested"],
+      agent: "work-scan@2",
+    };
+    synthetic.agents.set("work-scan@2", {
+      ...synthetic.agents.get("work-scan@1"),
+      version: 2,
+      ref: "work-scan@2",
+    });
+    const nextRef = admit(db, {
+      eventId: "work-v2",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-v2",
+      payload: { repo: "factory" },
+    });
+    expect(planEvent(db, synthetic, nextRef, { now: NOW + 1000, policyVersion: "git:test" })).toMatchObject({
+      decision: "noop",
+      reason: "work_scan_already_in_flight",
+      runId: first.runId,
+    });
   });
 
   test("a duplicate dispatch for a ticket with a live dispatch is refused at plan time (WM-491)", () => {
