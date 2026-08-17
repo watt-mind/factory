@@ -1400,6 +1400,69 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     };
   }
 
+  function makeMergeFixSpec(overrides = {}) {
+    const runId = overrides.runId ?? `run_merge_fix_${++seq}_${Math.random().toString(36).slice(2)}`;
+    const input = overrides.input ?? {
+      repo: "wt-worker",
+      github: "watt-mind/wt-worker",
+      base: "develop",
+      pr: 42,
+      headSha: "a".repeat(40),
+      baseSha: "b".repeat(40),
+      headRef: "feat/WM-720",
+      ticket: "WM-720",
+      finding: "mechanical correction",
+      findingHash: "c".repeat(64),
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["src/feature/fix.mjs"],
+    };
+    return {
+      schemaVersion: "factory.run-spec/v1",
+      runId,
+      agent: "merge-fix@1",
+      input,
+      inputHash: hashJson(input),
+      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      adapter: "merge-fake",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.merge-fix-result/v1",
+      capabilities: ["linear:write", "repo:write", "github:write"],
+      timeoutSeconds: 5,
+      maxAttempts: 1,
+      idempotencyKey: `idem-${runId}`,
+      ...overrides,
+    };
+  }
+
+  const mergeFixFakeAdapter = {
+    async execute({ spec, workspaceDir }) {
+      writeFileSync(path.join(workspaceDir, ".transcript.json"), `{"fake":"merge-fix transcript"}\n`, "utf8");
+      writeFileSync(
+        path.join(workspaceDir, "result.json"),
+        `${JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          reasonCode: "ok",
+          artifact: {
+            outcome: "UPDATED",
+            repo: spec.input.repo,
+            ticket: spec.input.ticket,
+            pr: spec.input.pr,
+            headSha: spec.input.headSha,
+            round: spec.input.round,
+            summary: "applied mechanical correction",
+          },
+          evidence: { commands: ["echo repo_verified"] },
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      return { exitCode: 0, timedOut: false };
+    },
+  };
+
   const readyDispatchTicket = (identifier, overrides = {}) => ({
     identifier,
     state: { name: "Todo" },
@@ -1667,6 +1730,58 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(specs.map((spec) => db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts)).toEqual([1, 1, 1]);
     expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
     expect(maxActiveClaims).toBe(1);
+  });
+
+  test("merge-fix gate accepts an assigned In Review ticket without invoking the dispatch claim", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-fix-gate-"));
+    const spec = queueRun(db, makeMergeFixSpec());
+    let claimCalled = false;
+
+    const summary = await runOnce(db, registry, { "merge-fake": mergeFixFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({
+          identifier: spec.input.ticket,
+          state: { name: "In Review" },
+          assignee: { id: "reviewer" },
+          labels: { nodes: [{ name: "ai:needs-review" }] },
+          description: "## Owned Paths\n- src/feature/**\n",
+        }),
+        fetchPullRequest: () => ({ state: "OPEN", headRefOid: spec.input.headSha }),
+        claimTicket: () => { claimCalled = true; return { ok: false, reasonCode: "ticket_assigned" }; },
+      },
+    }));
+
+    expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+    expect(claimCalled).toBe(false);
+    expect(runState(db, spec.runId)).toBe("COMPLETED");
+  });
+
+  test("merge-fix claim refusals use role-specific reason codes", async () => {
+    for (const [suffix, ticketOverrides, pr, reasonCode] of [
+      ["escalated", { labels: { nodes: [{ name: "ai:escalated" }] } }, { state: "OPEN", headRefOid: "a".repeat(40) }, "merge_fix_ticket_escalated"],
+      ["moved", {}, { state: "OPEN", headRefOid: "d".repeat(40) }, "merge_fix_pr_moved"],
+    ]) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeMergeFixSpec({ runId: `run_merge_fix_${suffix}` }));
+      const summary = await runOnce(db, registry, { "merge-fake": mergeFixFakeAdapter }, opts({
+        dispatch: {
+          locksDir: mkdtempSync(path.join(os.tmpdir(), `evrt-merge-fix-${suffix}-`)),
+          fetchTicket: () => ({
+            identifier: spec.input.ticket,
+            state: { name: "In Review" },
+            assignee: { id: "reviewer" },
+            labels: { nodes: [{ name: "ai:needs-review" }] },
+            description: "## Owned Paths\n- src/feature/**\n",
+            ...ticketOverrides,
+          }),
+          fetchPullRequest: () => pr,
+        },
+      }));
+      expect(summary).toMatchObject({ terminalState: "REFUSED", reasonCode });
+      expect(["ticket_assigned", "ticket_not_todo"]).not.toContain(summary.reasonCode);
+    }
   });
 
   test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {

@@ -22,7 +22,7 @@ import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
-import { worktreeDispatchAutoEligibility } from "./planner.mjs";
+import { worktreeDispatchAutoEligibility, worktreeMergeFixEligibility } from "./planner.mjs";
 import { closeOpenProposalForRun } from "./proposals.mjs";
 import { computeDefHash, createReceipt, verifyDefHash } from "./receipts.mjs";
 import { traceRecorder } from "./trace.mjs";
@@ -680,6 +680,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
+        description: "## Owned Paths\n- **\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
@@ -880,11 +881,38 @@ export async function executeClaimed(db, registry, adapters, claim, {
         return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
       };
 
+      const gate = def?.gate ?? "dispatch";
+      if (!["dispatch", "merge-fix"].includes(gate)) {
+        releaseClaimLock(lockFile);
+        const reasonCode = "worktree_gate_unknown";
+        const res = refuseTerminal(reasonCode, ["worktree_gate"]);
+        if (res?.fenced) return { fenced: true };
+        return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+      }
+
       let gateResult;
       try {
-        gateResult = worktreeDispatchAutoEligibility(spec.input, dispatchOpts);
+        if (gate === "merge-fix") {
+          const fetchNonTerminalRuns = dispatchOpts?.fetchNonTerminalRuns ?? (() => db.query(
+            `SELECT run_id AS runId, state
+               FROM runs
+              WHERE run_id <> ?
+                AND state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+                AND json_extract(spec_json, '$.input.repo') = ?
+                AND json_extract(spec_json, '$.input.ticket') = ?
+              ORDER BY created_at, run_id`,
+          ).all(runId, repoName, ticketId));
+          gateResult = worktreeMergeFixEligibility(spec.input, {
+            fetchTicket: dispatchOpts?.fetchTicket,
+            fetchPullRequest: dispatchOpts?.fetchPullRequest,
+            fetchNonTerminalRuns,
+            now: nowFn,
+          });
+        } else {
+          gateResult = worktreeDispatchAutoEligibility(spec.input, dispatchOpts);
+        }
       } catch (err) {
-        if (hasPlanTimeDispatchEvidence(spec) && String(err?.message ?? err).startsWith("linear_read_failed:")) {
+        if (gate === "dispatch" && hasPlanTimeDispatchEvidence(spec) && String(err?.message ?? err).startsWith("linear_read_failed:")) {
           return deferTransientGate("linear_read_failed");
         }
         releaseClaimLock(lockFile);
@@ -894,39 +922,47 @@ export async function executeClaimed(db, registry, adapters, claim, {
       if (!gateResult.ok) {
         const gateRefusal = gateResult.refusal;
         if (
+          gate === "dispatch" &&
           gateRefusal.reason === "owned_paths_unknown" &&
           contradictsPlanTimeOwnedPaths(spec, gateResult)
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
         releaseClaimLock(lockFile);
-        const res = refuseTerminal(gateRefusal.reason, ["dispatch_gate"], { detail: gateRefusal.detail });
+        const res = refuseTerminal(gateRefusal.reason, [`${gate}_gate`], { detail: gateRefusal.detail });
         if (res?.fenced) return { fenced: true };
         return { runId, attempt, terminalState: "REFUSED", reasonCode: gateRefusal.reason, receipt: res?.receipt };
       }
 
-      let claimRes;
-      try {
-        claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
-      } finally {
+      if (gate === "merge-fix") {
+        // The ticket is already assigned and under review by definition. The
+        // merge-fix gate proved those live facts; trying the dispatch claim
+        // verb here would reject the valid run as ticket_assigned.
         releaseClaimLock(lockFile);
-      }
-
-      if (!claimRes?.ok) {
-        const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
-        const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
-        if (res?.fenced) return { fenced: true };
-        return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
-      }
-
-      ticketClaimed = true;
-      writeWorkerLease({ repo: repoName, ticket: ticketId, owner, pid: process.pid, dir: leasesDir, now: nowFn() });
-      leaseHeartbeat = setInterval(() => {
+      } else {
+        let claimRes;
         try {
-          renewWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir, now: Date.now() });
-        } catch {}
-      }, LEASE_HEARTBEAT_MS);
-      leaseHeartbeat?.unref?.();
+          claimRes = await claimTicketFn({ repo: repoName, ticket: ticketId, harness: spec.adapter ?? "claude" });
+        } finally {
+          releaseClaimLock(lockFile);
+        }
+
+        if (!claimRes?.ok) {
+          const reasonCode = claimRes?.reasonCode || "ticket_claim_lost";
+          const res = refuseTerminal(reasonCode, ["dispatch_claim"]);
+          if (res?.fenced) return { fenced: true };
+          return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
+        }
+
+        ticketClaimed = true;
+        writeWorkerLease({ repo: repoName, ticket: ticketId, owner, pid: process.pid, dir: leasesDir, now: nowFn() });
+        leaseHeartbeat = setInterval(() => {
+          try {
+            renewWorkerLease({ repo: repoName, ticket: ticketId, owner, dir: leasesDir, now: Date.now() });
+          } catch {}
+        }, LEASE_HEARTBEAT_MS);
+        leaseHeartbeat?.unref?.();
+      }
     }
 
     const adapterKey = adapterOverride ?? spec.adapter;
