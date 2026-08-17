@@ -1128,6 +1128,51 @@ export function Overview({
                 <div className="text-[12px] text-(--text-faint)">no proposals in gate</div>
               )}
             </div>
+
+            {/* Sub-row 3: Waiting on you (inbox ledger, WM-286). Absent on a
+                pre-inbox control API — the row simply does not render. */}
+            {s.inbox && (
+              <div className="mt-3.5 border-t border-(--border) pt-2.5">
+                <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
+                  <span className="font-semibold text-(--text)">Waiting on you</span>
+                  <span className="mono text-(--text-dim)">
+                    {s.inbox.open > 0
+                      ? `${s.inbox.open} open${s.inbox.acked > 0 ? ` · ${s.inbox.acked} acked` : ""}`
+                      : s.inbox.acked > 0
+                        ? `${s.inbox.acked} acked`
+                        : "nothing waiting"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onNavigate("inbox")}
+                  aria-label={`Waiting on you: ${s.inbox.open} open inbox item${s.inbox.open === 1 ? "" : "s"} — open the inbox`}
+                  className="flex w-full cursor-pointer items-center gap-3 rounded-md border border-(--border) bg-(--surface-1) px-3 py-1.5 text-left hover:bg-(--surface-2)"
+                >
+                  <span
+                    className="display text-xl tabular-nums"
+                    style={s.inbox.open > 0 ? { color: "var(--hue-warn)" } : undefined}
+                  >
+                    {s.inbox.open}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-(--text-faint)">
+                    {s.inbox.open > 0 && s.inbox.byKind
+                      ? (() => {
+                          const kinds = Object.entries(s.inbox.byKind!)
+                            .filter(([, n]) => n > 0)
+                            .sort((a, b) => b[1] - a[1]);
+                          const total = kinds.reduce((sum, [, n]) => sum + n, 0);
+                          // byKind spans open + acked on the API; say so when the
+                          // breakdown would not add up to the open headline.
+                          const prefix = total !== s.inbox!.open ? "open + acked · " : "";
+                          return prefix + kinds.map(([kind, n]) => `${n} ${kind}`).join(" · ");
+                        })()
+                      : "Nothing needs a decision right now."}
+                  </span>
+                  <span className="mono text-[11px] text-(--text-faint)">g n →</span>
+                </button>
+              </div>
+            )}
           </StageCard>
 
           {/* Card 2: Execution & Fleet Capacity */}

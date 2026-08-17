@@ -538,7 +538,9 @@ describe("Overview anomaly deck (WM-95)", () => {
       mutableApi.archive = originals.archive;
       mutableApi.releaseWorker = originals.releaseWorker;
     }
-  });
+    // Two 2s status polls plus the waitFor budgets put this right at bun's
+    // default 5s — it passed on develop by ~100ms. Give it its real budget.
+  }, 15_000);
 
   test("other anomaly kinds (stale leases, unpublished outbox) render unchanged", async () => {
     const origStatus = api.status;
@@ -1022,3 +1024,72 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
   });
 });
 
+
+describe("Overview waiting-on-you tile (WM-286)", () => {
+  function withStatus(status: StatusView) {
+    const orig = { status: api.status, proposals: api.proposals, outbox: api.outbox, journal: api.journal };
+    api.status = async () => status;
+    api.proposals = async () => ({ proposals: [] });
+    api.outbox = async () => ({ outbox: [] });
+    api.journal = async () => ({ entries: [], head: 0 });
+    return () => {
+      api.status = orig.status;
+      api.proposals = orig.proposals;
+      api.outbox = orig.outbox;
+      api.journal = orig.journal;
+    };
+  }
+
+  test("shows the open count with a by-kind caption and jumps to #/inbox", async () => {
+    const restore = withStatus({
+      ...baseStatus(),
+      inbox: { open: 3, acked: 0, byKind: { BLOCKED: 2, "CI RED": 1 } },
+    });
+    const onNavigate = mock(() => {});
+    try {
+      const view = renderOverview({ kind: "all" }, { onNavigate });
+      const tile = await waitFor(() => view.getByRole("button", { name: /Waiting on you: 3 open inbox items/ }));
+      expect(tile.textContent).toContain("2 BLOCKED · 1 CI RED");
+      expect(view.getByText("3 open")).toBeTruthy();
+      fireEvent.click(tile);
+      expect(onNavigate).toHaveBeenCalledWith("inbox");
+    } finally {
+      restore();
+    }
+  });
+
+  test("says when the by-kind breakdown spans acked items too, and reads calm at zero", async () => {
+    const restore = withStatus({
+      ...baseStatus(),
+      inbox: { open: 1, acked: 1, byKind: { BLOCKED: 2 } },
+    });
+    try {
+      const view = renderOverview();
+      const tile = await waitFor(() => view.getByRole("button", { name: /Waiting on you: 1 open inbox item/ }));
+      expect(tile.textContent).toContain("open + acked · 2 BLOCKED");
+      expect(view.getByText("1 open · 1 acked")).toBeTruthy();
+    } finally {
+      restore();
+    }
+    cleanup();
+    const restoreZero = withStatus({ ...baseStatus(), inbox: { open: 0, acked: 0, byKind: {} } });
+    try {
+      const view = renderOverview();
+      await waitFor(() => view.getByText("Nothing needs a decision right now."));
+      expect(view.getByText("nothing waiting")).toBeTruthy();
+    } finally {
+      restoreZero();
+    }
+  });
+
+  test("renders no tile against a pre-inbox control API", async () => {
+    const restore = withStatus(baseStatus());
+    try {
+      const view = renderOverview();
+      await waitFor(() => view.getByText("Approval Gate"));
+      expect(view.queryByText("Waiting on you")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
