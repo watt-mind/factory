@@ -45,7 +45,7 @@ function OptionRow({ label, htmlFor, children }: { label: string; htmlFor?: stri
   );
 }
 
-function Select({
+function ListboxSelect({
   id,
   ref,
   value,
@@ -55,29 +55,128 @@ function Select({
   label,
 }: {
   id?: string;
-  ref?: RefObject<HTMLSelectElement | null>;
+  ref?: RefObject<HTMLButtonElement | null>;
   value: string;
   onChange: (value: string) => void;
   options: { value: string; label: string }[];
   disabled?: boolean;
   label: string;
 }) {
+  const listId = useId();
+  const listRef = useRef<HTMLUListElement>(null);
+  const internalRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = ref ?? internalRef;
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(selectedIndex);
+  const selected = options[selectedIndex] ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    (listRef.current?.children[highlight] as HTMLElement | undefined)?.scrollIntoView({ block: "nearest" });
+  }, [highlight, listId, open]);
+
+  const show = () => {
+    if (disabled) return;
+    setHighlight(selectedIndex);
+    setOpen(true);
+  };
+
+  const pick = (index: number) => {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!open) {
+        show();
+      } else {
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        setHighlight((index) => (index + delta + options.length) % options.length);
+      }
+      return;
+    }
+    if (open && (event.key === "Home" || event.key === "End")) {
+      event.preventDefault();
+      setHighlight(event.key === "Home" ? 0 : options.length - 1);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (open) pick(highlight);
+      else show();
+      return;
+    }
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      return;
+    }
+    if (event.key === "Tab") setOpen(false);
+  };
+
   return (
-    <select
-      ref={ref}
-      id={id}
-      value={value}
-      disabled={disabled}
-      aria-label={label}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-32 cursor-pointer rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-[12px] text-(--text) outline-none hover:border-(--border-strong) focus:border-(--accent) disabled:cursor-not-allowed disabled:opacity-40"
-    >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+    <div className="relative w-32">
+      <button
+        ref={triggerRef}
+        id={id}
+        type="button"
+        role="combobox"
+        data-display-listbox-trigger
+        disabled={disabled}
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        aria-activedescendant={open ? `${listId}-option-${highlight}` : undefined}
+        onClick={() => (open ? setOpen(false) : show())}
+        onBlur={() => setOpen(false)}
+        onKeyDown={onKeyDown}
+        className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-left text-[12px] text-(--text) outline-none hover:border-(--border-strong) focus:border-(--accent) disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <span className="truncate">{selected?.label}</span>
+        <span aria-hidden className="shrink-0 text-[9px] text-(--text-faint)">▼</span>
+      </button>
+      {open && (
+        <ul
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label={`${label} options`}
+          className="absolute top-full right-0 z-40 mt-1 max-h-52 w-40 overflow-auto rounded-md border border-(--border-strong) bg-(--surface-1) p-1 text-[12px] shadow-xl outline-none"
+        >
+          {options.map((option, index) => (
+            <li
+              key={option.value}
+              id={`${listId}-option-${index}`}
+              role="option"
+              aria-selected={option.value === value}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                pick(index);
+              }}
+              onMouseEnter={() => setHighlight(index)}
+              className={`flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1 select-none ${
+                index === highlight
+                  ? "bg-(--surface-3) text-(--text)"
+                  : "text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+              }`}
+            >
+              <span className="truncate">{option.label}</span>
+              {option.value === value && <span aria-hidden className="text-(--accent)">✓</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -346,7 +445,7 @@ export function DisplayOptions<T>({
   const [customInput, setCustomInput] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const firstFocusRef = useRef<HTMLSelectElement>(null);
+  const firstFocusRef = useRef<HTMLButtonElement>(null);
   const groupId = useId();
   const subId = useId();
   const orderId = useId();
@@ -373,8 +472,10 @@ export function DisplayOptions<T>({
     modal.depth += 1;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      const openSuggestInput = rootRef.current?.querySelector('[aria-label="Add custom property path"][aria-expanded="true"]');
-      if (openSuggestInput && e.target === openSuggestInput) return;
+      const openNestedPopup = rootRef.current?.querySelector(
+        '[aria-label="Add custom property path"][aria-expanded="true"], [data-display-listbox-trigger][aria-expanded="true"]',
+      );
+      if (openNestedPopup && e.target === openNestedPopup) return;
       e.stopPropagation();
       setOpen(false);
       triggerRef.current?.focus();
@@ -454,7 +555,7 @@ export function DisplayOptions<T>({
           className="absolute right-0 top-full z-30 mt-1.5 w-80 max-h-[85vh] overflow-y-auto rounded-lg border border-(--border-strong) bg-(--surface-1) p-3 shadow-2xl"
         >
           <OptionRow label="Grouping" htmlFor={groupId}>
-            <Select
+            <ListboxSelect
               id={groupId}
               ref={firstFocusRef}
               label="Group by"
@@ -476,7 +577,7 @@ export function DisplayOptions<T>({
 
           {(config.subGroups?.length ?? 0) > 0 && (
             <OptionRow label="Sub-grouping" htmlFor={subId}>
-              <Select
+              <ListboxSelect
                 id={subId}
                 label="Sub-group by"
                 disabled={state.groupBy === NONE}
@@ -492,7 +593,7 @@ export function DisplayOptions<T>({
 
           <OptionRow label="Ordering" htmlFor={orderId}>
             <div className="flex items-center gap-1.5">
-              <Select
+              <ListboxSelect
                 id={orderId}
                 label="Order by"
                 value={state.sortBy}
@@ -513,15 +614,31 @@ export function DisplayOptions<T>({
                   })),
                 ]}
               />
-              <button
-                type="button"
-                aria-label={`Direction: ${state.sortDir === "asc" ? "ascending" : "descending"} — reverse`}
-                title={state.sortDir === "asc" ? "Ascending" : "Descending"}
-                onClick={() => onChange((s) => ({ ...s, sortDir: s.sortDir === "asc" ? "desc" : "asc" }))}
-                className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md border border-(--border) text-[11px] text-(--text-dim) hover:bg-(--surface-2) hover:text-(--text)"
+              <div
+                role="group"
+                aria-label="Ordering direction"
+                className="inline-flex shrink-0 items-center rounded-md border border-(--border) bg-(--surface-0) p-0.5"
               >
-                {state.sortDir === "asc" ? "↑" : "↓"}
-              </button>
+                {(["asc", "desc"] as const).map((direction) => {
+                  const pressed = state.sortDir === direction;
+                  return (
+                    <button
+                      key={direction}
+                      type="button"
+                      aria-pressed={pressed}
+                      aria-label={direction === "asc" ? "Ascending order" : "Descending order"}
+                      onClick={() => onChange((s) => ({ ...s, sortDir: direction }))}
+                      className={`cursor-pointer rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+                        pressed
+                          ? "bg-(--surface-2) text-(--text) shadow-sm"
+                          : "text-(--text-faint) hover:text-(--text-dim)"
+                      }`}
+                    >
+                      <span aria-hidden>{direction === "asc" ? "↑" : "↓"}</span> {direction}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </OptionRow>
 
@@ -554,12 +671,14 @@ export function DisplayOptions<T>({
                             : s.hiddenColumns.filter((k) => k !== c.key),
                         }))
                       }
-                      className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                      className={`inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
                         shown
-                          ? "border-(--border-strong) bg-(--surface-3) text-(--text)"
-                          : "border-(--border) text-(--text-faint) hover:bg-(--surface-2) hover:text-(--text-dim)"
+                          ? "border-(--border-strong) bg-(--surface-2) text-(--text)"
+                          : "border-(--border) bg-transparent hover:bg-(--surface-2)"
                       }`}
+                      style={shown ? undefined : { color: "var(--text-muted, var(--text-faint))" }}
                     >
+                      {shown && <span aria-hidden className="text-(--accent)">✓</span>}
                       {c.label}
                     </button>
                   );
