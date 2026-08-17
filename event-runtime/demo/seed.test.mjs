@@ -12,7 +12,22 @@ const VERIFY = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const TRIAGE_SCAN_OUTPUT_SCHEMA = JSON.parse(
   readFileSync(fileURLToPath(new URL("../schemas/triage-scan.output.json", import.meta.url)), "utf8"),
 );
-const SEED_TIMEOUT_MS = 10_000;
+// A liveness bound, not a performance target (WM-503). The two assertions that
+// use it exist to catch a seed that waits on the WRONG causal edge — reusing a
+// prior terminal triage-apply proposal instead of following the new scan's edge
+// — which blocks indefinitely rather than merely running slow.
+//
+// At 10s it was baseline-red on every run: the seed measures 10.1-10.5s on a
+// developer workstation, so the bound sat ~2% under the real cost and failed
+// 3/3 sampled runs (10164ms, 10130ms, 10545ms). That single failure failed the
+// whole-suite verification gate for EVERY dispatched ticket, since the gate is
+// all-or-nothing — the factory could not complete a ticket cleanly, and at
+// least one agent discarded a correct fix because of it.
+//
+// 20s is ~2x the observed cost, so ordinary host load cannot trip it, while a
+// genuine wrong-edge hang still fails here (and, failing that, at the 30s test
+// timeout). Rediscovered as WM-487, WM-492, WM-499 and WM-90 before WM-503.
+const SEED_TIMEOUT_MS = 20_000;
 
 const redact = (text) => String(text ?? "")
   .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
