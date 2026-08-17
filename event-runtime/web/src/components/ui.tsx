@@ -633,7 +633,11 @@ export function TableWindowFooter({ colSpan, range, move }: {
   if (total <= 100) return null;
   return (
     <tr>
-      <td colSpan={colSpan} onKeyDown={(e) => e.stopPropagation()} align="right">
+      <td
+        colSpan={colSpan}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && e.stopPropagation()}
+        align="right"
+      >
         {start + 1}–{end}/{total}{" "}
         <Button disabled={!start} onClick={() => move(-1)}>Prev</Button>{" "}
         <Button disabled={end === total} onClick={() => move(1)}>Next</Button>

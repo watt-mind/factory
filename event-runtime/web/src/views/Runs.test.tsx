@@ -934,6 +934,60 @@ describe("Runs long-list window (WM-563)", () => {
     );
   });
 
+  test("a sub-grouped page repeats only its own ancestry, never earlier sub headers", async () => {
+    // 5 agents x 50 runs, all COMPLETED: token 100 (the second page's first
+    // token) lands mid-way inside the second agent's subsection, so the window
+    // has to replay exactly two headers — COMPLETED and that agent — and no
+    // sub header whose rows all live on the previous page.
+    const runs = Array.from({ length: 250 }, (_, i) =>
+      stubListItem(`run_sub_${i}`, "COMPLETED", { agent: `agent-${Math.floor(i / 50)}` }),
+    );
+    localStorage.setItem("evrt-display-runs", JSON.stringify({
+      groupBy: "state",
+      subGroupBy: "agent",
+      sortBy: "default",
+      sortDir: "asc",
+      showEmpty: false,
+      hiddenColumns: [],
+      collapsed: [],
+      customColumns: [],
+    }));
+    await withApi(
+      { runs: async () => ({ runs }), status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        fireEvent.click(await r.findByRole("button", { name: "Next" }));
+        await waitFor(() => {
+          expect(r.container.querySelector('td[title="run_sub_100"]')).toBeTruthy();
+        });
+
+        // Walk the rendered body: every expanded sub header must own at least
+        // one run row before the next header. A header with a count badge and
+        // nothing under it is the phantom this guards against.
+        const rows = [...r.container.querySelectorAll("tbody tr")];
+        const phantoms: string[] = [];
+        rows.forEach((row, i) => {
+          const header = row.querySelector("button[aria-expanded]");
+          if (!header || header.getAttribute("aria-expanded") !== "true") return;
+          const next = rows[i + 1];
+          if (!next || !next.querySelector('td[title^="run_sub_"]')) {
+            if (header.className.includes("pl-8")) phantoms.push(header.textContent ?? "");
+          }
+        });
+        expect(phantoms).toEqual([]);
+
+        // Positively: the page's own ancestry is replayed — its state header
+        // and its own agent — and the subsection that ended on the previous
+        // page is gone entirely.
+        const headers = [...r.container.querySelectorAll("tbody tr button[aria-expanded]")]
+          .map((el) => el.textContent ?? "");
+        expect(headers[0]).toStartWith("COMPLETED");
+        expect(headers[1]).toStartWith("agent-1");
+        expect(headers.filter((label) => label.startsWith("agent-0"))).toEqual([]);
+      },
+    );
+  });
+
   test("j crosses a page boundary, Enter opens that row, and footer Enter does not", async () => {
     const runs = Array.from({ length: 250 }, (_, i) => stubListItem(`run_keys_${i}`, "COMPLETED"));
     const onOpenFull = mock(() => {});

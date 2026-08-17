@@ -174,11 +174,20 @@ export function tableTokens<T>(sections: DisplaySection<T>[], collapsed: readonl
 function sliceTableWindow<T>(tokens: TableToken<T>[], start: number, end: number) {
   const page = tokens.slice(start, end);
   if (start && (page[0].length === 1 || page[0][1])) {
+    // Only the page's own ancestry belongs here: at most one sub header (the
+    // row's) plus its parent. Unshifting every header walked past would render
+    // earlier sub headers with zero rows beneath them.
+    let haveSub = page[0].length === 2 && page[0][1];
     for (start--; start >= 0; start--) {
       const token = tokens[start];
-      if (token.length === 2) {
+      if (token.length !== 2) continue;
+      if (token[1]) {
+        if (haveSub) continue;
         page.unshift(token);
-        if (!token[1]) break;
+        haveSub = true;
+      } else {
+        page.unshift(token);
+        break;
       }
     }
   }
