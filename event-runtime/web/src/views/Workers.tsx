@@ -197,7 +197,7 @@ const WORKERS_DISPLAY: DisplayConfig<EnrichedWorker> = {
     { key: "state", label: "State", get: workerDisplayState, column: "state" },
     { key: "agent", label: "Agent", get: (w) => w.activeAgent, column: "agent" },
     { key: "target", label: "Target", get: (w) => w.activeTarget, column: "target" },
-    { key: "activeModel", label: "Active Model", get: (w) => w.activeModel, column: "activeModel" },
+    { key: "activeModel", label: "Model", get: (w) => w.activeModel, column: "activeModel" },
     { key: "labels", label: "Labels", get: (w) => labelText(w.labels), column: "labels" },
     { key: "adapters", label: "Adapters", get: (w) => w.adapters.join(", "), column: "adapters" },
     { key: "run", label: "Current run", get: (w) => w.currentRun ?? "", column: "run" },
@@ -206,15 +206,15 @@ const WORKERS_DISPLAY: DisplayConfig<EnrichedWorker> = {
   ],
   columns: [
     { key: "worker", label: "Worker", always: true },
-    { key: "host", label: "Host" },
-    { key: "pid", label: "PID" },
+    { key: "host", label: "Host", defaultHidden: true },
+    { key: "pid", label: "PID", defaultHidden: true },
     { key: "state", label: "State" },
     { key: "agent", label: "Agent" },
     { key: "target", label: "Target" },
-    { key: "activeModel", label: "Active Model" },
+    { key: "activeModel", label: "Model" },
     { key: "run", label: "Current run" },
-    { key: "adapters", label: "Adapters" },
-    { key: "labels", label: "Labels" },
+    { key: "adapters", label: "Adapters", defaultHidden: true },
+    { key: "labels", label: "Labels", defaultHidden: true },
     { key: "uptime", label: "Uptime" },
     { key: "heartbeat", label: "Heartbeat" },
   ],
@@ -767,17 +767,9 @@ export function Workers({
                   {show.has("run") && (
                     <td className="mono max-w-56 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)">
                       {w.currentRun ? (
-                        <div className="flex items-baseline gap-1.5 truncate whitespace-nowrap">
-                          {w.runItem?.agent && (
-                            <span className="truncate text-(--text-dim) text-[11px]" title={`Agent: ${w.runItem.agent}`}>
-                              {w.runItem.agent}
-                            </span>
-                          )}
-                          {w.runItem?.agent && <span className="text-(--text-faint)">·</span>}
-                          <JumpLink onClick={() => openRun(w.currentRun!)} title={`Open ${w.currentRun}`}>
-                            {shortId(w.currentRun)}
-                          </JumpLink>
-                        </div>
+                        <JumpLink onClick={() => openRun(w.currentRun!)} title={`Open ${w.currentRun}`}>
+                          {shortId(w.currentRun)}
+                        </JumpLink>
                       ) : (
                         "-"
                       )}
@@ -788,7 +780,9 @@ export function Workers({
                       className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={w.adapters.length > 0 ? w.adapters.join(", ") : undefined}
                     >
-                      {w.adapters.join(", ") || "-"}
+                      {w.adapters.length > 0
+                        ? `${w.adapters.length} adapter${w.adapters.length === 1 ? "" : "s"}`
+                        : "-"}
                     </td>
                   )}
                   {show.has("labels") && (

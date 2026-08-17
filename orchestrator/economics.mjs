@@ -34,7 +34,7 @@
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { LOG_DIR, METRICS_DIR, ROLLUP, parseRun, messageSignature } from "../lib/transcript.mjs";
+import { LOG_DIR, METRICS_DIR, ROLLUP, parseRun, messageSignature, parseDuration } from "../lib/transcript.mjs";
 
 const argv = process.argv.slice(2);
 const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
@@ -67,9 +67,7 @@ if (argv.includes("--gate")) {
 }
 
 const sinceArg = val("--since");
-const sinceMs = sinceArg
-  ? Date.now() - Number(sinceArg.replace(/[^\d]/g, "")) * (sinceArg.endsWith("h") ? 3600e3 : 86400e3)
-  : 0;
+const sinceMs = sinceArg ? Date.now() - parseDuration(sinceArg) : 0;
 
 const files = readdirSync(LOG_DIR)
   .filter((f) => f.endsWith(".jsonl"))

@@ -34,7 +34,7 @@ export const EVIDENCE_INLINE_LIMIT_BYTES = 256 * 1024;
  * own verify at the time (`bun test && bun build/emit.mjs --check`, the full
  * suite) measured 196-217s, so nothing could ever pass. Sized at ~3x the
  * slowest observed run, which leaves room for a loaded host while staying far
- * under `limits.max_run_minutes: 45` in config/policy.yaml — the bound that
+ * under `limits.max_run_minutes: 90` in config/policy.yaml — the bound that
  * actually caps a wedged run. (The factory verify has since been narrowed to
  * `bun test event-runtime/lib && bun build/emit.mjs --check`, ~70s, WM-528 —
  * the ceiling stays where it is for the other repos.)

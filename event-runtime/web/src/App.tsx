@@ -33,6 +33,24 @@ type NavBadge = {
   title?: string;
 };
 
+function NavCount({ id, badge }: { id: string; badge: NavBadge }) {
+  return (
+    <span
+      id={id}
+      aria-hidden="true"
+      className="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-medium leading-none tabular-nums"
+      title={badge.title}
+      style={{
+        color: badge.hue,
+        background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
+      }}
+    >
+      {badge.count}
+      {badge.word && <span className="ml-1">{badge.word}</span>}
+    </span>
+  );
+}
+
 const Artifacts = lazy(() => import("./views/Artifacts").then((m) => ({ default: m.Artifacts })));
 const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph })));
 const Chain = lazy(() => import("./views/Chain").then((m) => ({ default: m.Chain })));
@@ -249,8 +267,7 @@ export function App() {
     artifacts: {
       count: status.data?.artifacts.orphans ?? 0,
       hue: "var(--hue-warn)",
-      word: "orphan",
-      title: `${status.data?.artifacts.orphans ?? 0} unreferenced artifact${status.data?.artifacts.orphans === 1 ? "" : "s"}`,
+      title: `${status.data?.artifacts.orphans ?? 0} orphan artifact${status.data?.artifacts.orphans === 1 ? "" : "s"} (unreferenced)`,
     },
     schedules:
       stoppedSchedulesCount > 0
@@ -492,19 +509,7 @@ export function App() {
                      aria-describedby reference above still reads it back as
                      the button's description (accname spec includes hidden
                      nodes referenced by labelledby/describedby). */
-                  <span
-                    id={`nav-badge-${n.key}`}
-                    aria-hidden="true"
-                    className="rounded px-1.5 text-[11px] tabular-nums"
-                    title={badge.title}
-                    style={{
-                      color: badge.hue,
-                      background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
-                    }}
-                  >
-                    {badge.count}
-                    {badge.word && <span className="ml-1">{badge.word}</span>}
-                  </span>
+                  <NavCount id={`nav-badge-${n.key}`} badge={badge} />
                 )}
               </button>
             );

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildSkeleton, buildTemplates, retriggerEnvelope, summarize, triggerId } from "./templates";
+import { buildSkeleton, buildTemplates, groupTemplates, retriggerEnvelope, summarize, triggerId } from "./templates";
 import type { AgentsView } from "./types";
 
 const NOW = Date.parse("2026-08-13T09:15:00.000Z");
@@ -228,6 +228,28 @@ describe("buildTemplates", () => {
     expect(templates[0]?.eventType).toBe("factory.ticket.dispatched");
     expect(templates[0]?.agent).toBe("");
     expect(templates[0]?.adapter).toBe("");
+  });
+
+  test("groups domain prefixes deterministically and sorts event types inside each group (WM-555)", () => {
+    const unorderedView = {
+      agents: [],
+      eventTypes: [
+        { type: "keephq.disk-alert.raised" },
+        { type: "factory.triage.requested" },
+        { type: "github.workflow-run.failed" },
+        { type: "factory.ci-rerun.requested" },
+        { type: "clock.daily.tick" },
+        { type: "factory.status-report.requested" },
+      ],
+    };
+    const groups = groupTemplates(buildTemplates(unorderedView as unknown as AgentsView, NOW));
+
+    expect(groups.map((group) => group.domain)).toEqual(["clock.", "factory.", "github.", "keephq."]);
+    expect(groups.find((group) => group.domain === "factory.")?.templates.map((t) => t.eventType)).toEqual([
+      "factory.ci-rerun.requested",
+      "factory.status-report.requested",
+      "factory.triage.requested",
+    ]);
   });
 });
 

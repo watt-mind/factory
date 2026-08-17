@@ -17,6 +17,7 @@ import type { Worker, WorkerCapacity, WorkerState } from "../types";
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
 });
 
 const NOW = new Date().toISOString();
@@ -389,7 +390,7 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
     });
   }
 
-  test("renders Agent, Target, Active Model columns by default with run details and inline agent", async () => {
+  test("renders Agent, Target, and Model columns by default without repeating the agent in Current run", async () => {
     const workerBusy: Worker = {
       ...stubWorker("w_busy_active", "busy"),
       currentRun: "run_active_463",
@@ -406,15 +407,42 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
       // Verify Column headers exist
       expect(getByRole("columnheader", { name: "Agent" })).toBeTruthy();
       expect(getByRole("columnheader", { name: "Target" })).toBeTruthy();
-      expect(getByRole("columnheader", { name: "Active Model" })).toBeTruthy();
+      expect(getByRole("columnheader", { name: "Model" })).toBeTruthy();
 
-      // Verify busy worker displays agent, target, active model, and inline agent with run
-      expect(getAllByText("dispatch@1").length).toBeGreaterThanOrEqual(1);
+      // Verify busy worker displays agent once, plus target and active model.
+      expect(getAllByText("dispatch@1")).toHaveLength(1);
       expect(getByText("factory · WM-253")).toBeTruthy();
       expect(getByText("openai-codex/gpt-5.6-sol")).toBeTruthy();
 
       // Verify idle worker displays dashes for active columns
       expect(getByText("w_idle_free")).toBeTruthy();
+    });
+  });
+
+  test("uses the compact default column set and renders optional adapters as a titled count", async () => {
+    const workerBusy: Worker = {
+      ...stubWorker("w_busy_active", "busy"),
+      currentRun: "run_active_463",
+      adapters: ["actions", "agy", "claude", "command", "cursor", "fake", "pi"],
+    };
+
+    await withRunsAndWorkers([workerBusy], [stubRun], async () => {
+      const { getByRole, getByTitle, queryByRole } = renderWorkers();
+      await waitFor(() => expect(getByRole("columnheader", { name: "Worker" })).toBeTruthy());
+
+      for (const name of ["Worker", "State", "Agent", "Target", "Model", "Current run", "Uptime", "Heartbeat"]) {
+        expect(getByRole("columnheader", { name })).toBeTruthy();
+      }
+      for (const name of ["Host", "PID", "Adapters", "Labels"]) {
+        expect(queryByRole("columnheader", { name })).toBeNull();
+      }
+
+      fireEvent.click(getByRole("button", { name: /display/i }));
+      fireEvent.click(getByRole("button", { name: "Adapters" }));
+
+      expect(getByRole("columnheader", { name: "Adapters" })).toBeTruthy();
+      const adapters = getByTitle("actions, agy, claude, command, cursor, fake, pi");
+      expect(adapters.textContent).toBe("7 adapters");
     });
   });
 
