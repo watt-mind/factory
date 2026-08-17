@@ -365,9 +365,10 @@ no shared set. Every rule below is checkable in review.
      timeout, `ReloadIcon` = attempts. Add to this list in the same PR that
      adds the glyph.
    - Identity rows (`id`, `version`, contract) carry **no** icon — an
-     identifier is text, and a word already fits. Within one `KVGroup`
-     either every row has an icon or none does; `icon={null}` reserves the
-     slot when a group is mixed so labels stay aligned.
+     identifier is text, and a word already fits — but they pass
+     `icon={null}` so the slot is reserved and label text starts at one x
+     down the whole panel. Rule: once any row in a `Section` has an icon,
+     every `KV` in that section reserves the slot (real icon or `null`).
    - `aria-hidden` on the slot; the label carries the name.
    - Still no icon font, and no second icon package: one library keeps the
      stroke weight and the visual language uniform.
@@ -425,7 +426,7 @@ not in this table is not a placement.
 | Context                    | Position                  | Rule                                                                                                           |
 | -------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | State badge / status label | leading, `gap-1.5`        | Icon then word. Never trailing, never alone.                                                                   |
-| `KV` label (attribute icon)| leading, `gap-1.5`        | Icon then label, in the label column, label color. `KVGroup` rows are all-icon or no-icon; `icon={null}` reserves the slot. |
+| `KV` label (attribute icon)| leading, `gap-1.5`        | Icon then label, in the label column, label color. Once a section has one icon, every row reserves the slot (`icon={null}` for icon-less rows). |
 | Button                     | leading only              | A trailing glyph is reserved for one meaning: `…` = "opens a dialog". Nothing else trails.                     |
 | Table cell                 | leading, baseline-aligned | Same column as its text; a cell is never icon-only unless the header names the meaning and `title` repeats it. |
 | Section / group header     | between chevron and label | Chevron → dot/icon → label → count, in that order (`GroupHeaderRow`).                                          |

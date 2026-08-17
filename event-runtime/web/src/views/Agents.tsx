@@ -461,12 +461,14 @@ export function Agents({
         >
 
           <Section title="Definition">
-            {/* Grouped + attribute icons per §5.2 tier 3b (WM-482). Identity
-                rows carry no icon: an id is text and a word already fits. */}
+            {/* Grouped + attribute icons per §5.2 tier 4 (WM-482). Identity
+                rows carry no icon — an id is text and a word already fits —
+                but reserve the slot so label text starts at one x across the
+                whole panel (ux-critic finding, WM-482). */}
             <KVGroup title="Identity">
-              <KV k="id" v={sel.id} />
-              <KV k="version" v={String(sel.version)} />
-              <KV k="outputContract" v={sel.outputContract} />
+              <KV k="id" icon={null} v={sel.id} />
+              <KV k="version" icon={null} v={String(sel.version)} />
+              <KV k="outputContract" icon={null} v={sel.outputContract} />
             </KVGroup>
             <KVGroup title="Execution">
               <KV

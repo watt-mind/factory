@@ -1333,10 +1333,10 @@ export function KV({
   v: ReactNode;
   mono?: boolean;
   /**
-   * Attribute icon per §5.2 tier 3b (WM-482): a Radix icon at 14px,
+   * Attribute icon per §5.2 tier 4 (WM-482): a Radix icon at 14px,
    * `currentColor`, leading the label at `gap-1.5`. Pass `null` to reserve
-   * the slot on a row without an icon so labels in the same group stay
-   * aligned; omit it entirely in groups that carry no icons.
+   * the slot on a row without an icon so label text starts at one x across
+   * the section; omit it entirely in sections that carry no icons at all.
    */
   icon?: ReactNode;
 }) {
