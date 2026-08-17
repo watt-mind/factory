@@ -20,7 +20,7 @@
     ]
   },
   "limits": {
-    "timeout_seconds": 900,
+    "timeout_seconds": 1500,
     "attempts": 1
   },
   "mutating": false,
