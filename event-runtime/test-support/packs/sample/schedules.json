@@ -1,0 +1,9 @@
+{
+  "sample-echo": {
+    "every": "60m",
+    "eventType": "sample.echo.requested",
+    "catchUp": "none",
+    "approval": "watched",
+    "enabled": false
+  }
+}

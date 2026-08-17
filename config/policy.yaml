@@ -1,6 +1,10 @@
 # Limits the dispatcher enforces. Changing these changes how much autonomy the
 # factory has, so they live in git and move by PR — not by editing a running box.
 
+# Explicit extension allowlist (WM-470). Empty preserves the built-in registry
+# exactly; packs are never discovered by scanning the filesystem.
+packs: []
+
 chain_auto_approval:
   # Only internally admitted chain events in this closed set may be approved
   # unattended. Every other proposal remains watched by default.

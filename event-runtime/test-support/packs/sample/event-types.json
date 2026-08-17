@@ -1,0 +1,14 @@
+{
+  "sample.echo.requested": {
+    "agent": "sample/echo@1",
+    "adapter": "fake",
+    "idempotencyScope": ["correlationId"],
+    "proposalTtlSeconds": 1800
+  },
+  "sample.core-status.requested": {
+    "agent": "factory-status-report@1",
+    "adapter": "pi",
+    "idempotencyScope": ["correlationId"],
+    "proposalTtlSeconds": 1800
+  }
+}

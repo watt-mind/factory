@@ -24,6 +24,203 @@ export class RegistryError extends Error {
 }
 
 const PINNED_FIELDS = ["prompt", "input_schema", "output_schema"];
+const MAP_FILES = {
+  "event-types": "event-types.json",
+  edges: "edges.json",
+  schedules: "schedules.json",
+};
+
+function parseJson(bytes, description) {
+  try {
+    return JSON.parse(typeof bytes === "string" ? bytes : Buffer.from(bytes).toString("utf8"));
+  } catch (err) {
+    throw new RegistryError(`${description}: invalid JSON — ${err.message}`);
+  }
+}
+
+function readJson(file, description = file) {
+  return parseJson(readFileSync(file), description);
+}
+
+function nullDict() {
+  return Object.create(null);
+}
+
+function policyFile(root) {
+  return path.join(root, "config", "policy.yaml");
+}
+
+/**
+ * Read the explicit filesystem-pack allowlist. No directory discovery is ever
+ * performed: an absent block is the empty list, and malformed entries fail
+ * before any pack content is read.
+ */
+export function loadPackRoots({ root = reposRoot() } = {}) {
+  const file = policyFile(root);
+  if (!existsSync(file)) return [];
+  let parsed;
+  try {
+    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new RegistryError(`${file}: unparseable policy.yaml — ${err.message}`);
+  }
+  const configured = parsed?.packs;
+  if (configured === undefined || configured === null) return [];
+  if (!Array.isArray(configured)) throw new RegistryError(`${file}: "packs" must be an array`);
+
+  const names = new Set();
+  return configured.map((entry, index) => {
+    const at = `${file}: packs[${index}]`;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new RegistryError(`${at} must be an object with name and path`);
+    }
+    for (const key of Object.keys(entry)) {
+      if (!["name", "path", "namespace"].includes(key)) throw new RegistryError(`${at}: unknown field "${key}"`);
+    }
+    if (typeof entry.name !== "string" || entry.name.trim() === "") {
+      throw new RegistryError(`${at}.name must be a non-empty string`);
+    }
+    if (names.has(entry.name)) throw new RegistryError(`${file}: duplicate pack name "${entry.name}"`);
+    names.add(entry.name);
+    if (typeof entry.path !== "string" || entry.path.trim() === "") {
+      throw new RegistryError(`${at}.path must be a non-empty string`);
+    }
+    if (entry.namespace !== undefined && typeof entry.namespace !== "string") {
+      throw new RegistryError(`${at}.namespace must be a string when present`);
+    }
+    return {
+      kind: "fs",
+      name: entry.name,
+      path: path.resolve(root, entry.path),
+      ...(entry.namespace !== undefined ? { namespace: entry.namespace } : {}),
+    };
+  });
+}
+
+/**
+ * Filesystem implementation of the storage seam consumed by loadRegistry.
+ * Definition parsing and pinned bytes stay behind this interface so merged
+ * validation is equally usable by a future database-backed loader.
+ */
+export function createFsPackLoader(pack, { builtIn = false, ignorePins = false } = {}) {
+  const root = path.resolve(pack.path);
+  let pins;
+  return {
+    listAgentDefs() {
+      const dir = path.join(root, "agents");
+      if (!existsSync(dir)) return [];
+      return readdirSync(dir)
+        .filter(isDefinitionFile)
+        .sort()
+        .map((name) => {
+          const source = path.join(dir, name);
+          return { source, definition: readJson(source) };
+        });
+    },
+    // Optional seam member (WM-454): artifact-view sidecars are a filesystem
+    // notion, so only the fs loader offers them. loadRegistry treats an
+    // absent method as "this pack has no views".
+    readArtifactView(entry, def) {
+      return loadArtifactView(root, entry.source, def);
+    },
+    readPinned(relative, def) {
+      if (pins === undefined && !builtIn && !ignorePins) {
+        const file = path.join(root, "pins.json");
+        pins = existsSync(file) ? readJson(file) : nullDict();
+        if (typeof pins !== "object" || pins === null || Array.isArray(pins)) {
+          throw new RegistryError(`${file}: pins must be a path-to-hash map`);
+        }
+      }
+      const file = path.join(root, relative);
+      return {
+        expected: builtIn
+          ? Object.hasOwn(def.pins ?? nullDict(), relative)
+            ? def.pins[relative]
+            : undefined
+          : !ignorePins && Object.hasOwn(pins, relative)
+            ? pins[relative]
+            : undefined,
+        bytes: existsSync(file) ? readFileSync(file) : null,
+        source: file,
+        path: file,
+      };
+    },
+    readMap(name) {
+      const filename = MAP_FILES[name];
+      if (!filename) throw new RegistryError(`unknown pack map "${name}"`);
+      const file = path.join(root, filename);
+      if (!existsSync(file)) return nullDict();
+      const value = readJson(file);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new RegistryError(`${file}: top level must be an object`);
+      }
+      return value;
+    },
+  };
+}
+
+function configuredPack(pack) {
+  if (pack.kind !== "fs") throw new RegistryError(`pack ${pack.name}: unsupported configured kind "${pack.kind}"`);
+  const manifestFile = path.join(pack.path, "pack.json");
+  if (!existsSync(manifestFile)) throw new RegistryError(`pack ${pack.name}: missing ${manifestFile}`);
+  const manifest = readJson(manifestFile);
+  if (manifest.name !== pack.name) {
+    throw new RegistryError(`${manifestFile}: manifest name ${JSON.stringify(manifest.name)} does not match policy name "${pack.name}"`);
+  }
+  if (typeof manifest.version !== "string" || manifest.version.trim() === "") {
+    throw new RegistryError(`${manifestFile}: version must be a non-empty string`);
+  }
+  if (manifest.namespace !== undefined && typeof manifest.namespace !== "string") {
+    throw new RegistryError(`${manifestFile}: namespace must be a string when present`);
+  }
+  if (pack.namespace !== undefined && manifest.namespace !== undefined && pack.namespace !== manifest.namespace) {
+    throw new RegistryError(`${manifestFile}: namespace ${JSON.stringify(manifest.namespace)} does not match policy namespace ${JSON.stringify(pack.namespace)}`);
+  }
+  const namespace = pack.namespace ?? manifest.namespace;
+  if (namespace === undefined) {
+    throw new RegistryError(`${manifestFile}: non-built-in packs must declare namespace in the manifest or policy.yaml`);
+  }
+  return { ...pack, root: path.resolve(pack.path), namespace, version: manifest.version };
+}
+
+function injectedPack(pack) {
+  if (typeof pack?.kind !== "string" || pack.kind.trim() === "") {
+    throw new RegistryError("injected pack roots must declare a kind");
+  }
+  if (typeof pack.name !== "string" || pack.name.trim() === "") {
+    throw new RegistryError("injected pack roots must declare a non-empty name");
+  }
+  if (typeof pack.namespace !== "string") {
+    throw new RegistryError(`injected pack "${pack.name}" must declare namespace`);
+  }
+  return { ...pack, root: pack.root ?? pack.path ?? `${pack.kind}:${pack.name}` };
+}
+
+function defaultLoaderFor(pack, options) {
+  if (pack.kind !== "fs") {
+    throw new RegistryError(`pack ${pack.name}: no loader registered for kind "${pack.kind}"`);
+  }
+  return createFsPackLoader(pack, options);
+}
+
+function assertLoader(loader, pack) {
+  for (const method of ["listAgentDefs", "readPinned", "readMap"]) {
+    if (typeof loader?.[method] !== "function") {
+      throw new RegistryError(`pack ${pack.name}: loader is missing ${method}()`);
+    }
+  }
+  return loader;
+}
+
+function mergeMap(target, sources, incoming, pack, label) {
+  for (const [key, value] of Object.entries(incoming)) {
+    if (Object.hasOwn(target, key)) {
+      throw new RegistryError(`duplicate ${label} ${JSON.stringify(key)} from packs "${sources[key]}" and "${pack.name}"`);
+    }
+    target[key] = value;
+    sources[key] = pack.name;
+  }
+}
 
 /** Agent definition files: every `agents/*.json` except the view sidecars. */
 const VIEW_SUFFIX = ".view.json";
@@ -143,10 +340,19 @@ export function resolveModel(def, adapter, modelTiers) {
   return value;
 }
 
-function loadAgentDef(root, file) {
-  const def = JSON.parse(readFileSync(file, "utf8"));
+function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
+  const source = entry?.source ?? `${pack.name}: agent definition`;
+  const def = entry?.definition;
+  if (typeof def !== "object" || def === null || Array.isArray(def)) {
+    throw new RegistryError(`${source}: loader returned a non-object agent definition`);
+  }
   for (const field of ["id", "version", ...PINNED_FIELDS, "workspace", "capabilities", "limits"]) {
-    if (def[field] === undefined) throw new RegistryError(`${file}: missing "${field}"`);
+    if (def[field] === undefined) throw new RegistryError(`${source}: missing "${field}"`);
+  }
+  if (!builtIn && def.mutating !== false) {
+    throw new RegistryError(
+      `${source}: config-listed pack "${pack.name}" may not declare mutating: true (WM-468 decision 4; non-bare packs are read-only)`,
+    );
   }
   // §14 enforcement path: a mutating definition is admitted only when it is
   // enforceable by construction — a fixed argv template (the closed action
@@ -176,7 +382,7 @@ function loadAgentDef(root, file) {
       );
     if (!closedArgv && !closedActionRegistry && !closedItemList && !tier2Worktree) {
       throw new RegistryError(
-        `${file}: mutating agents are admitted only as closed command templates, closed action registries, or tier-2 worktree agents (docs/event-runtime.md §14; docs/event-runtime-dispatch.md §6; OPS-223/OPS-208/WM-108)`,
+        `${source}: mutating agents are admitted only as closed command templates, closed action registries, or tier-2 worktree agents (docs/event-runtime.md §14; docs/event-runtime-dispatch.md §6; OPS-223/OPS-208/WM-108)`,
       );
     }
   }
@@ -192,7 +398,7 @@ function loadAgentDef(root, file) {
       Array.isArray(def.repos) && def.repos.length > 0 && def.repos.every((r) => typeof r === "string" && r.trim() !== "");
     if (!wellFormed) {
       throw new RegistryError(
-        `${file}: "repos" must be a non-empty array of non-empty repo names (WM-64) — omit the field for an unrestricted agent`,
+        `${source}: "repos" must be a non-empty array of non-empty repo names (WM-64) — omit the field for an unrestricted agent`,
       );
     }
   }
@@ -203,128 +409,204 @@ function loadAgentDef(root, file) {
   // the adapter is known.
   if (def.model_tier !== undefined && !MODEL_TIERS.includes(def.model_tier)) {
     throw new RegistryError(
-      `${file}: "model_tier" must be one of ${MODEL_TIERS.join(", ")} (got ${JSON.stringify(def.model_tier)}) — definitions declare intent, not model ids (WM-135)`,
+      `${source}: "model_tier" must be one of ${MODEL_TIERS.join(", ")} (got ${JSON.stringify(def.model_tier)}) — definitions declare intent, not model ids (WM-135)`,
     );
   }
   if (def.model !== undefined && (typeof def.model !== "string" || def.model.trim() === "")) {
-    throw new RegistryError(`${file}: "model" must be a non-empty string model id — omit the field for tier/default routing (WM-135)`);
+    throw new RegistryError(`${source}: "model" must be a non-empty string model id — omit the field for tier/default routing (WM-135)`);
   }
-  const pins = def.pins ?? {};
+
+  const resources = {};
+  const pins = {};
   for (const field of PINNED_FIELDS) {
     const rel = def[field];
-    const abs = path.join(root, rel);
-    const actual = hashBytes(readFileSync(abs));
-    if (!pins[rel]) throw new RegistryError(`${file}: "${rel}" has no pin — run: bun event-runtime/cli.mjs update-pins`);
-    if (pins[rel] !== actual) {
+    const resource = loader.readPinned(rel, def);
+    if (typeof resource !== "object" || resource === null) {
+      throw new RegistryError(`${source}: loader returned no pinned resource for "${rel}"`);
+    }
+    const resourceSource = resource.source ?? `${source}: ${rel}`;
+    if (resource.bytes === null || resource.bytes === undefined) {
+      throw new RegistryError(`${resourceSource}: pinned file "${rel}" does not exist`);
+    }
+    const actual = hashBytes(resource.bytes);
+    const pinCommand = builtIn
+      ? "bun event-runtime/cli.mjs update-pins"
+      : `bun event-runtime/cli.mjs update-pins --pack ${pack.name}`;
+    if (!resource.expected) throw new RegistryError(`${source}: "${rel}" has no pin — run: ${pinCommand}`);
+    if (resource.expected !== actual) {
       throw new RegistryError(
-        `${file}: "${rel}" content ${actual} does not match pin ${pins[rel]} — bump the version (and re-pin) instead of editing in place`,
+        `${resourceSource}: "${rel}" content ${actual} does not match pin ${resource.expected} — bump the version (and re-pin) instead of editing in place`,
       );
     }
+    pins[rel] = resource.expected;
+    resources[field] = resource;
   }
+  const promptPath = resources.prompt.path ?? resources.prompt.source;
+  if (typeof promptPath !== "string" || promptPath === "") {
+    throw new RegistryError(`${source}: loader returned no prompt path for "${def.prompt}"`);
+  }
+  const localRef = `${def.id}@${def.version}`;
   return {
     ...def,
-    ref: `${def.id}@${def.version}`,
-    promptPath: path.join(root, def.prompt),
-    inputSchema: JSON.parse(readFileSync(path.join(root, def.input_schema), "utf8")),
-    outputSchema: JSON.parse(readFileSync(path.join(root, def.output_schema), "utf8")),
+    pins,
+    pack: pack.name,
+    ref: pack.namespace ? `${pack.namespace}/${localRef}` : localRef,
+    promptPath,
+    inputSchema: parseJson(resources.input_schema.bytes, resources.input_schema.source ?? def.input_schema),
+    outputSchema: parseJson(resources.output_schema.bytes, resources.output_schema.source ?? def.output_schema),
   };
 }
 
 /**
- * @returns {{ root: string, agents: Map<string, object>, eventTypes: object, schemas: object }}
+ * Load the built-in registry first, then explicitly configured filesystem
+ * packs in policy order. Validation below sees only the fully merged view, so
+ * a pack event may route to an agent supplied by an earlier root.
  */
-export function loadRegistry({ root = RUNTIME_ROOT, modelTiers = loadModelTierMap() } = {}) {
-  const agents = new Map();
-  const views = new Map();
-  const anomalies = [];
-  const agentsDir = path.join(root, "agents");
-  for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
-    const defFile = path.join(agentsDir, name);
-    const def = loadAgentDef(root, defFile);
-    if (agents.has(def.ref)) throw new RegistryError(`duplicate agent definition ${def.ref}`);
-    agents.set(def.ref, def);
-    const { file, view, anomaly } = loadArtifactView(root, defFile, def);
-    if (anomaly) anomalies.push(anomaly);
-    // Kept off the definition object so receipts' defHash and the pinned
-    // identity never see the view (§2.3).
-    views.set(def.ref, { file, view });
+export function loadRegistry({
+  root = RUNTIME_ROOT,
+  packRoots,
+  modelTiers = loadModelTierMap(),
+  loaderFor = defaultLoaderFor,
+} = {}) {
+  const configured = packRoots ?? (path.resolve(root) === path.resolve(RUNTIME_ROOT) ? loadPackRoots() : []);
+  if (!Array.isArray(configured)) throw new RegistryError("packRoots must be an array");
+  if (typeof loaderFor !== "function") throw new RegistryError("loaderFor must be a function");
+
+  const builtIn = { kind: "fs", name: "event-runtime", path: path.resolve(root), root: path.resolve(root), namespace: "" };
+  const packs = [
+    builtIn,
+    ...configured.map((pack) => (pack.kind === "fs" ? configuredPack(pack) : injectedPack(pack))),
+  ];
+  const bare = packs.filter((pack) => pack.namespace === "");
+  if (bare.length !== 1) {
+    throw new RegistryError(`exactly one pack must own the bare namespace; found ${bare.length}: ${bare.map((p) => p.name).join(", ")}`);
   }
 
-  const eventTypes = JSON.parse(readFileSync(path.join(root, "event-types.json"), "utf8"));
+  const agents = new Map();
+  const agentSources = new Map();
+  const views = new Map();
+  const anomalies = [];
+  const eventTypes = nullDict();
+  const edges = nullDict();
+  const schedules = nullDict();
+  const eventSources = nullDict();
+  const edgeSources = nullDict();
+  const scheduleSources = nullDict();
+
+  for (const [index, pack] of packs.entries()) {
+    const builtInPack = index === 0;
+    const loader = assertLoader(loaderFor(pack, { builtIn: builtInPack }), pack);
+    for (const entry of loader.listAgentDefs()) {
+      const def = loadAgentDef(pack, loader, entry, { builtIn: builtInPack });
+      if (agents.has(def.ref)) {
+        throw new RegistryError(
+          `duplicate agent ref ${JSON.stringify(def.ref)} from packs "${agentSources.get(def.ref)}" and "${pack.name}"`,
+        );
+      }
+      agents.set(def.ref, def);
+      agentSources.set(def.ref, pack.name);
+      // Kept off the definition object so receipts' defHash and the pinned
+      // identity never see the view (§2.3). Loaders that expose no sidecars
+      // (non-fs packs) simply contribute no view.
+      const { file, view, anomaly } = loader.readArtifactView?.(entry, def) ?? {
+        file: null,
+        view: null,
+        anomaly: null,
+      };
+      if (anomaly) anomalies.push(anomaly);
+      views.set(def.ref, { file, view });
+    }
+    mergeMap(eventTypes, eventSources, loader.readMap("event-types"), pack, "event type");
+    mergeMap(edges, edgeSources, loader.readMap("edges"), pack, "edge source");
+    mergeMap(schedules, scheduleSources, loader.readMap("schedules"), pack, "schedule loop");
+  }
+
   for (const [type, mapping] of Object.entries(eventTypes)) {
+    if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping)) {
+      throw new RegistryError(`event type ${type} must map to an object`);
+    }
+    const agentRef = Object.hasOwn(mapping, "agent") ? mapping.agent : undefined;
     // Observe-only types (WM-75): admitted and recorded, resolved by the
     // planner as a typed NOOP — never a run, never a human_needed ask. They
     // name no agent, and naming one anyway is a config error, not a hint.
-    if (mapping.observe === true) {
-      if (mapping.agent) {
-        throw new RegistryError(`event type ${type} is observe-only but names agent ${mapping.agent} — pick one`);
+    if (Object.hasOwn(mapping, "observe") && mapping.observe === true) {
+      if (agentRef) {
+        throw new RegistryError(`event type ${type} is observe-only but names agent ${agentRef} — pick one`);
       }
       continue;
     }
-    if (!mapping.agent || !agents.has(mapping.agent)) {
-      throw new RegistryError(`event type ${type} maps to unregistered agent ${mapping.agent}`);
+    if (!agentRef || !agents.has(agentRef)) {
+      throw new RegistryError(`event type ${type} maps to unregistered agent ${agentRef}`);
     }
-    if (!Array.isArray(mapping.idempotencyScope) || mapping.idempotencyScope.length === 0) {
+    if (!Object.hasOwn(mapping, "idempotencyScope") || !Array.isArray(mapping.idempotencyScope) || mapping.idempotencyScope.length === 0) {
       throw new RegistryError(`event type ${type} declares no idempotency scope (§5.4)`);
     }
     // Model-tier routing (WM-135): every routed (agent, adapter) pair must
     // resolve NOW — a declared tier without a policy mapping is a load error,
     // never a silent fall-through to the adapter default at dispatch time.
     try {
-      resolveModel(agents.get(mapping.agent), mapping.adapter, modelTiers);
+      resolveModel(agents.get(agentRef), mapping.adapter, modelTiers);
     } catch (err) {
       throw new RegistryError(`event type ${type}: ${err.message}`);
     }
   }
 
+  // Kernel envelopes are never supplied by packs. Agent I/O schemas are read
+  // and pinned by each pack loader while definitions are loaded above.
   const schemas = {
-    envelope: JSON.parse(readFileSync(path.join(root, "schemas", "factory.event.v1.json"), "utf8")),
-    agentResult: JSON.parse(readFileSync(path.join(root, "schemas", "factory.agent-result.v1.json"), "utf8")),
+    envelope: readJson(path.join(root, "schemas", "factory.event.v1.json")),
+    agentResult: readJson(path.join(root, "schemas", "factory.agent-result.v1.json")),
   };
 
   // Recommendation edges (OPS-223): validated fail-closed at load — a chain
   // may only connect registered agents through registered event types, and
   // input mappings may only draw from the source run's input or artifact.
-  let edges = {};
-  const edgesFile = path.join(root, "edges.json");
-  if (existsSync(edgesFile)) {
-    edges = JSON.parse(readFileSync(edgesFile, "utf8"));
-    for (const [agentRef, rule] of Object.entries(edges)) {
-      if (!agents.has(agentRef)) throw new RegistryError(`edges.json: unregistered source agent ${agentRef}`);
-      if (typeof rule.recommendationField !== "string" || !rule.recommendationField) {
-        throw new RegistryError(`edges.json: ${agentRef} has no recommendationField`);
+  for (const [agentRef, rule] of Object.entries(edges)) {
+    if (!agents.has(agentRef)) throw new RegistryError(`edges.json: unregistered source agent ${agentRef}`);
+    if (typeof rule !== "object" || rule === null || Array.isArray(rule)) {
+      throw new RegistryError(`edges.json: ${agentRef} must map to an object`);
+    }
+    if (!Object.hasOwn(rule, "recommendationField") || typeof rule.recommendationField !== "string" || !rule.recommendationField) {
+      throw new RegistryError(`edges.json: ${agentRef} has no recommendationField`);
+    }
+    if (Object.hasOwn(rule, "independent") && rule.independent !== true) {
+      throw new RegistryError(`edges.json: ${agentRef}.independent must be true when present`);
+    }
+    const ruleEdges = Object.hasOwn(rule, "edges") ? rule.edges : {};
+    if (typeof ruleEdges !== "object" || ruleEdges === null || Array.isArray(ruleEdges)) {
+      throw new RegistryError(`edges.json: ${agentRef}.edges must be an object`);
+    }
+    for (const [value, edge] of Object.entries(ruleEdges)) {
+      if (typeof edge !== "object" || edge === null || Array.isArray(edge)) {
+        throw new RegistryError(`edges.json: ${agentRef}.${value} must be an object`);
       }
-      if (rule.independent !== undefined && rule.independent !== true) {
-        throw new RegistryError(`edges.json: ${agentRef}.independent must be true when present`);
+      if (rule.independent === true) {
+        if (typeof edge.whenItemsField !== "string" || !edge.whenItemsField) {
+          throw new RegistryError(`edges.json: ${agentRef}.${value} independent edge has no whenItemsField`);
+        }
+        if (typeof edge.mixedEventId !== "string" || !edge.mixedEventId.includes("${runId}")) {
+          throw new RegistryError(
+            `edges.json: ${agentRef}.${value} independent edge needs a mixedEventId containing \${runId}`,
+          );
+        }
+        if (edge.itemsField !== undefined && !edge.mixedEventId.includes("${item.")) {
+          throw new RegistryError(
+            `edges.json: ${agentRef}.${value} independent multi edge needs an item placeholder in mixedEventId`,
+          );
+        }
       }
-      for (const [value, edge] of Object.entries(rule.edges ?? {})) {
-        if (rule.independent === true) {
-          if (typeof edge.whenItemsField !== "string" || !edge.whenItemsField) {
-            throw new RegistryError(`edges.json: ${agentRef}.${value} independent edge has no whenItemsField`);
-          }
-          if (typeof edge.mixedEventId !== "string" || !edge.mixedEventId.includes("${runId}")) {
-            throw new RegistryError(
-              `edges.json: ${agentRef}.${value} independent edge needs a mixedEventId containing \${runId}`,
-            );
-          }
-          if (edge.itemsField !== undefined && !edge.mixedEventId.includes("${item.")) {
-            throw new RegistryError(
-              `edges.json: ${agentRef}.${value} independent multi edge needs an item placeholder in mixedEventId`,
-            );
-          }
+      for (const field of ["eventId", "mixedEventId"]) {
+        if (edge[field] !== undefined && (typeof edge[field] !== "string" || edge[field].trim() === "")) {
+          throw new RegistryError(`edges.json: ${agentRef}.${value} ${field} must be a non-empty string`);
         }
-        for (const field of ["eventId", "mixedEventId"]) {
-          if (edge[field] !== undefined && (typeof edge[field] !== "string" || edge[field].trim() === "")) {
-            throw new RegistryError(`edges.json: ${agentRef}.${value} ${field} must be a non-empty string`);
-          }
-        }
-        if (!eventTypes[edge.eventType]) {
-          throw new RegistryError(`edges.json: ${agentRef}.${value} targets unregistered event type ${edge.eventType}`);
-        }
-        for (const expr of Object.values(edge.input ?? {})) {
-          if (typeof expr === "string" && expr.startsWith("$.") && !/^\$\.(input|artifact|artifactHash)(\.|$)/.test(expr)) {
-            throw new RegistryError(`edges.json: ${agentRef}.${value} input path "${expr}" — only $.input.*, $.artifact.* and $.artifactHash.* are allowed`);
-          }
+      }
+      const edgeEventType = Object.hasOwn(edge, "eventType") ? edge.eventType : undefined;
+      if (!edgeEventType || !Object.hasOwn(eventTypes, edgeEventType)) {
+        throw new RegistryError(`edges.json: ${agentRef}.${value} targets unregistered event type ${edgeEventType}`);
+      }
+      for (const expr of Object.values(edge.input ?? {})) {
+        if (typeof expr === "string" && expr.startsWith("$.") && !/^\$\.(input|artifact|artifactHash)(\.|$)/.test(expr)) {
+          throw new RegistryError(`edges.json: ${agentRef}.${value} input path "${expr}" — only $.input.*, $.artifact.* and $.artifactHash.* are allowed`);
         }
       }
     }
@@ -333,59 +615,70 @@ export function loadRegistry({ root = RUNTIME_ROOT, modelTiers = loadModelTierMa
   // Schedules (OPS-381): validated fail-closed at load — an unparseable
   // cadence or an unregistered event type must be a startup error, not a
   // surprise at 03:00 when nothing fires.
-  let schedules = {};
-  const schedulesFile = path.join(root, "schedules.json");
-  if (existsSync(schedulesFile)) {
-    schedules = JSON.parse(readFileSync(schedulesFile, "utf8"));
-    for (const [loop, schedule] of Object.entries(schedules)) {
-      if (!/^[a-z][a-z0-9-]*$/.test(loop)) throw new RegistryError(`schedules.json: bad loop name "${loop}"`);
-      try {
-        parseCadence(schedule.every);
-      } catch (err) {
-        throw new RegistryError(`schedules.json: ${loop}: ${err.message}`);
+  for (const [loop, schedule] of Object.entries(schedules)) {
+    if (!/^[a-z][a-z0-9-]*$/.test(loop)) throw new RegistryError(`schedules.json: bad loop name "${loop}"`);
+    if (typeof schedule !== "object" || schedule === null || Array.isArray(schedule)) {
+      throw new RegistryError(`schedules.json: ${loop} must map to an object`);
+    }
+    try {
+      parseCadence(schedule.every);
+    } catch (err) {
+      throw new RegistryError(`schedules.json: ${loop}: ${err.message}`);
+    }
+    const scheduleEventType = Object.hasOwn(schedule, "eventType") ? schedule.eventType : undefined;
+    if (!scheduleEventType || !Object.hasOwn(eventTypes, scheduleEventType)) {
+      throw new RegistryError(`schedules.json: ${loop} fires unregistered event type ${scheduleEventType}`);
+    }
+    const catchUp = schedule.catchUp ?? "none";
+    if (!CATCH_UP_MODES.includes(catchUp)) {
+      throw new RegistryError(`schedules.json: ${loop} has unknown catchUp "${catchUp}" (${CATCH_UP_MODES.join(", ")})`);
+    }
+    const approval = schedule.approval ?? "watched";
+    if (!APPROVAL_MODES.includes(approval)) {
+      throw new RegistryError(`schedules.json: ${loop} has unknown approval "${approval}" (${APPROVAL_MODES.join(", ")})`);
+    }
+    // Unattended approval on a loop that is not even switched on is almost
+    // certainly a half-finished edit; refuse it rather than let it lurk.
+    if (approval === "auto" && !schedule.enabled) {
+      throw new RegistryError(`schedules.json: ${loop} declares approval "auto" but is not enabled — decide one`);
+    }
+    // The ship chain's deploy-branch merge is PERMANENTLY watched: that
+    // approval IS the human master decision, so the config that would
+    // delete it cannot load, whoever writes it and however good the track
+    // record looks (docs/event-runtime-dispatch.md §7, WM-111).
+    const scheduledMapping = eventTypes[scheduleEventType];
+    if (approval === "auto" && Object.hasOwn(scheduledMapping, "humanApprovalOnly") && scheduledMapping.humanApprovalOnly === true) {
+      throw new RegistryError(
+        `schedules.json: ${loop} declares approval "auto" but ${scheduleEventType} is humanApprovalOnly — the deploy-branch decision is permanently the human's watched approval (docs/event-runtime-dispatch.md §7, WM-111)`,
+      );
+    }
+    // A static payload rides along on every tick (repo-scoped loops need
+    // {repo}). Tick fields always win the merge, so a payload claiming
+    // loop/slot identity is a config error, not a spoofing vector.
+    if (schedule.payload !== undefined) {
+      if (typeof schedule.payload !== "object" || schedule.payload === null || Array.isArray(schedule.payload)) {
+        throw new RegistryError(`schedules.json: ${loop} payload must be a plain object`);
       }
-      if (!eventTypes[schedule.eventType]) {
-        throw new RegistryError(`schedules.json: ${loop} fires unregistered event type ${schedule.eventType}`);
-      }
-      const catchUp = schedule.catchUp ?? "none";
-      if (!CATCH_UP_MODES.includes(catchUp)) {
-        throw new RegistryError(`schedules.json: ${loop} has unknown catchUp "${catchUp}" (${CATCH_UP_MODES.join(", ")})`);
-      }
-      const approval = schedule.approval ?? "watched";
-      if (!APPROVAL_MODES.includes(approval)) {
-        throw new RegistryError(`schedules.json: ${loop} has unknown approval "${approval}" (${APPROVAL_MODES.join(", ")})`);
-      }
-      // Unattended approval on a loop that is not even switched on is almost
-      // certainly a half-finished edit; refuse it rather than let it lurk.
-      if (approval === "auto" && !schedule.enabled) {
-        throw new RegistryError(`schedules.json: ${loop} declares approval "auto" but is not enabled — decide one`);
-      }
-      // The ship chain's deploy-branch merge is PERMANENTLY watched: that
-      // approval IS the human master decision, so the config that would
-      // delete it cannot load, whoever writes it and however good the track
-      // record looks (docs/event-runtime-dispatch.md §7, WM-111).
-      if (approval === "auto" && eventTypes[schedule.eventType]?.humanApprovalOnly === true) {
-        throw new RegistryError(
-          `schedules.json: ${loop} declares approval "auto" but ${schedule.eventType} is humanApprovalOnly — the deploy-branch decision is permanently the human's watched approval (docs/event-runtime-dispatch.md §7, WM-111)`,
-        );
-      }
-      // A static payload rides along on every tick (repo-scoped loops need
-      // {repo}). Tick fields always win the merge, so a payload claiming
-      // loop/slot identity is a config error, not a spoofing vector.
-      if (schedule.payload !== undefined) {
-        if (typeof schedule.payload !== "object" || schedule.payload === null || Array.isArray(schedule.payload)) {
-          throw new RegistryError(`schedules.json: ${loop} payload must be a plain object`);
-        }
-        for (const reserved of ["loop", "slot", "cadenceSeconds", "skippedSlots"]) {
-          if (reserved in schedule.payload) {
-            throw new RegistryError(`schedules.json: ${loop} payload must not set reserved tick field "${reserved}"`);
-          }
+      for (const reserved of ["loop", "slot", "cadenceSeconds", "skippedSlots"]) {
+        if (reserved in schedule.payload) {
+          throw new RegistryError(`schedules.json: ${loop} payload must not set reserved tick field "${reserved}"`);
         }
       }
     }
   }
 
-  return { root, agents, views, anomalies, eventTypes, schemas, edges, schedules, modelTiers };
+  return {
+    root,
+    packs: packs.map(({ name, root: packRoot, namespace }) => ({ name, root: packRoot, namespace })),
+    agents,
+    views,
+    anomalies,
+    eventTypes,
+    schemas,
+    edges,
+    schedules,
+    modelTiers,
+  };
 }
 
 /** The artifact view for a registered agent: `{ file, view }`, both null when the agent has none. */
@@ -400,16 +693,48 @@ export function getAgent(registry, ref) {
 }
 
 export function getEventType(registry, type) {
-  return registry.eventTypes[type] ?? null;
+  return Object.hasOwn(registry.eventTypes, type) ? registry.eventTypes[type] : null;
 }
 
-/** Recompute every definition's pins in place — the deliberate operator verb. */
-export function updatePins({ root = RUNTIME_ROOT } = {}) {
+/**
+ * Recompute pins deliberately. With no `pack`, this is byte-for-byte the
+ * built-in behavior: inline pins in built-in definitions only. A configured
+ * pack must be named explicitly and receives one root-level pins.json.
+ */
+export function updatePins({ root = RUNTIME_ROOT, pack } = {}) {
+  if (pack !== undefined) {
+    let descriptor = pack;
+    if (typeof pack === "string") {
+      descriptor = loadPackRoots().find((candidate) => candidate.name === pack);
+      if (!descriptor) throw new RegistryError(`unknown configured pack "${pack}"`);
+    }
+    const resolved = configuredPack(descriptor);
+    const loader = createFsPackLoader(resolved, { ignorePins: true });
+    const pins = {};
+    for (const entry of loader.listAgentDefs()) {
+      const def = entry.definition;
+      for (const field of PINNED_FIELDS) {
+        const rel = def[field];
+        if (!rel) continue;
+        const resource = loader.readPinned(rel, def);
+        if (resource.bytes === null || resource.bytes === undefined) {
+          throw new RegistryError(`${resource.source ?? entry.source}: pinned file "${rel}" does not exist`);
+        }
+        pins[rel] = hashBytes(resource.bytes);
+      }
+    }
+    const pinsFile = path.join(resolved.root, "pins.json");
+    const serialized = `${JSON.stringify(pins, null, 2)}\n`;
+    if (existsSync(pinsFile) && readFileSync(pinsFile, "utf8") === serialized) return [];
+    writeFileSync(pinsFile, serialized, "utf8");
+    return [resolved.name];
+  }
+
   const changed = [];
   const agentsDir = path.join(root, "agents");
   for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
     const file = path.join(agentsDir, name);
-    const def = JSON.parse(readFileSync(file, "utf8"));
+    const def = readJson(file);
     const pins = {};
     for (const field of PINNED_FIELDS) {
       if (!def[field]) continue;

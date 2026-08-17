@@ -1,0 +1,5 @@
+{
+  "agents/echo.md": "sha256:c39d1884049789a1a435f53ac25ad671f01205e4cdf709e533e6722f8ba6d830",
+  "schemas/echo.input.json": "sha256:0e6470b57f8a1ad10cbc7f427ec860822b5bf5eb62391e9eba95822a0b5dc100",
+  "schemas/echo.output.json": "sha256:0e6470b57f8a1ad10cbc7f427ec860822b5bf5eb62391e9eba95822a0b5dc100"
+}

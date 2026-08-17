@@ -1,12 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { cpSync } from "node:fs";
-import { mkdirSync } from "node:fs";
+import { canonicalJson, hashBytes } from "./canonical.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import {
-  DEFAULT_MODEL, RegistryError, getAgent, getArtifactView, getEventType, loadModelTierMap, loadRegistry, resolveModel,
+  DEFAULT_MODEL,
+  RegistryError,
+  createFsPackLoader,
+  getAgent,
+  getArtifactView,
+  getEventType,
+  loadModelTierMap,
+  loadPackRoots,
+  loadRegistry,
+  resolveModel,
   updatePins,
 } from "./registry.mjs";
 import { computeDefHash } from "./receipts.mjs";
@@ -27,6 +35,37 @@ function tempRegistry() {
  * definition declares. The claude map stays as the per-route exception's
  * mapping — no committed route consumes it today.
  */
+const SAMPLE_PACK_ROOT = path.join(RUNTIME_ROOT, "test-support", "packs", "sample");
+
+function samplePack(root = SAMPLE_PACK_ROOT, name = "sample", namespace = "sample") {
+  return { kind: "fs", name, path: root, namespace };
+}
+
+function tempPack({ name = "sample", namespace = "sample" } = {}) {
+  const root = mkdtempSync(path.join(tmpdir(), "event-pack-"));
+  cpSync(SAMPLE_PACK_ROOT, root, { recursive: true });
+  writeFileSync(path.join(root, "pack.json"), `${JSON.stringify({ name, version: "1.0.0", namespace }, null, 2)}\n`);
+  return samplePack(root, name, namespace);
+}
+
+function registryDigest(registry) {
+  const agents = Object.fromEntries(
+    [...registry.agents].map(([ref, def]) => {
+      const { pack: _pack, promptPath, ...stable } = def;
+      return [ref, { ...stable, promptPath: path.relative(registry.root, promptPath) }];
+    }),
+  );
+  return hashBytes(
+    canonicalJson({
+      agents,
+      eventTypes: registry.eventTypes,
+      edges: registry.edges,
+      schedules: registry.schedules,
+      modelTiers: registry.modelTiers,
+    }),
+  );
+}
+
 const PI_TIERS = {
   claude: { strong: "default", standard: "sonnet", light: "haiku" },
   pi: {
@@ -51,8 +90,211 @@ describe("registry", () => {
     const registry = loadRegistry();
     const def = getAgent(registry, "factory-status-report@1");
     expect(def.outputSchema.required).toContain("recommendedAction");
+    expect(def.pack).toBe("event-runtime");
+    expect(registry.packs).toEqual([{ name: "event-runtime", root: RUNTIME_ROOT, namespace: "" }]);
     expect(getEventType(registry, "factory.status-report.requested").agent).toBe("factory-status-report@1");
     expect(getEventType(registry, "unknown.event")).toBeNull();
+  });
+
+  test("zero-pack merged-view digest matches the develop baseline", () => {
+    // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
+    // The serializer omits only WM-470's new pack provenance and normalizes
+    // the absolute prompt path. Changing this digest requires an explicit
+    // reason in the PR body: it is the mechanical zero-pack compatibility gate.
+    const expected = "sha256:65fd52598a910dc92f9657eeddce3cd1af10695b8f24fceece24ed1f4b33f580";
+    expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
+  });
+
+  test("loads a namespaced filesystem pack and validates the merged maps", () => {
+    const registry = loadRegistry({ packRoots: [samplePack()] });
+    const def = getAgent(registry, "sample/echo@1");
+    expect(def.pack).toBe("sample");
+    expect(def.promptPath).toBe(path.join(SAMPLE_PACK_ROOT, "agents", "echo.md"));
+    expect(def.pins).toEqual(JSON.parse(readFileSync(path.join(SAMPLE_PACK_ROOT, "pins.json"), "utf8")));
+    expect(Object.entries(def.pins)).toHaveLength(3);
+    expect(getEventType(registry, "sample.echo.requested").agent).toBe("sample/echo@1");
+    expect(getEventType(registry, "sample.core-status.requested").agent).toBe("factory-status-report@1");
+    expect(registry.edges["sample/echo@1"].recommendationField).toBe("message");
+    expect(registry.schedules["sample-echo"].eventType).toBe("sample.echo.requested");
+    expect(registry.packs.map((pack) => pack.name)).toEqual(["event-runtime", "sample"]);
+  });
+
+  test("merged validation accepts a loader with no filesystem access", () => {
+    const resources = {
+      "agents/echo.md": "Return the input unchanged.\n",
+      "schemas/echo.input.json": JSON.stringify({ type: "object" }),
+      "schemas/echo.output.json": JSON.stringify({ type: "object" }),
+    };
+    const definition = {
+      id: "echo",
+      version: 1,
+      prompt: "agents/echo.md",
+      input_schema: "schemas/echo.input.json",
+      output_schema: "schemas/echo.output.json",
+      workspace: { type: "ephemeral", retainOnFailure: false },
+      capabilities: { filesystem: "read-only", services: [] },
+      limits: { timeout_seconds: 30, attempts: 1 },
+      mutating: false,
+    };
+    const pins = Object.fromEntries(Object.entries(resources).map(([name, bytes]) => [name, hashBytes(bytes)]));
+    const loader = {
+      listAgentDefs: () => [{ source: "memory:agents/echo.json", definition }],
+      readPinned: (relative) => ({
+        expected: pins[relative],
+        bytes: resources[relative],
+        source: `memory:${relative}`,
+        path: `memory:${relative}`,
+      }),
+      readMap: (name) =>
+        name === "event-types"
+          ? {
+              "memory.echo.requested": {
+                agent: "memory/echo@1",
+                adapter: "fake",
+                idempotencyScope: ["correlationId"],
+              },
+            }
+          : Object.create(null),
+    };
+    const registry = loadRegistry({
+      packRoots: [{ kind: "memory", name: "memory", namespace: "memory", root: "memory:pack" }],
+      loaderFor: (pack, options) => (pack.kind === "memory" ? loader : createFsPackLoader(pack, options)),
+    });
+    const def = getAgent(registry, "memory/echo@1");
+    expect(def.promptPath).toBe("memory:agents/echo.md");
+    expect(def.pins).toEqual(pins);
+    expect(getEventType(registry, "memory.echo.requested").agent).toBe("memory/echo@1");
+  });
+
+  test("duplicate agent refs identify both source packs", () => {
+    const other = tempPack({ name: "other", namespace: "sample" });
+    expect(() => loadRegistry({ packRoots: [samplePack(), other] })).toThrow(
+      /duplicate agent ref.*sample.*other/,
+    );
+  });
+
+  test("map collisions identify both source packs", () => {
+    for (const [file, key, label] of [
+      ["event-types.json", "factory.status-report.requested", "event type"],
+      ["edges.json", "disk-diagnose@1", "edge source"],
+      ["schedules.json", "reaper", "schedule loop"],
+    ]) {
+      const pack = tempPack();
+      writeFileSync(path.join(pack.path, file), JSON.stringify({ [key]: {} }));
+      expect(() => loadRegistry({ packRoots: [pack] })).toThrow(
+        new RegExp(`duplicate ${label}.*event-runtime.*sample`),
+      );
+    }
+  });
+
+  test("prototype-like map keys collide normally without polluting merged maps", () => {
+    const first = tempPack();
+    const second = tempPack({ name: "other", namespace: "other" });
+    const protoEvent = '{"__proto__":{"observe":true}}';
+    writeFileSync(path.join(first.path, "event-types.json"), protoEvent);
+    writeFileSync(path.join(second.path, "event-types.json"), protoEvent);
+    expect(() => loadRegistry({ packRoots: [first, second] })).toThrow(
+      /duplicate event type "__proto__".*sample.*other/,
+    );
+
+    const registry = loadRegistry({ packRoots: [] });
+    expect(Object.getPrototypeOf(registry.eventTypes)).toBeNull();
+    expect(Object.getPrototypeOf(registry.edges)).toBeNull();
+    expect(Object.getPrototypeOf(registry.schedules)).toBeNull();
+    expect(getEventType(registry, "toString")).toBeNull();
+  });
+
+  test("inherited object names cannot satisfy event references", () => {
+    const edgePack = tempPack();
+    writeFileSync(
+      path.join(edgePack.path, "edges.json"),
+      JSON.stringify({
+        "sample/echo@1": {
+          recommendationField: "message",
+          edges: { BAD: { eventType: "toString" } },
+        },
+      }),
+    );
+    expect(() => loadRegistry({ packRoots: [edgePack] })).toThrow(/targets unregistered event type toString/);
+
+    const schedulePack = tempPack();
+    writeFileSync(
+      path.join(schedulePack.path, "schedules.json"),
+      JSON.stringify({
+        "inherited-event": {
+          every: "60m",
+          eventType: "constructor",
+          approval: "watched",
+          enabled: false,
+        },
+      }),
+    );
+    expect(() => loadRegistry({ packRoots: [schedulePack] })).toThrow(/fires unregistered event type constructor/);
+  });
+
+  test("exactly one pack owns the bare namespace", () => {
+    const bare = tempPack({ name: "bare-extra", namespace: "" });
+    expect(() => loadRegistry({ packRoots: [bare] })).toThrow(/exactly one pack must own the bare namespace.*event-runtime.*bare-extra/);
+  });
+
+  test("config-listed packs cannot admit mutating agents", () => {
+    const pack = tempPack();
+    const defFile = path.join(pack.path, "agents", "echo.json");
+    const def = JSON.parse(readFileSync(defFile, "utf8"));
+    writeFileSync(defFile, JSON.stringify({ ...def, mutating: true }));
+    expect(() => loadRegistry({ packRoots: [pack] })).toThrow(/config-listed pack.*may not declare mutating: true.*WM-468/);
+  });
+
+  test("pack manifest and pins fail closed, and explicit pack pinning repairs drift", () => {
+    const pack = tempPack();
+    const prompt = path.join(pack.path, "agents", "echo.md");
+    writeFileSync(prompt, `${readFileSync(prompt, "utf8")}drift\n`);
+    expect(() => loadRegistry({ packRoots: [pack] })).toThrow(/does not match pin/);
+    expect(updatePins({ pack })).toEqual(["sample"]);
+    expect(() => loadRegistry({ packRoots: [pack] })).not.toThrow();
+    writeFileSync(path.join(pack.path, "pins.json"), "not-json\n");
+    expect(updatePins({ pack })).toEqual(["sample"]);
+    expect(() => loadRegistry({ packRoots: [pack] })).not.toThrow();
+
+    const mismatched = tempPack({ name: "policy-name" });
+    writeFileSync(
+      path.join(mismatched.path, "pack.json"),
+      JSON.stringify({ name: "manifest-name", version: "1.0.0", namespace: "sample" }),
+    );
+    expect(() => loadRegistry({ packRoots: [mismatched] })).toThrow(/does not match policy name/);
+  });
+
+  test("loadPackRoots reads only policy-listed roots and validates fail-closed", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "event-policy-packs-"));
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    const policy = path.join(root, "config", "policy.yaml");
+    expect(loadPackRoots({ root })).toEqual([]);
+
+    writeFileSync(policy, "packs:\n  - name: sample\n    path: vendor/sample\n    namespace: sample\n");
+    expect(loadPackRoots({ root })).toEqual([
+      { kind: "fs", name: "sample", path: path.join(root, "vendor", "sample"), namespace: "sample" },
+    ]);
+    writeFileSync(policy, "packs:\n  sample: vendor/sample\n");
+    expect(() => loadPackRoots({ root })).toThrow(/packs.*array/);
+    writeFileSync(policy, "packs:\n  - name: sample\n    path: one\n  - name: sample\n    path: two\n");
+    expect(() => loadPackRoots({ root })).toThrow(/duplicate pack name/);
+  });
+
+  test("update-pins --pack rejects missing and unknown pack names", () => {
+    const run = (...args) =>
+      Bun.spawnSync({
+        cmd: [process.execPath, "event-runtime/cli.mjs", "update-pins", ...args],
+        cwd: path.dirname(RUNTIME_ROOT),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    const missing = run("--pack");
+    expect(missing.exitCode).not.toBe(0);
+    expect(missing.stderr.toString()).toContain("usage: update-pins [--pack NAME]");
+
+    const unknown = run("--pack", "not-configured");
+    expect(unknown.exitCode).not.toBe(0);
+    expect(unknown.stderr.toString()).toContain('unknown configured pack "not-configured"');
   });
 
   test("editing a pinned file without re-pinning fails closed", () => {

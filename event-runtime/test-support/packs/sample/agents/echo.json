@@ -1,0 +1,20 @@
+{
+  "id": "echo",
+  "version": 1,
+  "prompt": "agents/echo.md",
+  "input_schema": "schemas/echo.input.json",
+  "output_schema": "schemas/echo.output.json",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": false
+  },
+  "capabilities": {
+    "filesystem": "read-only",
+    "services": []
+  },
+  "limits": {
+    "timeout_seconds": 30,
+    "attempts": 1
+  },
+  "mutating": false
+}

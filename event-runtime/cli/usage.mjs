@@ -52,7 +52,7 @@ usage: bun event-runtime/cli.mjs <command>
   retry <run-id> [--force]       re-queue a FAILED run (--force past maxAttempts)
   inspect <run-id>               spec, lifecycle journal, result, receipt, workspace
   trace <run-id>                 live agent trace: assistant text, tool calls, usage
-  update-pins                    re-pin agent definition content hashes (edits repo files)
+  update-pins [--pack NAME]      re-pin built-in definitions, or one explicitly named pack
 
 All commands except serve, work, supervise, and update-pins are clients of the control
 API and need serve running on ${API_HOST}:${DEFAULT_PORT} (FACTORY_EVENT_PORT to change).`;
