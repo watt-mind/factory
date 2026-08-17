@@ -332,6 +332,9 @@ export interface AgentDef {
   inputSchema: unknown;
   outputSchemaFile: string;
   outputSchema: unknown;
+  /** Artifact-view sidecar (WM-454), null when the agent ships none. */
+  outputViewFile?: string | null;
+  outputView?: unknown;
   pins: Record<string, string>;
   /** Closed-execution shape: fixed argv (command adapter) or action registry. */
   command: string[] | null;

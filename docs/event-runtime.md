@@ -360,6 +360,14 @@ mutating: false
 A definition is admitted only when its adapter can prove the required
 capabilities. Adapter support is a contract, not a hopeful command-line flag.
 
+**Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
+`factory.artifact-view/v1` document beside the definition annotates pointers
+into the output schema with rendering hints ([event-runtime-artifact-views.md](event-runtime-artifact-views.md)
+§2); it is validated against the output schema at load, is not part of the
+definition pin, is served as `GET /agents[].outputView`, and a view that does
+not fit its schema is a `/status.anomalies.configuration` entry — the agent
+still loads, without a view.
+
 **Per-agent repo scoping (`repos`, WM-64).** A definition may declare an
 optional top-level `"repos": ["bj29", "cw-app"]` — a closed set of repos the
 agent may run over, the repo analogue of the actions adapter's per-definition
