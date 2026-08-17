@@ -16,6 +16,7 @@ import { materializeArtifact } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
+import { findPriorResumeContext } from "./transcripts.mjs";
 
 /** Hard ceiling for repository-owned worktree lifecycle scripts (WM-262). */
 export const DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS = 120_000;
@@ -202,7 +203,12 @@ export function createWorkspace({
   workspace = {},
   artifactStore = artifactsRoot(),
   worktreeTimeoutMs = worktreeScriptTimeoutMs(),
+  adapter = null,
 }) {
+  // Lease loss can leave the prior attempt's scratch directory behind. Read
+  // recognized harness session metadata before creating the new attempt;
+  // absence (including normal cleanup after an orderly failure) means cold start.
+  const resume = findPriorResumeContext({ root, runId, attempt, adapter });
   const dir = path.join(root, `${runId}-a${attempt}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "input.json"), `${canonicalJson(input)}\n`, "utf8");
@@ -246,7 +252,7 @@ export function createWorkspace({
       timeoutMs: worktreeTimeoutMs,
     });
   }
-  return { dir, checkout, materialized, worktree };
+  return { dir, checkout, materialized, worktree, resume };
 }
 
 /**

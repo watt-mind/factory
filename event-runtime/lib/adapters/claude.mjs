@@ -165,8 +165,16 @@ export function safeChildEnvironment(env = {}, defOrOpts = {}) {
  * passed verbatim as `--model` unless it is the "default" sentinel or null,
  * both of which mean "ride the CLI's own default" — today's behavior.
  */
-export function buildClaudeArgv({ prompt, def, allowedTools = deriveAllowedTools(def), mcpConfig, settingsPath, model }) {
-  const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+export function buildClaudeArgv({
+  prompt, def, allowedTools = deriveAllowedTools(def), mcpConfig, settingsPath, model, resumeSessionId,
+}) {
+  const args = ["-p", prompt];
+  if (typeof resumeSessionId === "string" && resumeSessionId) {
+    // Continue from the stale attempt's context under a new native session ID;
+    // the expired source process may still exist and must not share writes.
+    args.push("--resume", resumeSessionId, "--fork-session");
+  }
+  args.push("--output-format", "stream-json", "--verbose");
   if (def?.mutating !== false) {
     args.push("--dangerously-skip-permissions");
   }
@@ -300,6 +308,7 @@ export async function execute({
   env = {},
   onTrace,
   onUsage,
+  resume = null,
   abortSignal,
   signal,
 }) {
@@ -310,7 +319,9 @@ export async function execute({
   const settings = buildClaudeSettings({ spec, def, workspaceDir });
   const settingsPath = settings ? path.join(workspaceDir, ".claude-policy.json") : null;
   if (settingsPath) writeFileSync(settingsPath, `${JSON.stringify(settings)}\n`, "utf8");
-  const argv = buildClaudeArgv({ prompt, def, mcpConfig, settingsPath, model: spec?.model });
+  const argv = buildClaudeArgv({
+    prompt, def, mcpConfig, settingsPath, model: spec?.model, resumeSessionId: resume?.sessionId,
+  });
 
   return new Promise((resolve, reject) => {
     const child = spawn("claude", argv, {

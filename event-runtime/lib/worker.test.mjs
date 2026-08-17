@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { buildClaudeArgv, execute as executeClaude } from "./adapters/claude.mjs";
 import * as fake from "./adapters/fake.mjs";
+import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
@@ -14,6 +16,7 @@ import { openDb, runUsage } from "./db.mjs";
 import { createRun, lifecycleOf, runState, transition, IllegalTransition } from "./lifecycle.mjs";
 import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
+import { transcriptSessionId } from "./transcripts.mjs";
 import {
   acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
   createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
@@ -418,6 +421,146 @@ describe("worker", () => {
     expect(summary.terminalState).toBe("FAILED");
     expect(runState(db, spec.runId)).toBe("FAILED");
     expect(claimNext(db, opts())).toBeNull();
+  });
+
+  test("attempt 2 resumes the prior harness session and stale attempt 1 remains fenced", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const o = opts();
+    const stale = claimNext(db, o);
+    const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    mkdirSync(priorWorkspace, { recursive: true });
+    const priorTranscript = path.join(priorWorkspace, ".transcript.json");
+    writeFileSync(priorTranscript, `${JSON.stringify({
+      type: "system", subtype: "init", cwd: priorWorkspace,
+      session_id: "11111111-2222-4333-8444-555555555555",
+    })}\n`);
+
+    const afterExpiry = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
+    expect(reapExpiredLeases(db, { now: afterExpiry, policyVersion: "test" })).toBe(1);
+    const fresh = claimNext(db, { ...o, now: afterExpiry });
+    expect(fresh.attempt).toBe(2);
+
+    let observedResume = null;
+    const resumeAdapter = {
+      async execute(args) {
+        observedResume = args.resume;
+        return fake.execute(args);
+      },
+    };
+    const done = await executeClaimed(db, registry, { claude: resumeAdapter }, fresh, { ...o, now: afterExpiry });
+    expect(done.terminalState).toBe("COMPLETED");
+    expect(observedResume).toEqual({
+      attempt: 1,
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      transcriptPath: priorTranscript,
+    });
+
+    const zombie = await executeClaimed(db, registry, { claude: resumeAdapter }, stale, { ...o, now: afterExpiry });
+    expect(zombie.fenced === true || zombie.cancelled === true).toBe(true);
+    expect(db.query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`).get(spec.runId).n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM outbox`).get().n).toBe(1);
+  });
+
+  test("attempt 2 cold-starts cleanly when the prior transcript has no resumable session", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const o = opts();
+    claimNext(db, o);
+    const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    mkdirSync(priorWorkspace, { recursive: true });
+    writeFileSync(path.join(priorWorkspace, ".transcript.json"), [
+      JSON.stringify({ type: "system", subtype: "init", cwd: priorWorkspace, session_id: "not-a-uuid" }),
+      JSON.stringify({
+        type: "system", subtype: "init", cwd: "/another/run",
+        session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ].join("\n") + "\n");
+
+    const afterExpiry = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
+    expect(reapExpiredLeases(db, { now: afterExpiry, policyVersion: "test" })).toBe(1);
+    const fresh = claimNext(db, { ...o, now: afterExpiry });
+
+    let observedResume = "not-called";
+    const coldAdapter = {
+      async execute(args) {
+        observedResume = args.resume;
+        return fake.execute(args);
+      },
+    };
+    const done = await executeClaimed(db, registry, { claude: coldAdapter }, fresh, { ...o, now: afterExpiry });
+    expect(done.terminalState).toBe("COMPLETED");
+    expect(observedResume).toBeNull();
+  });
+
+  test("adapter argv carries an extracted resume session identifier", () => {
+    const root = freshRoot();
+    const claudeTranscript = path.join(root, "claude.ndjson");
+    const piTranscript = path.join(root, "pi.ndjson");
+    const claudeId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    writeFileSync(claudeTranscript, `${JSON.stringify({
+      type: "system", subtype: "init", cwd: root, session_id: claudeId,
+    })}\n`);
+    writeFileSync(piTranscript, `${JSON.stringify({
+      type: "session", version: 3, cwd: root, id: "pi-session",
+    })}\n`);
+
+    const claudeSession = transcriptSessionId(claudeTranscript, "claude");
+    const piSession = transcriptSessionId(piTranscript, "pi");
+    expect(claudeSession).toBe(claudeId);
+    expect(piSession).toBe("pi-session");
+
+    const claude = buildClaudeArgv({
+      prompt: "continue", def: { mutating: false }, resumeSessionId: claudeSession,
+    });
+    expect(claude.slice(0, 4)).toEqual(["-p", "continue", "--resume", claudeId]);
+    expect(claude).toContain("--fork-session");
+
+    const pi = buildPiArgv({
+      def: { mutating: false }, model: null, resumeSessionId: piSession,
+    });
+    expect(pi).toContain("--fork");
+    expect(pi[pi.indexOf("--fork") + 1]).toBe("pi-session");
+  });
+
+  test("real adapter execute paths forward resume context to their spawned CLIs", async () => {
+    const root = freshRoot();
+    const bin = path.join(root, "bin");
+    mkdirSync(bin);
+    for (const command of ["claude", "pi"]) {
+      const executable = path.join(bin, command);
+      writeFileSync(executable, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FACTORY_TEST_ARGV\"\n");
+      chmodSync(executable, 0o755);
+    }
+    const promptPath = path.join(root, "prompt.md");
+    writeFileSync(promptPath, "Continue the run.\n");
+    const def = { promptPath, mutating: true, capabilities: { tools: [] } };
+    const spec = { model: null, input: {} };
+
+    const claudeWorkspace = path.join(root, "claude-workspace");
+    const claudeArgv = path.join(root, "claude-argv.txt");
+    mkdirSync(claudeWorkspace);
+    const claudeOutcome = await executeClaude({
+      spec, def, workspaceDir: claudeWorkspace, timeoutMs: 5_000,
+      env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, FACTORY_TEST_ARGV: claudeArgv },
+      resume: { sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+    });
+    expect(claudeOutcome.exitCode).toBe(0);
+    expect(readFileSync(claudeArgv, "utf8").split("\n")).toContain("--resume");
+    expect(readFileSync(claudeArgv, "utf8")).toContain("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    expect(readFileSync(claudeArgv, "utf8").split("\n")).toContain("--fork-session");
+
+    const piWorkspace = path.join(root, "pi-workspace");
+    const piArgv = path.join(root, "pi-argv.txt");
+    mkdirSync(piWorkspace);
+    const piOutcome = await executePi({
+      spec, def, workspaceDir: piWorkspace, timeoutMs: 5_000,
+      env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, FACTORY_TEST_ARGV: piArgv },
+      resume: { sessionId: "pi-session" },
+    });
+    expect(piOutcome.exitCode).toBe(0);
+    expect(readFileSync(piArgv, "utf8").split("\n")).toContain("--fork");
+    expect(readFileSync(piArgv, "utf8")).toContain("pi-session");
   });
 
   test("fencing: a stale claim can never publish over a newer attempt", async () => {

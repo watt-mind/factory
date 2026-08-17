@@ -796,9 +796,10 @@ export async function executeClaimed(db, registry, adapters, claim, {
       leaseHeartbeat?.unref?.();
     }
 
+    const adapterKey = adapterOverride ?? spec.adapter;
     const created = createWorkspace({
       root: workspacesRoot, runId, attempt, input: spec.input, workspace: spec.workspace,
-      artifactStore,
+      artifactStore, adapter: adapterKey,
     });
     workspaceDir = created.dir;
     checkoutPath = created.checkout?.path ?? null;
@@ -807,7 +808,6 @@ export async function executeClaimed(db, registry, adapters, claim, {
     db.query(`UPDATE attempts SET workspace_path = ? WHERE run_id = ? AND attempt = ?`)
       .run(workspaceDir, runId, attempt);
 
-    const adapterKey = adapterOverride ?? spec.adapter;
     const adapter = adapters[adapterKey];
     if (!adapter) {
       const res = failTerminal("FAILED", "unknown_adapter", "unknown_adapter");
@@ -846,6 +846,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
     try {
       outcome = await adapter.execute({
         spec, def, workspaceDir, timeoutMs: spec.timeoutSeconds * 1000, env, onTrace, onUsage,
+        resume: created.resume ?? null,
         abortSignal: abortController.signal, signal: abortController.signal,
       });
     } finally {
