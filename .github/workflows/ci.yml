@@ -100,7 +100,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* 2>/dev/null || true
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
           git init -q "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
@@ -192,7 +192,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* 2>/dev/null || true
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
           git init -q "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
@@ -331,6 +331,7 @@ jobs:
           trap cleanup EXIT
 
           ready=0
+          # shellcheck disable=SC2034 # bounded retry counter; loop body doesn't need the index
           for i in $(seq 50); do
             if kill -0 "$SERVE_PID" 2>/dev/null && \
               HEALTH="$(curl -sf "http://127.0.0.1:$PORT/health")" && \

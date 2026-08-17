@@ -1,0 +1,8 @@
+# actionlint config (WM-608). Declares the repo's custom self-hosted runner
+# labels so `runs-on: [self-hosted, shadow]` / `[self-hosted, smoke-test]`
+# don't flag as "unknown label" — see docs/ci.md and
+# ~/Develop/hdkiller/docs/guides/github-runners.md for what they map to.
+self-hosted-runner:
+  labels:
+    - shadow
+    - smoke-test

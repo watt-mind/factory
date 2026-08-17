@@ -213,3 +213,7 @@ factory linear queue --team CLNT                         # what is dispatchable
 
 Never print, echo, commit, or paste an API key, token, or `.env` file — not into a transcript, a PR, a Linear comment, or a log. Scripts read credentials themselves. If a secret appears in a diff, that's an escalation, not a cleanup.
 <!-- FACTORY:FLOOR:END -->
+
+## Repo-specific notes
+
+Run `factory security` (Gitleaks + Semgrep + Actionlint, `lib/security-check.sh`) before pushing — `.github/workflows/security.yml` runs the same three tools in CI on every PR and on pushes to `develop`/`main` (see `docs/ci.md` "Security scans").

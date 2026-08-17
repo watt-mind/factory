@@ -1,0 +1,10 @@
+# Semgrep already respects .gitignore; this file adds paths that are tracked
+# (or occasionally present) but not source to scan: generated output, vendor
+# trees, fixtures, and lockfiles. See docs/ci.md "Security scans".
+node_modules/
+**/node_modules/
+dist/
+graphify-out/
+evals/**/fixtures/
+bun.lock
+deploy/launchd/

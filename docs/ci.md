@@ -43,3 +43,14 @@ After changing the workflow:
 3. For each relevant run, inspect step timestamps with `gh run view <RUN_ID>` and confirm the interval from `Acquire host verify lock` completing through `Release host verify lock` does not overlap that interval in either test job from another Factory workflow run.
 
 A failed or cancelled test job breaks the streak. Record the five develop run URLs in the validating ticket or merge handoff.
+
+## Security scans
+
+`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `[self-hosted, shadow]` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
+
+- **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
+- **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
+- **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
+- **CodeQL** — gated behind `if: ${{ vars.CODEQL_ENABLED == 'true' }}` and currently a placeholder: this repo is private with no GitHub Advanced Security (`code-scanning/default-setup` returns 403). Flip the `CODEQL_ENABLED` repository variable and replace the placeholder step with `github/codeql-action` init/analyze once GHAS is available (project-conventions.md §3D).
+
+Run the same tools locally before pushing with `factory security` (Gitleaks + Semgrep + Actionlint, plus Ruff/pip-audit when a repo has adopted the Python tier) — see `lib/security-check.sh`. Local and CI use identical tool invocations and config files (`.gitleaks.toml`, `.semgrepignore`) so a clean local run predicts a clean CI run.
