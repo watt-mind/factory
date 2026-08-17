@@ -339,6 +339,13 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
   const git = (args) => Bun.spawnSync({ cmd: ["git", ...args], cwd: path.resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" });
 
   try {
+    // CI checks out with actions/checkout's default fetch-depth 1, so
+    // origin/develop has no parent in the shallow clone and `origin/develop~1`
+    // resolves to nothing (exit 128). Deepen by one commit only in that case
+    // (WM-530); a full local clone never takes this branch.
+    if (git(["rev-parse", "--verify", "--quiet", "origin/develop~1"]).exitCode !== 0) {
+      expect(git(["fetch", "--deepen=1", "origin", "develop"]).exitCode).toBe(0);
+    }
     expect(git(["branch", branch, "origin/develop~1"]).exitCode).toBe(0);
     const staleSha = git(["rev-parse", branch]).stdout.toString().trim();
     const baseSha = git(["rev-parse", "origin/develop"]).stdout.toString().trim();
