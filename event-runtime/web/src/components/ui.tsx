@@ -623,6 +623,25 @@ export function DetailPane({
 
 export const ESC_CLEARS_FILTER = "Esc clears the filter";
 
+/** Previous/next controls for a 100-row table window. */
+export function TableWindowFooter({ colSpan, range, move }: {
+  colSpan: number;
+  range: readonly [number, number, number];
+  move: (direction: number) => void;
+}) {
+  const [start, end, total] = range;
+  if (total <= 100) return null;
+  return (
+    <tr>
+      <td colSpan={colSpan} onKeyDown={(e) => e.stopPropagation()} align="right">
+        {start + 1}–{end}/{total}{" "}
+        <Button disabled={!start} onClick={() => move(-1)}>Prev</Button>{" "}
+        <Button disabled={end === total} onClick={() => move(1)}>Next</Button>
+      </td>
+    </tr>
+  );
+}
+
 /** Empty / loading / error row for the dense lists. Never say "none" while pending. */
 export function ListEmpty({
   colSpan,

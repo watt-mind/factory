@@ -898,3 +898,23 @@ describe("Planner decisions explain themselves (WM-594)", () => {
     });
   });
 });
+
+describe("Events long-list window (WM-563)", () => {
+  test("a 2,000-row deep link mounts fewer than 200 table rows and reveals its selection", async () => {
+    const events = Array.from({ length: 2000 }, (_, i) => stubEvent(`evt_window_${i}`, "admitted"));
+    await withApi(
+      {
+        events: async () => ({ events }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({ focusEvent: { source: "github", eventId: "evt_window_1999" } });
+        await waitFor(() => {
+          expect(r.container.querySelector('td[title="evt_window_1999"]')).toBeTruthy();
+        });
+        expect(r.container.querySelectorAll("tbody tr").length).toBeLessThan(200);
+        expect(r.container.querySelector('td[title="evt_window_1999"]')?.closest("tr")?.className).toContain("row-selected");
+      },
+    );
+  });
+});

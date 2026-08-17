@@ -1052,3 +1052,26 @@ describe("Proposals single-proposal reject dialog hotkeys (WM-236)", () => {
   });
 });
 
+describe("Proposals long-list window (WM-563)", () => {
+  test("a 2,000-row fixture mounts fewer than 200 table rows and pages forward", async () => {
+    const proposals = Array.from({ length: 2000 }, (_, i) => stubProposal(`prop_window_${i}`));
+    await withApi(
+      {
+        proposals: async () => ({ proposals }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderProposals();
+        const next = await r.findByRole("button", { name: "Next" });
+        expect(r.container.querySelectorAll("tbody tr").length).toBeLessThan(200);
+        expect(r.queryByLabelText("Select proposal prop_window_100")).toBeNull();
+        fireEvent.click(next);
+        await waitFor(() => {
+          expect(r.getByLabelText("Select proposal prop_window_100")).toBeTruthy();
+        });
+        expect(r.container.querySelectorAll("tbody tr").length).toBeLessThan(200);
+      },
+    );
+  });
+});
+

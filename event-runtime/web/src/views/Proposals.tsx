@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, tableTokens, useDisplayOptions, useListKeys, useNow, useTabKeys, useTableWindow } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -45,6 +45,7 @@ import {
   PROPOSAL_STATUS_HUES,
   GroupHeaderRow,
   Section,
+  TableWindowFooter,
   StateBadge,
   Th,
   VerbError,
@@ -426,6 +427,13 @@ export function Proposals({
   // Keyboard index walks the open sections; the detail pane keys off the row
   // itself so collapsing the group under a selection never closes the pane.
   const selectedIndex = useMemo(() => flat.findIndex((p) => p.id === selectedId), [flat, selectedId]);
+  const tokens = tableTokens(sections, display.collapsed, grouped(display));
+  const [windowTokens, windowStart, windowEnd, moveWindow] = useTableWindow(
+    tokens,
+    selectedId,
+    (row) => row.id,
+    JSON.stringify([tab, filter, expiredOnly, context, display]),
+  );
   const sel = useMemo(
     () => (selectedId ? (visible.find((p) => p.id === selectedId) ?? null) : null),
     [visible, selectedId],
@@ -450,7 +458,7 @@ export function Proposals({
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
-  }, [selectedIndex]);
+  }, [selectedIndex, windowStart]);
 
   // Reveal a hash-selected proposal only when current filters hide it. Latch
   // until the row exists in `rows` (tab switch / re-plan / poll); decide once
@@ -968,39 +976,26 @@ export function Proposals({
                   ))}
                 </tr>
               );
-              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
-              return sections.map((s) => {
-                const closed = display.collapsed.includes(s.key);
+              return windowTokens.map((token) => {
+                if (token.length === 1) return renderRow(token[0]);
+                const [s, sub] = token;
                 return (
-                  <Fragment key={s.key}>
-                    <GroupHeaderRow
-                      colSpan={totalColSpan}
-                      section={s}
-                      collapsed={closed}
-                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
-                    />
-                    {!closed &&
-                      (s.subsections
-                        ? s.subsections.map((child) => {
-                            const childClosed = display.collapsed.includes(child.key);
-                            return (
-                              <Fragment key={child.key}>
-                                <GroupHeaderRow
-                                  colSpan={totalColSpan}
-                                  section={child}
-                                  collapsed={childClosed}
-                                  onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
-                                  sub
-                                />
-                                {!childClosed && child.rows.map(renderRow)}
-                              </Fragment>
-                            );
-                          })
-                        : s.rows.map(renderRow))}
-                  </Fragment>
+                  <GroupHeaderRow
+                    key={`group:${s.key}`}
+                    colSpan={totalColSpan}
+                    section={s}
+                    collapsed={display.collapsed.includes(s.key)}
+                    onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    sub={sub}
+                  />
                 );
               });
             })()}
+            <TableWindowFooter
+              colSpan={listCols.length + (tab === "open" ? 1 : 0)}
+              range={[windowStart, windowEnd, tokens.length]}
+              move={moveWindow}
+            />
             {visible.length === 0 && (
               <ListEmpty
                 colSpan={listCols.length + (tab === "open" ? 1 : 0)}

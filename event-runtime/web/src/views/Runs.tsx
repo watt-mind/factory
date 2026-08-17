@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { api, ApiError } from "../api";
-import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, tableTokens, useDisplayOptions, useListKeys, useNow, useTabKeys, useTableWindow } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -51,6 +51,7 @@ import {
   StateBadge,
   STATE_HUES,
   GroupHeaderRow,
+  TableWindowFooter,
   Th,
   VerbError,
   copyText,
@@ -332,6 +333,13 @@ export function Runs({
   // Keyboard index walks the open sections; the detail pane keys off the row
   // itself so collapsing the group under a selection never closes the pane.
   const selectedIndex = useMemo(() => flat.findIndex((r) => r.runId === selectedId), [flat, selectedId]);
+  const tokens = tableTokens(sections, display.collapsed, grouped(display));
+  const [windowTokens, windowStart, windowEnd, moveWindow] = useTableWindow(
+    tokens,
+    selectedId,
+    (row) => row.runId,
+    JSON.stringify([tab, filter, context, display]),
+  );
 
   // Deep link / jump: switch to ALL if the run isn't on this tab. Hash stays put.
   // Reveal (clear filter) once per focus id, after the run is on the tab so a
@@ -430,7 +438,7 @@ export function Runs({
 
   useEffect(() => {
     document.querySelector("tr.row-selected")?.scrollIntoView({ block: "nearest" });
-  }, [selectedIndex]);
+  }, [selectedIndex, windowStart]);
 
   const detail = useQuery({
     queryKey: ["run", selectedId],
@@ -830,39 +838,26 @@ export function Runs({
                   ))}
                 </tr>
               );
-              if (!grouped(display)) return sections[0]?.rows.map(renderRow);
-              return sections.map((s) => {
-                const closed = display.collapsed.includes(s.key);
+              return windowTokens.map((token) => {
+                if (token.length === 1) return renderRow(token[0]);
+                const [s, sub] = token;
                 return (
-                  <Fragment key={s.key}>
-                    <GroupHeaderRow
-                      colSpan={listCols.length}
-                      section={s}
-                      collapsed={closed}
-                      onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
-                    />
-                    {!closed &&
-                      (s.subsections
-                        ? s.subsections.map((child) => {
-                            const childClosed = display.collapsed.includes(child.key);
-                            return (
-                              <Fragment key={child.key}>
-                                <GroupHeaderRow
-                                  colSpan={listCols.length}
-                                  section={child}
-                                  collapsed={childClosed}
-                                  onToggle={() => setDisplay((st) => toggleCollapsed(st, child.key))}
-                                  sub
-                                />
-                                {!childClosed && child.rows.map(renderRow)}
-                              </Fragment>
-                            );
-                          })
-                        : s.rows.map(renderRow))}
-                  </Fragment>
+                  <GroupHeaderRow
+                    key={`group:${s.key}`}
+                    colSpan={listCols.length}
+                    section={s}
+                    collapsed={display.collapsed.includes(s.key)}
+                    onToggle={() => setDisplay((st) => toggleCollapsed(st, s.key))}
+                    sub={sub}
+                  />
                 );
               });
             })()}
+            <TableWindowFooter
+              colSpan={listCols.length}
+              range={[windowStart, windowEnd, tokens.length]}
+              move={moveWindow}
+            />
             {visible.length === 0 && (
               <ListEmpty
                 colSpan={listCols.length}
