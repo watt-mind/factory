@@ -1,5 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
-import { artifactUrl } from "../api";
+import { api, artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import { dur } from "../heartbeat";
 import type { ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
@@ -19,6 +20,7 @@ import {
   shortId,
 } from "./ui";
 import { AgentHoverCard } from "./AgentHoverCard";
+import { ArtifactPanel } from "./ArtifactView";
 import { attrIcon } from "./attrIcons";
 
 export const TERMINAL: RunState[] = ["COMPLETED", "REFUSED", "FAILED", "TIMED_OUT", "CANCELLED"];
@@ -493,6 +495,14 @@ export function RunDetailBlocks({
     : null;
   const clocks = current ? deadlinesOf(current, d.run.spec.timeoutSeconds, now) : null;
 
+  // The artifact's view sidecar rides the `/agents` item for this run's agent
+  // (WM-454); the same query AgentHoverCard already keeps warm, so no new
+  // request per run. No agent, no view → the JSON block, unchanged.
+  const agentsQ = useQuery({ queryKey: ["agents"], queryFn: () => api.agents(), staleTime: 30_000 });
+  const agentDef = (agentsQ.data?.agents ?? []).find(
+    (a) => a.ref === d.run.spec.agent || a.id === d.run.spec.agent,
+  );
+
   return (
     <>
       <Section title="Run" icons>
@@ -707,7 +717,11 @@ export function RunDetailBlocks({
         >
           {d.result.artifact !== undefined ? (
             <Disclosure label="artifact" defaultOpen>
-              <JsonBlock value={d.result.artifact} />
+              <ArtifactPanel
+                artifact={d.result.artifact}
+                schema={agentDef?.outputSchema}
+                view={agentDef?.outputView}
+              />
             </Disclosure>
           ) : (
             <Disclosure label="result" defaultOpen>

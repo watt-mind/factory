@@ -8,6 +8,7 @@ import {
   FORMATS,
   SECTION_KINDS,
   TONES,
+  inspectHeader,
   parsePointer,
   resolvePointer,
   resolveSchemaPointer,
@@ -280,5 +281,26 @@ describe("committed views fit their agents' output schemas (drift gate, design Â
     expect(merge.sections.find((s) => s.path === "/escalate").columns).toContain("reason");
     expect(merge.sections.find((s) => s.path === "/plan").columns).toContain("reason");
     expect(merge.sections.find((s) => s.path === "/fix").columns).toContain("finding");
+  });
+});
+
+describe("inspectHeader â€” the first lines of `inspect`'s result section (WM-455)", () => {
+  const view = JSON.parse(readFileSync(path.join(RUNTIME_ROOT, "agents", "merge-scan.view.json"), "utf8"));
+
+  test("summary prose, then status as `<label>: <value>` with the pointer's last token as label", () => {
+    expect(inspectHeader(view, { summary: "  Two PRs held. ", recommendation: "ESCALATE", escalate: [] })).toEqual([
+      "Two PRs held.",
+      "recommendation: ESCALATE",
+    ]);
+  });
+
+  test("a pointer that does not resolve contributes nothing; no view means no lines", () => {
+    expect(inspectHeader(view, { recommendation: "NOOP" })).toEqual(["recommendation: NOOP"]);
+    expect(inspectHeader(view, { summary: "only prose" })).toEqual(["only prose"]);
+    expect(inspectHeader(view, { summary: "", recommendation: { nested: true } })).toEqual([]);
+    expect(inspectHeader(view, "not an object")).toEqual([]);
+    expect(inspectHeader(null, { summary: "x" })).toEqual([]);
+    expect(inspectHeader(undefined, { summary: "x" })).toEqual([]);
+    expect(inspectHeader({ schemaVersion: ARTIFACT_VIEW_SCHEMA_VERSION, sections: [] }, { summary: "x" })).toEqual([]);
   });
 });

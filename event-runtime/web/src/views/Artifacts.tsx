@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, artifactUrl, fetchArtifacts } from "../api";
+import { ArtifactPanel, loadArtifactRaw } from "../components/ArtifactView";
 import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import {
@@ -23,7 +24,10 @@ import {
   type DisplayConfig,
 } from "../displayOptions";
 import { useDisplayOptions, useNow } from "../hooks";
-import type { AdmittedEvent, ArtifactInventoryItem, StatusView } from "../types";
+import { formatBytes, viewApplies } from "../lib/artifactView";
+import type { AdmittedEvent, AgentDef, ArtifactInventoryItem, StatusView } from "../types";
+
+export { formatBytes };
 
 export type ArtifactFilters = {
   kind: string | null;
@@ -35,13 +39,6 @@ const COMMON_KINDS = ["report", "log", "transcript", "ci-log"];
 
 function kindsOf(artifact: ArtifactInventoryItem): string[] {
   return [...new Set(artifact.references.flatMap((reference) => reference.kind ?? []))];
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
 const ARTIFACTS_DISPLAY: DisplayConfig<ArtifactInventoryItem> = {
@@ -111,6 +108,17 @@ function containsArtifactHash(value: unknown, sha256: string, seen = new Set<obj
   return Array.isArray(value)
     ? value.some((entry) => containsArtifactHash(entry, sha256, seen))
     : Object.values(value).some((entry) => containsArtifactHash(entry, sha256, seen));
+}
+
+/** The stored bytes as one JSON object, or null — the only shape a view can describe. */
+function parsedObject(raw: string): Record<string, unknown> | null {
+  if (!/^\s*\{/.test(raw)) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function formattedContent(raw: string, kinds: string[]): string {
@@ -228,6 +236,15 @@ export function Artifacts({
     enabled: selectedSha !== null,
     refetchInterval: 10_000,
   });
+  // The producing run's agent may ship a view sidecar (WM-454); when the
+  // stored bytes are that agent's artifact, the inspector draws it (WM-455).
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.agents(),
+    enabled: selectedSha !== null,
+    staleTime: 30_000,
+  });
+  const [artifactRaw, setArtifactRaw] = useState(loadArtifactRaw);
 
   const kinds = useMemo(
     () =>
@@ -276,6 +293,21 @@ export function Artifacts({
   );
   const selectedKinds = selected ? kindsOf(selected) : [];
   const preview = contentQ.data === undefined ? null : formattedContent(contentQ.data, selectedKinds);
+  const parsedArtifact = useMemo(
+    () => (contentQ.data === undefined ? null : parsedObject(contentQ.data)),
+    [contentQ.data],
+  );
+  const producerAgent: AgentDef | undefined = useMemo(() => {
+    const refs = selected?.references.map((reference) => reference.agent).filter(Boolean) ?? [];
+    const defs = agentsQ.data?.agents ?? [];
+    for (const ref of refs) {
+      const def = defs.find((a) => a.ref === ref || a.id === ref);
+      if (def?.outputView) return def;
+    }
+    return undefined;
+  }, [selected, agentsQ.data]);
+  const viewShown =
+    parsedArtifact !== null && viewApplies(producerAgent?.outputView, parsedArtifact) && !artifactRaw;
   const previewLines = preview?.split("\n") ?? [];
   const matchCount = contentSearch.trim()
     ? previewLines.filter((line) => line.toLowerCase().includes(contentSearch.trim().toLowerCase())).length
@@ -606,21 +638,39 @@ export function Artifacts({
             <div>
               <h2 className="display text-[12px] font-semibold">Preview</h2>
               <p className="mt-0.5 text-[11px] text-(--text-faint)">
-                {matchCount === null ? `${previewLines.length.toLocaleString()} lines` : `${matchCount.toLocaleString()} matching lines`}
+                {viewShown
+                  ? `${producerAgent?.outputView?.title ?? "view"} · ${producerAgent?.ref}`
+                  : matchCount === null
+                    ? `${previewLines.length.toLocaleString()} lines`
+                    : `${matchCount.toLocaleString()} matching lines`}
               </p>
             </div>
-            <FilterInput value={contentSearch} onChange={setContentSearch} placeholder="Find in content…" label="Search artifact content" />
+            {!viewShown && (
+              <FilterInput value={contentSearch} onChange={setContentSearch} placeholder="Find in content…" label="Search artifact content" />
+            )}
           </div>
           {contentQ.isPending && <div className="mt-3 text-[12px] text-(--text-faint)">Loading artifact preview…</div>}
           {contentQ.isError && <div className="mt-3 text-[12px] text-(--hue-err)">Could not load artifact content: {(contentQ.error as Error).message}</div>}
           {preview !== null && (
-            <div role="region" aria-label="Artifact content" className="mono mt-3 max-h-[60vh] overflow-auto rounded-md border border-(--border) bg-(--surface-0) py-2 text-[11.5px] leading-relaxed">
-              {previewLines.map((line, index) => (
-                <div key={index} className={`grid grid-cols-[4rem_minmax(0,1fr)] px-2 ${contentSearch.trim() && line.toLowerCase().includes(contentSearch.trim().toLowerCase()) ? "bg-(--surface-2)" : ""}`}>
-                  <span aria-hidden="true" className="select-none border-r border-(--border) pr-2 text-right text-(--text-faint)">{index + 1}</span>
-                  <span className="min-w-0 whitespace-pre-wrap break-words pl-3">{highlightedLine(line, contentSearch)}</span>
-                </div>
-              ))}
+            <div className="mt-3">
+              <ArtifactPanel
+                artifact={parsedArtifact ?? preview}
+                schema={producerAgent?.outputSchema}
+                view={parsedArtifact ? producerAgent?.outputView : null}
+                onJumpRun={onJumpRun}
+                raw={artifactRaw}
+                onRawChange={setArtifactRaw}
+                rawFallback={
+                  <div role="region" aria-label="Artifact content" className="mono max-h-[60vh] overflow-auto rounded-md border border-(--border) bg-(--surface-0) py-2 text-[11.5px] leading-relaxed">
+                    {previewLines.map((line, index) => (
+                      <div key={index} className={`grid grid-cols-[4rem_minmax(0,1fr)] px-2 ${contentSearch.trim() && line.toLowerCase().includes(contentSearch.trim().toLowerCase()) ? "bg-(--surface-2)" : ""}`}>
+                        <span aria-hidden="true" className="select-none border-r border-(--border) pr-2 text-right text-(--text-faint)">{index + 1}</span>
+                        <span className="min-w-0 whitespace-pre-wrap break-words pl-3">{highlightedLine(line, contentSearch)}</span>
+                      </div>
+                    ))}
+                  </div>
+                }
+              />
             </div>
           )}
         </section>
