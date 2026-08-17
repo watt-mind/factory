@@ -1289,15 +1289,15 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     releaseClaimLock(lockFile);
   });
 
-  test("acquireClaimLock steals stale lock older than 120s or from dead PID", () => {
+  test("acquireClaimLock preserves old locks from live owners and reclaims dead owners", () => {
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-stale-"));
     const lockFile = dispatchLockPath("wt-worker", lockDir);
-    // Write stale lock from 200s ago
+    // Age alone cannot make a live owner's lock safe to steal.
     writeFileSync(lockFile, `${process.pid} 1000\n`, "utf8");
-    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 201_000, isAlive: () => true })).toBe(true);
+    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 201_000, isAlive: () => true })).toBe(false);
     releaseClaimLock(lockFile);
 
-    // Write lock from dead PID
+    // A dead owner's lock is stale and is reclaimed immediately.
     writeFileSync(lockFile, `999999 1000\n`, "utf8");
     expect(acquireClaimLock(lockFile, { pid: process.pid, now: 2000, isAlive: () => false })).toBe(true);
     releaseClaimLock(lockFile);

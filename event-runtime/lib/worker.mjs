@@ -269,15 +269,17 @@ export function acquireClaimLock(lockFile, { pid = process.pid, now = Date.now()
       writeFileSync(lockFile, `${pid} ${now}\n`, { flag: "wx" });
       return true;
     } catch {
-      let lockPid = 0, at = 0;
+      let lockPid = 0;
       try {
         const content = readFileSync(lockFile, "utf8").trim();
-        [lockPid, at] = content.split(/\s+/).map(Number);
+        [lockPid] = content.split(/\s+/).map(Number);
       } catch {
         return false;
       }
       const alive = isAlive(lockPid);
-      if (alive && now - at < 120_000) return false;
+      // Age alone is not proof of abandonment: a slow but live Linear claim
+      // must retain mutual exclusion. Only a dead owner makes the lock stale.
+      if (alive) return false;
       try { unlinkSync(lockFile); } catch {}
     }
   }
