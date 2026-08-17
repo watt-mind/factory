@@ -108,17 +108,20 @@ export function buildTemplates(view: unknown, nowMs: number): TriggerTemplate[] 
 
   const byRef = new Map(agents.map((a) => [a.ref, a]));
   return eventTypes.map((route) => {
-    const def = byRef.get(route.agent);
+    const def = route.agent ? byRef.get(route.agent) : undefined;
     const id = triggerId(nowMs);
+    const eventType = route.type ?? "";
+    const agent = route.agent ?? "";
+    const adapter = route.adapter ?? "";
     return {
-      eventType: route.type,
-      agent: route.agent,
-      adapter: route.adapter,
+      eventType,
+      agent,
+      adapter,
       summary: summarize(def?.inputSchema),
       envelope: {
         schemaVersion: "factory.event/v1",
         eventId: id,
-        type: route.type,
+        type: eventType,
         source: "web-trigger",
         subject: "factory",
         occurredAt: new Date(nowMs).toISOString(),

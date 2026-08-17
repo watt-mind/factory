@@ -217,6 +217,18 @@ describe("buildTemplates", () => {
   ])("returns no templates when the registry response is %s", (_label, response) => {
     expect(buildTemplates(response as unknown as AgentsView, NOW)).toEqual([]);
   });
+
+  test("handles unrouted event types without agent or adapter (WM-475)", () => {
+    const unroutedView = {
+      agents: [],
+      eventTypes: [{ type: "factory.ticket.dispatched", proposalTtlSeconds: null }],
+    };
+    const templates = buildTemplates(unroutedView as unknown as AgentsView, NOW);
+    expect(templates).toHaveLength(1);
+    expect(templates[0]?.eventType).toBe("factory.ticket.dispatched");
+    expect(templates[0]?.agent).toBe("");
+    expect(templates[0]?.adapter).toBe("");
+  });
 });
 
 describe("retriggerEnvelope", () => {

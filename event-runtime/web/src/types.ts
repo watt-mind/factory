@@ -310,10 +310,10 @@ export interface RecommendationRule {
 /** Every registered route, independent of which agent mentions it. */
 export interface EventRoute {
   type: string;
-  agent: string;
-  adapter: string;
-  idempotencyScope: string[];
-  proposalTtlSeconds: number | null;
+  agent?: string;
+  adapter?: string;
+  idempotencyScope?: string[];
+  proposalTtlSeconds?: number | null;
 }
 
 export interface AgentsView {

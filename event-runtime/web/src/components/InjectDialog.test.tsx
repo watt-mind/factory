@@ -653,6 +653,31 @@ describe("InjectDialog keyboard search (WM-80)", () => {
       });
       expect(document.activeElement === search).toBe(true);
     }));
+
+  test("typing in search filters templates safely when registry contains unrouted event types (WM-475)", async () => {
+    const origAgents = api.agents;
+    const origRepos = api.repos;
+    api.agents = async () => ({
+      ...schemaRegistry(),
+      eventTypes: [
+        ...schemaRegistry().eventTypes,
+        { type: "factory.ticket.dispatched", proposalTtlSeconds: null } as any,
+      ],
+    });
+    api.repos = async () => ({ repos: REPO_ITEMS });
+    try {
+      const r = renderWithClient(<InjectDialog onClose={() => {}} />);
+      await r.findByText("factory.ticket.dispatched");
+      const search = r.getByPlaceholderText(/search event types/i);
+      act(() => {
+        changeInput(search, "smoke");
+      });
+      expect(r.getByText(/no templates or recent payloads matching "smoke"/i)).toBeTruthy();
+    } finally {
+      api.agents = origAgents;
+      api.repos = origRepos;
+    }
+  });
 });
 
 describe("InjectDialog invalid-payload confirm is distinct (WM-85)", () => {

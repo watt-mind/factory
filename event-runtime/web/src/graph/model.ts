@@ -106,9 +106,9 @@ export function buildCapabilityGraph(view: AgentsView, live?: LiveGraphState): C
       id: eventNodeId(route.type),
       kind: "eventType",
       label: route.type,
-      adapter: route.adapter,
+      adapter: route.adapter ?? "—",
       scope: route.idempotencyScope ?? [],
-      ttl: route.proposalTtlSeconds,
+      ttl: route.proposalTtlSeconds ?? null,
       admittedCount,
       plannedCount,
     });
@@ -150,7 +150,7 @@ export function buildCapabilityGraph(view: AgentsView, live?: LiveGraphState): C
 
   // 3. event type → agent (the planner's registered mapping)
   for (const route of routes) {
-    if (!byRef.has(route.agent)) continue; // registry guarantees this, but never draw a dangling edge
+    if (!route.agent || !byRef.has(route.agent)) continue; // registry guarantees this, but never draw a dangling edge
     edges.push({
       id: `routes:${route.type}`,
       source: eventNodeId(route.type),

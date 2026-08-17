@@ -375,8 +375,8 @@ export function InjectDialog({
     const q = search.trim().toLowerCase();
     if (!q) return recentEvents;
     return recentEvents.filter((r) => {
-      if (r.type.toLowerCase().includes(q)) return true;
-      if (r.eventId.toLowerCase().includes(q)) return true;
+      if (r.type?.toLowerCase().includes(q)) return true;
+      if (r.eventId?.toLowerCase().includes(q)) return true;
       if (r.envelope && isPlainObject(r.envelope.payload)) {
         try {
           if (JSON.stringify(r.envelope.payload).toLowerCase().includes(q)) return true;
@@ -391,9 +391,9 @@ export function InjectDialog({
     if (!q) return templates;
     return templates.filter(
       (t) =>
-        t.eventType.toLowerCase().includes(q) ||
-        t.agent.toLowerCase().includes(q) ||
-        t.summary.toLowerCase().includes(q),
+        (t.eventType?.toLowerCase().includes(q) ?? false) ||
+        (t.agent?.toLowerCase().includes(q) ?? false) ||
+        (t.summary?.toLowerCase().includes(q) ?? false),
     );
   }, [templates, search]);
 
