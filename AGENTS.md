@@ -14,6 +14,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `~/D
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
 
+**A local `commit-msg` hook enforces `type(scope): summary (ISSUE-ID)` (WM-609)** — `FACTORY_NO_TICKET=1 git commit …` is the deliberate escape hatch for a commit that genuinely has no ticket.
+
 **Retroactive capture is the backstop, not the plan.** If you notice partway through, or while wrapping up, that work already done has no issue, file it _then_ — with the commits or PR linked and the state set to where the work actually is (`Done` if it is already merged and green), never dressed up as queued work. Before reporting a session finished, check that everything you changed is on a ticket. A late ticket beats an invisible change; both are worse than filing up front.
 
 **Claim before you code.** Set assignee to yourself, state `In Progress`, add `ai:in-progress`, then **re-read the ticket** — if the assignee isn't you, another agent won the race; take the next one. This read-back is the entire concurrency control.
