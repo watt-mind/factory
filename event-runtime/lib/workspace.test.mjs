@@ -72,11 +72,11 @@ describe("worktree workspaces (WM-108)", () => {
     mkdirSync(path.join(repoDir, "bin"), { recursive: true });
     writeFileSync(
       path.join(repoDir, "bin", "worktree-up.sh"),
-      `#!/bin/bash\nset -e\necho "up $1 cwd=$PWD" >> "${callsLog}"\nmkdir -p "${wtRoot}/$1"\n`,
+      `#!/bin/bash\nset -e\nWT="${wtRoot}/$1"\necho "up $1 cwd=$PWD" >> "${callsLog}"\nif [[ -e "$WT/ports" || -e "$WT/run/serve.pid" || -e "$WT/run/worker.pid" || -e "$WT/run/web.pid" ]]; then\n  echo "stale daemon state for $1" >&2\n  exit 9\nfi\nmkdir -p "$WT/run"\nprintf '7740 7741\\n' > "$WT/ports"\ntouch "$WT/run/serve.pid" "$WT/run/worker.pid" "$WT/run/web.pid"\n`,
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-down.sh"),
-      `#!/bin/bash\nset -e\necho "down $1" >> "${callsLog}"\nrm -rf "${wtRoot}/$1"\n`,
+      `#!/bin/bash\nset -e\nWT="${wtRoot}/$1"\necho "down $1" >> "${callsLog}"\nrm -f "$WT/ports" "$WT/run/serve.pid" "$WT/run/worker.pid" "$WT/run/web.pid"\nif [[ -f "$WT/debug-change" ]]; then\n  echo "refusing: dirty tree" >&2\n  exit 1\nfi\nrm -rf "$WT"\n`,
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-up-broken.sh"),
@@ -176,19 +176,38 @@ describe("worktree workspaces (WM-108)", () => {
     expect(existsSync(path.join(wtRoot, "WM-2"))).toBe(false);
   });
 
-  test("retainOnFailure: retain skips worktree_down and keeps workspace AND worktree for inspection", () => {
+  test("retainOnFailure stops daemons and clears ports while dirty worktree files remain inspectable", () => {
     const { dir } = make("wtrepo", "WM-3", "run_wt3");
+    const tree = path.join(wtRoot, "WM-3");
+    writeFileSync(path.join(tree, "debug-change"), "keep me\n");
+
     expect(destroyWorkspace(dir, { retain: true })).toBe(false);
-    expect(calls()).not.toContain("down WM-3");
-    expect(existsSync(dir)).toBe(true);
-    expect(existsSync(path.join(wtRoot, "WM-3"))).toBe(true);
-    expect(destroyWorkspace(dir)).toBe(true); // operator finishing the inspection
     expect(calls()).toContain("down WM-3");
+    expect(existsSync(dir)).toBe(true);
+    expect(existsSync(tree)).toBe(true);
+    expect(readFileSync(path.join(tree, "debug-change"), "utf8")).toBe("keep me\n");
+    expect(existsSync(path.join(tree, "ports"))).toBe(false);
+    expect(existsSync(path.join(tree, "run", "serve.pid"))).toBe(false);
+    expect(existsSync(path.join(tree, "run", "worker.pid"))).toBe(false);
+    expect(existsSync(path.join(tree, "run", "web.pid"))).toBe(false);
   });
 
-  test("a refusing worktree_down (dirty tree) retains everything and never forces", () => {
+  test("a clean retained failure can be redispatched and its workspace later removed", () => {
+    const { dir } = make("wtrepo", "WM-12", "run_wt12");
+    expect(destroyWorkspace(dir, { retain: true })).toBe(false);
+    expect(existsSync(dir)).toBe(true);
+    expect(existsSync(path.join(dir, ".worktree.json"))).toBe(false);
+    expect(existsSync(path.join(wtRoot, "WM-12"))).toBe(false);
+
+    const retry = make("wtrepo", "WM-12", "run_wt12_retry");
+    expect(calls().filter((call) => call.startsWith("up WM-12 "))).toHaveLength(2);
+    expect(destroyWorkspace(retry.dir)).toBe(true);
+    expect(destroyWorkspace(dir)).toBe(true);
+  });
+
+  test("a refusing worktree_down (dirty tree) is surfaced even when retention was requested", () => {
     const { dir } = make("refusing-down", "WM-4", "run_wt4");
-    expect(destroyWorkspace(dir)).toBe(false);
+    expect(destroyWorkspace(dir, { retain: true })).toBe(false);
     expect(existsSync(dir)).toBe(true);
     expect(existsSync(path.join(wtRoot, "WM-4"))).toBe(true);
   });

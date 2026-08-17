@@ -38,7 +38,7 @@ export function CustomCell({ row, path }: { row: unknown; path: string }) {
 
   return (
     <td
-      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 text-[11.5px] text-(--text-dim)"
+      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11.5px] text-(--text-dim)"
       title={title}
     >
       {isComplex ? (

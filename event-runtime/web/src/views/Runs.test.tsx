@@ -4,7 +4,10 @@ import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { Runs, statesForRunTab } from "./Runs";
 import {
   changeInput,
+  createAgentsFixture,
   createLifecycleEventFixture,
+  createProposalFixture,
+  createRunSpecFixture,
   createRunDetailFixture,
   createRunListItemFixture,
   createStatusFixture,
@@ -680,6 +683,203 @@ describe("Runs copy chords and hints (WM-233)", () => {
     ]);
     expect(statesForRunTab("COMPLETED")).toEqual(["COMPLETED"]);
     expect(statesForRunTab("CANCELLED")).toEqual(["CANCELLED"]);
+  });
+
+  test("PROPOSED run shows proposal jump link in table and open & approve actions in detail pane", async () => {
+    const onJumpProposal = mock(() => {});
+    const onSelectRun = mock(() => {});
+    const runId = "run-proposed-1";
+    const propId = "prop-1234567890abcdef";
+
+    const proposedRow = stubListItem(runId, "PROPOSED");
+    const proposal = createProposalFixture({
+      id: propId,
+      runId,
+      status: "open",
+      decision: "run",
+    });
+
+    const approveMock = mock(async (_id: string) => ({
+      approved: true as const,
+      runId,
+    }));
+
+    await withApi(
+      {
+        runs: mock(async () => ({ runs: [proposedRow] })),
+        run: mock(async () => stubDetail(runId, "PROPOSED", [])),
+        proposals: mock(async () => ({ proposals: [proposal] })),
+        approve: approveMock,
+        status: mock(async () =>
+          createStatusFixture({
+            runs: { byState: { PROPOSED: 1 } },
+          }),
+        ),
+      },
+      async () => {
+        const r = renderRuns({
+          focusRunId: runId,
+          onJumpProposal,
+          onSelectRun,
+        });
+
+        // Verify "proposal" link is present in the table row and clickable
+        await waitFor(() => {
+          expect(r.getByTitle(`Open proposal ${propId}`)).toBeTruthy();
+        });
+
+        fireEvent.click(r.getByTitle(`Open proposal ${propId}`));
+        expect(onJumpProposal).toHaveBeenCalledWith(propId);
+
+        // Verify detail pane shows "Awaiting Proposal Approval" section and "Approve…" button
+        await waitFor(() => {
+          expect(r.getByText("Awaiting Proposal Approval")).toBeTruthy();
+          expect(r.getAllByRole("button", { name: /Approve…/i }).length).toBeGreaterThan(0);
+        });
+
+        // Click "Approve…" button in the detail pane
+        const approveBtns = r.getAllByRole("button", { name: /Approve…/i });
+        fireEvent.click(approveBtns[0]);
+
+        // Confirmation dialog should open
+        await waitFor(() => {
+          expect(r.getByRole("dialog")).toBeTruthy();
+          expect(r.getByText(/Approve and queue run/i)).toBeTruthy();
+        });
+
+        // Click "Approve and queue" in the dialog
+        const confirmBtn = r.getByRole("button", { name: /Approve and queue/i });
+        fireEvent.click(confirmBtn);
+
+        await waitFor(() => {
+          expect(approveMock).toHaveBeenCalledWith(propId);
+        });
+      },
+    );
+  });
+
+  // WM-505: approving from Runs launches a real agent that spends money and can
+  // push code. It must show the same risk context the Proposals view shows —
+  // both paths now render the shared `ApprovalRiskDetails` component.
+  test("approve dialog surfaces capabilities, mutating status, blast radius and budget", async () => {
+    const runId = "run-proposed-risk";
+    const propId = "prop-risk-1";
+
+    const proposal = createProposalFixture({
+      id: propId,
+      runId,
+      status: "open",
+      decision: "run",
+      agent: "shipper",
+      repos: ["watt-mind/factory"],
+      spec: createRunSpecFixture(runId, {
+        agent: "shipper",
+        capabilities: ["gh:write", "linear:read"],
+        timeoutSeconds: 900,
+        maxAttempts: 2,
+        input: { branch: "main" },
+      }),
+    });
+
+    await withApi(
+      {
+        runs: mock(async () => ({ runs: [stubListItem(runId, "PROPOSED", { agent: "shipper" })] })),
+        run: mock(async () => stubDetail(runId, "PROPOSED", [])),
+        proposals: mock(async () => ({ proposals: [proposal] })),
+        agents: mock(async () =>
+          createAgentsFixture({
+            agents: [
+              {
+                ref: "shipper@1",
+                id: "shipper",
+                version: 1,
+                outputContract: "factory.agent-result/v1",
+                workspace: { type: "ephemeral" },
+                capabilities: { filesystem: "workspace-only", services: ["github"] },
+                limits: { timeout_seconds: 900, attempts: 2 },
+                mutating: true,
+                promptFile: "agents/shipper.md",
+                prompt: "",
+                inputSchemaFile: "schemas/shipper.input.json",
+                inputSchema: {},
+                outputSchemaFile: "schemas/agent-result.output.json",
+                outputSchema: {},
+                pins: {},
+                command: null,
+                actionRegistry: null,
+                hosts: null,
+                modelTier: "standard",
+                model: null,
+                eventTypes: [],
+              },
+            ],
+          } as unknown as Parameters<typeof createAgentsFixture>[0]),
+        ),
+        approve: mock(async () => ({ approved: true as const, runId })),
+        status: mock(async () => createStatusFixture({ runs: { byState: { PROPOSED: 1 } } })),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId, onJumpProposal: noop });
+
+        await waitFor(() => {
+          expect(r.getAllByRole("button", { name: /Approve…/i }).length).toBeGreaterThan(0);
+        });
+        fireEvent.click(r.getAllByRole("button", { name: /Approve…/i })[0]);
+
+        const dialog = await waitFor(() => r.getByRole("dialog"));
+        const text = dialog.textContent ?? "";
+
+        // Capabilities the agent runs with — the signal the old dialog dropped.
+        expect(text).toContain("gh:write");
+        expect(text).toContain("linear:read");
+        // Mutating / blast-radius verdict.
+        expect(text).toContain("Mutating");
+        expect(text).toContain("Risk");
+        // Budget and target.
+        expect(text).toContain("900");
+        expect(text).toContain("watt-mind/factory");
+        expect(text).toContain("main");
+        // The immutable spec itself is reachable from the dialog.
+        expect(text).toContain("immutable RunSpec");
+      },
+    );
+  });
+
+  // WM-505: the global `table td { white-space: nowrap }` turned the State
+  // column's `max-w-32 truncate` into a hard clip — `truncate` cannot ellipsize
+  // a flex child, so `PROPOSED` + the `proposal` link were cut mid-glyph and
+  // most of the link's hit area was unclickable. jsdom has no layout engine, so
+  // assert the class contract that caused the clip is gone.
+  test("State cell does not clip the proposal jump link", async () => {
+    const runId = "run-proposed-clip";
+    const propId = "prop-clip-1";
+    const proposal = createProposalFixture({ id: propId, runId, status: "open", decision: "run" });
+
+    await withApi(
+      {
+        runs: mock(async () => ({ runs: [stubListItem(runId, "PROPOSED")] })),
+        run: mock(async () => stubDetail(runId, "PROPOSED", [])),
+        proposals: mock(async () => ({ proposals: [proposal] })),
+        status: mock(async () => createStatusFixture({ runs: { byState: { PROPOSED: 1 } } })),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId, onJumpProposal: noop });
+
+        const link = await waitFor(() => r.getByTitle(`Open proposal ${propId}`));
+        const cell = link.closest("td");
+        expect(cell).toBeTruthy();
+
+        const cls = cell!.className;
+        // A capped width plus `truncate` is exactly what clipped the link.
+        expect(cls).not.toContain("truncate");
+        expect(cls).not.toMatch(/\bmax-w-/);
+        // The row must still not wrap — that is the point of this PR.
+        expect(cls).toContain("whitespace-nowrap");
+
+        // The link text is rendered in full, not cut short.
+        expect(link.textContent).toContain("proposal");
+      },
+    );
   });
 });
 

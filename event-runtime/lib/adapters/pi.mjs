@@ -137,8 +137,14 @@ export function resolvePiCommand({ which = Bun.which } = {}) {
  * `model` is the planner-resolved value pinned in the RunSpec (WM-135):
  * passed verbatim as `--model` unless it is the "default" sentinel or null/empty.
  */
-export function buildPiArgv({ def, model }) {
+export function buildPiArgv({ def, model, resumeSessionId }) {
   const args = ["-p", "--mode", "json"];
+  // A resumed attempt has a different cwd. `--session <id>` asks whether to
+  // fork sessions found in another project, which is interactive; `--fork`
+  // performs that continuation explicitly and remains deterministic headlessly.
+  if (typeof resumeSessionId === "string" && resumeSessionId) {
+    args.push("--fork", resumeSessionId);
+  }
   if (typeof model === "string" && model !== "" && model !== "default") {
     args.push("--model", model);
   }
@@ -333,6 +339,7 @@ export async function execute({
   env = {},
   onTrace,
   onUsage,
+  resume = null,
   abortSignal,
   signal,
 }) {
@@ -348,7 +355,10 @@ export async function execute({
       "neither pi nor npx is on PATH — install the pi CLI, or ensure npx can fetch it (docs/event-runtime.md §6)",
     );
   }
-  const argv = [...resolved.args, ...buildPiArgv({ def, model: spec?.model })];
+  const argv = [
+    ...resolved.args,
+    ...buildPiArgv({ def, model: spec?.model, resumeSessionId: resume?.sessionId }),
+  ];
 
   return new Promise((resolve, reject) => {
     const child = spawn(resolved.command, argv, {

@@ -514,6 +514,14 @@ describe("scheduleView (§9)", () => {
   test("reports cadence, last fire, next due — and a stopped clock", () => {
     const d = db();
     const registry = withLoop();
+
+    const unticked = scheduleView(d, registry, { now: at("2026-08-13T21:30:00Z") })[0];
+    expect(unticked).toMatchObject({
+      lastSlot: null,
+      nextDue: "2026-08-13T21:00:00.000Z",
+      stopped: false,
+    });
+
     emitDueTicks(d, registry, { now: at("2026-08-13T21:00:00Z") });
 
     const soon = scheduleView(d, registry, { now: at("2026-08-13T21:30:00Z") })[0];

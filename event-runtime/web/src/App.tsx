@@ -33,8 +33,27 @@ type NavBadge = {
   title?: string;
 };
 
+function NavCount({ id, badge }: { id: string; badge: NavBadge }) {
+  return (
+    <span
+      id={id}
+      aria-hidden="true"
+      className="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-medium leading-none tabular-nums"
+      title={badge.title}
+      style={{
+        color: badge.hue,
+        background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
+      }}
+    >
+      {badge.count}
+      {badge.word && <span className="ml-1">{badge.word}</span>}
+    </span>
+  );
+}
+
 const Artifacts = lazy(() => import("./views/Artifacts").then((m) => ({ default: m.Artifacts })));
 const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph })));
+const Chain = lazy(() => import("./views/Chain").then((m) => ({ default: m.Chain })));
 const Projects = lazy(() => import("./views/Projects").then((m) => ({ default: m.Projects })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
 const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default: m.Proposals })));
@@ -129,6 +148,10 @@ export function App() {
   const workerHealthFromHash = view === "workers" ? hashSearch(window.location.hash).get("health") : null;
   const focusWorkerHealth = isWorkerHealthFilter(workerHealthFromHash) ? workerHealthFromHash : null;
   const focusGraphNode = view === "graph" ? (route[1] ?? null) : null;
+  // `#/chain/:correlationId[/:nodeId]` — the chain trace (WM-527); node
+  // selection rides the hash so a pasted link lands on the same node.
+  const chainId = view === "chain" ? (route[1] ?? null) : null;
+  const focusChainNode = view === "chain" ? (route[2] ?? null) : null;
   const artifactQuery = hashSearch(window.location.hash);
   const artifactFilters: ArtifactFilters = {
     kind: view === "artifacts" ? artifactQuery.get("kind") : null,
@@ -199,6 +222,8 @@ export function App() {
   const jumpToWorkers = (health: WorkerHealthFilter) => navigate(workerHash(null, health));
   const jumpToProject = (name: string) => navigate(hashPath("projects", name));
   const jumpToGraph = (nodeId?: string) => navigate(hashPath("graph", nodeId));
+  const jumpToChain = (correlationId: string, nodeId?: string) =>
+    navigate(hashPath("chain", correlationId, nodeId));
 
   const health = useQuery({
     queryKey: ["health"],
@@ -242,8 +267,7 @@ export function App() {
     artifacts: {
       count: status.data?.artifacts.orphans ?? 0,
       hue: "var(--hue-warn)",
-      word: "orphan",
-      title: `${status.data?.artifacts.orphans ?? 0} unreferenced artifact${status.data?.artifacts.orphans === 1 ? "" : "s"}`,
+      title: `${status.data?.artifacts.orphans ?? 0} orphan artifact${status.data?.artifacts.orphans === 1 ? "" : "s"} (unreferenced)`,
     },
     schedules:
       stoppedSchedulesCount > 0
@@ -298,7 +322,9 @@ export function App() {
     }, [navigate, selectContext, openRepos]),
   );
 
-  const viewLabel = NAV.find((n) => n.key === view)?.label ?? (view === "run" ? "Run" : "Overview");
+  const viewLabel =
+    NAV.find((n) => n.key === view)?.label ??
+    (view === "run" ? "Run" : view === "chain" ? "Chain" : "Overview");
 
   useEffect(() => {
     const id = route.length > 1 ? route[route.length - 1] : null;
@@ -321,7 +347,9 @@ export function App() {
     setViewAnnouncement(`${viewLabel} view`);
     // `/` intentionally sends focus to the destination view's filter instead.
     // Fall back to main when a lazy destination has not mounted its filter yet.
-    if (!document.activeElement?.matches("[data-view-filter]")) mainRef.current?.focus();
+    if (!document.activeElement?.matches("[data-view-filter]")) {
+      mainRef.current?.focus({ preventScroll: true });
+    }
   }, [view, viewLabel]);
 
   useEffect(() => {
@@ -481,19 +509,7 @@ export function App() {
                      aria-describedby reference above still reads it back as
                      the button's description (accname spec includes hidden
                      nodes referenced by labelledby/describedby). */
-                  <span
-                    id={`nav-badge-${n.key}`}
-                    aria-hidden="true"
-                    className="rounded px-1.5 text-[11px] tabular-nums"
-                    title={badge.title}
-                    style={{
-                      color: badge.hue,
-                      background: `color-mix(in oklch, ${badge.hue} 12%, transparent)`,
-                    }}
-                  >
-                    {badge.count}
-                    {badge.word && <span className="ml-1">{badge.word}</span>}
-                  </span>
+                  <NavCount id={`nav-badge-${n.key}`} badge={badge} />
                 )}
               </button>
             );
@@ -569,6 +585,8 @@ export function App() {
                 onBack={() => navigate(hashPath("runs", fullRunId))}
                 onJumpAgent={jumpToAgent}
                 onJumpEvent={jumpToEvent}
+                onJumpProposal={jumpToProposal}
+                onJumpChain={jumpToChain}
               />
             </Suspense>
           ) : view === "runs" || view === "run" ? (
@@ -582,6 +600,7 @@ export function App() {
               onFocusStateConsumed={() => setFocusRunState(null)}
               onJumpAgent={jumpToAgent}
               onJumpEvent={jumpToEvent}
+              onJumpProposal={jumpToProposal}
               rejumpEpoch={rejumpEpoch}
             />
           ) : view === "projects" ? (
@@ -590,6 +609,19 @@ export function App() {
                 connected={connected}
                 focusRepoName={focusRepoName}
                 onSelectRepo={(name) => navigate(hashPath("projects", name))}
+              />
+            </Suspense>
+          ) : view === "chain" && chainId ? (
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading chain…</div>}>
+              <Chain
+                correlationId={chainId}
+                focusNodeId={focusChainNode}
+                onSelectNode={(id) => navigate(hashPath("chain", chainId, id))}
+                onJumpEvent={jumpToEvent}
+                onJumpRun={jumpToRun}
+                onOpenRunFull={openRunFull}
+                onJumpProposal={jumpToProposal}
+                onJumpAgent={jumpToAgent}
               />
             </Suspense>
           ) : view === "graph" ? (
@@ -657,6 +689,7 @@ export function App() {
               }
               onJumpProposal={jumpToProposal}
               onJumpRun={jumpToRun}
+              onJumpChain={jumpToChain}
               onTriggerAgain={(envelope) => {
                 setInjectSeed(envelope);
                 setInjectOpen(true);

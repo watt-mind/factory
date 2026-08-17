@@ -278,6 +278,7 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
     })),
     status: mock(async () => createStatusFixture()),
     events: mock(async (_status?: string) => ({ events: [] as AdmittedEvent[] })),
+    chain: mock(async (correlationId: string) => ({ correlationId, events: [], runs: [] })),
     proposals: mock(async () => ({ proposals: [] as Proposal[] })),
     proposalHistory: mock(async (_status = "all") => ({ proposals: [] as Proposal[] })),
     approve: mock(async (id: string): Promise<ApproveOutcome> => ({

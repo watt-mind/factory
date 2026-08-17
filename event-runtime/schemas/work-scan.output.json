@@ -1,7 +1,7 @@
 {
-  "title": "factory.work-plan/v1 output artifact — ordered dispatchable-ticket plan with one chained dispatch target (WM-110)",
+  "title": "factory.work-plan/v1 output artifact — ordered dispatchable-ticket plan with complete candidate accounting (WM-350)",
   "type": "object",
-  "required": ["recommendation", "repo", "ticket", "plan", "deferred", "summary"],
+  "required": ["recommendation", "repo", "ticket", "plan", "deferred", "readyCandidates", "triageBacklog", "summary"],
   "additionalProperties": false,
   "properties": {
     "recommendation": {
@@ -16,11 +16,11 @@
     "ticket": {
       "type": ["string", "null"],
       "pattern": "^[A-Z]+-[0-9]+$",
-      "description": "The plan's first ticket — the single target the chain edge feeds into factory.dispatch.requested (chain.mjs emits exactly one chain event per run); must equal plan[0].ticket, null on NOOP"
+      "description": "The plan's first ticket; must equal plan[0].ticket for DISPATCH and be null otherwise"
     },
     "plan": {
       "type": "array",
-      "description": "Queue-ordered tickets using explicit Linear priority rank Urgent (1), High (2), Medium (3), Low (4), No priority (0), then createdAt ascending. Every item is dispatchable right now: state exactly Todo, label ai:agent-ready present, and assignee null; within the per-repo in-flight cap; Owned Paths mutually disjoint and disjoint from every in-flight ticket's paths. Item order is dispatch order; only the first item chains this run",
+      "description": "Queue-ordered tickets using explicit Linear priority rank Urgent (1), High (2), Medium (3), Low (4), No priority (0), then createdAt ascending. Every item is dispatchable right now: state exactly Todo, label ai:agent-ready present, and assignee null; within the per-repo in-flight cap; Owned Paths mutually disjoint and disjoint from every in-flight ticket's paths. Every plan item chains to its own dispatch request",
       "items": {
         "type": "object",
         "required": ["ticket", "ownedPaths", "reason"],
@@ -51,22 +51,33 @@
     },
     "deferred": {
       "type": "array",
-      "description": "Tickets after the first plan item: selected but NOT chained this run — chain.mjs emits one chain event per run, so only plan[0] becomes a factory.dispatch.requested; rolling dispatch re-fires the scan after each completion and re-plans these against a fresh world",
+      "description": "Every ready candidate not selected into plan, with the typed reason it cannot start during this scan. Together plan and deferred account for every ready candidate on DISPATCH",
       "items": {
-        "type": "string",
-        "pattern": "^[A-Z]+-[0-9]+$",
-        "description": "Linear issue identifier of a planned-but-deferred ticket (echo of a plan[1..] item's ticket)"
+        "type": "object",
+        "required": ["ticket", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]+$",
+            "description": "Linear issue identifier of the ready candidate that was not selected"
+          },
+          "reason": {
+            "enum": ["cap_full", "owned_paths_overlap"],
+            "description": "Typed reason this candidate cannot start: no remaining in-flight slot, or Owned Paths overlap with in-flight/selected work"
+          }
+        }
       }
     },
     "readyCandidates": {
       "type": "integer",
       "minimum": 0,
-      "description": "Count after a complete read is filtered to state exactly Todo, label ai:agent-ready present, and assignee null, before cap/overlap pruning"
+      "description": "Count after a complete read is filtered to state exactly Todo, label ai:agent-ready present, and assignee null, before cap/overlap pruning; must equal evidence.candidatesSeen"
     },
     "triageBacklog": {
       "type": "integer",
       "minimum": 0,
-      "description": "Count of remaining Triage issues read from Linear in a complete read"
+      "description": "Count of remaining Triage issues from the independent complete read; 0 when Triage is not read because ready candidates exist"
     },
     "summary": {
       "type": "string",

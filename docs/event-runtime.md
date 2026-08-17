@@ -584,6 +584,19 @@ result rows never reference files that died with a workspace. Passing work
 between agents means materializing an accepted artifact into a new workspace,
 not letting two agents share a live directory.
 
+A requeued attempt still gets its own `${runId}-a${attempt}` directory. Before
+starting attempt 2 or later, the workspace provider checks retained earlier
+attempt directories, newest first, for adapter-authored session metadata in
+`.transcript.json`. The metadata must identify the expected adapter and prior
+workspace cwd. When present, the worker gives that session identifier to the
+same adapter (Claude's `--resume ... --fork-session`; pi's explicit `--fork`
+continuation because the new attempt has a different cwd), so a lease-loss retry
+can continue the harness conversation under a new native session without
+sharing the stale attempt's writable workspace. A missing, cleaned, partial,
+malformed, mismatched, or unsupported transcript is an expected condition and
+produces an ordinary cold start. Transcript
+availability is an optimization, never durable run state.
+
 Working-directory separation alone is not a security sandbox. For Claude
 `mutating: false` runs, the adapter additionally passes a generated settings
 policy: Bash is sandboxed with unsandboxed fallback disabled, the repository
@@ -626,8 +639,10 @@ Delivery is **at least once**, never assumed exactly once:
 - unique source event IDs deduplicate intake;
 - unique run idempotency keys deduplicate planning (§5.4);
 - leases expire and carry fencing tokens;
-- each attempt has its own identity;
-- only the current fencing token may publish a terminal result; and
+- each attempt has its own identity and workspace, even when it resumes an
+  earlier harness session;
+- session resumption does not transfer publication authority: only the current
+  fencing token may publish a terminal result; and
 - storing an accepted result and its derived event is one transaction via an
   outbox.
 

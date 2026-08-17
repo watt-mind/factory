@@ -157,6 +157,7 @@
     "agent": "merge-scan@2",
     "adapter": "cursor",
     "idempotencyScope": [
+      "correlationId",
       "inputHash"
     ],
     "proposalTtlSeconds": 1800

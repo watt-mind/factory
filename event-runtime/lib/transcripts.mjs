@@ -10,7 +10,9 @@
  * guaranteeing the artifact store's core invariant: stored bytes always equal
  * the computed hash and the agent's full output.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync,
+} from "node:fs";
 import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +20,78 @@ import { sha256Hex } from "./canonical.mjs";
 import { artifactPath } from "./artifacts.mjs";
 
 export const TRANSCRIPT_FILENAME = ".transcript.json";
+
+/** Session metadata is emitted at the head of both supported NDJSON streams. */
+export const MAX_RESUME_SCAN_BYTES = 1024 * 1024;
+
+function validSessionId(value, adapter) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256) return false;
+  if (adapter === "claude") {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  }
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
+/**
+ * Extract the native harness session identifier from recognized top-level
+ * metadata for the expected adapter and prior workspace. Nested agent text or
+ * metadata naming a different cwd is never interpreted as resume context.
+ */
+export function transcriptSessionId(transcriptPath, adapter) {
+  if (adapter !== "claude" && adapter !== "pi") return null;
+
+  let fd;
+  try {
+    fd = openSync(transcriptPath, "r");
+    const buffer = Buffer.alloc(MAX_RESUME_SCAN_BYTES);
+    const size = readSync(fd, buffer, 0, buffer.byteLength, 0);
+    const lines = buffer.subarray(0, size).toString("utf8").split("\n");
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const priorWorkspace = path.dirname(transcriptPath);
+      const candidate = adapter === "claude"
+        && event?.type === "system"
+        && event?.subtype === "init"
+        && event?.cwd === priorWorkspace
+        ? event.session_id
+        : adapter === "pi"
+          && event?.type === "session"
+          && event?.cwd === priorWorkspace
+          ? event.id
+          : null;
+      if (validSessionId(candidate, adapter)) return candidate;
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the newest earlier attempt whose retained workspace contains native
+ * session metadata. Missing, cleaned, partial, or malformed transcripts are a
+ * normal cold-start condition, not a workspace provisioning failure.
+ */
+export function findPriorResumeContext({ root, runId, attempt, adapter }) {
+  if (!Number.isInteger(attempt) || attempt <= 1) return null;
+  for (let priorAttempt = attempt - 1; priorAttempt >= 1; priorAttempt -= 1) {
+    const transcriptPath = path.join(root, `${runId}-a${priorAttempt}`, TRANSCRIPT_FILENAME);
+    if (!existsSync(transcriptPath)) continue;
+    const sessionId = transcriptSessionId(transcriptPath, adapter);
+    if (sessionId) return { attempt: priorAttempt, sessionId, transcriptPath };
+  }
+  return null;
+}
 
 /**
  * Await a writable stream's complete flush to disk and close.

@@ -93,6 +93,7 @@ BASE_BRANCH="${FACTORY_BASE_BRANCH:-develop}"
 # are unchanged for real use.
 PORT_BASE="${FACTORY_PORT_BASE:-7400}"
 PORT_SPAN="${FACTORY_PORT_SPAN:-200}"
+PORT_RESERVATION_ROOT="${FACTORY_PORT_RESERVATION_ROOT:-$HOME/.factory/locks/worktree-ports}"
 HERE_API_PORT=7391
 HERE_WEB_PORT=7392
 
@@ -105,6 +106,7 @@ warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 
 [[ "$PORT_BASE" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_BASE must be numeric (got '$PORT_BASE')"
 [[ "$PORT_SPAN" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_SPAN must be numeric (got '$PORT_SPAN')"
+(( PORT_BASE % 2 == 0 )) || die "FACTORY_PORT_BASE must be even so API/web pairs stay aligned (got '$PORT_BASE')"
 
 repo_root() { git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel; }
 
@@ -179,6 +181,165 @@ write_ports() { # <worktree> <api> <web>
   printf 'api=%s\nweb=%s\n' "$2" "$3" >"$(run_dir "$1")/ports"
 }
 
+# Port selection and reservation are separate from TCP bind: dependency
+# installation and the web build can take long enough for a second worktree to
+# observe the selected pair as still free. A short global allocator lock makes
+# selection atomic, while one persistent directory per API/web pair bridges
+# that bind gap and records which checkout owns the pair.
+port_allocation_lock_dir() { printf '%s/allocation.lock' "$PORT_RESERVATION_ROOT"; }
+port_reservation_dir() { printf '%s/%s.lock' "$PORT_RESERVATION_ROOT" "$1"; }
+
+acquire_port_allocation_lock() {
+  local lock start now holder age mtime stale
+  lock="$(port_allocation_lock_dir)"
+  mkdir -p "$PORT_RESERVATION_ROOT"
+  start=$(date +%s)
+  while ! mkdir "$lock" 2>/dev/null; do
+    holder=$(cat "$lock/pid" 2>/dev/null || true)
+    now=$(date +%s)
+    stale=0
+    if [[ "$holder" =~ ^[0-9]+$ ]]; then
+      kill -0 "$holder" 2>/dev/null || stale=1
+    else
+      if stat -f '%m' "$lock" >/dev/null 2>&1; then
+        mtime=$(stat -f '%m' "$lock" 2>/dev/null || printf '0')
+      else
+        mtime=$(stat -c '%Y' "$lock" 2>/dev/null || printf '0')
+      fi
+      [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
+      age=$((now - mtime))
+      (( age >= 2 )) && stale=1
+    fi
+    if [[ "$stale" -eq 1 ]]; then
+      local stale_lock="${lock}.stale.$$.$RANDOM"
+      if mv "$lock" "$stale_lock" 2>/dev/null; then
+        rm -rf "$stale_lock"
+        continue
+      fi
+    fi
+    (( now - start < 10 )) || die "timed out waiting for worktree port allocation lock ($lock)"
+    sleep 0.05
+  done
+  local pid_tmp="$lock/pid.$$.$RANDOM"
+  printf '%s\n' "$$" >"$pid_tmp"
+  mv "$pid_tmp" "$lock/pid"
+}
+
+release_port_allocation_lock() {
+  local lock holder
+  lock="$(port_allocation_lock_dir)"
+  holder=$(cat "$lock/pid" 2>/dev/null || true)
+  [[ "$holder" == "$$" ]] && rm -rf "$lock" || true
+}
+
+# A reservation remains active while its allocating shell is alive, or after
+# that shell exits while the recorded checkout still owns live daemons/ports.
+# Otherwise it is stale residue from a failed or killed startup and can be
+# reclaimed under the allocator lock. Both API and web ports get reservation
+# directories so odd --here pairs cannot overlap an even ticket pair.
+port_reservation_active() { # <reserved-port>
+  local port="$1" dir owner claimant api web rdir
+  dir="$(port_reservation_dir "$port")"
+  [[ -d "$dir" ]] || return 1
+  claimant=$(cat "$dir/pid" 2>/dev/null || true)
+  if [[ "$claimant" =~ ^[0-9]+$ ]] && kill -0 "$claimant" 2>/dev/null; then
+    return 0
+  fi
+  owner=$(cat "$dir/worktree" 2>/dev/null || true)
+  api=$(awk -F= '$1 == "api" { print $2 }' "$dir/ports" 2>/dev/null || true)
+  web=$(awk -F= '$1 == "web" { print $2 }' "$dir/ports" 2>/dev/null || true)
+  [[ -n "$owner" && -d "$owner" && "$api" =~ ^[0-9]+$ && "$web" =~ ^[0-9]+$ ]] || return 1
+  rdir="$(run_dir "$owner")"
+  if pid_alive "$rdir/serve.pid" || pid_alive "$rdir/web.pid" \
+    || port_listening "$api" || port_listening "$web"; then
+    return 0
+  fi
+  return 1
+}
+
+port_pair_reserved_by_other() { # <api-port> <worktree>
+  local api="$1" wt="$2" port dir owner
+  for port in "$api" "$((api + 1))"; do
+    dir="$(port_reservation_dir "$port")"
+    [[ -d "$dir" ]] || continue
+    if ! port_reservation_active "$port"; then
+      rm -rf "$dir"
+      continue
+    fi
+    owner=$(cat "$dir/worktree" 2>/dev/null || true)
+    [[ "$owner" == "$wt" ]] || return 0
+  done
+  return 1
+}
+
+reserve_port_pair() { # <worktree> <api-port> <web-port>; allocator lock held
+  local wt="$1" api="$2" web="$3" port dir owner tmp
+  [[ "$web" -eq $((api + 1)) ]] || return 1
+  port_pair_reserved_by_other "$api" "$wt" && return 1
+  for port in "$api" "$web"; do
+    dir="$(port_reservation_dir "$port")"
+    if [[ -d "$dir" ]]; then
+      owner=$(cat "$dir/worktree" 2>/dev/null || true)
+      if [[ "$owner" != "$wt" ]]; then
+        rm -rf "$(port_reservation_dir "$api")" "$(port_reservation_dir "$web")"
+        return 1
+      fi
+    else
+      if ! mkdir "$dir"; then
+        rm -rf "$(port_reservation_dir "$api")" "$(port_reservation_dir "$web")"
+        return 1
+      fi
+    fi
+    tmp="$dir/worktree.$$.$RANDOM"
+    printf '%s\n' "$wt" >"$tmp"
+    mv "$tmp" "$dir/worktree"
+    tmp="$dir/pid.$$.$RANDOM"
+    printf '%s\n' "$$" >"$tmp"
+    mv "$tmp" "$dir/pid"
+    printf 'api=%s\nweb=%s\n' "$api" "$web" >"$dir/ports"
+  done
+}
+
+release_port_reservation() { # <worktree> [api-port]
+  local wt="$1" api="${2:-}" web="" recorded dir owner port
+  if [[ -z "$api" ]]; then
+    recorded=$(read_ports "$wt" 2>/dev/null || true)
+    if [[ -n "$recorded" ]]; then
+      api="${recorded%% *}"
+      web="${recorded##* }"
+    elif [[ "${API_PORT:-}" =~ ^[0-9]+$ ]]; then
+      api="$API_PORT"
+    else
+      return 0
+    fi
+  fi
+  if [[ -z "$web" ]]; then
+    dir="$(port_reservation_dir "$api")"
+    web=$(awk -F= '$1 == "web" { print $2 }' "$dir/ports" 2>/dev/null || true)
+    [[ "$web" =~ ^[0-9]+$ ]] || web=$((api + 1))
+  fi
+  acquire_port_allocation_lock
+  for port in "$api" "$web"; do
+    dir="$(port_reservation_dir "$port")"
+    owner=$(cat "$dir/worktree" 2>/dev/null || true)
+    [[ "$owner" == "$wt" ]] && rm -rf "$dir" || true
+  done
+  release_port_allocation_lock
+}
+
+# Failed bring-up calls this after stopping only the daemons it started. Keep
+# an established checkout's reservation, but remove dead partial pid/port
+# state so the next invocation can retry the same preferred pair.
+release_worktree_ports_if_idle() { # <worktree>
+  local wt="$1" rdir
+  rdir="$(run_dir "$wt")"
+  if pid_alive "$rdir/serve.pid" || pid_alive "$rdir/worker.pid" || pid_alive "$rdir/web.pid"; then
+    return 0
+  fi
+  release_port_reservation "$wt"
+  rm -f "$rdir/serve.pid" "$rdir/worker.pid" "$rdir/web.pid" "$rdir/ports"
+}
+
 # Listening TCP port for a pidfile, or fail. Used to recover ports from a
 # daemon started before .factory/run/ports existed.
 listen_tcp_port() { # <pidfile>
@@ -188,12 +349,14 @@ listen_tcp_port() { # <pidfile>
   pid=$(cat "$1" 2>/dev/null) || return 1
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  port=$(lsof -nP -iTCP -sTCP:LISTEN -p "$pid" 2>/dev/null \
+  port=$(lsof -nP -a -iTCP -sTCP:LISTEN -p "$pid" 2>/dev/null \
     | awk -v pid="$pid" 'NR > 1 && $2 == pid {name=$9; sub(/^.*:/, "", name); print name; exit}') \
     || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   [[ "$port" =~ ^[0-9]+$ ]] || return 1
-  (( port >= PORT_BASE && port < PORT_BASE + 2 * PORT_SPAN )) || return 1
+  if [[ "$port" -ne "$HERE_API_PORT" && "$port" -ne "$HERE_WEB_PORT" ]]; then
+    (( port >= PORT_BASE && port < PORT_BASE + 2 * PORT_SPAN )) || return 1
+  fi
   printf '%s' "$port"
 }
 
@@ -230,7 +393,9 @@ allocate_api_port() { # <preferred> <expected_home> [worktree]
   [[ "$preferred" =~ ^[0-9]+$ ]] || die "invalid preferred port '$preferred'"
   while [[ $i -lt $PORT_SPAN ]]; do
     api_available=0
-    if port_listening "$port"; then
+    if [[ -n "$wt" ]] && port_pair_reserved_by_other "$port" "$wt"; then
+      warn "port pair $port/$((port + 1)) is reserved by another worktree — trying next"
+    elif port_listening "$port"; then
       json=$(health_json "$port")
       occupant=$(health_field "$json" home)
       if [[ -n "$occupant" && "$occupant" == "$expected" ]]; then
@@ -263,9 +428,13 @@ allocate_api_port() { # <preferred> <expected_home> [worktree]
       warn "web port $web_port is owned by another process — trying next pair"
     fi
 
-    port=$((port + 2))
-    if [[ $port -ge $((PORT_BASE + 2 * PORT_SPAN)) ]]; then
+    if [[ $port -lt $PORT_BASE ]]; then
       port=$PORT_BASE
+    else
+      port=$((port + 2))
+      if [[ $port -ge $((PORT_BASE + 2 * PORT_SPAN)) ]]; then
+        port=$PORT_BASE
+      fi
     fi
     i=$((i + 1))
   done
@@ -278,14 +447,19 @@ allocate_api_port() { # <preferred> <expected_home> [worktree]
 # Sets API_PORT and WEB_PORT for the caller.
 resolve_worktree_ports() { # <worktree> <preferred-api-port> <expected-home>
   local wt="$1" preferred="$2" expected="$3"
-  local rdir resolved=0 recorded occupant sp wp recorded_web_pid_port api_reusable web_reusable
+  local rdir resolved=0 recorded occupant sp wp recorded_web_pid_port api_reusable web_reusable pair_available stale_port stale_dir stale_owner
   rdir="$(run_dir "$wt")"
+  acquire_port_allocation_lock
 
   if recorded=$(read_ports "$wt"); then
     API_PORT="${recorded%% *}"
     WEB_PORT="${recorded##* }"
     api_reusable=0
     web_reusable=0
+    pair_available=1
+    if [[ "$WEB_PORT" -ne $((API_PORT + 1)) ]] || port_pair_reserved_by_other "$API_PORT" "$wt"; then
+      pair_available=0
+    fi
 
     if port_listening "$API_PORT"; then
       occupant=$(health_field "$(health_json "$API_PORT")" home)
@@ -301,34 +475,54 @@ resolve_worktree_ports() { # <worktree> <preferred-api-port> <expected-home>
       [[ "$recorded_web_pid_port" == "$WEB_PORT" ]] && web_reusable=1
     fi
 
-    if [[ "$api_reusable" -eq 1 && "$web_reusable" -eq 1 ]]; then
+    if [[ "$pair_available" -eq 1 && "$api_reusable" -eq 1 && "$web_reusable" -eq 1 ]] \
+      && reserve_port_pair "$wt" "$API_PORT" "$WEB_PORT"; then
       info "reusing recorded ports $API_PORT / $WEB_PORT"
       resolved=1
     else
-      warn "recorded ports $API_PORT / $WEB_PORT are occupied by another process — allocating a free pair"
+      warn "recorded ports $API_PORT / $WEB_PORT are occupied or reserved by another process — allocating a free pair"
+      for stale_port in "$API_PORT" "$WEB_PORT"; do
+        stale_dir="$(port_reservation_dir "$stale_port")"
+        stale_owner=$(cat "$stale_dir/worktree" 2>/dev/null || true)
+        [[ "$stale_owner" == "$wt" ]] && rm -rf "$stale_dir" || true
+      done
     fi
   fi
 
   if [[ "$resolved" -eq 0 ]] && pid_alive "$rdir/serve.pid"; then
     if sp=$(listen_tcp_port "$rdir/serve.pid"); then
       API_PORT="$sp"
+      WEB_PORT=$((API_PORT + 1))
       if pid_alive "$rdir/web.pid" && wp=$(listen_tcp_port "$rdir/web.pid"); then
-        WEB_PORT="$wp"
-      else
-        WEB_PORT=$((API_PORT + 1))
+        if [[ "$wp" -ne "$WEB_PORT" ]]; then
+          release_port_allocation_lock
+          die "live daemon ports $API_PORT / $wp are not an adjacent API/web pair"
+        fi
+      elif port_listening "$WEB_PORT"; then
+        release_port_allocation_lock
+        die "adjacent web port $WEB_PORT is occupied by a process not owned by this worktree"
       fi
-      info "reusing live daemon ports $API_PORT / $WEB_PORT"
-      write_ports "$wt" "$API_PORT" "$WEB_PORT"
-      resolved=1
+      if port_pair_reserved_by_other "$API_PORT" "$wt"; then
+        release_port_allocation_lock
+        die "live daemon port pair $API_PORT/$WEB_PORT is reserved by another worktree"
+      fi
+      if reserve_port_pair "$wt" "$API_PORT" "$WEB_PORT"; then
+        info "reusing live daemon ports $API_PORT / $WEB_PORT"
+        write_ports "$wt" "$API_PORT" "$WEB_PORT"
+        resolved=1
+      fi
     fi
   fi
 
   if [[ "$resolved" -eq 0 ]]; then
     API_PORT="$(allocate_api_port "$preferred" "$expected" "$wt")"
     WEB_PORT=$((API_PORT + 1))
+    reserve_port_pair "$wt" "$API_PORT" "$WEB_PORT" \
+      || die "port pair $API_PORT/$WEB_PORT was claimed during allocation"
     write_ports "$wt" "$API_PORT" "$WEB_PORT"
     info "allocated ports $API_PORT / $WEB_PORT (preferred $preferred)"
   fi
+  release_port_allocation_lock
 }
 
 # Refuse to proceed (and never seed) when /health is a different event home.

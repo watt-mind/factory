@@ -17,7 +17,6 @@ import {
   humanSize,
   JsonBlock,
   JumpLink,
-  Section,
   StateBadge,
   StateIcon,
   VerbError,
@@ -28,6 +27,58 @@ import {
 } from "../components/ui";
 
 const FEED_CAP = 50;
+
+export function SectionTitle({
+  title,
+  meta,
+  collapsible = false,
+  collapsed = false,
+  onToggle,
+  className = "mb-2.5",
+}: {
+  title: string;
+  meta?: ReactNode;
+  collapsible?: boolean;
+  collapsed?: boolean;
+  onToggle?: () => void;
+  className?: string;
+}) {
+  const label = (
+    <span className="text-[11px] font-semibold uppercase tracking-wider text-(--text-faint)">
+      {title}
+    </span>
+  );
+  const metaNode = meta != null && (
+    <span className="ml-auto text-right text-[11px] text-(--text-faint)">{meta}</span>
+  );
+
+  if (collapsible) {
+    return (
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        className={`${className} flex w-full cursor-pointer items-center gap-1.5 text-left hover:text-(--text-dim)`}
+      >
+        <span
+          aria-hidden="true"
+          className={`text-[9px] text-(--text-faint) transition-transform ${collapsed ? "" : "rotate-90"}`}
+        >
+          ▶
+        </span>
+        {label}
+        {metaNode}
+      </button>
+    );
+  }
+
+  return (
+    <div className={`${className} flex items-baseline justify-between gap-3`}>
+      <h2>{label}</h2>
+      {metaNode}
+    </div>
+  );
+}
 
 export interface Segment {
   key: string;
@@ -162,23 +213,48 @@ export function StageCard({
 }) {
   return (
     <section className={`rounded-lg border border-(--border) bg-(--surface-1) p-3.5 ${className}`}>
-      <div className="mb-2.5 flex items-baseline justify-between gap-3">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-(--text-faint)">
-          {index != null ? `${index}. ${title}` : title}
-        </h2>
-        <div className="flex items-baseline gap-2">
-          {meta && <span className="text-[11px] text-(--text-faint)">{meta}</span>}
-          {headline != null && (
-            <span
-              className="display text-xl font-semibold tabular-nums"
-              style={headlineHue ? { color: headlineHue } : undefined}
-            >
-              {headline}
-            </span>
-          )}
-        </div>
-      </div>
+      <SectionTitle
+        title={index != null ? `${index}. ${title}` : title}
+        meta={
+          <span className="flex items-baseline gap-2">
+            {meta && <span>{meta}</span>}
+            {headline != null && (
+              <span
+                className="display text-xl font-semibold tabular-nums"
+                style={headlineHue ? { color: headlineHue } : undefined}
+              >
+                {headline}
+              </span>
+            )}
+          </span>
+        }
+      />
       {children}
+    </section>
+  );
+}
+
+function OverviewSection({
+  title,
+  meta,
+  children,
+}: {
+  title: string;
+  meta?: ReactNode;
+  children: ReactNode;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  return (
+    <section className="mb-5">
+      <SectionTitle
+        title={title}
+        meta={meta}
+        collapsible
+        collapsed={collapsed}
+        onToggle={() => setCollapsed((value) => !value)}
+        className="mb-1.5"
+      />
+      {!collapsed && children}
     </section>
   );
 }
@@ -201,6 +277,8 @@ export interface ActivityGroup {
   actor: string;
   reason: string | null;
   attempt: number | null;
+  /** Full oldest-to-newest state path represented by this group. */
+  path: string[];
   /** Timestamp of the most recent transition. */
   at: string;
 }
@@ -218,6 +296,7 @@ export function groupJournalEntries(entries: JournalEntry[]): ActivityGroup[] {
     if (open && open.runId === e.runId) {
       // `e` is older than the entries already merged: extend the span's start.
       open.from = e.from;
+      open.path.unshift(e.from ?? "START");
       open.count += 1;
     } else {
       groups.push({
@@ -229,11 +308,41 @@ export function groupJournalEntries(entries: JournalEntry[]): ActivityGroup[] {
         actor: e.actor,
         reason: e.reason,
         attempt: e.attempt,
+        path: [e.from ?? "START", e.to],
         at: e.at,
       });
     }
   }
   return groups;
+}
+
+const DUPLICATE_STATE_REASONS: Partial<Record<string, Set<string>>> = {
+  RUNNING: new Set(["run", "running", "start", "started"]),
+  COMPLETED: new Set(["complete", "completed", "ok", "success", "succeeded", "exit_0", "exit 0"]),
+  FAILED: new Set(["fail", "failed"]),
+  QUEUED: new Set(["queue", "queued"]),
+  LEASED: new Set(["lease", "leased"]),
+  VERIFYING: new Set(["verify", "verifying"]),
+  REFUSED: new Set(["refuse", "refused"]),
+  TIMED_OUT: new Set(["timed_out", "timed out", "timeout"]),
+  CANCELLED: new Set(["cancel", "cancelled", "canceled"]),
+};
+
+export function formatActivityGroup(group: ActivityGroup): {
+  steps: string | null;
+  path: string;
+  reason: string | null;
+} {
+  const normalizedReason = group.reason?.trim().toLowerCase() ?? null;
+  const reason =
+    normalizedReason && !DUPLICATE_STATE_REASONS[group.to]?.has(normalizedReason)
+      ? group.reason?.trim() ?? null
+      : null;
+  return {
+    steps: group.count > 1 ? `+${group.count} steps` : null,
+    path: group.path.join(" → "),
+    reason,
+  };
 }
 
 export type AnomalyKind =
@@ -432,40 +541,52 @@ function RecentOutcomesStrip({
 
   // Chronological left-to-right (oldest -> newest at right)
   const chrono = outcomes.slice().reverse();
+  const completed = outcomes.filter((outcome) => outcome.to === "COMPLETED").length;
+  const failed = outcomes.filter((outcome) => outcome.to === "FAILED").length;
 
   return (
     <div
       className="rounded-lg border border-(--border) bg-(--surface-1) p-3.5"
       title="Recent outcomes (newest on the right)"
     >
-      <div className="mb-2 flex items-baseline justify-between text-[11px]">
-        <span className="font-medium uppercase tracking-wide text-(--text-faint)">
-          Recent Outcomes · last {outcomes.length}
-        </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-1.5">
-        {chrono.map((o) => {
-          const hue =
-            o.to === "COMPLETED"
-              ? "var(--hue-ok)"
-              : o.to === "FAILED"
-                ? "var(--hue-err)"
-                : o.to === "TIMED_OUT"
-                  ? "var(--hue-warn)"
-                  : "var(--text-faint)";
-          const label = `${o.runId} ${o.to}${o.reason ? ` (${o.reason})` : ""} ${ago(o.at, now)}`;
-          return (
-            <button
-              key={o.seq}
-              type="button"
-              onClick={() => onJumpRun(o.runId)}
-              aria-label={label}
-              className="h-4 w-2 cursor-pointer rounded-xs opacity-80 transition-all hover:scale-125 hover:opacity-100 hover:ring-1 hover:ring-(--text) focus-visible:ring-2 focus-visible:ring-(--accent)"
-              style={{ backgroundColor: hue }}
-              title={`${o.runId} · ${o.to}${o.reason ? ` (${o.reason})` : ""} · ${ago(o.at, now)}`}
-            />
-          );
-        })}
+      <SectionTitle title="Recent outcomes" meta={`last ${outcomes.length}`} />
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          {chrono.map((o) => {
+            const hue =
+              o.to === "COMPLETED"
+                ? "var(--hue-ok)"
+                : o.to === "FAILED"
+                  ? "var(--hue-err)"
+                  : o.to === "TIMED_OUT"
+                    ? "var(--hue-warn)"
+                    : "var(--text-faint)";
+            const label = `${o.runId} · ${o.to} · ${ago(o.at, now)}`;
+            return (
+              <button
+                key={o.seq}
+                type="button"
+                onClick={() => onJumpRun(o.runId)}
+                aria-label={label}
+                className="group flex size-6 cursor-pointer items-center justify-center rounded focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+                title={label}
+              >
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-2 rounded-xs opacity-80 transition-all group-hover:scale-125 group-hover:opacity-100 group-hover:ring-1 group-hover:ring-(--text)"
+                  style={{ backgroundColor: hue }}
+                />
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-(--text-faint)" aria-label={`${completed} completed, ${failed} failed`}>
+          <span className="text-(--hue-ok)">●</span>
+          <span>{completed} completed</span>
+          <span>·</span>
+          <span className="text-(--hue-err)">●</span>
+          <span>{failed} failed</span>
+        </div>
       </div>
     </div>
   );
@@ -1166,34 +1287,27 @@ export function Overview({
           />
 
           {/* Band D: Artifact Store Housekeeping Line */}
-          <div className="flex items-center justify-between rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-2.5 text-[12px] text-(--text-dim)">
-            <div className="flex items-center gap-2">
-              <span className="font-medium text-(--text)">Artifacts Store</span>
-              <span className="text-(--text-faint)">·</span>
-              <span className="mono">{s.artifacts.files} files</span>
-              <span className="text-(--text-faint)">·</span>
-              <span className="mono">{humanSize(s.artifacts.bytes)}</span>
-              {s.artifacts.orphans > 0 && (
-                <>
-                  <span className="text-(--text-faint)">·</span>
-                  <span className="mono text-(--hue-warn)">{s.artifacts.orphans} orphans</span>
-                </>
-              )}
-            </div>
-            {factoryWide && <span className="text-[11px] text-(--text-faint)">factory-wide</span>}
+          <div className="rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-2.5 text-(--text-dim)">
+            <SectionTitle
+              title="Artifacts store"
+              className="mb-0"
+              meta={
+                <span className="mono">
+                  {s.artifacts.files} files · {humanSize(s.artifacts.bytes)}
+                  {s.artifacts.orphans > 0 ? ` · ${s.artifacts.orphans} orphans` : ""}
+                  {factoryWide ? " · factory-wide" : ""}
+                </span>
+              }
+            />
           </div>
         </div>
       )}
 
       {/* Band D Feeds: Real-time Activity Stream & Outbox Results */}
       <div className="grid gap-x-5 xl:grid-cols-2">
-        <Section
-          title={
-            feedsUnscoped
-              ? `Activity · latest ${Math.min(feed.entries.length, FEED_CAP)} · factory-wide`
-              : `Activity · latest ${Math.min(feed.entries.length, FEED_CAP)}`
-          }
-          card={false}
+        <OverviewSection
+          title="Activity"
+          meta={`latest ${Math.min(feed.entries.length, FEED_CAP)}${feedsUnscoped ? " · factory-wide" : ""}`}
         >
           {feed.entries.length === 0 ? (
             <div className="text-(--text-faint)">
@@ -1208,38 +1322,40 @@ export function Overview({
               className="max-h-[420px] overflow-y-auto rounded-md border border-(--border) px-3 py-1"
               aria-live="off"
             >
-              {groupedFeed.map((g) => (
-                <div key={g.seq} className="flex items-baseline gap-2 border-b border-(--border) py-1.5 last:border-0">
-                  <Ago iso={g.at} now={now} className="mono w-[52px] shrink-0 text-(--text-faint)" />
-                  <JumpLink
-                    onClick={() => onJumpRun(g.runId)}
-                    title={g.runId}
-                    className="max-w-36 shrink-0 truncate"
-                  >
-                    {shortId(g.runId)}
-                  </JumpLink>
-                  <span className="shrink-0">
-                    {g.from ? `${g.from} → ` : "START → "}
-                    {g.count > 1 ? "… → " : ""}
-                    <StateBadge state={g.to} />
-                  </span>
-                  <span
-                    className="truncate text-(--text-faint)"
-                    title={`by ${g.actor}${g.reason ? ` (${g.reason})` : ""}${g.count > 1 ? ` · ${g.count} transitions` : ""}`}
-                  >
-                    by {shortId(g.actor)}
-                    {g.reason ? ` (${g.reason})` : ""}
-                    {g.count > 1 ? ` · ${g.count} transitions` : ""}
-                  </span>
-                </div>
-              ))}
+              {groupedFeed.map((group) => {
+                const row = formatActivityGroup(group);
+                return (
+                  <div key={group.seq} className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-(--border) py-1.5 last:border-0">
+                    <Ago iso={group.at} now={now} className="mono shrink-0 text-(--text-faint)" />
+                    <span className="text-(--text-faint)">·</span>
+                    <JumpLink onClick={() => onJumpRun(group.runId)} title={group.runId} className="shrink-0">
+                      {shortId(group.runId)}
+                    </JumpLink>
+                    <span className="text-(--text-faint)">·</span>
+                    <StateBadge state={group.to} />
+                    {row.steps && (
+                      <span className="shrink-0 text-[11px] text-(--text-faint)" title={row.path}>
+                        {row.steps}
+                      </span>
+                    )}
+                    <span className="text-(--text-faint)">·</span>
+                    <span className="shrink-0 text-(--text-faint)">by {shortId(group.actor)}</span>
+                    {row.reason && (
+                      <>
+                        <span className="text-(--text-faint)">·</span>
+                        <span className="min-w-0 break-words text-(--text-dim)">{row.reason}</span>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
-        </Section>
+        </OverviewSection>
 
-        <Section
-          title={feedsUnscoped ? "Outbox · published results · factory-wide" : "Outbox · published results"}
-          card={false}
+        <OverviewSection
+          title="Outbox"
+          meta={`published results${feedsUnscoped ? " · factory-wide" : ""}`}
         >
           <div id="outbox">
             {(outbox.data?.outbox ?? []).length === 0 ? (
@@ -1306,7 +1422,7 @@ export function Overview({
               </div>
             )}
           </div>
-        </Section>
+        </OverviewSection>
       </div>
 
       {rejectingProposalId && (

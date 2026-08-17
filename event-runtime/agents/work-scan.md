@@ -36,8 +36,14 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    excludes the ticket, regardless of state or labels; an `agent:*` or `ai:*`
    label proves nothing about assignment. A ticket without `ai:agent-ready` is
    also excluded. An excluded ticket must never appear in `plan` or `deferred`.
-   `readyCandidates` counts only tickets left after this complete filter and
-   before cap/overlap pruning. If the read errors, truncates, or returns
+   `readyCandidates` and `evidence.candidatesSeen` both count only tickets left
+   after this complete filter and before cap/overlap pruning; they must be equal.
+   Preserve those tickets in queue order in `evidence.candidates`, each exactly
+   `{ticket, disposition}`. `disposition` is `selected`, `owned_paths_overlap`,
+   or `cap_full`, and must agree with `plan`/`deferred`/`noopReason` below.
+   `evidence.candidatesSeen` is a non-negative integer equal to that array's
+   length, not a prose estimate or the raw count before filtering. If the read
+   errors, truncates, or returns
    malformed JSON, refuse with `reasonCode: "needs_human"` rather than inventing
    candidate order.
 2. **Order the filtered candidates** with this explicit Linear priority rank,
@@ -66,10 +72,11 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    not produce that result.
 3. **Count the cap**: the repo's `max_in_flight` from
    `$FACTORY_ROOT/config/repos.yaml`, falling back to
-   `concurrency.max_in_flight_per_repo` in `config/policy.yaml`, else 3. The
-   in-flight count against it is the repo team/project's `In Progress`
-   tickets — the same set the dispatch gate reads. Free slots = cap minus
-   in-flight; zero or fewer → NOOP `cap_full`.
+   `concurrency.max_in_flight_per_repo` in `config/policy.yaml`, else 3. Record
+   that value as `evidence.maxInFlight`. The in-flight count against it is the
+   repo team/project's `In Progress` tickets — the same set the dispatch gate
+   reads; record it as `evidence.inFlightSeen`. Free slots = cap minus in-flight;
+   zero or fewer → NOOP `cap_full`.
 4. **Pin each candidate's Owned Paths**: parse each candidate's
    `## Owned Paths` section and check the globs against the real tree at
    `./repo`. A glob matching nothing that exists is only a smell (new files
@@ -78,14 +85,22 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    still plannable, but only alone, with nothing in flight. Ambiguous overlap
    is overlap — the same biases as `orchestrator/owned-paths.mjs`, always toward
    collision.
-5. **Select the plan**: walk the ordered queue; take each ticket whose Owned
-   Paths are disjoint from every in-flight ticket's paths AND from every
-   ticket already selected; skip colliding ones (they wait for a later scan);
-   stop when the free slots are full. Selected in order, each item pinning
-   `{ticket, ownedPaths, reason}`.
+5. **Select the plan**: walk the entire ordered candidate queue. Take each
+   ticket whose Owned Paths are disjoint from every in-flight ticket's paths AND
+   from every ticket already selected while a free slot remains. Selected in
+   order, each item pins `{ticket, ownedPaths, reason}`. Every candidate not
+   selected goes in `deferred` as `{ticket, reason}`, where `reason` is the typed
+   value `owned_paths_overlap` for a collision or `cap_full` when no slot remains.
+   Do not stop accounting when the slots fill: mark every remaining candidate
+   `cap_full`.
 
-   Track the complete candidate count before cap/overlap pruning as
-   `readyCandidates`.
+   Track the complete candidate count before cap/overlap pruning as both
+   `readyCandidates` and `evidence.candidatesSeen`. Record the same candidates,
+   in the same queue order, in `evidence.candidates`: selected tickets use
+   `disposition: "selected"`; each deferred ticket's disposition equals its
+   typed `reason`. On `DISPATCH`, `plan.length + deferred.length` must equal the
+   count, with no duplicate ticket across the two arrays, and their ticket IDs
+   and dispositions must exactly match `evidence.candidates`.
 
    If the walk has any dispatch candidates, do not read Triage and emit
    `DISPATCH` or `NOOP` (`cap_full`/`all_overlapping`) according to the result.
@@ -97,8 +112,9 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    `reasonCode: "needs_human"`.
 
    If `readyCandidates` is greater than 0 and there are no dispatch candidates,
-   keep the `NOOP`/`cap_full` or `all_overlapping` outcome and still set
-   `triageBacklog` to 0.
+   keep the `NOOP`/`cap_full` or `all_overlapping` outcome, leave `deferred`
+   empty because the whole queue is accounted for by `noopReason`, and still set
+   `triageBacklog` to 0. A non-empty candidate read can never emit `queue_empty`.
 
    If there are no dispatch candidates and non-empty Triage backlog, emit
    `LOW_SUPPLY` with `readyCandidates` and `triageBacklog` counts in the
@@ -115,10 +131,10 @@ chained `factory.dispatch.requested` is re-gated by WM-108's plan-time checks
 dispatch run's claim read-back refuses a lost race as `NOT_CLAIMED`. Your
 plan is advisory input to that gate, not a reservation.
 
-Only the **first** plan item chains into a dispatch this run (one chain event
-per run); list every later item's ticket id in `deferred`. Rolling dispatch
-comes from re-firing `factory.work.requested` after each completion, which
-re-plans the deferred tickets against a fresh world.
+Every `plan` item chains into its own re-gated dispatch request. `deferred`
+contains only ready candidates that cannot start in this scan, never selected
+plan items. Rolling dispatch comes from re-firing `factory.work.requested` after
+completion, which re-plans those candidates against a fresh world.
 
 ## Output
 
@@ -132,21 +148,34 @@ re-plans the deferred tickets against a fresh world.
     "repo": "bj29",
     "ticket": "CLNT-123",
     "plan": [
-      { "ticket": "CLNT-123", "ownedPaths": ["src/feature-a/**"], "reason": "priority Urgent, paths disjoint from all in-flight" },
-      { "ticket": "CLNT-124", "ownedPaths": ["src/feature-b/**"], "reason": "priority High, disjoint from CLNT-123 and in-flight" }
+      { "ticket": "CLNT-123", "ownedPaths": ["src/feature-a/**"], "reason": "priority Urgent, paths disjoint from all in-flight" }
     ],
-    "deferred": ["CLNT-124"],
+    "deferred": [
+      { "ticket": "CLNT-124", "reason": "owned_paths_overlap" }
+    ],
     "summary": "one line an operator can act on",
     "readyCandidates": 2,
     "triageBacklog": 0
   },
-  "evidence": { "commands": ["the linear reads this rests on"], "candidatesSeen": 5, "inFlightSeen": 1 }
+  "evidence": {
+    "commands": ["the linear reads this rests on"],
+    "candidatesSeen": 2,
+    "candidates": [
+      { "ticket": "CLNT-123", "disposition": "selected" },
+      { "ticket": "CLNT-124", "disposition": "owned_paths_overlap" }
+    ],
+    "inFlightSeen": 1,
+    "maxInFlight": 3
+  }
 }
 ```
 
 `ticket` is always `plan[0].ticket` when `recommendation: "DISPATCH"`.
-`readyCandidates` is the final count of dispatch candidates before cap/overlap
-pruning; `triageBacklog` is the complete count of Linear `Triage` issues.
+`readyCandidates` and `evidence.candidatesSeen` are the identical complete count
+of qualifying candidates before cap/overlap pruning, and
+`evidence.candidates.length` is the same count with the ordered ticket IDs and
+normalized dispositions retained. `triageBacklog` is the complete count of
+Linear `Triage` issues when that independent read is required, and 0 otherwise.
 
 `LOW_SUPPLY` means zero ready candidates and non-empty Triage backlog with a
 successful complete read for both; emit `readyCandidates` and `triageBacklog` in
@@ -154,7 +183,12 @@ that artifact.
 
 `NOOP` still means no ready work (`queue_empty`), zero free slots
 (`cap_full`), or ownership overlap (`all_overlapping`) with an empty `plan`,
-empty `deferred`, `ticket: null`, and typed `noopReason`. A NOOP is a good
+empty `deferred`, `ticket: null`, and typed `noopReason`. `queue_empty` is valid
+only when `readyCandidates` and `evidence.candidatesSeen` are both exactly 0
+and `evidence.candidates` is empty. `cap_full` requires a non-empty candidate
+array whose dispositions are all `cap_full` plus capacity evidence showing
+`inFlightSeen >= maxInFlight`; `all_overlapping` requires a non-empty candidate
+array whose dispositions are all `owned_paths_overlap`. A NOOP is a good
 outcome, not a failure. If Linear is unreachable, or the repo has no
 team/project in `config/repos.yaml`, refuse:
 `{"schemaVersion": "factory.agent-result/v1", "terminalState": "refused", "reasonCode": "needs_human"}`.

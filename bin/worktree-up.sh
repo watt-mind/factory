@@ -8,6 +8,7 @@
 #   bin/worktree-up.sh OPS-123 --no-seed       # start empty (no demo data)
 #   bin/worktree-up.sh OPS-123 --no-fetch      # skip git fetch when base ref exists
 #   bin/worktree-up.sh OPS-123 --reseed        # seed again under a fresh prefix
+#   bin/worktree-up.sh OPS-123 --resume        # preserve an existing branch as-is
 #
 # What it isolates that `git worktree add` does not: the control-API and web
 # ports (hashed from the full ticket id, persisted in .factory/run/ports) and
@@ -32,6 +33,7 @@ RESEED=0
 LIVE=0
 CHECKOUT_ONLY=0
 NO_FETCH=0
+RESUME="${FACTORY_WORKTREE_RESUME:-0}"
 POS=0
 
 while [[ $# -gt 0 ]]; do
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --no-seed) SEED=0 ;;
     --no-fetch) NO_FETCH=1 ;;
     --reseed) RESEED=1 ;;
+    --resume) RESUME=1 ;;
     --checkout-only) CHECKOUT_ONLY=1 ;;
     -h | --help)
       sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -60,21 +63,66 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+[[ "$RESUME" == "0" || "$RESUME" == "1" ]] \
+  || die "FACTORY_WORKTREE_RESUME must be 0 or 1 (got '$RESUME')"
+
 REPO="$(repo_root)"
+WORKTREE_LIFECYCLE_LOCK=""
+
+try_worktree_lifecycle_lock() { # <ticket>
+  local common root lock holder=""
+  common=$(git -C "$REPO" rev-parse --git-common-dir)
+  [[ "$common" == /* ]] || common="$REPO/$common"
+  root="$common/factory-worktree-locks"
+  lock="$root/$1.lock"
+  mkdir -p "$root"
+  if ! mkdir "$lock" 2>/dev/null; then
+    holder=$(cat "$lock/pid" 2>/dev/null || true)
+    if [[ "$holder" =~ ^[0-9]+$ ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$lock"
+      mkdir "$lock" 2>/dev/null || return 1
+    else
+      return 1
+    fi
+  fi
+  printf '%s\n' "$$" >"$lock/pid"
+  WORKTREE_LIFECYCLE_LOCK="$lock"
+}
+
+release_worktree_lifecycle_lock() {
+  if [[ -n "$WORKTREE_LIFECYCLE_LOCK" && "$(cat "$WORKTREE_LIFECYCLE_LOCK/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "$WORKTREE_LIFECYCLE_LOCK"
+  fi
+  WORKTREE_LIFECYCLE_LOCK=""
+}
 
 if [[ "$HERE" -eq 1 ]]; then
   [[ -z "$TICKET" ]] || die "--here takes no ticket — it provisions the current checkout"
   WT="$REPO"
   LABEL="here"
 else
-  [[ -n "$TICKET" ]] || die "usage: worktree-up.sh <TICKET-ID> [type] [slug] | --here   (--checkout-only, --no-seed, --no-fetch, --reseed)"
+  [[ -n "$TICKET" ]] || die "usage: worktree-up.sh <TICKET-ID> [type] [slug] | --here   (--checkout-only, --no-seed, --no-fetch, --reseed, --resume)"
   [[ "$TICKET" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] || die "ticket must look like OPS-123 or OPS-123-scratch"
   WT="$WT_ROOT/$TICKET"
   LABEL="$TICKET"
   BRANCH="$TYPE/$TICKET${SLUG:+-$SLUG}"
 
-  if [[ -d "$WT" ]]; then
-    [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "worktree already exists: $WT"
+  try_worktree_lifecycle_lock "$TICKET" \
+    || die "worktree_lifecycle_busy: another process is provisioning or removing $TICKET"
+  trap release_worktree_lifecycle_lock EXIT
+  trap 'release_worktree_lifecycle_lock; exit 130' INT
+  trap 'release_worktree_lifecycle_lock; exit 143' TERM
+
+  BASE_REF="origin/$BASE_BRANCH"
+  BRANCH_EXISTS=0
+  RESUMING=0
+  git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH" && BRANCH_EXISTS=1
+
+  # An explicit resume is a promise not to refresh or inspect the existing
+  # branch against the base. Auto-resume still fetches so its unique-commit
+  # and open-PR checks use the current remote base.
+  if [[ "$BRANCH_EXISTS" -eq 1 && "$RESUME" -eq 1 ]]; then
+    RESUMING=1
   else
     [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "fetching origin/$BASE_BRANCH"
     if [[ "$NO_FETCH" -eq 1 ]]; then
@@ -82,8 +130,71 @@ else
     else
       git_fetch "$REPO" "origin" "$BASE_BRANCH"
     fi
+  fi
+
+  if [[ "$BRANCH_EXISTS" -eq 1 ]]; then
+    BRANCH_SHA=$(git -C "$REPO" rev-parse "refs/heads/$BRANCH") \
+      || die "worktree_branch_inspection_failed: could not resolve branch '$BRANCH'"
+
+    if [[ "$RESUMING" -eq 0 ]]; then
+      BASE_SHA=$(git -C "$REPO" rev-parse "$BASE_REF") \
+        || die "worktree_branch_inspection_failed: could not resolve $BASE_REF"
+      UNIQUE_COMMITS=$(git -C "$REPO" rev-list --count "$BASE_REF..$BRANCH") \
+        || die "worktree_branch_inspection_failed: could not compare branch '$BRANCH' with $BASE_REF"
+    fi
+
+    if [[ "$RESUMING" -eq 0 && "$UNIQUE_COMMITS" -gt 0 ]]; then
+      OPEN_PR_COUNT=$(cd "$REPO" && gh pr list --head "$BRANCH" --state open --json number --limit 1 --jq 'length' 2>/dev/null) \
+        || die "worktree_pr_inspection_failed: could not check for an open PR on branch '$BRANCH'"
+      [[ "$OPEN_PR_COUNT" == "1" ]] && RESUMING=1
+    fi
+
+    if [[ "$RESUMING" -eq 1 ]]; then
+      if [[ -d "$WT" ]]; then
+        CURRENT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        [[ "$CURRENT_BRANCH" == "$BRANCH" ]] \
+          || die "worktree_branch_mismatch: $WT is on '${CURRENT_BRANCH:-detached HEAD}', expected '$BRANCH'"
+      fi
+      [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "resuming branch $BRANCH as-is"
+    else
+      if [[ "$UNIQUE_COMMITS" -gt 0 ]]; then
+        die "worktree_branch_has_commits: branch '$BRANCH' has $UNIQUE_COMMITS unique commit(s) beyond $BASE_REF — re-run with --resume or remove branch '$BRANCH' explicitly before re-dispatch"
+      fi
+
+      if [[ -d "$WT" ]]; then
+        CURRENT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        [[ "$CURRENT_BRANCH" == "$BRANCH" ]] \
+          || die "worktree_branch_mismatch: $WT is on '${CURRENT_BRANCH:-detached HEAD}', expected '$BRANCH'"
+        [[ -z "$(git -C "$WT" status --porcelain)" ]] \
+          || die "worktree_branch_dirty: $WT has uncommitted work — re-run with --resume or clean it explicitly before re-dispatch"
+        # `merge --ff-only` is non-destructive if another process commits after
+        # inspection; unlike reset --hard, it can never discard that commit.
+        git -C "$WT" merge --ff-only "$BASE_REF" >/dev/null \
+          || die "worktree_branch_update_failed: branch '$BRANCH' changed while moving to $BASE_REF"
+      else
+        # Compare-and-swap the ref so a concurrent commit cannot be overwritten.
+        git -C "$REPO" update-ref "refs/heads/$BRANCH" "$BASE_SHA" "$BRANCH_SHA" \
+          || die "worktree_branch_update_failed: branch '$BRANCH' changed while moving to $BASE_REF"
+      fi
+
+      UNIQUE_COMMITS=$(git -C "$REPO" rev-list --count "$BASE_REF..$BRANCH") \
+        || die "worktree_branch_inspection_failed: could not re-check branch '$BRANCH'"
+      [[ "$UNIQUE_COMMITS" -eq 0 ]] \
+        || die "worktree_branch_has_commits: branch '$BRANCH' gained $UNIQUE_COMMITS unique commit(s) while moving to $BASE_REF — refusing re-dispatch"
+    fi
+  elif [[ -d "$WT" ]]; then
+    die "worktree_branch_missing: $WT exists but branch '$BRANCH' does not"
+  fi
+
+  if [[ -d "$WT" ]]; then
+    if [[ "$RESUMING" -eq 1 ]]; then
+      [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "worktree already exists on resumed branch: $WT"
+    else
+      [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "worktree already exists at current $BASE_REF: $WT"
+    fi
+  else
     [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "creating worktree $WT on $BRANCH"
-    worktree_add "$WT" "$BRANCH" "origin/$BASE_BRANCH" "$REPO"
+    worktree_add "$WT" "$BRANCH" "$BASE_REF" "$REPO"
   fi
 fi
 
@@ -93,6 +204,7 @@ if [[ "$CHECKOUT_ONLY" -eq 1 ]]; then
 fi
 
 command -v bun >/dev/null || die "bun is required (https://bun.sh)"
+command -v lsof >/dev/null || die "lsof is required to verify daemon port ownership"
 
 RUN_DIR="$(run_dir "$WT")"
 HOME_DIR="$(event_home "$WT")"
@@ -121,7 +233,32 @@ record_red_baseline() {
 
 # Resolve API/web ports only after the checkout exists so we can persist them.
 # --here prefers 7391/7392 but follows the same recorded-port reuse and
-# collision fallback path as named ticket worktrees.
+# collision fallback path as named ticket worktrees. If anything after the
+# reservation fails, stop only daemons created by this invocation and release
+# dead partial pid/port state so a retry can claim the pair.
+STARTED_SERVE=0
+STARTED_WORKER=0
+STARTED_WEB=0
+WORKTREE_UP_OK=0
+cleanup_worktree_up() {
+  local code=$?
+  trap - EXIT INT TERM
+  release_port_allocation_lock
+  if [[ "$code" -ne 0 && "$WORKTREE_UP_OK" -ne 1 ]]; then
+    [[ "$STARTED_WEB" -eq 1 ]] && term_daemon "$RUN_DIR/web.pid" "web server"
+    [[ "$STARTED_WORKER" -eq 1 ]] && term_daemon "$RUN_DIR/worker.pid" "worker"
+    [[ "$STARTED_SERVE" -eq 1 ]] && term_daemon "$RUN_DIR/serve.pid" "event runtime"
+    [[ "$STARTED_WEB" -eq 1 ]] && await_daemon "$RUN_DIR/web.pid" "web server"
+    [[ "$STARTED_WORKER" -eq 1 ]] && await_daemon "$RUN_DIR/worker.pid" "worker"
+    [[ "$STARTED_SERVE" -eq 1 ]] && await_daemon "$RUN_DIR/serve.pid" "event runtime"
+    release_worktree_ports_if_idle "$WT"
+  fi
+  exit "$code"
+}
+trap cleanup_worktree_up EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ "$HERE" -eq 1 ]]; then
   preferred="$HERE_API_PORT"
 else
@@ -158,6 +295,12 @@ else
   fi
 fi
 
+WEB_AVAILABLE=1
+if [[ -f "$BASELINE_REPORT" && ! -f "$WEB_DIR/dist/index.html" ]]; then
+  WEB_AVAILABLE=0
+  warn "web UI unavailable because the baseline web build failed; control API and worker remain usable"
+fi
+
 # ---------------------------------------------------------------- daemons ---
 FRESH=0
 [[ -f "$HOME_DIR/runtime.db" ]] || FRESH=1
@@ -174,7 +317,6 @@ if port_listening "$API_PORT"; then
   occupant=$(health_field "$(health_json "$API_PORT")" home)
   if [[ "$occupant" != "$HOME_DIR" ]]; then
     if ! pid_alive "$RUN_DIR/serve.pid"; then
-      rm -f "$RUN_DIR/ports"
       die "port $API_PORT is owned by another runtime (env.home=${occupant:-unknown}, this worktree=$HOME_DIR) — refusing to seed"
     fi
   fi
@@ -187,6 +329,7 @@ else
   spawn_daemon "$RUN_DIR/serve.pid" "$RUN_DIR/serve.log" "$WT" \
     env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
     bun event-runtime/cli.mjs serve ${ADAPTER_ARGS[@]+"${ADAPTER_ARGS[@]}"}
+  STARTED_SERVE=1
 fi
 
 # Wait for /health BEFORE starting the worker: on a fresh DB, serve and worker
@@ -210,19 +353,16 @@ for _ in {1..50}; do
   HEALTH_JSON=$(curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" 2>/dev/null) && break
   HEALTH_JSON=""
   if ! pid_alive "$RUN_DIR/serve.pid"; then
-    rm -f "$RUN_DIR/ports"
     dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
     die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
   fi
   sleep 0.1
 done
 if ! pid_alive "$RUN_DIR/serve.pid"; then
-  rm -f "$RUN_DIR/ports"
   dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
 fi
 if [[ -z "$HEALTH_JSON" ]]; then
-  rm -f "$RUN_DIR/ports"
   dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   HEALTH_JSON=$(curl -sf -m 2 "http://127.0.0.1:$API_PORT/health") \
     || die "control API never came up on $API_PORT — see $RUN_DIR/serve.log"
@@ -240,15 +380,37 @@ else
   spawn_daemon "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$WT" \
     env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
     bun event-runtime/cli.mjs work ${ADAPTER_ARGS[@]+"${ADAPTER_ARGS[@]}"}
+  STARTED_WORKER=1
 fi
 
-if pid_alive "$RUN_DIR/web.pid"; then
-  info "web server already running (pid $(cat "$RUN_DIR/web.pid"), port $WEB_PORT)"
-else
-  info "starting web server on $WEB_PORT"
-  spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$WT" \
-    env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
-    bun event-runtime/web/serve.mjs
+if [[ "$WEB_AVAILABLE" -eq 1 ]]; then
+  if pid_alive "$RUN_DIR/web.pid"; then
+    info "web server already running (pid $(cat "$RUN_DIR/web.pid"), port $WEB_PORT)"
+  else
+    info "starting web server on $WEB_PORT"
+    spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$WT" \
+      env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+      bun event-runtime/web/serve.mjs
+    STARTED_WEB=1
+  fi
+
+  # A listener alone is insufficient: an alien process could have occupied the
+  # adjacent port after allocation. Require the recorded web daemon itself to own
+  # the persisted port before reporting the environment ready.
+  WEB_PID_PORT=""
+  for _ in {1..50}; do
+    if ! pid_alive "$RUN_DIR/web.pid"; then
+      dump_daemon_log "$RUN_DIR/web.log" "web server"
+      die "web server died during startup on $WEB_PORT — see $RUN_DIR/web.log"
+    fi
+    WEB_PID_PORT=$(listen_tcp_port "$RUN_DIR/web.pid" || true)
+    [[ "$WEB_PID_PORT" == "$WEB_PORT" ]] && break
+    sleep 0.1
+  done
+  if [[ "$WEB_PID_PORT" != "$WEB_PORT" ]]; then
+    dump_daemon_log "$RUN_DIR/web.log" "web server"
+    die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT"
+  fi
 fi
 
 # ------------------------------------------------------------------- seed ---
@@ -295,6 +457,12 @@ if [[ "$SEED" -eq 1 && ( "$FRESH" -eq 1 || "$RESEED" -eq 1 ) ]]; then
 fi
 
 # ----------------------------------------------------------------- report ---
+if [[ "$WEB_AVAILABLE" -eq 1 ]]; then
+  WEB_UI_REPORT="http://127.0.0.1:$WEB_PORT"
+else
+  WEB_UI_REPORT="unavailable (baseline web build failed)"
+fi
+WORKTREE_UP_OK=1
 cat <<EOF
 
 $(info "ready — $LABEL")
@@ -302,7 +470,7 @@ $(info "ready — $LABEL")
   checkout   $WT
   event home $HOME_DIR
   control    http://127.0.0.1:$API_PORT      $(adapter_banner "$HEALTH_ADAPTER")
-  web UI     http://127.0.0.1:$WEB_PORT
+  web UI     $WEB_UI_REPORT
   logs       $RUN_DIR/{serve,worker,web}.log
 
   status:  FACTORY_EVENT_PORT=$API_PORT bun event-runtime/cli.mjs status

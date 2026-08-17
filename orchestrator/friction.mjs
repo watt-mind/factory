@@ -27,7 +27,7 @@
  * change" is not a job for a histogram.
  */
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { parseRun, LOG_DIR } from "../lib/transcript.mjs";
+import { parseRun, LOG_DIR, parseDuration } from "../lib/transcript.mjs";
 
 const argv = process.argv.slice(2);
 const val = (f) => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
@@ -36,9 +36,7 @@ const JSON_OUT = argv.includes("--json");
 if (!existsSync(LOG_DIR)) { console.error(`no transcripts at ${LOG_DIR}`); process.exit(1); }
 
 const sinceArg = val("--since");
-const sinceMs = sinceArg
-  ? Date.now() - Number(sinceArg.replace(/[^\d]/g, "")) * (sinceArg.endsWith("h") ? 3600e3 : 86400e3)
-  : 0;
+const sinceMs = sinceArg ? Date.now() - parseDuration(sinceArg) : 0;
 const onlyRun = val("--run");
 
 const files = readdirSync(LOG_DIR)

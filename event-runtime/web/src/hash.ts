@@ -7,6 +7,8 @@
  * full-page run view — distinct first segment so expand/back get push
  * semantics) `#/agents` `#/agents/:ref` `#/artifacts` `#/artifacts?kind=…`
  * `#/workers` `#/workers/:id` `#/graph` `#/graph/:nodeId`
+ * `#/chain/:correlationId` `#/chain/:correlationId/:nodeId` (the chain trace,
+ * WM-527 — a drill-in like `#/run/:id`, not a nav item)
  *
  * Optional `?project=` (OPS-356) restores the context-tab filter; `inflight`
  * is reserved. The path still names the view. A pasted `#/runs/:id` without

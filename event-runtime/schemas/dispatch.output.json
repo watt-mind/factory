@@ -37,6 +37,14 @@
       ],
       "description": "URL of the opened pull request when outcome is PR_OPEN; null for every other outcome"
     },
+    "prNumber": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "description": "Numeric pull request number when outcome is PR_OPEN, used to chain an immediate scoped merge review; null for every other outcome. Optional only for backward compatibility with accepted pre-WM-576 artifacts."
+    },
     "verification": {
       "type": "object",
       "required": [

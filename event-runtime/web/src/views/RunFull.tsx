@@ -24,6 +24,7 @@ import {
   isCancellable,
 } from "../components/RunDetailBlocks";
 import { handleRunArtifactClick, toggleRunPin } from "./Runs";
+import { AgentHoverCard } from "../components/AgentHoverCard";
 import type { RunListItem } from "../types";
 
 /**
@@ -40,21 +41,32 @@ export function RunFull({
   onBack,
   onJumpAgent,
   onJumpEvent,
+  onJumpProposal,
+  onJumpChain,
 }: {
   runId: string;
   connected: boolean;
   onBack: () => void;
   onJumpAgent: (ref: string) => void;
   onJumpEvent: (source: string, eventId: string) => void;
+  onJumpProposal?: (id: string) => void;
+  /** Open the chain trace this run belongs to (WM-527). */
+  onJumpChain?: (correlationId: string, nodeId?: string) => void;
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
   const [confirm, setConfirm] = useState<"cancel" | "force-retry" | null>(null);
+  const [confirmApprove, setConfirmApprove] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
 
   const detail = useQuery({
     queryKey: ["run", runId],
     queryFn: () => api.run(runId),
+    refetchInterval: 2000,
+  });
+  const proposalsQ = useQuery({
+    queryKey: ["proposals", "open"],
+    queryFn: () => api.proposals(),
     refetchInterval: 2000,
   });
   // Origin event comes from the list view's join, not GET /runs/:id — the
@@ -79,6 +91,18 @@ export function RunFull({
       (e) => e.causationId === runId || (e.envelope as any)?.causationId === runId,
     );
   }, [eventsQ.data, runId]);
+  // The chain this run belongs to: its origin event's correlation id (falling
+  // back to the event id, as the chain emitter does), or — for a run whose
+  // origin is not in the list — any event it emitted names the same chain.
+  const chainKey = useMemo(() => {
+    const events = eventsQ.data?.events ?? [];
+    const origin = listRow
+      ? events.find((e) => e.source === listRow.eventSource && e.eventId === listRow.eventId)
+      : null;
+    if (origin) return origin.correlationId ?? origin.eventId;
+    const emitted = events.find((e) => e.causationId === runId);
+    return emitted ? (emitted.correlationId ?? emitted.eventId) : null;
+  }, [eventsQ.data, listRow, runId]);
   const runsById = useMemo(() => {
     const map = new Map<string, RunListItem>();
     for (const r of listQ.data?.runs ?? []) {
@@ -124,6 +148,38 @@ export function RunFull({
     },
   });
 
+  const approve = useMutation({
+    mutationFn: (proposalId: string) => api.approve(proposalId),
+    onSuccess: (outcome) => {
+      invalidate();
+      queryClient.invalidateQueries({ queryKey: ["proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["status"] });
+      if (outcome.approved && outcome.runId) {
+        notify(`Approved proposal — queued ${outcome.runId}`, "ok");
+      } else if (outcome.replanned && outcome.proposal) {
+        notify(`Proposal expired — re-planned new spec`, "info");
+        if (onJumpProposal) onJumpProposal(outcome.proposal.id);
+      }
+      setConfirmApprove(false);
+    },
+    onError: invalidate,
+  });
+
+  const selProposal = useMemo(() => {
+    for (const p of proposalsQ.data?.proposals ?? []) {
+      if (p.runId === runId) return p;
+    }
+    return null;
+  }, [proposalsQ.data?.proposals, runId]);
+
+  const canApprove = Boolean(
+    selProposal &&
+      selProposal.status === "open" &&
+      selProposal.decision === "run" &&
+      d?.run.state === "PROPOSED",
+  );
+
   // Verbs: Esc back to list, x cancel, c copy id, c i / c c copy CLI inspect command, c l copy link.
   useEffect(() => {
     let pendingC = 0;
@@ -137,6 +193,11 @@ export function RunFull({
       if (e.key === "p") {
         e.preventDefault();
         toggleRunPin(runId);
+        return;
+      }
+      if (e.key === "a" && canApprove && connected && !approve.isPending) {
+        e.preventDefault();
+        setConfirmApprove(true);
         return;
       }
       if (e.key === "x" && d && connected && isCancellable(d.run.state)) {
@@ -171,7 +232,7 @@ export function RunFull({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [d, connected, onBack, runId]);
+  }, [d, connected, onBack, runId, canApprove, approve.isPending]);
 
   // Offer this run's verbs in the ⌘K palette (§5), same rules as the panel.
   useEffect(() => {
@@ -198,6 +259,23 @@ export function RunFull({
       setContextActions(copy);
     } else {
       setContextActions([
+        ...(canApprove && selProposal
+          ? [
+              {
+                label: `Approve proposal ${selProposal.id}…`,
+                hint: "a",
+                run: () => setConfirmApprove(true),
+              },
+            ]
+          : []),
+        ...(selProposal && onJumpProposal
+          ? [
+              {
+                label: `Open proposal ${selProposal.id}`,
+                run: () => onJumpProposal(selProposal.id),
+              },
+            ]
+          : []),
         ...(isCancellable(d.run.state)
           ? [
               {
@@ -225,7 +303,7 @@ export function RunFull({
     }
     return () => setContextActions([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d?.run.runId, d?.run.state, attemptsExhausted, connected]);
+  }, [d?.run.runId, d?.run.state, attemptsExhausted, connected, canApprove, selProposal]);
 
   return (
     <div className="flex h-full min-w-0 flex-col">
@@ -267,6 +345,25 @@ export function RunFull({
         <div className="ml-auto flex shrink-0 items-center gap-3">
           {d && (
             <div className="flex items-center gap-1.5">
+              {canApprove && selProposal && (
+                <Button
+                  disabled={!connected || approve.isPending}
+                  onClick={() => setConfirmApprove(true)}
+                >
+                  Approve…{" "}
+                  <span
+                    className="mono ml-1 text-(--text-faint)"
+                    aria-hidden="true"
+                  >
+                    a
+                  </span>
+                </Button>
+              )}
+              {selProposal && onJumpProposal && (
+                <Button onClick={() => onJumpProposal(selProposal.id)}>
+                  Open proposal
+                </Button>
+              )}
               {isCancellable(d.run.state) && (
                 <Button
                   variant="danger"
@@ -301,6 +398,13 @@ export function RunFull({
                   </Button>
                 ))}
             </div>
+          )}
+          {onJumpChain && chainKey && (
+            <Button
+              onClick={() => onJumpChain(chainKey, `run:${runId}`)}
+            >
+              View chain
+            </Button>
           )}
           <Button onClick={() => toggleRunPin(runId)}>
             <span>Open in tab</span>
@@ -341,6 +445,35 @@ export function RunFull({
                 lifecycle={d.lifecycle}
                 className="mb-6"
               />
+              {d.run.state === "PROPOSED" && (
+                <div className="mb-6 rounded-md border border-(--border) bg-(--surface-1) p-4 text-[13px]">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-semibold text-(--text)">Awaiting Proposal Approval</div>
+                      <div className="text-[12px] text-(--text-dim) mt-0.5">
+                        {selProposal
+                          ? `Proposal ${shortId(selProposal.id)} is open and ready to approve.`
+                          : "This run was proposed and is waiting for proposal approval."}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {selProposal && onJumpProposal && (
+                        <Button onClick={() => onJumpProposal(selProposal.id)}>
+                          Open proposal
+                        </Button>
+                      )}
+                      {canApprove && selProposal && (
+                        <Button
+                          disabled={!connected || approve.isPending}
+                          onClick={() => setConfirmApprove(true)}
+                        >
+                          Approve…
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               <RunTrace
                 key={runId}
                 runId={runId}
@@ -437,9 +570,10 @@ export function RunFull({
                                     <span className="text-(--text-faint)">agent</span>
                                     <span className="text-(--text-dim) truncate">
                                       {linkedRun?.agent ? (
-                                        <JumpLink onClick={() => onJumpAgent(linkedRun.agent)} title={linkedRun.agent}>
-                                          {linkedRun.agent}
-                                        </JumpLink>
+                                        <AgentHoverCard
+                                          agentRef={linkedRun.agent}
+                                          onJumpAgent={onJumpAgent}
+                                        />
                                       ) : (
                                         "—"
                                       )}
@@ -472,6 +606,30 @@ export function RunFull({
             </div>
           </aside>
         </div>
+      )}
+
+      {confirmApprove && selProposal && d && (
+        <Dialog
+          title={`Approve and queue run ${shortId(selProposal.runId ?? d.run.runId)}?`}
+          onClose={() => setConfirmApprove(false)}
+          wide
+        >
+          <div className="mb-3 text-[12px] text-(--text-dim)">
+            Approving proposal <span className="mono font-semibold">{selProposal.id}</span> queues this run for execution.
+          </div>
+          <VerbError error={approve.error} />
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setConfirmApprove(false)}>Not yet</Button>
+            <Button
+              disabled={!connected || approve.isPending}
+              onClick={() => {
+                approve.mutate(selProposal.id);
+              }}
+            >
+              Approve and queue <span className="mono ml-1 opacity-80" aria-hidden="true">↵</span>
+            </Button>
+          </div>
+        </Dialog>
       )}
 
       {confirm === "cancel" && d && (

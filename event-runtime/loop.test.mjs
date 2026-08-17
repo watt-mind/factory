@@ -160,10 +160,17 @@ async function dispatchTo(outcome, eventId, ticket) {
 
 describe("dispatch-completion edge registration (WM-112)", () => {
   test("PR_OPEN and NOT_CLAIMED both map onto factory.work.requested {repo} — ci-doctor's two-verdicts-one-target shape", () => {
+    // WM-576: PR_OPEN additionally fans out a scoped factory.merge.requested {repo, prNumbers} via the PR_OPEN_MERGE sibling edge.
     expect(registry.edges["dispatch@1"]).toEqual({
       recommendationField: "outcome",
       edges: {
-        PR_OPEN: { eventType: "factory.work.requested", input: { repo: "$.input.repo" } },
+        PR_OPEN: { eventType: "factory.work.requested", also: ["PR_OPEN_MERGE"], input: { repo: "$.input.repo" } },
+        PR_OPEN_MERGE: {
+          eventType: "factory.merge.requested",
+          mixedEventId: "chain-${runId}-merge",
+          whenPath: "$.artifact.prNumber",
+          input: { repo: "$.artifact.repo", prNumbers: ["$.artifact.prNumber"] },
+        },
         NOT_CLAIMED: { eventType: "factory.work.requested", input: { repo: "$.input.repo" } },
       },
     });
@@ -247,8 +254,9 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
       expect(registry.schedules[`merge-${repo}`]).toEqual(loopEntry("factory.merge.requested", repo, "30m"));
       expect(registry.schedules[`ship-${repo}`]).toEqual(loopEntry("factory.ship.requested", repo, "7d"));
     }
+    // WM-576: the Factory full-set merge sweep runs every 15m as the fallback behind per-PR scoped scans.
     expect(registry.schedules["merge-factory"]).toEqual(
-      loopEntry("factory.merge.requested", "factory", "30m", { approval: "auto", enabled: true }),
+      loopEntry("factory.merge.requested", "factory", "15m", { approval: "auto", enabled: true }),
     );
   });
 

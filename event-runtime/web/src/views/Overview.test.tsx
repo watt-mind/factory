@@ -2,7 +2,7 @@ import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Overview, groupJournalEntries, buildAnomalyRows } from "./Overview";
+import { Overview, groupJournalEntries, formatActivityGroup, buildAnomalyRows } from "./Overview";
 import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
@@ -166,6 +166,7 @@ describe("groupJournalEntries (WM-100)", () => {
     expect(groups[0]!.from).toBe("PROPOSED");
     expect(groups[0]!.to).toBe("FAILED");
     expect(groups[0]!.count).toBe(4);
+    expect(groups[0]!.path).toEqual(["PROPOSED", "QUEUED", "LEASED", "RUNNING", "FAILED"]);
     // Key, timestamp, and actor come from the most recent transition.
     expect(groups[0]!.seq).toBe(5);
     expect(groups[0]!.at).toBe(entries[0]!.at);
@@ -201,6 +202,20 @@ describe("groupJournalEntries (WM-100)", () => {
     expect(groups[2]!.reason).toBe("operator");
   });
 
+  test("formats collapsed steps without ellipsis and suppresses state-duplicate reasons", () => {
+    const [group] = groupJournalEntries([
+      entry({ seq: 3, runId: "run_a", from: "RUNNING", to: "COMPLETED", reason: "exit_0" }),
+      entry({ seq: 2, runId: "run_a", from: "LEASED", to: "RUNNING" }),
+      entry({ seq: 1, runId: "run_a", from: "QUEUED", to: "LEASED" }),
+    ]);
+
+    const row = formatActivityGroup(group!);
+    expect(row.steps).toBe("+3 steps");
+    expect(row.path).toBe("QUEUED → LEASED → RUNNING → COMPLETED");
+    expect(row.path).not.toContain("…");
+    expect(row.reason).toBeNull();
+  });
+
   test("empty input produces no rows", () => {
     expect(groupJournalEntries([])).toEqual([]);
   });
@@ -230,9 +245,11 @@ describe("Overview activity feed rendering (WM-100)", () => {
 
       await waitFor(() => getByTitle("run_cda2b3c0"));
 
-      // One row spanning the whole run: first state, ellipsis, transition count.
-      expect(getByText(/PROPOSED → … →/)).toBeTruthy();
-      expect(getByText(/· 3 transitions/)).toBeTruthy();
+      // The final state stays prominent while collapsed detail is plain-language and inspectable.
+      expect(getByText("+3 steps")).toBeTruthy();
+      expect(getByTitle("PROPOSED → LEASED → RUNNING → FAILED")).toBeTruthy();
+      expect(document.body.textContent).not.toContain("…");
+      expect(document.body.textContent).not.toContain("transitions");
       // Last state keeps its badge; the single-transition run renders plainly.
       expect(getByText("FAILED")).toBeTruthy();
       expect(getByTitle("run_other")).toBeTruthy();
@@ -680,16 +697,18 @@ describe("Overview scoped tiles and factory-wide labels (WM-147)", () => {
 
     try {
       const repo = renderOverview({ kind: "repo", name: "bj29" });
-      await waitFor(() => repo.getByText(/Activity · latest/));
-      expect(repo.getByText(/Activity · latest/).textContent?.toLowerCase()).toMatch(/factory-wide/);
-      expect(repo.getByText(/Outbox/).textContent?.toLowerCase()).toMatch(/factory-wide/);
+      const repoActivity = await waitFor(() => repo.getByText("Activity").closest("button"));
+      const repoOutbox = repo.getByText("Outbox").closest("button");
+      expect(repoActivity?.textContent?.toLowerCase()).toMatch(/latest 0.*factory-wide/);
+      expect(repoOutbox?.textContent?.toLowerCase()).toMatch(/published results.*factory-wide/);
       expect(repo.container.textContent).not.toMatch(/\/journal|\/outbox|GET \//);
       repo.unmount();
 
       const all = renderOverview({ kind: "all" });
-      await waitFor(() => all.getByText(/Activity · latest/));
-      expect(all.getByText(/Activity · latest/).textContent?.toLowerCase()).not.toMatch(/factory-wide/);
-      expect(all.getByText(/Outbox/).textContent?.toLowerCase()).not.toMatch(/factory-wide/);
+      const allActivity = await waitFor(() => all.getByText("Activity").closest("button"));
+      const allOutbox = all.getByText("Outbox").closest("button");
+      expect(allActivity?.textContent?.toLowerCase()).not.toMatch(/factory-wide/);
+      expect(allOutbox?.textContent?.toLowerCase()).not.toMatch(/factory-wide/);
       expect(all.queryByRole("status")).toBeNull();
     } finally {
       restore();
@@ -970,7 +989,11 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
     });
 
     try {
-      const { getByText, getByTitle, getByRole } = renderOverview();
+      const onJumpRun = mock((_runId: string) => {});
+      const { getByText, getByTitle, getByRole } = renderOverview(
+        { kind: "all" },
+        { onJumpRun },
+      );
 
       await waitFor(() => getByText(/Worker Fleet Capacity/));
       expect(getByText(/3 live · 1 busy · 2 idle/)).toBeTruthy();
@@ -978,10 +1001,15 @@ describe("Overview 4-Band layout & telemetry (WM-205)", () => {
       expect(getByText("per-repo max_in_flight reached")).toBeTruthy();
       expect(getByText("light 1/3")).toBeTruthy();
 
-      // Recent outcomes strip displays completed & failed terminal entries (2 total)
-      expect(getByText(/Recent Outcomes · last 2/)).toBeTruthy();
-      expect(getByTitle(/run_term_1 · COMPLETED/)).toBeTruthy();
-      expect(getByTitle(/run_term_2 · FAILED/)).toBeTruthy();
+      // Recent outcomes strip exposes exact titles, a legend, and run navigation.
+      expect(getByText("Recent outcomes")).toBeTruthy();
+      expect(getByText("last 2")).toBeTruthy();
+      const completedTick = getByTitle(/^run_term_1 · COMPLETED · /);
+      expect(completedTick.getAttribute("title")).toMatch(/^run_term_1 · COMPLETED · .+ ago$/);
+      expect(getByTitle(/^run_term_2 · FAILED · /)).toBeTruthy();
+      expect(getByRole("generic", { name: "1 completed, 1 failed" })).toBeTruthy();
+      fireEvent.click(completedTick);
+      expect(onJumpRun).toHaveBeenCalledWith("run_term_1");
 
       // Outbox summary preview
       expect(getByText("[PR_OPEN #42]")).toBeTruthy();

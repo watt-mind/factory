@@ -90,6 +90,7 @@ describe("buildChainInput", () => {
           ticket: "$.item.ticket",
           tag: "$.item.meta.tag",
           fullItem: "$.item",
+          selected: ["$.item.count"],
           literal: "fixed",
         },
         itemContext,
@@ -99,6 +100,7 @@ describe("buildChainInput", () => {
       ticket: "WM-119",
       tag: "alpha",
       fullItem: { ticket: "WM-119", count: 42, meta: { tag: "alpha" } },
+      selected: [42],
       literal: "fixed",
     });
   });
@@ -460,6 +462,33 @@ describe("multi-emit chain resolution (WM-119)", () => {
       },
     });
     expect(resolveChains(db3, registry)).toEqual({ emitted: 0, skipped: 1, errors: [] });
+  });
+
+  test("dispatch PR_OPEN fans out work continuation and scoped merge review (WM-576)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-dispatch-pr-open",
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "WM-576" },
+      artifact: {
+        outcome: "PR_OPEN",
+        repo: "factory",
+        ticket: "WM-576",
+        prNumber: 576,
+      },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({ emitted: 2, skipped: 0, errors: [] });
+    const events = db
+      .query(`SELECT event_id,type,envelope_json FROM events WHERE source = 'chain' ORDER BY event_id`)
+      .all();
+    expect(events.map(({ event_id, type }) => ({ eventId: event_id, type }))).toEqual([
+      { eventId: "chain-run-dispatch-pr-open", type: "factory.work.requested" },
+      { eventId: "chain-run-dispatch-pr-open-merge", type: "factory.merge.requested" },
+    ]);
+    expect(JSON.parse(events[0].envelope_json).payload).toEqual({ repo: "factory" });
+    expect(JSON.parse(events[1].envelope_json).payload).toEqual({ repo: "factory", prNumbers: [576] });
+    expect(resolveChains(db, registry)).toEqual({ emitted: 0, skipped: 0, errors: [] });
   });
 
   test("non-completed runs do not generate chain candidates", () => {

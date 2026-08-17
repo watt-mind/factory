@@ -11,7 +11,7 @@
  * evidence checking is slice 2.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { validate } from "./schema.mjs";
@@ -31,10 +31,13 @@ export const EVIDENCE_INLINE_LIMIT_BYTES = 256 * 1024;
  * performance budget — it exists to tell "wedged forever" from "running".
  *
  * 120s was below the real cost and failed every dispatch (WM-510): this repo's
- * own `bun test && bun build/emit.mjs --check` measures 196-217s, so nothing
- * could ever pass. Sized at ~3x the slowest observed run, which leaves room for
- * a loaded host while staying far under `limits.max_run_minutes: 45` in
- * config/policy.yaml — the bound that actually caps a wedged run.
+ * own verify at the time (`bun test && bun build/emit.mjs --check`, the full
+ * suite) measured 196-217s, so nothing could ever pass. Sized at ~3x the
+ * slowest observed run, which leaves room for a loaded host while staying far
+ * under `limits.max_run_minutes: 90` in config/policy.yaml — the bound that
+ * actually caps a wedged run. (The factory verify has since been narrowed to
+ * `bun test event-runtime/lib && bun build/emit.mjs --check`, ~70s, WM-528 —
+ * the ceiling stays where it is for the other repos.)
  *
  * Raise this rather than trimming it to fit: a ceiling that only just fits is
  * the same outage with a longer fuse. Per-repo tuning goes through
@@ -96,6 +99,58 @@ function matchesRedBaseline(baseline, verifyOutput) {
   const verifySig = failureSignature(verifyOutput);
   if (!baselineSig || !verifySig) return false;
   return baselineSig === verifySig;
+}
+
+const REPO_VERIFY_REASON_MAX_LINES = 40;
+const REPO_VERIFY_REASON_MAX_CHARS = 8 * 1024;
+const REPO_VERIFY_TEST_FAILURE_LINE = /\(fail\)|✗/i;
+const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
+
+function boundedDiagnostic(lines) {
+  const excerpt = [];
+  let remaining = REPO_VERIFY_REASON_MAX_CHARS;
+  for (const line of lines) {
+    const separatorLength = excerpt.length === 0 ? 0 : 1;
+    if (remaining <= separatorLength) break;
+    remaining -= separatorLength;
+    if (line.length <= remaining) {
+      excerpt.push(line);
+      remaining -= line.length;
+      continue;
+    }
+    excerpt.push(`${line.slice(0, Math.max(0, remaining - 1))}…`);
+    break;
+  }
+  return excerpt.join("\n");
+}
+
+/**
+ * Keep the actionable lines from a failed repository verification bounded for
+ * the run reason. Explicit test-failure markers are retained before generic
+ * errors, so later runner noise cannot displace the failing test names.
+ */
+function repoVerifyFailureExcerpt(output) {
+  const lines = String(output ?? "")
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) return "";
+
+  const testFailures = lines.filter((line) => REPO_VERIFY_TEST_FAILURE_LINE.test(line));
+  const errors = lines.filter(
+    (line) => !REPO_VERIFY_TEST_FAILURE_LINE.test(line) && REPO_VERIFY_ERROR_LINE.test(line),
+  );
+  if (testFailures.length === 0 && errors.length === 0) {
+    return boundedDiagnostic(lines.slice(-REPO_VERIFY_REASON_MAX_LINES));
+  }
+
+  const excerpt = testFailures.slice(-REPO_VERIFY_REASON_MAX_LINES);
+  const errorCapacity = Math.max(0, REPO_VERIFY_REASON_MAX_LINES - excerpt.length - 1);
+  if (errorCapacity > 0) excerpt.push(...errors.slice(-errorCapacity));
+  const summary = lines.at(-1);
+  if (excerpt.length < REPO_VERIFY_REASON_MAX_LINES && !excerpt.includes(summary)) excerpt.push(summary);
+  return boundedDiagnostic(excerpt);
 }
 
 export { normalizeFailureOutput, failureSignature };
@@ -210,22 +265,166 @@ function parseProbeBytes(raw) {
   return match ? Number(match[1]) : null;
 }
 
-/** `LOW_SUPPLY` in work-scan must carry exact candidate-count semantics. */
+/**
+ * Work-scan is model-authored, so its individually valid fields still need a
+ * deterministic consistency check (WM-350). The normalized candidate evidence
+ * lets this verifier reconcile identities and dispositions instead of trusting
+ * a summary count or model prose.
+ */
 function checkWorkPlan(candidate) {
-  const artifact = candidate?.artifact;
-  if (artifact?.recommendation !== "LOW_SUPPLY") return [];
+  const { artifact, evidence } = candidate;
   const violations = [];
+  const candidatesSeen = evidence?.candidatesSeen;
+  const candidates = evidence?.candidates;
+  const dispositions = new Set(["selected", "cap_full", "owned_paths_overlap"]);
+
+  if (!Number.isInteger(candidatesSeen) || candidatesSeen < 0) {
+    violations.push("evidence_candidatesSeen_required");
+  }
+  if (!Array.isArray(candidates)) {
+    violations.push("evidence_candidates_required");
+  }
+
+  const normalizedCandidates = [];
+  if (Array.isArray(candidates)) {
+    for (const [index, entry] of candidates.entries()) {
+      const valid = entry !== null
+        && typeof entry === "object"
+        && !Array.isArray(entry)
+        && Object.keys(entry).length === 2
+        && typeof entry.ticket === "string"
+        && /^[A-Z]+-[0-9]+$/.test(entry.ticket)
+        && dispositions.has(entry.disposition);
+      if (!valid) {
+        violations.push(`evidence_candidate_invalid_at_index_${index}`);
+      } else {
+        normalizedCandidates.push(entry);
+      }
+    }
+    const candidateTickets = normalizedCandidates.map((entry) => entry.ticket);
+    if (new Set(candidateTickets).size !== candidateTickets.length) {
+      violations.push("evidence_candidate_tickets_must_be_unique");
+    }
+    if (Number.isInteger(candidatesSeen) && candidatesSeen !== candidates.length) {
+      violations.push(
+        `evidence_candidate_count_mismatch: candidatesSeen ${candidatesSeen} != candidates.length ${candidates.length}`,
+      );
+    }
+  }
 
   if (!Number.isInteger(artifact.readyCandidates) || artifact.readyCandidates < 0) {
-    violations.push("readyCandidates_required_for_low_supply");
-  } else if (artifact.readyCandidates !== 0) {
-    violations.push(`low_supply_readyCandidates_must_be_0 (got ${artifact.readyCandidates})`);
+    violations.push("readyCandidates_required_for_work_plan");
+  } else if (Number.isInteger(candidatesSeen) && artifact.readyCandidates !== candidatesSeen) {
+    violations.push(
+      `candidate_count_mismatch: readyCandidates ${artifact.readyCandidates} != evidence.candidatesSeen ${candidatesSeen}`,
+    );
   }
 
   if (!Number.isInteger(artifact.triageBacklog) || artifact.triageBacklog < 0) {
-    violations.push("triageBacklog_required_for_low_supply");
-  } else if (artifact.triageBacklog < 1) {
-    violations.push(`low_supply_triage_backlog_must_be_at_least_1 (got ${artifact.triageBacklog})`);
+    violations.push("triageBacklog_required_for_work_plan");
+  }
+
+  const planTickets = artifact.plan.map((item) => item.ticket);
+  const deferredTickets = artifact.deferred.map((item) => item.ticket);
+  const accountedTickets = [...planTickets, ...deferredTickets];
+  if (new Set(accountedTickets).size !== accountedTickets.length) {
+    violations.push("work_plan_ticket_accounting_must_be_unique");
+  }
+
+  const expectedTicket = planTickets[0] ?? null;
+  if (artifact.ticket !== expectedTicket) {
+    violations.push(`work_plan_ticket_must_equal_first_plan_ticket (expected ${expectedTicket})`);
+  }
+
+  if (artifact.recommendation === "DISPATCH") {
+    if (artifact.plan.length === 0) violations.push("dispatch_plan_must_not_be_empty");
+    if (Object.hasOwn(artifact, "noopReason")) violations.push("dispatch_must_not_have_noopReason");
+
+    const evidencePlan = normalizedCandidates
+      .filter((entry) => entry.disposition === "selected")
+      .map((entry) => entry.ticket);
+    const evidenceDeferred = normalizedCandidates
+      .filter((entry) => entry.disposition !== "selected")
+      .map((entry) => ({ ticket: entry.ticket, reason: entry.disposition }));
+    if (JSON.stringify(planTickets) !== JSON.stringify(evidencePlan)) {
+      violations.push("dispatch_plan_must_match_candidate_evidence");
+    }
+    if (JSON.stringify(artifact.deferred) !== JSON.stringify(evidenceDeferred)) {
+      violations.push("dispatch_deferred_must_match_candidate_evidence");
+    }
+    if (Number.isInteger(candidatesSeen) && accountedTickets.length !== candidatesSeen) {
+      violations.push(
+        `dispatch_candidate_accounting_mismatch: plan ${artifact.plan.length} + deferred ${artifact.deferred.length} != candidatesSeen ${candidatesSeen}`,
+      );
+    }
+
+    const hasCapDeferral = normalizedCandidates.some((entry) => entry.disposition === "cap_full");
+    if (hasCapDeferral) {
+      const inFlightSeen = evidence?.inFlightSeen;
+      const maxInFlight = evidence?.maxInFlight;
+      if (!Number.isInteger(inFlightSeen) || inFlightSeen < 0
+        || !Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        violations.push("capacity_evidence_required_for_cap_full");
+      } else if (inFlightSeen + artifact.plan.length < maxInFlight) {
+        violations.push(
+          `cap_full_contradicts_capacity: inFlightSeen ${inFlightSeen} + plan ${artifact.plan.length} < maxInFlight ${maxInFlight}`,
+        );
+      }
+    }
+    if (artifact.triageBacklog !== 0) {
+      violations.push(`dispatch_triageBacklog_must_be_0 (got ${artifact.triageBacklog})`);
+    }
+  } else if (artifact.recommendation === "LOW_SUPPLY") {
+    if (artifact.plan.length > 0 || artifact.deferred.length > 0) {
+      violations.push("low_supply_plan_and_deferred_must_be_empty");
+    }
+    if (Object.hasOwn(artifact, "noopReason")) violations.push("low_supply_must_not_have_noopReason");
+    if (artifact.readyCandidates !== 0) {
+      violations.push(`low_supply_readyCandidates_must_be_0 (got ${artifact.readyCandidates})`);
+    }
+    if (Number.isInteger(candidatesSeen) && candidatesSeen !== 0) {
+      violations.push(`low_supply_candidatesSeen_must_be_0 (got ${candidatesSeen})`);
+    }
+    if (normalizedCandidates.length !== 0) violations.push("low_supply_candidates_must_be_empty");
+    if (Number.isInteger(artifact.triageBacklog) && artifact.triageBacklog < 1) {
+      violations.push(`low_supply_triage_backlog_must_be_at_least_1 (got ${artifact.triageBacklog})`);
+    }
+  } else if (artifact.recommendation === "NOOP") {
+    if (artifact.plan.length > 0 || artifact.deferred.length > 0) {
+      violations.push("noop_plan_and_deferred_must_be_empty");
+    }
+    if (!Object.hasOwn(artifact, "noopReason")) {
+      violations.push("noopReason_required_for_noop");
+    } else if (artifact.noopReason === "queue_empty") {
+      if (artifact.readyCandidates !== 0) {
+        violations.push(`queue_empty_readyCandidates_must_be_0 (got ${artifact.readyCandidates})`);
+      }
+      if (Number.isInteger(candidatesSeen) && candidatesSeen !== 0) {
+        violations.push(`queue_empty_candidatesSeen_must_be_0 (got ${candidatesSeen})`);
+      }
+      if (normalizedCandidates.length !== 0) violations.push("queue_empty_candidates_must_be_empty");
+    } else if (artifact.noopReason === "cap_full") {
+      if (normalizedCandidates.length === 0) violations.push("cap_full_candidates_must_not_be_empty");
+      if (normalizedCandidates.some((entry) => entry.disposition !== "cap_full")) {
+        violations.push("cap_full_candidates_must_all_have_cap_full_disposition");
+      }
+      const inFlightSeen = evidence?.inFlightSeen;
+      const maxInFlight = evidence?.maxInFlight;
+      if (!Number.isInteger(inFlightSeen) || inFlightSeen < 0
+        || !Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        violations.push("capacity_evidence_required_for_cap_full");
+      } else if (inFlightSeen < maxInFlight) {
+        violations.push(`cap_full_contradicts_capacity: inFlightSeen ${inFlightSeen} < maxInFlight ${maxInFlight}`);
+      }
+    } else if (artifact.noopReason === "all_overlapping") {
+      if (normalizedCandidates.length === 0) violations.push("all_overlapping_candidates_must_not_be_empty");
+      if (normalizedCandidates.some((entry) => entry.disposition !== "owned_paths_overlap")) {
+        violations.push("all_overlapping_candidates_must_all_have_overlap_disposition");
+      }
+    }
+    if (artifact.triageBacklog !== 0) {
+      violations.push(`noop_triageBacklog_must_be_0 (got ${artifact.triageBacklog})`);
+    }
   }
 
   return violations;
@@ -305,17 +504,24 @@ function verifyCompleted({
     const worktreePath = worktreeRecord.path && existsSync(worktreeRecord.path)
       ? worktreeRecord.path
       : path.join(workspaceDir, "repo");
-    const vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], {
-      cwd: worktreePath,
-      encoding: "utf8",
-      timeout: verifyTimeoutMs,
-    });
+    const verifyLogPath = path.join(workspaceDir, ".verify.log");
+    const verifyLogFd = openSync(verifyLogPath, "w");
+    let vres;
+    try {
+      vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], {
+        cwd: worktreePath,
+        stdio: ["ignore", verifyLogFd, verifyLogFd],
+        timeout: verifyTimeoutMs,
+      });
+    } finally {
+      closeSync(verifyLogFd);
+    }
+    const output = readFileSync(verifyLogPath, "utf8");
     if (vres.error?.code === "ETIMEDOUT" || vres.status !== 0) {
-      const output = [vres.stdout, vres.stderr].filter(Boolean).join("\n").trim();
       const timedOut = vres.error?.code === "ETIMEDOUT";
       const why = timedOut
         ? `timed out after ${verifyTimeoutMs}ms`
-        : output.split("\n").filter(Boolean).pop() || `exit ${vres.status}`;
+        : repoVerifyFailureExcerpt(output) || `exit ${vres.status}`;
       const baselineStillRed = !timedOut && matchesRedBaseline(worktreeRecord.baseline, output);
       throw new ContractViolation(
         [`repo_verify_failed: ${why}`],
