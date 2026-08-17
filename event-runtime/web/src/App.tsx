@@ -35,6 +35,7 @@ type NavBadge = {
 
 const Artifacts = lazy(() => import("./views/Artifacts").then((m) => ({ default: m.Artifacts })));
 const Graph = lazy(() => import("./views/Graph").then((m) => ({ default: m.Graph })));
+const Chain = lazy(() => import("./views/Chain").then((m) => ({ default: m.Chain })));
 const Projects = lazy(() => import("./views/Projects").then((m) => ({ default: m.Projects })));
 const Schedules = lazy(() => import("./views/Schedules").then((m) => ({ default: m.Schedules })));
 const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default: m.Proposals })));
@@ -129,6 +130,10 @@ export function App() {
   const workerHealthFromHash = view === "workers" ? hashSearch(window.location.hash).get("health") : null;
   const focusWorkerHealth = isWorkerHealthFilter(workerHealthFromHash) ? workerHealthFromHash : null;
   const focusGraphNode = view === "graph" ? (route[1] ?? null) : null;
+  // `#/chain/:correlationId[/:nodeId]` — the chain trace (WM-527); node
+  // selection rides the hash so a pasted link lands on the same node.
+  const chainId = view === "chain" ? (route[1] ?? null) : null;
+  const focusChainNode = view === "chain" ? (route[2] ?? null) : null;
   const artifactQuery = hashSearch(window.location.hash);
   const artifactFilters: ArtifactFilters = {
     kind: view === "artifacts" ? artifactQuery.get("kind") : null,
@@ -199,6 +204,8 @@ export function App() {
   const jumpToWorkers = (health: WorkerHealthFilter) => navigate(workerHash(null, health));
   const jumpToProject = (name: string) => navigate(hashPath("projects", name));
   const jumpToGraph = (nodeId?: string) => navigate(hashPath("graph", nodeId));
+  const jumpToChain = (correlationId: string, nodeId?: string) =>
+    navigate(hashPath("chain", correlationId, nodeId));
 
   const health = useQuery({
     queryKey: ["health"],
@@ -298,7 +305,9 @@ export function App() {
     }, [navigate, selectContext, openRepos]),
   );
 
-  const viewLabel = NAV.find((n) => n.key === view)?.label ?? (view === "run" ? "Run" : "Overview");
+  const viewLabel =
+    NAV.find((n) => n.key === view)?.label ??
+    (view === "run" ? "Run" : view === "chain" ? "Chain" : "Overview");
 
   useEffect(() => {
     const id = route.length > 1 ? route[route.length - 1] : null;
@@ -570,6 +579,7 @@ export function App() {
                 onJumpAgent={jumpToAgent}
                 onJumpEvent={jumpToEvent}
                 onJumpProposal={jumpToProposal}
+                onJumpChain={jumpToChain}
               />
             </Suspense>
           ) : view === "runs" || view === "run" ? (
@@ -592,6 +602,19 @@ export function App() {
                 connected={connected}
                 focusRepoName={focusRepoName}
                 onSelectRepo={(name) => navigate(hashPath("projects", name))}
+              />
+            </Suspense>
+          ) : view === "chain" && chainId ? (
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading chain…</div>}>
+              <Chain
+                correlationId={chainId}
+                focusNodeId={focusChainNode}
+                onSelectNode={(id) => navigate(hashPath("chain", chainId, id))}
+                onJumpEvent={jumpToEvent}
+                onJumpRun={jumpToRun}
+                onOpenRunFull={openRunFull}
+                onJumpProposal={jumpToProposal}
+                onJumpAgent={jumpToAgent}
               />
             </Suspense>
           ) : view === "graph" ? (
@@ -659,6 +682,7 @@ export function App() {
               }
               onJumpProposal={jumpToProposal}
               onJumpRun={jumpToRun}
+              onJumpChain={jumpToChain}
               onTriggerAgain={(envelope) => {
                 setInjectSeed(envelope);
                 setInjectOpen(true);

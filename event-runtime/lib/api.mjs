@@ -21,6 +21,7 @@ import {
   send as sendJson,
 } from "./api-http.mjs";
 import { handleIntakeApiRoute } from "./api-intake.mjs";
+import { handleChainApiRoute } from "./api-chain.mjs";
 import { handleMetricsApiRoute } from "./api-metrics.mjs";
 import { handleRegistryApiRoute } from "./api-registry.mjs";
 import {
@@ -158,6 +159,10 @@ export function createApi({
         url.pathname === "/metrics/breakdown"
       ) {
         const result = handleMetricsApiRoute(common);
+        if (result !== false) return result;
+      }
+      if (url.pathname.startsWith("/chain/")) {
+        const result = handleChainApiRoute(common);
         if (result !== false) return result;
       }
       if (

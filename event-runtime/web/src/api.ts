@@ -2,6 +2,7 @@ import type {
   AdmittedEvent,
   AgentsView,
   ArtifactInventoryItem,
+  ChainView,
   ApproveOutcome,
   CancelOutcome,
   EnvIdentity,
@@ -110,6 +111,8 @@ export const api = {
     call<{ released: boolean; runId: string }>("POST", `/workers/${encodeURIComponent(workerId)}/release`, { runId }),
   // The agent registry, fully readable: definitions, prompts, schemas, pins.
   agents: () => call<AgentsView>("GET", "/agents"),
+  // Every event + run under one correlation id (WM-527); 404 when unknown.
+  chain: (correlationId: string) => call<ChainView>("GET", `/chain/${encodeURIComponent(correlationId)}`),
   // Configured factory repositories (config/repos.yaml) — context tabs open from this list.
   repos: () => call<{ repos: RepoItem[] }>("GET", "/repos"),
   // Janitor worktree scan and cleanup (apply: false for dry run, apply: true for teardown)

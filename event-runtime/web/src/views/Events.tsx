@@ -179,6 +179,7 @@ export function Events({
   onSelectType,
   onJumpProposal,
   onJumpRun,
+  onJumpChain,
   onTriggerAgain,
   onInject,
   rejumpEpoch,
@@ -191,6 +192,8 @@ export function Events({
   onSelectType: (type: string | null) => void;
   onJumpProposal: (id: string) => void;
   onJumpRun: (runId: string) => void;
+  /** Open the chain trace this event belongs to (WM-527). Optional so tests can omit it. */
+  onJumpChain?: (correlationId: string, nodeId?: string) => void;
   onTriggerAgain: (envelope: Record<string, unknown>) => void;
   onInject: () => void;
   rejumpEpoch?: number;
@@ -863,6 +866,13 @@ export function Events({
                 </Button>
               )}
               <div className="flex items-center gap-1.5">
+                {onJumpChain && (
+                  <Button
+                    onClick={() => onJumpChain(sel.correlationId ?? sel.eventId, `event:${sel.source}:${sel.eventId}`)}
+                  >
+                    View chain
+                  </Button>
+                )}
                 <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
                   Replay…
                 </Button>
@@ -884,7 +894,28 @@ export function Events({
             <KV k="type" v={sel.type} />
             <KV k="subject" v={sel.subject} />
             <KV k="status" v={<StateBadge state={sel.status} hues={EVENT_STATUS_HUES} />} />
-            <KV k="correlationId" v={sel.correlationId} />
+            <KV
+              k="correlationId"
+              v={
+                sel.correlationId && onJumpChain ? (
+                  <JumpLink onClick={() => onJumpChain(sel.correlationId!)} title="Open chain trace">
+                    {sel.correlationId}
+                  </JumpLink>
+                ) : (
+                  sel.correlationId
+                )
+              }
+            />
+            <KV
+              k="causationId"
+              v={
+                sel.causationId ? (
+                  <JumpLink onClick={() => onJumpRun(sel.causationId!)} title="The run that emitted this event">
+                    {shortId(sel.causationId)}
+                  </JumpLink>
+                ) : null
+              }
+            />
             <KV k="occurredAt" v={<Ago iso={sel.occurredAt} now={now} />} />
             <KV k="receivedAt" v={<Ago iso={sel.receivedAt} now={now} />} />
             <KV k="admittedAt" v={<Ago iso={sel.admittedAt} now={now} />} />

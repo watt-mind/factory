@@ -42,6 +42,7 @@ export function RunFull({
   onJumpAgent,
   onJumpEvent,
   onJumpProposal,
+  onJumpChain,
 }: {
   runId: string;
   connected: boolean;
@@ -49,6 +50,8 @@ export function RunFull({
   onJumpAgent: (ref: string) => void;
   onJumpEvent: (source: string, eventId: string) => void;
   onJumpProposal?: (id: string) => void;
+  /** Open the chain trace this run belongs to (WM-527). */
+  onJumpChain?: (correlationId: string, nodeId?: string) => void;
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
@@ -88,6 +91,18 @@ export function RunFull({
       (e) => e.causationId === runId || (e.envelope as any)?.causationId === runId,
     );
   }, [eventsQ.data, runId]);
+  // The chain this run belongs to: its origin event's correlation id (falling
+  // back to the event id, as the chain emitter does), or — for a run whose
+  // origin is not in the list — any event it emitted names the same chain.
+  const chainKey = useMemo(() => {
+    const events = eventsQ.data?.events ?? [];
+    const origin = listRow
+      ? events.find((e) => e.source === listRow.eventSource && e.eventId === listRow.eventId)
+      : null;
+    if (origin) return origin.correlationId ?? origin.eventId;
+    const emitted = events.find((e) => e.causationId === runId);
+    return emitted ? (emitted.correlationId ?? emitted.eventId) : null;
+  }, [eventsQ.data, listRow, runId]);
   const runsById = useMemo(() => {
     const map = new Map<string, RunListItem>();
     for (const r of listQ.data?.runs ?? []) {
@@ -393,6 +408,13 @@ export function RunFull({
                   </Button>
                 ))}
             </div>
+          )}
+          {onJumpChain && chainKey && (
+            <Button
+              onClick={() => onJumpChain(chainKey, `run:${runId}`)}
+            >
+              View chain
+            </Button>
           )}
           <Button onClick={() => toggleRunPin(runId)}>
             <span>Open in tab</span>

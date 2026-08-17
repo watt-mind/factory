@@ -1329,3 +1329,36 @@ worktrees a repo owns.
 
 Nothing here writes `config/repos.yaml`. The registry is edited in the file
 and read by the UI, exactly as the agent registry is in §10.6.
+
+### 10.15 Chain trace (`#/chain/:correlationId`) — WM-527
+
+The Graph (§10.13) answers "what can happen"; the chain trace answers "what
+happened to *this* one, and where did it start". A chain instance is stitched
+by two ids the emitter writes on every hop (`lib/chain.mjs`): `correlationId`,
+inherited unchanged from the origin event (falling back to the origin's own
+`eventId` when it carried none), and `causationId`, the run id that produced
+the derived event. `GET /chain/:correlationId` returns every event and run
+under that key — flat lists, `causationId` intact, 404 when unknown — and the
+client builds the DAG: origin event → run → emitted events → runs …, laid out
+left-to-right on the same React Flow + elk canvas as the map, with tighter
+layer spacing because chains are long and thin.
+
+- **Reachable from wherever an operator is standing.** The event panel shows
+  `correlationId` (a link into the chain) and `causationId` (a link to the
+  run that emitted it) and has a **View chain** action; the full run page has
+  the same action, keyed by the run's origin event. Both land on the chain
+  with that event/run pre-selected (`#/chain/:correlationId/:nodeId`).
+- **Every node is an instance.** Event nodes carry source, type, status,
+  short id, age and repos; run nodes carry agent, state, adapter, attempt and
+  reason code. The left border is the event status / run state hue, so a
+  failed hop reads at a glance. The header sums it up: origin, event/run
+  counts, hop depth, and a state tally.
+- **Same chrome as the map.** `j`/`k` (and arrows) walk nodes in reading
+  order, `z` / **Show on canvas** pans the selection into view, `Esc` closes,
+  **Reset layout** re-runs elk. The panel links out to Events, Runs, the run
+  page, Proposals and Agents, and to the parent run / origin event *inside*
+  the chain. Positions are reused across the 3 s poll while node/edge
+  identity is unchanged (§10.13's identity rule).
+
+It is a drill-in like `#/run/:id`, not a nav item: you arrive from an event
+or a run, never cold.

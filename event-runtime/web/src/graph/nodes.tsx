@@ -7,7 +7,7 @@ import { DECISION_HUES, STATE_HUES, StateBadge } from "../components/ui";
 // reads as part of the tool rather than an embedded diagram widget. Accents
 // and dash styles come from ./style so the legend stays truthful (WM-99).
 
-const handleStyle = { background: "var(--border-strong)", width: 6, height: 6, border: "none" };
+export const handleStyle = { background: "var(--border-strong)", width: 6, height: 6, border: "none" };
 
 const searchHitOf = (data: NodeProps["data"]) => Boolean((data as { searchHit?: boolean }).searchHit);
 const searchCurrentOf = (data: NodeProps["data"]) =>
@@ -39,7 +39,7 @@ export function nodeAccessibleName(node: GraphNode): string {
   return `${kind} ${node.label}, ${materialState(node)}`;
 }
 
-function Shell({
+export function Shell({
   children,
   accent,
   selected,
@@ -84,7 +84,7 @@ function Shell({
   );
 }
 
-function Line({ children, dim }: { children: React.ReactNode; dim?: boolean }) {
+export function Line({ children, dim }: { children: React.ReactNode; dim?: boolean }) {
   return (
     <div
       className="mono truncate text-[11.5px]"
