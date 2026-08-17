@@ -397,7 +397,21 @@ repos:
     # Cap on concurrent ticket agents; per repo, not per supervisor, like bj29.
     max_in_flight: 20
 
-    verify: bun test && bun build/emit.mjs --check
+    # Fast, deterministic local gate — deliberately a strict SUBSET of CI
+    # (WM-528). GitHub CI (.github/workflows/ci.yml, `bun test
+    # --max-concurrency=4` over the whole tree) remains the full-suite merge
+    # gate; merge already requires CI green, so re-running the full ~2050-test
+    # suite (~200-250s) inside every dispatched worktree only duplicated it and
+    # generated load-induced flakes: on 2026-08-17 four of six dispatches
+    # (WM-259, WM-350, WM-338, WM-512) failed `repo_verify_failed` on commits
+    # that were green in CI, because up to ~8 sibling worktrees run their own
+    # serve/worker/web daemons and suites at once. `event-runtime/lib` is the
+    # unit-only slice: it binds `port: 0` and shells out to git only — no
+    # daemons, no demo seed (those live in event-runtime/*.test.mjs, cli/,
+    # demo/, web/, bin/, orchestrator/ and stay CI-only). Measured 70-72s wall
+    # on the loaded host, 0 failures over repeated runs. `emit.mjs --check` is
+    # the contract check that must never be skipped locally.
+    verify: bun test event-runtime/lib && bun build/emit.mjs --check
 
     # Owned Paths closure rules for this repo's control-plane ticket types.
     owned_paths_policy:

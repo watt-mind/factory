@@ -31,10 +31,13 @@ export const EVIDENCE_INLINE_LIMIT_BYTES = 256 * 1024;
  * performance budget — it exists to tell "wedged forever" from "running".
  *
  * 120s was below the real cost and failed every dispatch (WM-510): this repo's
- * own `bun test && bun build/emit.mjs --check` measures 196-217s, so nothing
- * could ever pass. Sized at ~3x the slowest observed run, which leaves room for
- * a loaded host while staying far under `limits.max_run_minutes: 45` in
- * config/policy.yaml — the bound that actually caps a wedged run.
+ * own verify at the time (`bun test && bun build/emit.mjs --check`, the full
+ * suite) measured 196-217s, so nothing could ever pass. Sized at ~3x the
+ * slowest observed run, which leaves room for a loaded host while staying far
+ * under `limits.max_run_minutes: 45` in config/policy.yaml — the bound that
+ * actually caps a wedged run. (The factory verify has since been narrowed to
+ * `bun test event-runtime/lib && bun build/emit.mjs --check`, ~70s, WM-528 —
+ * the ceiling stays where it is for the other repos.)
  *
  * Raise this rather than trimming it to fit: a ceiling that only just fits is
  * the same outage with a longer fuse. Per-repo tuning goes through
