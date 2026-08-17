@@ -35,6 +35,16 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
+function isolatedScheduleRegistry() {
+  const agents = new Map(registry.agents);
+  const mergeScan = agents.get("merge-scan@2");
+  agents.set("merge-scan@2", {
+    ...mergeScan,
+    workspace: { type: "ephemeral" },
+  });
+  return { ...registry, agents };
+}
+
 describe("POST /schedules/:loop/run (OPS-401)", () => {
   let s;
   beforeAll(async () => {
@@ -95,7 +105,12 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
   });
 
   test("manual merge trigger propagates selected PR numbers into the immutable event and planned input", async () => {
-    const mergeServer = await makeServer();
+    // Planning commits the run before the API sends its response, so a returned
+    // runId guarantees read-after-write. Keep this schedule-input test isolated
+    // from merge-scan's unrelated shared repository mirror fetch.
+    const mergeServer = await makeServer({
+      registry: isolatedScheduleRegistry(),
+    });
     try {
       const res = await fetch(mergeServer.url("/schedules/merge-factory/run"), {
         method: "POST",
@@ -104,6 +119,9 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
       });
       expect(res.status).toBe(200);
       const body = await res.json();
+      expect(body.decision).toBe("run");
+      expect(body.reason).toBeNull();
+      expect(typeof body.runId).toBe("string");
       const event = mergeServer.db
         .query(
           `SELECT envelope_json FROM events WHERE source = 'operator' AND event_id = ?`,
