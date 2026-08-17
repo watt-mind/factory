@@ -192,6 +192,42 @@ factory notify "<EVENT> <TICKET/PR>: <one answerable sentence>"
 
 ---
 
+### Loop 6: Delegate the Long Work — Stay Available to Be Steered
+
+The operator "observes and sets high-level strategy". That only works if the
+session can answer them. A blocking command makes the operator wait on work they
+cannot see, and their steering message queues behind it.
+
+**Delegate to a subagent** anything long-running or output-heavy: full test
+suites (a `bun test` pass is ~200s), `gh run watch`, PR completion, conflict
+resolution, dependency installs, log triage, multi-file investigation. The
+subagent returns a verdict; its raw output never enters your context.
+
+**Keep the decisions inline.** Selecting and dispatching tickets, approving and
+rejecting proposals, judging escalations, and deciding what to fix are cheap and
+are exactly what the operator is steering. This rule is "delegate the waiting",
+not "delegate everything".
+
+Reach for the specialised agent before a general one — each exists so its raw
+output stays out of the caller's context:
+
+| Agent | Use for |
+| :--- | :--- |
+| `factory-ci-doctor` | one red GitHub Actions run — after it fails, never to wait for it |
+| `factory-merge-reviewer` | a PR diff, so the diff never enters the orchestrator |
+| `factory-infra-scout` | anything needing SSH or container output |
+| `factory-ux-critic` | user-facing flows, after verification and before the PR |
+
+The secondary reason is cost: a tool result is re-sent on every later turn, so a
+test log read inline is charged for the rest of the shift — see **Context
+discipline** in `AGENTS.md` for the measurements.
+
+Two failure modes to avoid: spawning a subagent and then re-doing its work
+inline, and reading a subagent's transcript file directly — which puts back
+exactly the payload the delegation removed.
+
+---
+
 ## 4. Command Center Reference
 
 ```bash
