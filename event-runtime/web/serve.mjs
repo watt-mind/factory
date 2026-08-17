@@ -56,6 +56,12 @@ Bun.serve({
     if (!resolved.startsWith(DIST)) return new Response("not found", { status: 404 });
     const file = Bun.file(resolved === DIST ? path.join(DIST, "index.html") : resolved);
     if (await file.exists()) return new Response(file);
+    // A stale content-hashed import must fail as a missing module. Returning the
+    // SPA document here disguises it as JavaScript and produces a misleading
+    // MIME error before the route error boundary can recover.
+    if (url.pathname === "/assets" || url.pathname.startsWith("/assets/")) {
+      return new Response("asset not found", { status: 404 });
+    }
     return new Response(Bun.file(path.join(DIST, "index.html")));
   },
 });
