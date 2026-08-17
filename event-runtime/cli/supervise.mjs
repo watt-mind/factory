@@ -117,6 +117,21 @@ export const SPAWN_GRACE_MS = 10_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Flags that shape a worker are passed through unchanged by the pool. */
+export function workerPassthroughArgs(args) {
+  const passthrough = [];
+  for (const flag of ["--adapter-override", "--poll-ms", "--drain-timeout"]) {
+    const v = flagValue(args, flag);
+    if (v !== null && v !== undefined) passthrough.push(flag, v);
+  }
+  if (args.includes("--reload-on-change")) passthrough.push("--reload-on-change");
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--label")
+      passthrough.push("--label", String(args[i + 1] ?? ""));
+  }
+  return passthrough;
+}
+
 /**
  * The pool supervisor: a deterministic loop that maintains
  * `workers.min ≤ pool ≤ workers.max` from observed queue depth. It is its own
@@ -162,15 +177,7 @@ export default async function supervise(args) {
 
   // Whatever shapes a worker gets handed straight through, so a supervised pool
   // is configured exactly like the single worker it replaces.
-  const passthrough = [];
-  for (const flag of ["--adapter-override", "--poll-ms", "--drain-timeout"]) {
-    const v = flagValue(args, flag);
-    if (v !== null && v !== undefined) passthrough.push(flag, v);
-  }
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--label")
-      passthrough.push("--label", String(args[i + 1] ?? ""));
-  }
+  const passthrough = workerPassthroughArgs(args);
 
   // One supervisor per run dir. Two would allocate the same slot numbers and
   // silently orphan each other's workers — pidfiles overwritten, processes
