@@ -184,6 +184,12 @@ else
   fi
 fi
 
+WEB_AVAILABLE=1
+if [[ -f "$BASELINE_REPORT" && ! -f "$WEB_DIR/dist/index.html" ]]; then
+  WEB_AVAILABLE=0
+  warn "web UI unavailable because the baseline web build failed; control API and worker remain usable"
+fi
+
 # ---------------------------------------------------------------- daemons ---
 FRESH=0
 [[ -f "$HOME_DIR/runtime.db" ]] || FRESH=1
@@ -266,32 +272,34 @@ else
   STARTED_WORKER=1
 fi
 
-if pid_alive "$RUN_DIR/web.pid"; then
-  info "web server already running (pid $(cat "$RUN_DIR/web.pid"), port $WEB_PORT)"
-else
-  info "starting web server on $WEB_PORT"
-  spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$WT" \
-    env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
-    bun event-runtime/web/serve.mjs
-  STARTED_WEB=1
-fi
-
-# A listener alone is insufficient: an alien process could have occupied the
-# adjacent port after allocation. Require the recorded web daemon itself to own
-# the persisted port before reporting the environment ready.
-WEB_PID_PORT=""
-for _ in {1..50}; do
-  if ! pid_alive "$RUN_DIR/web.pid"; then
-    dump_daemon_log "$RUN_DIR/web.log" "web server"
-    die "web server died during startup on $WEB_PORT — see $RUN_DIR/web.log"
+if [[ "$WEB_AVAILABLE" -eq 1 ]]; then
+  if pid_alive "$RUN_DIR/web.pid"; then
+    info "web server already running (pid $(cat "$RUN_DIR/web.pid"), port $WEB_PORT)"
+  else
+    info "starting web server on $WEB_PORT"
+    spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$WT" \
+      env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+      bun event-runtime/web/serve.mjs
+    STARTED_WEB=1
   fi
-  WEB_PID_PORT=$(listen_tcp_port "$RUN_DIR/web.pid" || true)
-  [[ "$WEB_PID_PORT" == "$WEB_PORT" ]] && break
-  sleep 0.1
-done
-if [[ "$WEB_PID_PORT" != "$WEB_PORT" ]]; then
-  dump_daemon_log "$RUN_DIR/web.log" "web server"
-  die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT"
+
+  # A listener alone is insufficient: an alien process could have occupied the
+  # adjacent port after allocation. Require the recorded web daemon itself to own
+  # the persisted port before reporting the environment ready.
+  WEB_PID_PORT=""
+  for _ in {1..50}; do
+    if ! pid_alive "$RUN_DIR/web.pid"; then
+      dump_daemon_log "$RUN_DIR/web.log" "web server"
+      die "web server died during startup on $WEB_PORT — see $RUN_DIR/web.log"
+    fi
+    WEB_PID_PORT=$(listen_tcp_port "$RUN_DIR/web.pid" || true)
+    [[ "$WEB_PID_PORT" == "$WEB_PORT" ]] && break
+    sleep 0.1
+  done
+  if [[ "$WEB_PID_PORT" != "$WEB_PORT" ]]; then
+    dump_daemon_log "$RUN_DIR/web.log" "web server"
+    die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT"
+  fi
 fi
 
 # ------------------------------------------------------------------- seed ---
@@ -338,6 +346,11 @@ if [[ "$SEED" -eq 1 && ( "$FRESH" -eq 1 || "$RESEED" -eq 1 ) ]]; then
 fi
 
 # ----------------------------------------------------------------- report ---
+if [[ "$WEB_AVAILABLE" -eq 1 ]]; then
+  WEB_UI_REPORT="http://127.0.0.1:$WEB_PORT"
+else
+  WEB_UI_REPORT="unavailable (baseline web build failed)"
+fi
 WORKTREE_UP_OK=1
 cat <<EOF
 
@@ -346,7 +359,7 @@ $(info "ready — $LABEL")
   checkout   $WT
   event home $HOME_DIR
   control    http://127.0.0.1:$API_PORT      $(adapter_banner "$HEALTH_ADAPTER")
-  web UI     http://127.0.0.1:$WEB_PORT
+  web UI     $WEB_UI_REPORT
   logs       $RUN_DIR/{serve,worker,web}.log
 
   status:  FACTORY_EVENT_PORT=$API_PORT bun event-runtime/cli.mjs status
