@@ -11,7 +11,7 @@
  * evidence checking is slice 2.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { validate } from "./schema.mjs";
@@ -96,6 +96,58 @@ function matchesRedBaseline(baseline, verifyOutput) {
   const verifySig = failureSignature(verifyOutput);
   if (!baselineSig || !verifySig) return false;
   return baselineSig === verifySig;
+}
+
+const REPO_VERIFY_REASON_MAX_LINES = 40;
+const REPO_VERIFY_REASON_MAX_CHARS = 8 * 1024;
+const REPO_VERIFY_TEST_FAILURE_LINE = /\(fail\)|✗/i;
+const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
+
+function boundedDiagnostic(lines) {
+  const excerpt = [];
+  let remaining = REPO_VERIFY_REASON_MAX_CHARS;
+  for (const line of lines) {
+    const separatorLength = excerpt.length === 0 ? 0 : 1;
+    if (remaining <= separatorLength) break;
+    remaining -= separatorLength;
+    if (line.length <= remaining) {
+      excerpt.push(line);
+      remaining -= line.length;
+      continue;
+    }
+    excerpt.push(`${line.slice(0, Math.max(0, remaining - 1))}…`);
+    break;
+  }
+  return excerpt.join("\n");
+}
+
+/**
+ * Keep the actionable lines from a failed repository verification bounded for
+ * the run reason. Explicit test-failure markers are retained before generic
+ * errors, so later runner noise cannot displace the failing test names.
+ */
+function repoVerifyFailureExcerpt(output) {
+  const lines = String(output ?? "")
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) return "";
+
+  const testFailures = lines.filter((line) => REPO_VERIFY_TEST_FAILURE_LINE.test(line));
+  const errors = lines.filter(
+    (line) => !REPO_VERIFY_TEST_FAILURE_LINE.test(line) && REPO_VERIFY_ERROR_LINE.test(line),
+  );
+  if (testFailures.length === 0 && errors.length === 0) {
+    return boundedDiagnostic(lines.slice(-REPO_VERIFY_REASON_MAX_LINES));
+  }
+
+  const excerpt = testFailures.slice(-REPO_VERIFY_REASON_MAX_LINES);
+  const errorCapacity = Math.max(0, REPO_VERIFY_REASON_MAX_LINES - excerpt.length - 1);
+  if (errorCapacity > 0) excerpt.push(...errors.slice(-errorCapacity));
+  const summary = lines.at(-1);
+  if (excerpt.length < REPO_VERIFY_REASON_MAX_LINES && !excerpt.includes(summary)) excerpt.push(summary);
+  return boundedDiagnostic(excerpt);
 }
 
 export { normalizeFailureOutput, failureSignature };
@@ -305,17 +357,24 @@ function verifyCompleted({
     const worktreePath = worktreeRecord.path && existsSync(worktreeRecord.path)
       ? worktreeRecord.path
       : path.join(workspaceDir, "repo");
-    const vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], {
-      cwd: worktreePath,
-      encoding: "utf8",
-      timeout: verifyTimeoutMs,
-    });
+    const verifyLogPath = path.join(workspaceDir, ".verify.log");
+    const verifyLogFd = openSync(verifyLogPath, "w");
+    let vres;
+    try {
+      vres = spawnSync("/bin/bash", ["-c", worktreeRecord.verify], {
+        cwd: worktreePath,
+        stdio: ["ignore", verifyLogFd, verifyLogFd],
+        timeout: verifyTimeoutMs,
+      });
+    } finally {
+      closeSync(verifyLogFd);
+    }
+    const output = readFileSync(verifyLogPath, "utf8");
     if (vres.error?.code === "ETIMEDOUT" || vres.status !== 0) {
-      const output = [vres.stdout, vres.stderr].filter(Boolean).join("\n").trim();
       const timedOut = vres.error?.code === "ETIMEDOUT";
       const why = timedOut
         ? `timed out after ${verifyTimeoutMs}ms`
-        : output.split("\n").filter(Boolean).pop() || `exit ${vres.status}`;
+        : repoVerifyFailureExcerpt(output) || `exit ${vres.status}`;
       const baselineStillRed = !timedOut && matchesRedBaseline(worktreeRecord.baseline, output);
       throw new ContractViolation(
         [`repo_verify_failed: ${why}`],

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { hashJson, sha256Hex } from "./canonical.mjs";
@@ -352,6 +352,42 @@ describe("worktree baseline verification (WM-334)", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(ContractViolation);
       expect(err.reasonCode).toBe("contract_violation");
+    }
+  });
+
+  test("a multi-line verification failure retains the failing test name and full log", () => {
+    const dir = worktreeWorkspace(
+      "printf 'suite start\\n(fail) totals > rejects an invalid total\\nRan 2045 tests across 150 files.\\n'; printf 'error: expected 400, received 200\\n' >&2; exit 1",
+      null,
+    );
+    try {
+      verifyResult({ spec: dispatchSpec, def: dispatchDef, registry, workspaceDir: dir, attempt: 1 });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations[0]).toContain("(fail) totals > rejects an invalid total");
+      expect(err.violations[0]).toContain("error: expected 400, received 200");
+    }
+
+    const verifyLog = readFileSync(path.join(dir, ".verify.log"), "utf8");
+    expect(verifyLog).toContain("suite start");
+    expect(verifyLog).toContain("(fail) totals > rejects an invalid total");
+    expect(verifyLog).toContain("Ran 2045 tests across 150 files.");
+    expect(verifyLog).toContain("error: expected 400, received 200");
+  });
+
+  test("later error noise cannot displace a failing test name from the bounded reason", () => {
+    const dir = worktreeWorkspace(
+      "printf '(fail) billing > rejects a duplicate charge\\n'; i=1; while [ \"$i\" -le 45 ]; do printf 'error: detail %s\\n' \"$i\"; i=$((i + 1)); done; exit 1",
+      null,
+    );
+    try {
+      verifyResult({ spec: dispatchSpec, def: dispatchDef, registry, workspaceDir: dir, attempt: 1 });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations[0]).toContain("(fail) billing > rejects a duplicate charge");
+      expect(err.violations[0].split("\n").length).toBeLessThanOrEqual(40);
     }
   });
 
