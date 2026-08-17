@@ -363,12 +363,10 @@ describe("context strip fast jump chords (WM-235)", () => {
   });
 });
 
-describe("view navigation landmark focus and announcement (WM-325)", () => {
-  test("main landmark receives focus without visual focus ring on view navigation", async () => {
+describe("view navigation landmark focus and announcement (WM-325, WM-542)", () => {
+  test("main landmark receives focus and announces the view on navigation", async () => {
     const utils = renderApp();
     const main = utils.getByRole("main");
-    expect(main.className).toContain("focus:outline-none");
-    expect(main.className).not.toContain("focus:ring");
 
     act(() => {
       fireEvent.keyDown(document.body, { key: "g" });
@@ -377,8 +375,20 @@ describe("view navigation landmark focus and announcement (WM-325)", () => {
     expect(window.location.hash).toBe("#/runs");
 
     await waitFor(() => {
+      expect(document.activeElement).toBe(main);
       expect(main.textContent).toContain("Runs view");
     });
+  });
+
+  test("theme suppresses the landmark ring without removing interactive focus rings", async () => {
+    const themeCss = await Bun.file(new URL("./theme.css", import.meta.url)).text();
+
+    expect(themeCss).toMatch(
+      /:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\);[^}]*\}/s,
+    );
+    expect(themeCss).toMatch(
+      /main\[tabindex="-1"\]:focus-visible\s*\{\s*outline:\s*none;\s*\}/,
+    );
   });
 });
 
