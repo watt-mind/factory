@@ -709,7 +709,7 @@ export function Workers({
                   } ${w.workerId === selectedId ? "row-selected" : ""}`}
                 >
                   <td
-                    className={`mono max-w-52 truncate border-b border-(--border) px-3 py-1.5 ${
+                    className={`mono max-w-52 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap ${
                       w.state === "stopped" && !w.stale ? "text-(--text-faint)" : ""
                     }`}
                     title={w.workerId}
@@ -717,17 +717,17 @@ export function Workers({
                     {w.workerId}
                   </td>
                   {show.has("host") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim)">{w.host}</td>
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">{w.host}</td>
                   )}
                   {show.has("pid") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-faint)">{w.pid}</td>
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap tabular-nums text-(--text-faint)">{w.pid}</td>
                   )}
                   {show.has("state") && (
-                    <td className="border-b border-(--border) px-3 py-1.5">
-                      <span className="flex items-baseline gap-1.5">
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <span className="flex items-baseline gap-1.5 whitespace-nowrap">
                         <StateBadge state={workerDisplayState(w)} hues={WORKER_STATE_HUES} />
                         {w.stale && (
-                          <span className="text-[11px] text-(--text-faint)" title="What the worker last reported before its heartbeat stopped">
+                          <span className="text-[11px] text-(--text-faint) whitespace-nowrap" title="What the worker last reported before its heartbeat stopped">
                             reported {w.state}
                           </span>
                         )}
@@ -736,7 +736,7 @@ export function Workers({
                   )}
                   {show.has("agent") && (
                     <td
-                      className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)"
+                      className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
                       title={w.activeAgent !== "-" ? w.activeAgent : undefined}
                     >
                       {w.activeAgent !== "-" ? (
@@ -748,7 +748,7 @@ export function Workers({
                   )}
                   {show.has("target") && (
                     <td
-                      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)"
+                      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
                       title={w.activeTarget !== "-" ? w.activeTarget : undefined}
                     >
                       {w.activeTarget !== "-" ? (
@@ -760,7 +760,7 @@ export function Workers({
                   )}
                   {show.has("activeModel") && (
                     <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={w.activeModel !== "-" ? w.activeModel : undefined}
                     >
                       {w.activeModel !== "-" ? (
@@ -771,9 +771,9 @@ export function Workers({
                     </td>
                   )}
                   {show.has("run") && (
-                    <td className="mono max-w-56 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
+                    <td className="mono max-w-56 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)">
                       {w.currentRun ? (
-                        <div className="flex items-baseline gap-1.5 truncate">
+                        <div className="flex items-baseline gap-1.5 truncate whitespace-nowrap">
                           {w.runItem?.agent && (
                             <span className="truncate text-(--text-dim) text-[11px]" title={`Agent: ${w.runItem.agent}`}>
                               {w.runItem.agent}
@@ -791,14 +791,14 @@ export function Workers({
                   )}
                   {show.has("adapters") && (
                     <td
-                      className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={w.adapters.length > 0 ? w.adapters.join(", ") : undefined}
                     >
                       {w.adapters.join(", ") || "-"}
                     </td>
                   )}
                   {show.has("labels") && (
-                    <td className="max-w-48 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)" title={labelText(w.labels)}>
+                    <td className="max-w-48 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)" title={labelText(w.labels)}>
                       {labelText(w.labels)}
                     </td>
                   )}

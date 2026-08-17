@@ -441,8 +441,8 @@ export function Projects({
                   aria-selected={i === selectedIndex}
                   className={`cursor-pointer hover:bg-(--surface-1) ${i === selectedIndex ? "row-selected" : ""}`}
                 >
-                  <td className="mono border-b border-(--border) px-3 py-1.5 font-semibold text-(--text)">{r.name}</td>
-                  <td className="border-b border-(--border) px-3 py-1.5">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap font-semibold text-(--text)">{r.name}</td>
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     {r.team ? (
                       <span className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11px] font-medium text-(--text-dim)">
                         {r.team}
@@ -451,10 +451,10 @@ export function Projects({
                       "—"
                     )}
                   </td>
-                  <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                  <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
                     {projectTarget(r)}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     <span
                       className="rounded px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
                       style={
@@ -472,11 +472,11 @@ export function Projects({
                       {r.reportOnly ? "Report Only" : "Dispatchable"}
                     </span>
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
                     {r.base}
                     {r.deployBranch ? ` → ${r.deployBranch}` : ""}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-faint)">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-faint)">
                     {worktreeScripts(r)}
                   </td>
                 </tr>

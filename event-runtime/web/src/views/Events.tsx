@@ -708,27 +708,27 @@ export function Events({
                     aria-selected={isSelected}
                     className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${isSelected ? "row-selected" : ""}`}
                   >
-                    <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={e.eventId}>
+                    <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap" title={e.eventId}>
                       {shortId(e.eventId)}
                     </td>
                     {show.has("source") && (
-                      <td className="mono max-w-24 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.source}>
+                      <td className="mono max-w-24 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)" title={e.source}>
                         {e.source}
                       </td>
                     )}
                     {show.has("type") && (
-                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)" title={e.type}>
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)" title={e.type}>
                         {e.type}
                       </td>
                     )}
                     {show.has("subject") && (
-                      <td className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.subject ?? undefined}>
+                      <td className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)" title={e.subject ?? undefined}>
                         {e.subject ?? "-"}
                       </td>
                     )}
                     {show.has("status") && (
-                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5">
-                        <div className="flex items-center">
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                        <div className="flex items-center whitespace-nowrap">
                           <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
                           {e.planFailures > 0 && (
                             <span className="ml-2 whitespace-nowrap text-[11px] text-(--hue-err)">
@@ -740,11 +740,11 @@ export function Events({
                             11.5px, so no size utility (it is unlayered and would win).
                             The detail pane keeps the untruncated error. */}
                         {e.lastPlanError ? (
-                          <div className="mono mt-0.5 truncate text-(--text-dim)" title={e.lastPlanError}>
+                          <div className="mono mt-0.5 truncate whitespace-nowrap text-(--text-dim)" title={e.lastPlanError}>
                             {e.lastPlanError}
                           </div>
                         ) : proposalReason ? (
-                          <div className="mono mt-0.5 truncate text-(--text-dim)" title={proposalReason}>
+                          <div className="mono mt-0.5 truncate whitespace-nowrap text-(--text-dim)" title={proposalReason}>
                             {proposalReason}
                           </div>
                         ) : null}

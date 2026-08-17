@@ -848,7 +848,7 @@ export function Proposals({
           <tbody>
             {(() => {
               const totalColSpan = cols.length + (tab === "open" ? 1 : 0);
-              const tdCls = "border-b border-(--border) px-3 py-1.5";
+              const tdCls = "border-b border-(--border) px-3 py-1.5 whitespace-nowrap";
               const renderRow = (p: Proposal) => (
                 <tr
                   key={p.id}

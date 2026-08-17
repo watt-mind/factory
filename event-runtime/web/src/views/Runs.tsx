@@ -666,17 +666,17 @@ export function Runs({
                   aria-selected={r.runId === selectedId}
                   className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
                 >
-                  <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={r.runId}>
+                  <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap" title={r.runId}>
                     {shortId(r.runId)}
                   </td>
                   {show.has("state") && (
-                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5">
+                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                       <StateBadge state={r.state} />
                       {IN_FLIGHT.includes(r.state) && <RowDeadlines r={r} now={now} />}
                     </td>
                   )}
                   {show.has("agent") && (
-                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
                       <JumpLink
                         onClick={() => onJumpAgent(r.agent)}
                         title={`Open ${r.agent} in Agents`}
@@ -686,13 +686,13 @@ export function Runs({
                     </td>
                   )}
                   {show.has("adapter") && (
-                    <td className="max-w-24 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={r.adapter}>
+                    <td className="max-w-24 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)" title={r.adapter}>
                       {r.adapter}
                     </td>
                   )}
                   {show.has("model") && (
                     <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={
                         rowModel(r) === "n/a"
                           ? `The ${r.adapter} adapter runs a fixed argv, not a model.`
@@ -711,7 +711,7 @@ export function Runs({
                   )}
                   {show.has("reason") && (
                     <td
-                      className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : undefined}
                     >
                       {r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : ""}
@@ -719,7 +719,7 @@ export function Runs({
                   )}
                   {show.has("origin") && (
                     <td
-                      className="mono max-w-32 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="mono max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={r.eventId ?? undefined}
                     >
                       {r.eventId && r.eventSource ? (

@@ -356,7 +356,7 @@ export function Artifacts({
                 aria-selected={artifact.sha256 === selectedSha}
                 className={`cursor-pointer hover:bg-(--surface-1) ${artifact.sha256 === selectedSha ? "row-selected" : ""}`}
               >
-                <td className="mono max-w-40 border-b border-(--border) px-3 py-2" title={artifact.sha256}>
+                <td className="mono max-w-40 border-b border-(--border) px-3 py-2 whitespace-nowrap truncate" title={artifact.sha256}>
                   <a
                     href={artifactUrl(artifact.sha256, name)}
                     download={name}
@@ -367,7 +367,7 @@ export function Artifacts({
                     {artifact.sha256.slice(0, 12)}
                   </a>
                 </td>
-                <td className="border-b border-(--border) px-3 py-2">
+                <td className="border-b border-(--border) px-3 py-2 whitespace-nowrap">
                   {artifactKinds.length > 0 ? (
                     <div className="flex flex-wrap gap-1">
                       {artifactKinds.map((kind) => <KindBadge key={kind} kind={kind} />)}
@@ -385,7 +385,7 @@ export function Artifacts({
                     {new Date(artifact.mtime).toLocaleString()}
                   </time>
                 </td>
-                <td className="border-b border-(--border) px-3 py-2">
+                <td className="border-b border-(--border) px-3 py-2 whitespace-nowrap">
                   {artifact.references.length > 0 ? (
                     <div className="flex flex-wrap gap-x-2 gap-y-1">
                       {artifact.references.map((reference) => (
@@ -402,7 +402,7 @@ export function Artifacts({
                     <span className="text-(--text-faint)">—</span>
                   )}
                 </td>
-                <td className="border-b border-(--border) px-3 py-2">
+                <td className="border-b border-(--border) px-3 py-2 whitespace-nowrap">
                   {!artifact.referenced ? (
                     <span
                       className="rounded px-1.5 py-0.5 text-[11px] font-medium"

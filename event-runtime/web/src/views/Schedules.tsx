@@ -348,13 +348,13 @@ export function Schedules({
                     isSel ? "row-selected bg-(--surface-3)" : ""
                   }`}
                 >
-                  <td className="mono border-b border-(--border) px-3 py-1.5 font-medium text-(--text)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap font-medium text-(--text)">
                     {s.loop}
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
                     {s.every}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     {s.enabled ? (
                       <span
                         className="mono text-[11px] text-(--hue-ok)"
@@ -371,7 +371,7 @@ export function Schedules({
                       </span>
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     {isAuto ? (
                       <span
                         className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
@@ -388,13 +388,13 @@ export function Schedules({
                       <span className="text-[11px] text-(--text-dim)">watched</span>
                     )}
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
                     {s.catchUp}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
                     {s.lastSlot ? <Ago iso={s.lastSlot} now={now} /> : <span className="text-(--text-faint)">never</span>}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5 text-[11px] text-(--text-dim)">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
                     {!s.enabled ? (
                       <span className="text-(--text-faint)">-</span>
                     ) : s.error ? (
@@ -410,7 +410,7 @@ export function Schedules({
                       "-"
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     {s.error ? (
                       <span
                         className="rounded px-1.5 py-0.5 text-[11px] font-medium text-(--hue-err)"
@@ -445,7 +445,7 @@ export function Schedules({
                       </span>
                     )}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5 text-right">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-right">
                     <Button
                       disabled={connected === false}
                       onClick={() => setConfirmLoop(s)}

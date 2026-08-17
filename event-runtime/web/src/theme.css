@@ -88,6 +88,11 @@ body {
     box-shadow: inset 3px 0 0 var(--accent);
   }
 
+  /* Prevent list/data table cells from breaking into multiple lines across tables */
+  table td {
+    white-space: nowrap;
+  }
+
   [cmdk-group-heading] {
     padding: 8px 12px 2px;
     font-size: 11px;
