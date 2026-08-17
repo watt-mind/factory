@@ -255,6 +255,11 @@ jobs:
       - name: Install event-runtime/web deps
         run: cd event-runtime/web && bun install --frozen-lockfile
 
+      # Run tsc + Vite before tests so broken TSX imports and entry-chunk budget
+      # regressions fail Verify immediately instead of reaching a later build.
+      - name: Typecheck and build event-runtime/web
+        run: cd event-runtime/web && bun run build
+
       - name: Formatting check (prettier)
         run: bun run format:check
 
@@ -283,11 +288,6 @@ jobs:
         # else. If this fails, the fix is to move the rule into shared/ and
         # regenerate — never to edit the generated file.
         run: bun build/emit.mjs --check
-
-      # Agents already typecheck/build the web UI locally; a green Verify on a
-      # TSX PR said nothing about compilation until this step existed (OPS-243).
-      - name: Typecheck and build event-runtime/web
-        run: cd event-runtime/web && bun run build
 
       - name: Schedule renders match deploy/launchd
         run: bun deploy/gen.mjs && git diff --exit-code deploy/launchd/
