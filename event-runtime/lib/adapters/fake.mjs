@@ -10,6 +10,14 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { TRACE_EVENTS_CAP } from "../trace.mjs";
+import { refuseSandbox } from "./sandboxed.mjs";
+
+/**
+ * The fake spawns nothing, so there is nothing to isolate — but it must still
+ * decide (WM-313): a sandboxed definition is refused, so `--adapter-override
+ * fake` cannot become the way a sandbox requirement quietly disappears.
+ */
+export const SANDBOX_SUPPORT = "unsupported";
 
 /**
  * Deterministic factory.trace/v1 sequence for the happy-path modes, so tests
@@ -99,6 +107,7 @@ export function mergeScanArtifact(repo) {
 }
 
 export async function execute({ spec, def, workspaceDir, timeoutMs, env, onTrace, abortSignal, signal }) {
+  refuseSandbox("fake", def, "the fake adapter runs no process and models no VM; a sandboxed definition cannot be exercised through it");
   // Every real adapter captures the agent's output as a runtime artifact
   // (worker.mjs RUNTIME_ARTIFACTS). The fake must too, or it models a world
   // where transcripts do not exist — which is exactly what run-postmortem

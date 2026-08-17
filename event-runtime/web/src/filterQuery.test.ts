@@ -283,7 +283,7 @@ describe("chip and input copy", () => {
   test("an impossible chip says so and names what this list does have", () => {
     const q = parseFilterQuery("agent:ci-doctor is:expired", EVENT_FACETS);
     expect(chipHelp(q.chips[0], q)).toBe(
-      "No agent field. event, source, type, subject, status, proposal, run, repo.",
+      "No agent field. event, source, type, subject, status, proposal, run, repo, reason.",
     );
     expect(chipHelp(q.chips[1], q)).toBe("Unknown is:expired. is:stale.");
   });
@@ -394,3 +394,32 @@ describe("getFilterSuggestions", () => {
   });
 });
 
+
+describe("events reason: facet (WM-594)", () => {
+  const rows = [
+    { ...event({ eventId: "evt_a", status: "noop" }), decisionReason: "owned_paths_overlap" },
+    { ...event({ eventId: "evt_b", status: "noop" }), decisionReason: "ticket_dispatch_already_live:run_x:same_ticket_worktree_held" },
+    { ...event({ eventId: "evt_c", status: "planned" }), decisionReason: "auto_approval_ineligible:proposal_expired" },
+    event({ eventId: "evt_d", status: "admitted" }),
+  ];
+
+  test("reason:<code> matches the head code and word starts inside a chained reason", () => {
+    const overlap = parseFilterQuery("reason:owned_paths_overlap", EVENT_FACETS);
+    expect(rows.filter((r) => matchesFilterQuery(r, overlap, EVENT_FACETS, undefined)).map((r) => r.eventId)).toEqual(["evt_a"]);
+    const live = parseFilterQuery("reason:ticket_dispatch_already_live", EVENT_FACETS);
+    expect(rows.filter((r) => matchesFilterQuery(r, live, EVENT_FACETS, undefined)).map((r) => r.eventId)).toEqual(["evt_b"]);
+    const expired = parseFilterQuery("reason:proposal_expired", EVENT_FACETS);
+    expect(rows.filter((r) => matchesFilterQuery(r, expired, EVENT_FACETS, undefined)).map((r) => r.eventId)).toEqual(["evt_c"]);
+  });
+
+  test("a row without a decision reason never matches reason:", () => {
+    const q = parseFilterQuery("reason:owned", EVENT_FACETS);
+    expect(matchesFilterQuery(rows[3], q, EVENT_FACETS, undefined)).toBe(false);
+  });
+
+  test("reason: is offered as a facet and takes caller-supplied value suggestions", () => {
+    expect(getFilterSuggestions("rea", EVENT_FACETS).map((s) => s.insertText)).toContain("reason:");
+    const facets = { ...EVENT_FACETS, values: { ...EVENT_FACETS.values, reason: ["owned_paths_overlap", "ticket_assigned"] } };
+    expect(getFilterSuggestions("reason:own", facets).map((s) => s.insertText)).toEqual(["reason:owned_paths_overlap "]);
+  });
+});

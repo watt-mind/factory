@@ -375,6 +375,111 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
   }
 });
 
+test("re-dispatch preserves an abandoned dirty zero-ahead worktree on a conventional wip branch", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-abandoned-dirty-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-abandoned-dirty-bin-"));
+  const ticketId = `WM-${Date.now()}${process.pid}${Math.floor(Math.random() * 10000)}`;
+  const branch = `feat/${ticketId}`;
+  const expectedPath = path.join(tempWtRoot, ticketId);
+  const reportPath = path.join(tempWtRoot, "preservation.json");
+  let wipBranch = null;
+
+  try {
+    expect(Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    }).exitCode).toBe(0);
+    writeFileSync(path.join(expectedPath, "abandoned.txt"), "preserve this work\n");
+
+    const realGit = Bun.which("git");
+    writeFileSync(path.join(mockBin, "git"), `#!/usr/bin/env bash
+if [[ "$*" == *" push -u origin wip/${ticketId}-"* ]]; then
+  echo "simulated push failure" >&2
+  exit 1
+fi
+exec "${realGit}" "$@"
+`, { mode: 0o755 });
+
+    const recovered = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
+        FACTORY_WORKTREE_PRESERVATION_REPORT: reportPath,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.stdout.toString()).toContain("preserved abandoned worktree changes on wip/");
+    expect(recovered.stderr.toString()).toContain("keeping it locally");
+
+    const report = JSON.parse(readFileSync(reportPath, "utf8"));
+    wipBranch = report.ref;
+    expect(wipBranch).toMatch(new RegExp(`^wip/${ticketId}-\\d{8}T\\d{6}Z(?:-\\d+)?$`));
+    expect(report.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(report.push).toBe("local_only");
+    expect(Bun.spawnSync({ cmd: ["git", "branch", "--show-current"], cwd: expectedPath }).stdout.toString().trim()).toBe(branch);
+    expect(Bun.spawnSync({ cmd: ["git", "status", "--porcelain"], cwd: expectedPath }).stdout.toString()).toBe("");
+    expect(Bun.spawnSync({ cmd: ["git", "show", `${wipBranch}:abandoned.txt`], cwd: expectedPath }).stdout.toString()).toBe("preserve this work\n");
+    expect(Bun.spawnSync({ cmd: ["git", "log", "-1", "--format=%s", wipBranch], cwd: expectedPath }).stdout.toString().trim())
+      .toBe(`chore(wip): preserve ${ticketId} worktree changes (${ticketId})`);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch, ...(wipBranch ? [wipBranch] : [])], cwd: path.resolve(import.meta.dir, "..") });
+  }
+}, 20_000);
+
+test("re-dispatch refuses a dirty worktree with typed worktree_in_use when a live owner exists", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-live-dirty-"));
+  const ticketId = makeTestTicket("LIVEOWNER");
+  const branch = `feat/${ticketId}`;
+  const expectedPath = path.join(tempWtRoot, ticketId);
+  const reportPath = path.join(tempWtRoot, "must-not-exist.json");
+  const leasePath = path.join(tempWtRoot, "live-owner-lease.json");
+
+  try {
+    expect(Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    }).exitCode).toBe(0);
+    writeFileSync(path.join(expectedPath, "live-owner.txt"), "still in use\n");
+    writeFileSync(leasePath, JSON.stringify({ owner: "new-live-owner", pid: 42 }));
+
+    const refused = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
+        FACTORY_WORKTREE_PRESERVATION_REPORT: reportPath,
+        FACTORY_WORKTREE_EXPECTED_LEASE_FILE: leasePath,
+        FACTORY_WORKTREE_EXPECTED_LEASE_PID: String(process.pid),
+      },
+    });
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.stderr.toString()).toContain("worktree_in_use");
+    expect(readFileSync(path.join(expectedPath, "live-owner.txt"), "utf8")).toBe("still in use\n");
+    expect(existsSync(reportPath)).toBe(false);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
+  }
+});
+
 test("merge-fix re-dispatch resumes a committed PR branch as-is", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-merge-fix-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-open-pr-bin-"));
@@ -394,7 +499,7 @@ test("merge-fix re-dispatch resumes a committed PR branch as-is", () => {
     writeFileSync(path.join(expectedPath, "merge-fix.txt"), "resolved conflict\n");
     expect(Bun.spawnSync({ cmd: ["git", "add", "merge-fix.txt"], cwd: expectedPath }).exitCode).toBe(0);
     expect(Bun.spawnSync({
-      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "merge fix"],
+      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test(worktree): preserve merge fix branch (WM-1)"],
       cwd: expectedPath,
       stdout: "pipe",
       stderr: "pipe",
@@ -451,7 +556,7 @@ test("explicit resume flag and environment preserve committed branches without q
       writeFileSync(path.join(expectedPath, "resume.txt"), `${mode}\n`);
       expect(Bun.spawnSync({ cmd: ["git", "add", "resume.txt"], cwd: expectedPath }).exitCode).toBe(0);
       expect(Bun.spawnSync({
-        cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", `explicit ${mode} resume`],
+        cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", `test(worktree): exercise explicit ${mode} resume (WM-1)`],
         cwd: expectedPath,
         stdout: "pipe",
         stderr: "pipe",
@@ -491,9 +596,9 @@ exit 99
       Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: path.resolve(import.meta.dir, "..") });
     }
   }
-});
+}, 15_000);
 
-test("re-dispatch refuses a branch carrying unique commits and names the escape", () => {
+test("re-dispatch keeps unique-commit refusal ahead of dirty-worktree preservation", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-unique-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-no-pr-bin-"));
   const ticketId = makeTestTicket("UNIQUE");
@@ -511,17 +616,12 @@ test("re-dispatch refuses a branch carrying unique commits and names the escape"
     writeFileSync(path.join(expectedPath, "unique.txt"), "ticket work\n");
     expect(Bun.spawnSync({ cmd: ["git", "add", "unique.txt"], cwd: expectedPath }).exitCode).toBe(0);
     expect(Bun.spawnSync({
-      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "unique ticket commit"],
+      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test(worktree): create unique ticket commit (WM-1)"],
       cwd: expectedPath,
       stdout: "pipe",
       stderr: "pipe",
     }).exitCode).toBe(0);
-    expect(Bun.spawnSync({
-      cmd: ["bash", DOWN, ticketId],
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-      stdout: "pipe",
-      stderr: "pipe",
-    }).exitCode).toBe(0);
+    writeFileSync(path.join(expectedPath, "still-dirty.txt"), "uncommitted after unique commit\n");
 
     writeFileSync(path.join(mockBin, "gh"), "#!/usr/bin/env bash\nprintf '0\\n'\n", { mode: 0o755 });
     const secondUp = Bun.spawnSync({
@@ -531,6 +631,8 @@ test("re-dispatch refuses a branch carrying unique commits and names the escape"
       env: {
         ...process.env,
         FACTORY_WT_ROOT: tempWtRoot,
+        FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
+        FACTORY_WORKTREE_PRESERVATION_REPORT: path.join(tempWtRoot, "must-not-preserve.json"),
         PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
       },
     });
@@ -538,7 +640,9 @@ test("re-dispatch refuses a branch carrying unique commits and names the escape"
     expect(secondUp.stderr.toString()).toContain("worktree_branch_has_commits");
     expect(secondUp.stderr.toString()).toContain(branch);
     expect(secondUp.stderr.toString()).toContain("re-run with --resume");
-    expect(existsSync(expectedPath)).toBe(false);
+    expect(existsSync(expectedPath)).toBe(true);
+    expect(readFileSync(path.join(expectedPath, "still-dirty.txt"), "utf8")).toBe("uncommitted after unique commit\n");
+    expect(existsSync(path.join(tempWtRoot, "must-not-preserve.json"))).toBe(false);
   } finally {
     Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
     rmSync(tempWtRoot, { recursive: true, force: true });

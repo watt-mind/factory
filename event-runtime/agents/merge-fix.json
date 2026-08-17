@@ -6,6 +6,7 @@
   "output_schema": "schemas/merge-fix.output.json",
   "output_contract": "factory.merge-fix-result/v1",
   "model_tier": "strong",
+  "gate": "merge-fix",
   "workspace": {
     "type": "worktree",
     "checkoutDir": "repo",

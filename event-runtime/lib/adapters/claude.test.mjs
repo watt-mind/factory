@@ -15,8 +15,54 @@ import {
   PUSH_CREDENTIAL_ENV,
   READ_ONLY_TOOLS,
   safeChildEnvironment,
+  SANDBOX_DEFERRAL_REASON,
+  SANDBOX_SUPPORT,
   WRITE_TOOLS,
 } from "./claude.mjs";
+import { SandboxUnsupportedError } from "./sandboxed.mjs";
+
+describe("sandbox decision (WM-313): deferred, so refused — never ignored", () => {
+  const sandboxedDef = (promptPath) => ({
+    ref: "sandboxed-claude@1",
+    promptPath,
+    mutating: false,
+    sandbox: { provider: "gondolin", allowedHosts: ["api.anthropic.com"] },
+  });
+
+  test("declares itself unsupported and carries the reasoned deferral", () => {
+    expect(SANDBOX_SUPPORT).toBe("unsupported");
+    expect(SANDBOX_DEFERRAL_REASON).toContain("--mcp-config");
+    expect(SANDBOX_DEFERRAL_REASON).toContain("--settings");
+    expect(SANDBOX_DEFERRAL_REASON).toContain("WM-313");
+  });
+
+  test("a sandboxed definition is refused with a typed error naming the adapter, before any spawn or workspace write", async () => {
+    const workspaceDir = realpathSync(mkdtempSync(path.join(tmpdir(), "evrt-claude-sandbox-")));
+    const promptPath = path.join(workspaceDir, "prompt.md");
+    writeFileSync(promptPath, "hello", "utf8");
+    let caught;
+    try {
+      await execute({
+        spec: { agent: "sandboxed-claude@1", input: {}, workspace: { type: "repository", checkoutDir: "repo" } },
+        def: sandboxedDef(promptPath),
+        workspaceDir,
+        timeoutMs: 1000,
+        env: { PATH: workspaceDir },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(SandboxUnsupportedError);
+    expect(caught.code).toBe("sandbox_unsupported");
+    expect(caught.adapter).toBe("claude");
+    expect(caught.message).toContain('adapter "claude" cannot honour a sandbox policy');
+    expect(caught.message).toContain(SANDBOX_DEFERRAL_REASON);
+    // Nothing host-side happened: no settings policy, no transcript.
+    expect(existsSync(path.join(workspaceDir, ".claude-policy.json"))).toBe(false);
+    expect(existsSync(path.join(workspaceDir, ".transcript.json"))).toBe(false);
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+});
 
 describe("isHarnessDenial (WM-127)", () => {
   test("matches the harness's own refusal shapes", () => {

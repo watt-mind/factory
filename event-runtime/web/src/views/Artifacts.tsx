@@ -12,6 +12,7 @@ import {
   JumpLink,
   ListEmpty,
   ListPane,
+  StatCard,
   Th,
   copyText,
   shortId,
@@ -161,31 +162,6 @@ function KindBadge({ kind }: { kind: string }) {
     >
       {kind}
     </span>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  caption,
-  warning,
-}: {
-  label: string;
-  value: string;
-  caption?: string;
-  warning?: boolean;
-}) {
-  return (
-    <div className="min-w-36 rounded-lg border border-(--border) bg-(--surface-1) px-3.5 py-3">
-      <div className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase">{label}</div>
-      <div
-        className="display mt-1 text-xl font-semibold tabular-nums"
-        style={warning ? { color: "var(--hue-warn)" } : undefined}
-      >
-        {value}
-      </div>
-      {caption && <div className="mt-0.5 text-[11px] text-(--text-faint)">{caption}</div>}
-    </div>
   );
 }
 
@@ -359,13 +335,13 @@ export function Artifacts({
           </div>
 
           <section aria-label="Artifact storage summary" className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <Metric label="Stored files" value={summary.files.toLocaleString()} />
-            <Metric label="Disk usage" value={formatBytes(summary.bytes)} />
-            <Metric
+            <StatCard label="Stored files" value={summary.files.toLocaleString()} />
+            <StatCard label="Disk usage" value={formatBytes(summary.bytes)} />
+            <StatCard
               label="Orphans"
               value={summary.orphans.toLocaleString()}
               caption={formatBytes(summary.orphanBytes)}
-              warning={summary.orphans > 0}
+              hue={summary.orphans > 0 ? "var(--hue-warn)" : undefined}
             />
           </section>
 

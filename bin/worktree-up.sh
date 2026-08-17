@@ -34,6 +34,11 @@ LIVE=0
 CHECKOUT_ONLY=0
 NO_FETCH=0
 RESUME="${FACTORY_WORKTREE_RESUME:-0}"
+PRESERVE_ABANDONED="${FACTORY_WORKTREE_PRESERVE_ABANDONED:-0}"
+WORKTREE_IN_USE="${FACTORY_WORKTREE_IN_USE:-0}"
+PRESERVATION_REPORT="${FACTORY_WORKTREE_PRESERVATION_REPORT:-}"
+EXPECTED_LEASE_FILE="${FACTORY_WORKTREE_EXPECTED_LEASE_FILE:-}"
+EXPECTED_LEASE_PID="${FACTORY_WORKTREE_EXPECTED_LEASE_PID:-}"
 POS=0
 
 while [[ $# -gt 0 ]]; do
@@ -65,6 +70,16 @@ done
 
 [[ "$RESUME" == "0" || "$RESUME" == "1" ]] \
   || die "FACTORY_WORKTREE_RESUME must be 0 or 1 (got '$RESUME')"
+[[ "$PRESERVE_ABANDONED" == "0" || "$PRESERVE_ABANDONED" == "1" ]] \
+  || die "FACTORY_WORKTREE_PRESERVE_ABANDONED must be 0 or 1 (got '$PRESERVE_ABANDONED')"
+[[ "$WORKTREE_IN_USE" == "0" || "$WORKTREE_IN_USE" == "1" ]] \
+  || die "FACTORY_WORKTREE_IN_USE must be 0 or 1 (got '$WORKTREE_IN_USE')"
+[[ "$PRESERVE_ABANDONED" -eq 0 || -n "$PRESERVATION_REPORT" ]] \
+  || die "FACTORY_WORKTREE_PRESERVATION_REPORT is required when preserving an abandoned worktree"
+[[ -z "$EXPECTED_LEASE_PID" || "$EXPECTED_LEASE_PID" =~ ^[0-9]+$ ]] \
+  || die "FACTORY_WORKTREE_EXPECTED_LEASE_PID must be numeric (got '$EXPECTED_LEASE_PID')"
+[[ -z "$EXPECTED_LEASE_PID" || -n "$EXPECTED_LEASE_FILE" ]] \
+  || die "FACTORY_WORKTREE_EXPECTED_LEASE_FILE is required with FACTORY_WORKTREE_EXPECTED_LEASE_PID"
 
 REPO="$(repo_root)"
 WORKTREE_LIFECYCLE_LOCK=""
@@ -165,8 +180,30 @@ else
         CURRENT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         [[ "$CURRENT_BRANCH" == "$BRANCH" ]] \
           || die "worktree_branch_mismatch: $WT is on '${CURRENT_BRANCH:-detached HEAD}', expected '$BRANCH'"
-        [[ -z "$(git -C "$WT" status --porcelain)" ]] \
-          || die "worktree_branch_dirty: $WT has uncommitted work — re-run with --resume or clean it explicitly before re-dispatch"
+        if [[ -n "$(git -C "$WT" status --porcelain)" ]]; then
+          if [[ "$WORKTREE_IN_USE" -eq 1 ]]; then
+            die "worktree_in_use: $WT has uncommitted work owned by a live run or lease"
+          fi
+          if [[ "$PRESERVE_ABANDONED" -eq 1 ]]; then
+            if [[ -n "$EXPECTED_LEASE_PID" ]]; then
+              OBSERVED_LEASE_PID=$(LEASE_FILE="$EXPECTED_LEASE_FILE" bun --eval '
+                import { readFileSync } from "node:fs";
+                try {
+                  const lease = JSON.parse(readFileSync(process.env.LEASE_FILE, "utf8"));
+                  if (Number.isInteger(lease.pid)) process.stdout.write(String(lease.pid));
+                } catch {}
+              ')
+              [[ "$OBSERVED_LEASE_PID" == "$EXPECTED_LEASE_PID" ]] \
+                && kill -0 "$EXPECTED_LEASE_PID" 2>/dev/null \
+                || die "worktree_in_use: the worker lease changed before abandoned worktree preservation"
+            fi
+            mkdir -p "$(dirname "$PRESERVATION_REPORT")"
+            rm -f "$PRESERVATION_REPORT"
+            preserve_abandoned_worktree "$WT" "$TICKET" "$BRANCH" "$PRESERVATION_REPORT"
+          else
+            die "worktree_branch_dirty: $WT has uncommitted work — re-run with --resume or clean it explicitly before re-dispatch"
+          fi
+        fi
         # `merge --ff-only` is non-destructive if another process commits after
         # inspection; unlike reset --hard, it can never discard that commit.
         git -C "$WT" merge --ff-only "$BASE_REF" >/dev/null \

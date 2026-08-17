@@ -76,6 +76,68 @@ worktree_add() { # <worktree> <branch> <base-ref> [repo]
   done
 }
 
+# Preserve a dirty, abandoned zero-ahead ticket branch before re-dispatch.
+# The caller has already proved no other live run owns the tree and holds the
+# per-ticket lifecycle lock. The report is consumed by event-runtime so the
+# durable workspace marker and Linear both name the recovery ref.
+preserve_abandoned_worktree() { # <worktree> <ticket> <ticket-branch> <report-path>
+  local wt="$1" ticket="$2" ticket_branch="$3" report="$4"
+  local timestamp wip_branch suffix=1 commit_sha push_status push_error_file push_error=""
+  timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+  wip_branch="wip/$ticket-$timestamp"
+  while git -C "$wt" show-ref --verify --quiet "refs/heads/$wip_branch"; do
+    suffix=$((suffix + 1))
+    wip_branch="wip/$ticket-$timestamp-$suffix"
+  done
+
+  git -C "$wt" switch -c "$wip_branch" >/dev/null \
+    || die "worktree_wip_preserve_failed: could not create '$wip_branch'"
+  if ! git -C "$wt" add -A; then
+    git -C "$wt" switch "$ticket_branch" >/dev/null 2>&1 || true
+    git -C "$wt" branch -D "$wip_branch" >/dev/null 2>&1 || true
+    die "worktree_wip_preserve_failed: could not stage dirty worktree on '$wip_branch'"
+  fi
+  if ! git -C "$wt" \
+    -c user.name="Factory Worktree Recovery" \
+    -c user.email="factory@users.noreply.github.com" \
+    commit -m "chore(wip): preserve $ticket worktree changes ($ticket)" >/dev/null; then
+    # Both refs still point at the same commit, so switching back carries the
+    # staged/unstaged files with it and restores the exact dirty ticket tree.
+    git -C "$wt" switch "$ticket_branch" >/dev/null 2>&1 || true
+    git -C "$wt" branch -D "$wip_branch" >/dev/null 2>&1 || true
+    die "worktree_wip_preserve_failed: could not commit dirty worktree on '$wip_branch'"
+  fi
+  commit_sha=$(git -C "$wt" rev-parse HEAD)
+
+  push_error_file="${report}.push-error.$$"
+  if git -C "$wt" push -u origin "$wip_branch" > /dev/null 2>"$push_error_file"; then
+    push_status="pushed"
+  else
+    push_status="local_only"
+    push_error=$(tail -c 4096 "$push_error_file" 2>/dev/null || true)
+    warn "could not push preserved branch '$wip_branch'; keeping it locally${push_error:+: $push_error}"
+  fi
+  rm -f "$push_error_file"
+
+  git -C "$wt" switch "$ticket_branch" >/dev/null \
+    || die "worktree_wip_preserve_failed: preserved changes on '$wip_branch' but could not return to '$ticket_branch'"
+  [[ -z "$(git -C "$wt" status --porcelain)" ]] \
+    || die "worktree_wip_preserve_failed: '$ticket_branch' remained dirty after preserving changes on '$wip_branch'"
+
+  PRESERVATION_REPORT="$report" PRESERVATION_REF="$wip_branch" \
+    PRESERVATION_COMMIT="$commit_sha" PRESERVATION_PUSH="$push_status" \
+    PRESERVATION_PUSH_ERROR="$push_error" bun --eval '
+      import { writeFileSync } from "node:fs";
+      writeFileSync(process.env.PRESERVATION_REPORT, JSON.stringify({
+        ref: process.env.PRESERVATION_REF,
+        commit: process.env.PRESERVATION_COMMIT,
+        push: process.env.PRESERVATION_PUSH,
+        ...(process.env.PRESERVATION_PUSH_ERROR ? { pushError: process.env.PRESERVATION_PUSH_ERROR } : {}),
+      }) + "\n");
+    '
+  info "preserved abandoned worktree changes on $wip_branch ($push_status)"
+}
+
 
 WT_ROOT="${FACTORY_WT_ROOT:-$HOME/Develop/.worktrees/factory}"
 BASE_BRANCH="${FACTORY_BASE_BRANCH:-develop}"

@@ -157,8 +157,10 @@ describe("Schedules enabled/state wording (WM-101)", () => {
   });
 
   test("disabled + not stopped renders 'disabled' and 'not scheduled' pointing at schedules.json", async () => {
-    const { getByText, getAllByText } = renderSchedules();
+    const { getByText, getAllByText, getByRole } = renderSchedules();
 
+    await waitFor(() => getByRole("tab", { name: /Disabled/ }));
+    fireEvent.click(getByRole("tab", { name: /Disabled/ }));
     await waitFor(() => getByText("loop-disabled-idle"));
 
     const disabledCells = getAllByText("disabled");
@@ -170,8 +172,10 @@ describe("Schedules enabled/state wording (WM-101)", () => {
   });
 
   test("disabled + stopped still renders 'not scheduled' (a disabled loop cannot be a stalled clock)", async () => {
-    const { getByText, getAllByText, queryByText } = renderSchedules();
+    const { getByText, getAllByText, queryByText, getByRole } = renderSchedules();
 
+    await waitFor(() => getByRole("tab", { name: /Disabled/ }));
+    fireEvent.click(getByRole("tab", { name: /Disabled/ }));
     await waitFor(() => getByText("loop-disabled-stopped"));
 
     // Both disabled rows collapse to "not scheduled"; the stopped flag on a
@@ -181,11 +185,11 @@ describe("Schedules enabled/state wording (WM-101)", () => {
   });
 
   test("column headers and footer say where enable/disable lives", async () => {
-    const { getByText } = renderSchedules();
+    const { getByText, getByTitle } = renderSchedules();
 
     await waitFor(() => getByText("loop-enabled-running"));
 
-    expect(getByText("Enabled").title).toContain("event-runtime/schedules.json");
+    expect(getByTitle(/Config flag from event-runtime\/schedules.json/).title).toContain("event-runtime/schedules.json");
     expect(getByText("State").title).toContain("Runtime health");
     expect(getByText(/there is no.*toggle here/s)).toBeTruthy();
   });
@@ -207,6 +211,63 @@ describe("Schedules enabled/state wording (WM-101)", () => {
     }
     // error wins the state token
     expect(scheduleFilterTokens(schedule({ loop: "l", error: "bad cadence" }))).toContain("error");
+  });
+});
+
+describe("Schedules tabs and default ordering (WM-549)", () => {
+  test("defaults to Enabled and exposes All, Enabled, and Disabled counts", async () => {
+    const view = renderSchedules();
+
+    const enabledTab = await view.findByRole("tab", { name: /Enabled\s*2/ });
+    const allTab = view.getByRole("tab", { name: /All\s*4/ });
+    const disabledTab = view.getByRole("tab", { name: /Disabled\s*2/ });
+
+    expect(enabledTab.getAttribute("aria-selected")).toBe("true");
+    expect(view.getByText("loop-enabled-running")).toBeTruthy();
+    expect(view.queryByText("loop-disabled-idle")).toBeNull();
+    expect(view.getByText(/2 enabled · 2 disabled/)).toBeTruthy();
+
+    fireEvent.click(allTab);
+    expect(view.getByText("loop-disabled-idle")).toBeTruthy();
+
+    fireEvent.click(disabledTab);
+    expect(view.queryByText("loop-enabled-running")).toBeNull();
+    expect(view.getByText("loop-disabled-idle")).toBeTruthy();
+  });
+
+  test("orders enabled first, then next due ascending, then loop name", async () => {
+    const orderedRows = [
+      schedule({ loop: "disabled-z", enabled: false, nextDue: "2030-01-01T00:00:00.000Z" }),
+      schedule({ loop: "enabled-later", nextDue: "2030-01-02T00:00:00.000Z" }),
+      schedule({ loop: "enabled-undated", nextDue: null }),
+      schedule({ loop: "disabled-a", enabled: false, nextDue: "2030-01-03T00:00:00.000Z" }),
+      schedule({ loop: "enabled-sooner", nextDue: "2030-01-01T00:00:00.000Z" }),
+    ];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("/api/schedules")) {
+        return new Response(JSON.stringify({ schedules: orderedRows }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return origFetch(input, init);
+    }) as typeof fetch;
+
+    const view = renderSchedules();
+    const allTab = await view.findByRole("tab", { name: /All\s*5/ });
+    fireEvent.click(allTab);
+
+    const renderedLoops = [...view.container.querySelectorAll("tbody tr td:first-child")].map(
+      (cell) => cell.textContent,
+    );
+    expect(renderedLoops).toEqual([
+      "enabled-sooner",
+      "enabled-later",
+      "enabled-undated",
+      "disabled-a",
+      "disabled-z",
+    ]);
   });
 });
 

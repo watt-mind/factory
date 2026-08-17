@@ -14,6 +14,7 @@ import path from "node:path";
 
 import {
   effectiveOwnedPaths,
+  globToRegExp,
   pathsCollide,
   parseOwnedPaths,
   readPinManifestRequirements,
@@ -146,6 +147,20 @@ function fetchTicketDefault(ticketId) {
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
     throw new Error(`linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`);
+  }
+}
+
+function fetchPullRequestDefault(payload) {
+  try {
+    return JSON.parse(execFileSync(
+      "gh",
+      ["pr", "view", String(payload?.pr), "--repo", payload?.github, "--json", "state,headRefOid"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ));
+  } catch (err) {
+    const stderr = String(err?.stderr ?? "");
+    if (/not found|no pull request/i.test(stderr)) return null;
+    throw new Error(`github_read_failed: ${stderr.trim().split("\n").pop() || err.message}`);
   }
 }
 
@@ -463,6 +478,114 @@ export function worktreeDispatchGate(payload, options = {}) {
   };
 }
 
+function normalizedOwnedPath(value) {
+  return String(value ?? "").trim().replace(/^\.\//, "").replace(/\/$/, "");
+}
+
+/** Conservative containment proof for the Owned Paths syntax used by tickets. */
+function ownedPathContains(ownerValue, candidateValue) {
+  const owner = normalizedOwnedPath(ownerValue);
+  const candidate = normalizedOwnedPath(candidateValue);
+  if (!owner || !candidate) return false;
+  if (owner === "**" || owner === candidate) return true;
+
+  const candidateHasGlob = /[*?{]/.test(candidate);
+  if (!candidateHasGlob) return globToRegExp(owner).test(candidate);
+
+  // A directory (bare or /**) owns narrower globs rooted below it. Other
+  // wildcard-to-wildcard containment is deliberately fail-closed unless equal.
+  const broadRoot = owner.endsWith("/**")
+    ? owner.slice(0, -3).replace(/\/$/, "")
+    : (!/[*?{]/.test(owner) && !/\.[a-z0-9]+$/i.test(owner) ? owner : null);
+  if (!broadRoot) return false;
+  const candidatePrefix = candidate.slice(0, candidate.search(/[*?{]/)).replace(/\/$/, "");
+  return candidatePrefix === broadRoot || candidatePrefix.startsWith(`${broadRoot}/`);
+}
+
+/**
+ * Claim-time gate for a bounded merge correction. Unlike dispatch, assignment
+ * and In Review are expected facts, not refusal conditions.
+ */
+export function worktreeMergeFixEligibility(payload, {
+  fetchTicket = fetchTicketDefault,
+  fetchPullRequest = fetchPullRequestDefault,
+  fetchNonTerminalRuns = () => [],
+  now = Date.now(),
+} = {}) {
+  const evidence = {
+    checkedAt: new Date(resolveNow(now)).toISOString(),
+    ticket: null,
+    pullRequest: null,
+    competingRuns: [],
+    checks: {},
+  };
+
+  let ticket;
+  try {
+    ticket = fetchTicket(payload?.ticket);
+  } catch (err) {
+    return refusal("merge_fix_ticket_read_failed", evidence, "noop", err?.message ?? String(err));
+  }
+  evidence.ticket = evidenceTicket(ticket, payload?.ticket);
+  if (!ticket) return refusal("merge_fix_ticket_not_found", evidence, "human_needed");
+  evidence.checks.ticket_found = true;
+
+  const labels = evidence.ticket.labels;
+  if (labels.includes("ai:escalated")) {
+    return refusal("merge_fix_ticket_escalated", evidence, "human_needed");
+  }
+  if (labels.includes("type:security") || labels.some((label) => /security/i.test(label))) {
+    return refusal("merge_fix_ticket_security", evidence, "human_needed");
+  }
+  evidence.checks.ticket_not_escalated_or_security = true;
+
+  if (!["In Review", "In Progress"].includes(evidence.ticket.state)) {
+    return refusal("merge_fix_ticket_state", evidence);
+  }
+  evidence.checks.ticket_state = true;
+
+  if (!evidence.ticket.ownedPathsParsed) {
+    return refusal("merge_fix_owned_paths_unknown", evidence, "human_needed");
+  }
+  const fixPaths = Array.isArray(payload?.ownedPaths) ? payload.ownedPaths : [];
+  if (
+    fixPaths.length === 0 ||
+    fixPaths.some((candidate) => !evidence.ticket.ownedPaths.some((owner) => ownedPathContains(owner, candidate)))
+  ) {
+    return refusal("merge_fix_owned_paths_moved", evidence);
+  }
+  evidence.checks.owned_paths_within_ticket = true;
+
+  let pullRequest;
+  try {
+    pullRequest = fetchPullRequest(payload);
+  } catch (err) {
+    return refusal("merge_fix_pr_read_failed", evidence, "noop", err?.message ?? String(err));
+  }
+  evidence.pullRequest = pullRequest;
+  if (!pullRequest) return refusal("merge_fix_pr_not_found", evidence, "human_needed");
+  evidence.checks.pr_found = true;
+  if (pullRequest.state !== "OPEN") return refusal("merge_fix_pr_not_open", evidence);
+  evidence.checks.pr_open = true;
+  if (pullRequest.headRefOid !== payload?.headSha) return refusal("merge_fix_pr_moved", evidence);
+  evidence.checks.pr_head_matches = true;
+
+  try {
+    evidence.competingRuns = fetchNonTerminalRuns(payload) ?? [];
+  } catch (err) {
+    return refusal("merge_fix_run_check_failed", evidence, "noop", err?.message ?? String(err));
+  }
+  if (evidence.competingRuns.length > 0) return refusal("merge_fix_run_active", evidence);
+  evidence.checks.no_competing_run = true;
+
+  return { ok: true, evidence };
+}
+
+function worktreeGateFor(def) {
+  if (def?.workspace?.type !== "worktree") return null;
+  return def.gate ?? "dispatch";
+}
+
 function insertProposal(db, { id, event, runId = null, decision, specJson = null, specHash = null, idempotencyKey = null, status, reason = null, at, ttlSeconds }) {
   db.query(
     `INSERT INTO proposals
@@ -551,8 +674,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
       // the gate's Linear/lease reads entirely — the transaction below parks
       // it repo_not_allowed before anything else happens.
       if (
-        preDef?.workspace?.type === "worktree" &&
-        preDef?.ref !== "merge-fix@1" &&
+        worktreeGateFor(preDef) === "dispatch" &&
         typeof preEnvelope.payload?.repo === "string" &&
         typeof preEnvelope.payload?.ticket === "string" &&
         !repoNotAllowed(preDef, preEnvelope.payload)
@@ -672,7 +794,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     // WM-108), computed above outside this transaction. Refusals are typed
     // and carry their reason; a null verdict means every check passed at the
     // moment of the read — the doc's execute-time re-check owns the TTL gap.
-    if (def.workspace?.type === "worktree" && def.ref !== "merge-fix@1" && worktreeRefusal) {
+    if (worktreeGateFor(def) === "dispatch" && worktreeRefusal) {
       if (worktreeRefusal.decision === "human_needed") {
         return humanNeeded(db, event, worktreeRefusal.reason, at, ttlSeconds);
       }

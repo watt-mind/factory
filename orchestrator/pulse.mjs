@@ -52,6 +52,7 @@ function hasLinearKey() {
 
 export async function gatherPulse({
   port = 7381,
+  webPort = 7382,
   host = "127.0.0.1",
   repoName = "factory",
   fetchLinear = true,
@@ -59,7 +60,7 @@ export async function gatherPulse({
 } = {}) {
   const pulse = {
     timestamp: new Date().toISOString(),
-    stack: { api: { ok: false }, web: { ok: false }, workers: { total: 0, busy: 0, idle: 0, list: [] } },
+    stack: { api: { ok: false }, web: { ok: false, port: webPort }, workers: { total: 0, busy: 0, idle: 0, list: [] } },
     runs: { active: [], proposed: 0, byState: {} },
     supply: { repo: repoName, team: "WM", dispatchable: 0, triage: 0, tickets: [] },
     prs: { total: 0, candidates: [] },
@@ -79,10 +80,17 @@ export async function gatherPulse({
 
   // 2. Web UI Health
   try {
-    const webRes = await fetch(`http://${host}:7382/`, { signal: AbortSignal.timeout(2000) });
-    pulse.stack.web = { ok: webRes.ok || webRes.status === 404 }; // serving HTTP
-  } catch {
-    pulse.stack.web = { ok: false };
+    const webRes = await fetch(`http://${host}:${webPort}/`, { signal: AbortSignal.timeout(2000) });
+    const ok = webRes.ok || webRes.status === 404; // serving HTTP
+    pulse.stack.web = ok
+      ? { ok: true, port: webPort }
+      : { ok: false, port: webPort, error: `WEB_DOWN: Web UI returned HTTP ${webRes.status}` };
+  } catch (err) {
+    pulse.stack.web = {
+      ok: false,
+      port: webPort,
+      error: `WEB_DOWN: Web UI on :${webPort} unreachable (${err.message})`,
+    };
   }
 
   // 3. Status & Workers & Runs from API (if alive)
@@ -233,8 +241,11 @@ export function formatPulse(pulse) {
     : c.red("✗ down");
   lines.push(`  API (:7381):     ${apiStatus}`);
 
-  const webStatus = pulse.stack.web.ok ? c.green("✓ up") : c.yellow("! down or unreachable");
-  lines.push(`  Web (:7382):     ${webStatus}`);
+  const webPort = pulse.stack.web.port ?? 7382;
+  const webStatus = pulse.stack.web.ok
+    ? c.green("✓ up")
+    : c.red(`✗ ${pulse.stack.web.error || "WEB_DOWN: down or unreachable"}`);
+  lines.push(`  Web (:${webPort}):     ${webStatus}`);
 
   const workers = pulse.stack.workers;
   const workerDetail = workers.total > 0

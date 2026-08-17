@@ -774,6 +774,7 @@ describe("worker", () => {
     expect(classifyFailureCause("adapter_error")).toBe("environment");
     expect(classifyFailureCause("lease_expired")).toBe("environment");
     expect(classifyFailureCause("linear_unconfigured")).toBe("environment");
+    expect(classifyFailureCause("registry_stale")).toBe("environment");
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -1026,6 +1027,81 @@ describe("worker", () => {
     expect(Date.parse(verifying.at)).toBeLessThan(Date.parse(completed.at));
     expect(attempt.started_at).toBe(running.at);
     expect(attempt.finished_at).toBe(completed.at);
+  });
+
+  test("claimNext refuses a stale worker before leasing and requires reload (WM-613)", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({
+      promptVersion: "git:current",
+      policyVersion: "git:current",
+    }));
+
+    const refusal = claimNext(db, {
+      ...opts(),
+      policyVersion: "git:stale",
+      registryVersion: "git:stale",
+      currentRegistryVersion: "git:current",
+    });
+
+    expect(refusal).toMatchObject({
+      runId: spec.runId,
+      refused: true,
+      retryable: true,
+      reloadRequired: true,
+      reasonCode: "registry_stale",
+      workerRegistryVersion: "git:stale",
+      checkoutRegistryVersion: "git:current",
+    });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts).toBe(0);
+    expect(db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId)).toHaveLength(0);
+  });
+
+  test("claimNext does not restart-loop a fresh worker on an older queued spec (WM-613)", () => {
+    const db = openDb(":memory:");
+    const staleSpec = queueRun(db, makeSpec({
+      promptVersion: "git:old",
+      policyVersion: "git:old",
+    }));
+
+    const refusal = claimNext(db, {
+      ...opts(),
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "git:current",
+    });
+
+    expect(refusal).toMatchObject({
+      runId: staleSpec.runId,
+      refused: true,
+      retryable: true,
+      reloadRequired: false,
+      reasonCode: "registry_stale",
+    });
+    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+  });
+
+  test("claimNext skips an incompatible old spec and claims compatible queued work (WM-613)", () => {
+    const db = openDb(":memory:");
+    const staleSpec = queueRun(db, makeSpec({
+      promptVersion: "git:old",
+      policyVersion: "git:old",
+    }), T0);
+    const compatibleSpec = queueRun(db, makeSpec({
+      promptVersion: "git:current",
+      policyVersion: "git:current",
+    }), T0 + 1000);
+
+    const claim = claimNext(db, {
+      ...opts(),
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "git:current",
+    });
+
+    expect(claim.runId).toBe(compatibleSpec.runId);
+    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(runState(db, compatibleSpec.runId)).toBe("LEASED");
   });
 
   test("claimNext unconstrained candidate query: 60 unsatisfiable placement runs do not starve matching run (OPS-454)", () => {
@@ -1450,6 +1526,69 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     };
   }
 
+  function makeMergeFixSpec(overrides = {}) {
+    const runId = overrides.runId ?? `run_merge_fix_${++seq}_${Math.random().toString(36).slice(2)}`;
+    const input = overrides.input ?? {
+      repo: "wt-worker",
+      github: "watt-mind/wt-worker",
+      base: "develop",
+      pr: 42,
+      headSha: "a".repeat(40),
+      baseSha: "b".repeat(40),
+      headRef: "feat/WM-720",
+      ticket: "WM-720",
+      finding: "mechanical correction",
+      findingHash: "c".repeat(64),
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["src/feature/fix.mjs"],
+    };
+    return {
+      schemaVersion: "factory.run-spec/v1",
+      runId,
+      agent: "merge-fix@1",
+      input,
+      inputHash: hashJson(input),
+      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      adapter: "merge-fake",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.merge-fix-result/v1",
+      capabilities: ["linear:write", "repo:write", "github:write"],
+      timeoutSeconds: 5,
+      maxAttempts: 1,
+      idempotencyKey: `idem-${runId}`,
+      ...overrides,
+    };
+  }
+
+  const mergeFixFakeAdapter = {
+    async execute({ spec, workspaceDir }) {
+      writeFileSync(path.join(workspaceDir, ".transcript.json"), `{"fake":"merge-fix transcript"}\n`, "utf8");
+      writeFileSync(
+        path.join(workspaceDir, "result.json"),
+        `${JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          reasonCode: "ok",
+          artifact: {
+            outcome: "UPDATED",
+            repo: spec.input.repo,
+            ticket: spec.input.ticket,
+            pr: spec.input.pr,
+            headSha: spec.input.headSha,
+            round: spec.input.round,
+            summary: "applied mechanical correction",
+          },
+          evidence: { commands: ["echo repo_verified"] },
+        }, null, 2)}\n`,
+        "utf8",
+      );
+      return { exitCode: 0, timedOut: false };
+    },
+  };
+
   const readyDispatchTicket = (identifier, overrides = {}) => ({
     identifier,
     state: { name: "Todo" },
@@ -1717,6 +1856,58 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(specs.map((spec) => db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts)).toEqual([1, 1, 1]);
     expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
     expect(maxActiveClaims).toBe(1);
+  });
+
+  test("merge-fix gate accepts an assigned In Review ticket without invoking the dispatch claim", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-fix-gate-"));
+    const spec = queueRun(db, makeMergeFixSpec());
+    let claimCalled = false;
+
+    const summary = await runOnce(db, registry, { "merge-fake": mergeFixFakeAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => ({
+          identifier: spec.input.ticket,
+          state: { name: "In Review" },
+          assignee: { id: "reviewer" },
+          labels: { nodes: [{ name: "ai:needs-review" }] },
+          description: "## Owned Paths\n- src/feature/**\n",
+        }),
+        fetchPullRequest: () => ({ state: "OPEN", headRefOid: spec.input.headSha }),
+        claimTicket: () => { claimCalled = true; return { ok: false, reasonCode: "ticket_assigned" }; },
+      },
+    }));
+
+    expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+    expect(claimCalled).toBe(false);
+    expect(runState(db, spec.runId)).toBe("COMPLETED");
+  });
+
+  test("merge-fix claim refusals use role-specific reason codes", async () => {
+    for (const [suffix, ticketOverrides, pr, reasonCode] of [
+      ["escalated", { labels: { nodes: [{ name: "ai:escalated" }] } }, { state: "OPEN", headRefOid: "a".repeat(40) }, "merge_fix_ticket_escalated"],
+      ["moved", {}, { state: "OPEN", headRefOid: "d".repeat(40) }, "merge_fix_pr_moved"],
+    ]) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeMergeFixSpec({ runId: `run_merge_fix_${suffix}` }));
+      const summary = await runOnce(db, registry, { "merge-fake": mergeFixFakeAdapter }, opts({
+        dispatch: {
+          locksDir: mkdtempSync(path.join(os.tmpdir(), `evrt-merge-fix-${suffix}-`)),
+          fetchTicket: () => ({
+            identifier: spec.input.ticket,
+            state: { name: "In Review" },
+            assignee: { id: "reviewer" },
+            labels: { nodes: [{ name: "ai:needs-review" }] },
+            description: "## Owned Paths\n- src/feature/**\n",
+            ...ticketOverrides,
+          }),
+          fetchPullRequest: () => pr,
+        },
+      }));
+      expect(summary).toMatchObject({ terminalState: "REFUSED", reasonCode });
+      expect(["ticket_assigned", "ticket_not_todo"]).not.toContain(summary.reasonCode);
+    }
   });
 
   test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {
@@ -2528,6 +2719,19 @@ describe("reload watcher (WM-213)", () => {
     expect(r.action).toBe("reload");
     expect(r.from).toBe("a");
     expect(r.to).toBe("b");
+  });
+
+  test("forced between-runs check detects a change before the normal interval (WM-613)", () => {
+    const h = harness();
+    h.change("b");
+    h.advance(1);
+
+    expect(h.watcher.check(null).action).toBe("none");
+    expect(h.watcher.check(null, { force: true })).toMatchObject({
+      action: "reload",
+      from: "a",
+      to: "b",
+    });
   });
 
   test("in-flight run defers the reload, then reloads at the next idle check", () => {
