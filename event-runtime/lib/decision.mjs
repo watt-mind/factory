@@ -1,17 +1,45 @@
+/**
+ * Decision contracts — `factory.decision-request/v1` and
+ * `factory.decision-response/v1` (docs/event-runtime-inbox.md §2, §3).
+ *
+ * A decision request is a bounded question an agent (or the runtime) puts to
+ * the operator: 1–6 options each carrying a runtime effect, plus 0–6 gated
+ * fields from a closed widget vocabulary. A response is the operator's answer,
+ * hash-bound to the exact request it was looking at. Both go through the same
+ * closed-keyword `lib/schema.mjs` as every other contract; the rules JSON
+ * Schema cannot express (id references, effect↔refs legality, per-kind field
+ * keys, per-option field applicability) live here, as `lib/artifact-view.mjs`
+ * does for views. Pure and fail-closed: `{ valid, errors }`, never throws on
+ * data, no I/O beyond loading the schemas once.
+ */
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { hashJson } from "./canonical.mjs";
+import { RUNTIME_ROOT } from "./config.mjs";
 import { validate } from "./schema.mjs";
 
-const requestSchema = JSON.parse(
-  readFileSync(new URL("../schemas/factory.decision-request.v1.json", import.meta.url), "utf8"),
+export const DECISION_REQUEST_SCHEMA_VERSION = "factory.decision-request/v1";
+export const DECISION_RESPONSE_SCHEMA_VERSION = "factory.decision-response/v1";
+export const DECISION_REQUEST_SCHEMA = JSON.parse(
+  readFileSync(path.join(RUNTIME_ROOT, "schemas", "factory.decision-request.v1.json"), "utf8"),
 );
-const responseSchema = JSON.parse(
-  readFileSync(new URL("../schemas/factory.decision-response.v1.json", import.meta.url), "utf8"),
+export const DECISION_RESPONSE_SCHEMA = JSON.parse(
+  readFileSync(path.join(RUNTIME_ROOT, "schemas", "factory.decision-response.v1.json"), "utf8"),
 );
+
+/** §2.1 `context` bound is a byte size, not a code-unit count. */
+export const CONTEXT_MAX_BYTES = 8 * 1024;
+/** §2.3 `text` defaults. */
+export const TEXT_DEFAULT_MAX_LENGTH = 2000;
+export const WIDGET_KINDS = ["text", "single-choice", "multi-choice", "confirm", "number"];
+export const EFFECTS = [
+  "authorise", "send_to_triage", "answer", "requeue", "approve_proposal", "reject_proposal", "dismiss",
+];
 
 const hasOwn = (value, key) =>
   value !== null && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key);
 
+/** Keys every field may carry, plus the per-`kind` extras (§2.3 "Extra keys"). */
 const COMMON_FIELD_KEYS = new Set(["id", "kind", "label", "required", "whenOption"]);
 const FIELD_KEYS = {
   text: new Set([...COMMON_FIELD_KEYS, "placeholder", "maxLength"]),
@@ -21,7 +49,8 @@ const FIELD_KEYS = {
   number: new Set([...COMMON_FIELD_KEYS, "minimum", "maximum", "integer"]),
 };
 
-const EFFECT_REFS = {
+/** §3 legality table: refs an item must carry for each effect to be offered. */
+export const EFFECT_REFS = {
   authorise: ["issue", "repo", "runId"],
   send_to_triage: ["issue"],
   answer: ["issue"],
@@ -30,10 +59,6 @@ const EFFECT_REFS = {
   reject_proposal: ["proposalId"],
   dismiss: [],
 };
-const RESPONSE_VALIDATION_REFS = Object.fromEntries(
-  [...new Set(Object.values(EFFECT_REFS).flat())].map((key) => [key, "response-validation"]),
-);
-
 function result(errors) {
   return { valid: errors.length === 0, errors };
 }
@@ -59,12 +84,21 @@ function duplicateValues(values) {
  * @returns {{ valid: boolean, errors: string[] }}
  */
 export function validateDecisionRequest(request, { refs = {} } = {}) {
-  const shape = validate(requestSchema, request);
+  return checkRequest(request, { refs, checkEffectLegality: true });
+}
+
+/**
+ * Shared body: the response validator re-checks the request it is answering
+ * (a malformed request cannot be answered correctly) but effect legality is a
+ * creation-time concern (§3) — the refs are not on hand at answer time.
+ */
+function checkRequest(request, { refs, checkEffectLegality }) {
+  const shape = validate(DECISION_REQUEST_SCHEMA, request);
   if (!shape.valid) return shape;
 
   const errors = [];
-  if (request.context !== undefined && Buffer.byteLength(request.context, "utf8") > 8192) {
-    errors.push("$.context: longer than 8 KiB when encoded as UTF-8");
+  if (request.context !== undefined && Buffer.byteLength(request.context, "utf8") > CONTEXT_MAX_BYTES) {
+    errors.push(`$.context: longer than ${CONTEXT_MAX_BYTES} bytes when encoded as UTF-8`);
   }
   const optionIds = request.options.map((option) => option.id);
   const optionIdSet = new Set(optionIds);
@@ -96,8 +130,10 @@ export function validateDecisionRequest(request, { refs = {} } = {}) {
       }
     }
 
-    for (const ref of EFFECT_REFS[option.effect]) {
-      if (!usableRef(refs, ref)) errors.push(`${path}.effect: "${option.effect}" requires refs.${ref}`);
+    if (checkEffectLegality) {
+      for (const ref of EFFECT_REFS[option.effect]) {
+        if (!usableRef(refs, ref)) errors.push(`${path}.effect: "${option.effect}" requires refs.${ref}`);
+      }
     }
   }
 
@@ -167,7 +203,7 @@ export function validateDecisionRequest(request, { refs = {} } = {}) {
   return result(errors);
 }
 
-/** Return the canonical identity a response must bind to. */
+/** The identity a response binds to (§2.2 `requestHash`): canonical-JSON sha256. */
 export function decisionRequestHash(request) {
   return hashJson(request);
 }
@@ -178,7 +214,7 @@ function validateFieldValue(field, value, path, errors) {
       errors.push(`${path}: expected string`);
       return;
     }
-    const maximum = field.maxLength ?? 2000;
+    const maximum = field.maxLength ?? TEXT_DEFAULT_MAX_LENGTH;
     if (field.required === true && value.length === 0) errors.push(`${path}: required text must not be empty`);
     if (value.length > maximum) errors.push(`${path}: longer than maxLength ${maximum}`);
     return;
@@ -242,10 +278,10 @@ function validateFieldValue(field, value, path, errors) {
  * @returns {{ valid: boolean, errors: string[] }}
  */
 export function validateDecisionResponse(response, request) {
-  const responseShape = validate(responseSchema, response);
+  const responseShape = validate(DECISION_RESPONSE_SCHEMA, response);
   if (!responseShape.valid) return responseShape;
 
-  const requestCheck = validateDecisionRequest(request, { refs: RESPONSE_VALIDATION_REFS });
+  const requestCheck = checkRequest(request, { refs: {}, checkEffectLegality: false });
   if (!requestCheck.valid) {
     return result(requestCheck.errors.map((error) => `request ${error}`));
   }

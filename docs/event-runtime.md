@@ -220,7 +220,7 @@ The LLM appears only inside `execute`.
 
 ## 5. Versioned contracts
 
-`factory.decision-request/v1` and `factory.decision-response/v1` define bounded human questions and their hash-bound answers.
+Besides the three below, `factory.decision-request/v1` and `factory.decision-response/v1` (`event-runtime/schemas/`, validated by `lib/decision.mjs`) define a bounded human question — 1–6 options with runtime effects plus gated fields from a closed widget vocabulary — and its hash-bound answer; a refused agent-result may carry a request as `decision` (docs/event-runtime-inbox.md §2–§4).
 
 ### 5.1 Event envelope
 
