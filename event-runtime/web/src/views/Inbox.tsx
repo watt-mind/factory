@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { keyGuard, useListKeys, useNow, useTabKeys } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import type { InboxItem } from "../types";
 import {
   Ago,
+  BulkActionBar,
   Button,
   CopyActions,
   DetailPane,
@@ -162,6 +163,52 @@ export function Inbox({
 
   const visibleGroups = useMemo(() => groupItems(items.filter((it) => matchesTab(it, tab))), [items, tab]);
   const visible = useMemo(() => visibleGroups.flatMap((g) => g.items), [visibleGroups]);
+  const selectionEnabled = tab === "open" || tab === "acked";
+  const actionableVisible = selectionEnabled ? visible : [];
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkAcking, setBulkAcking] = useState(false);
+  const [bulkResolving, setBulkResolving] = useState(false);
+  const [bulkResolveOpen, setBulkResolveOpen] = useState(false);
+  const headerCheckboxRef = useRef<HTMLInputElement>(null);
+  const pendingStar = useRef(0);
+
+  const allActionableSelected =
+    actionableVisible.length > 0 && actionableVisible.every((it) => selectedIds.has(it.id));
+  const someActionableSelected =
+    actionableVisible.some((it) => selectedIds.has(it.id)) && !allActionableSelected;
+  const selectedRows = useMemo(
+    () => visible.filter((it) => selectedIds.has(it.id)),
+    [visible, selectedIds],
+  );
+  const ackableSelected = selectedRows.filter((it) => itemStatus(it) === "open");
+  const resolvableSelected = selectedRows.filter((it) => itemStatus(it) !== "resolved");
+
+  useEffect(() => {
+    if (headerCheckboxRef.current) headerCheckboxRef.current.indeterminate = someActionableSelected;
+  }, [someActionableSelected]);
+
+  // IDs survive ordinary polling, while items that leave the active tab are
+  // pruned once the refetch establishes the new visible set.
+  useEffect(() => {
+    const visibleIds = new Set(actionableVisible.map((it) => it.id));
+    setSelectedIds((prev) => {
+      const next = new Set([...prev].filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [actionableVisible]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+  const selectAllActionable = () => setSelectedIds(new Set(actionableVisible.map((it) => it.id)));
+  const toggleSelectAll = () => {
+    if (allActionableSelected) setSelectedIds(new Set());
+    else selectAllActionable();
+  };
 
   const sel = focusItemId ? (items.find((it) => it.id === focusItemId) ?? null) : null;
   const selectedIndex = sel ? visible.findIndex((it) => it.id === sel.id) : -1;
@@ -204,23 +251,67 @@ export function Inbox({
   const canAck = !!sel && connected && itemStatus(sel) === "open" && !ack.isPending;
   const canResolve = !!sel && connected && itemStatus(sel) !== "resolved" && !resolve.isPending;
 
-  // Enter confirms the resolve dialog (same idiom as the Proposals confirms):
-  // the Dialog primitive parks focus on its root, so a focused button is not
-  // something we can rely on.
+  const handleBulkAck = async () => {
+    if (!connected || bulkAcking || ackableSelected.length === 0) return;
+    setBulkAcking(true);
+    let done = 0;
+    let failed = 0;
+    for (const item of ackableSelected) {
+      try {
+        await api.ackInbox(item.id);
+        done++;
+      } catch {
+        failed++;
+      }
+    }
+    invalidate();
+    setSelectedIds(new Set());
+    setBulkAcking(false);
+    notify(`Ack: ${done} done / ${failed} failed`, failed ? "err" : "ok");
+  };
+
+  const handleBulkResolve = async () => {
+    if (!connected || bulkResolving || resolvableSelected.length === 0) return;
+    setBulkResolving(true);
+    let done = 0;
+    let failed = 0;
+    for (const item of resolvableSelected) {
+      try {
+        await api.resolveInbox(item.id);
+        done++;
+      } catch {
+        failed++;
+      }
+    }
+    invalidate();
+    setSelectedIds(new Set());
+    setBulkResolving(false);
+    setBulkResolveOpen(false);
+    notify(`Resolve: ${done} done / ${failed} failed`, failed ? "err" : "ok");
+  };
+
+  // Enter confirms either resolve dialog. Dialog focus parks on its root, so a
+  // focused button is not something the keyboard contract can rely on.
   useEffect(() => {
-    if (!confirmResolve) return;
+    if (!confirmResolve && !bulkResolveOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Enter" || !sel || !canResolve) return;
-      e.preventDefault();
-      resolve.mutate(sel.id);
+      if (e.key !== "Enter") return;
+      if (bulkResolveOpen && connected && !bulkResolving && resolvableSelected.length > 0) {
+        e.preventDefault();
+        void handleBulkResolve();
+      } else if (confirmResolve && sel && canResolve) {
+        e.preventDefault();
+        resolve.mutate(sel.id);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [confirmResolve, sel, canResolve, resolve]);
+  }, [confirmResolve, bulkResolveOpen, sel, canResolve, resolve, connected, bulkResolving, resolvableSelected]);
 
   const selectTab = (t: InboxTab) => {
     setTab(t);
     onSelectItem(null);
+    setSelectedIds(new Set());
   };
   useTabKeys(INBOX_TABS, tab, selectTab);
   useEffect(() => {
@@ -244,17 +335,80 @@ export function Inbox({
     onSelect: (i) => onSelectItem(visible[i]?.id ?? null),
     onClose: () => {
       if (confirmResolve) setConfirmResolve(false);
+      else if (bulkResolveOpen) setBulkResolveOpen(false);
+      else if (selectedIds.size > 0) setSelectedIds(new Set());
       else if (sel) onSelectItem(null);
     },
     keys: {
       a: () => {
-        if (canAck && sel) ack.mutate(sel.id);
+        const starActive = pendingStar.current > 0 && Date.now() - pendingStar.current < 800;
+        if (!starActive && canAck && sel) ack.mutate(sel.id);
       },
       x: () => {
         if (canResolve) setConfirmResolve(true);
       },
     },
   });
+
+  useEffect(() => {
+    function onSelectionKey(e: KeyboardEvent) {
+      if (keyGuard(e) || e.altKey || goPrefixActive() || e.repeat) return;
+      const now = Date.now();
+      const starActive = pendingStar.current > 0 && now - pendingStar.current < 800;
+
+      if (!e.metaKey && !e.ctrlKey && e.key === "*") {
+        e.preventDefault();
+        pendingStar.current = now;
+        return;
+      }
+      if (!e.metaKey && !e.ctrlKey && starActive && (e.key === "a" || e.key === "n")) {
+        e.preventDefault();
+        pendingStar.current = 0;
+        if (e.key === "a") selectAllActionable();
+        else setSelectedIds(new Set());
+        return;
+      }
+      pendingStar.current = 0;
+
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "a") {
+        if (actionableVisible.length === 0) return;
+        e.preventDefault();
+        selectAllActionable();
+        return;
+      }
+      if (e.metaKey || e.ctrlKey) return;
+
+      if ((e.key === " " || e.key === "Spacebar") && selectionEnabled && sel) {
+        e.preventDefault();
+        toggleSelect(sel.id);
+        return;
+      }
+      if (e.key === "A" && selectedIds.size > 0) {
+        if (!connected || bulkAcking || ackableSelected.length === 0) return;
+        e.preventDefault();
+        void handleBulkAck();
+        return;
+      }
+      if (e.key === "X" && selectedIds.size > 0) {
+        if (!connected || bulkResolving || resolvableSelected.length === 0) return;
+        e.preventDefault();
+        setBulkResolveOpen(true);
+      }
+    }
+
+    window.addEventListener("keydown", onSelectionKey);
+    return () => window.removeEventListener("keydown", onSelectionKey);
+  }, [
+    actionableVisible,
+    ackableSelected,
+    bulkAcking,
+    bulkResolving,
+    connected,
+    resolvableSelected,
+    sel,
+    selectedIds.size,
+    selectionEnabled,
+  ]);
 
   const tdCls = "border-b border-(--border) px-3 py-1.5 whitespace-nowrap";
   const openEmpty = tab === "open" && visible.length === 0 && query.isSuccess;
@@ -319,6 +473,19 @@ export function Inbox({
             <table className="w-full border-separate border-spacing-0">
               <thead>
                 <tr className="text-left text-[11px] text-(--text-faint)">
+                  {selectionEnabled && (
+                    <th className="sticky top-0 z-10 h-7 w-8 bg-(--surface-0) px-3 shadow-[inset_0_-1px_0_var(--border)]">
+                      <input
+                        ref={headerCheckboxRef}
+                        type="checkbox"
+                        aria-label="Select all inbox items"
+                        checked={allActionableSelected}
+                        disabled={actionableVisible.length === 0}
+                        onChange={toggleSelectAll}
+                        className="cursor-pointer"
+                      />
+                    </th>
+                  )}
                   <Th label="Kind" />
                   <Th label="Title" />
                   <Th label="Age" />
@@ -329,19 +496,19 @@ export function Inbox({
               <tbody>
                 {query.isPending && !query.data && (
                   <tr>
-                    <td colSpan={5} className="px-3 py-8 text-center text-(--text-faint)">Loading inbox…</td>
+                    <td colSpan={5 + (selectionEnabled ? 1 : 0)} className="px-3 py-8 text-center text-(--text-faint)">Loading inbox…</td>
                   </tr>
                 )}
                 {query.isError && !query.data && (
                   <tr>
-                    <td colSpan={5} className="px-3 py-8 text-center text-(--text-faint)">
+                    <td colSpan={5 + (selectionEnabled ? 1 : 0)} className="px-3 py-8 text-center text-(--text-faint)">
                       Cannot reach the control API — the inbox will appear when it is up.
                     </td>
                   </tr>
                 )}
                 {query.isSuccess && visible.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-3 py-8 text-center text-(--text-faint)">
+                    <td colSpan={5 + (selectionEnabled ? 1 : 0)} className="px-3 py-8 text-center text-(--text-faint)">
                       {tab === "acked" ? "No acked items." : tab === "resolved" ? "No resolved items yet." : "The ledger is empty."}
                     </td>
                   </tr>
@@ -353,6 +520,9 @@ export function Inbox({
                     rows={rows}
                     now={now}
                     selectedId={sel?.id ?? null}
+                    bulkSelectedIds={selectedIds}
+                    selectionEnabled={selectionEnabled}
+                    onToggleSelection={toggleSelect}
                     onSelect={onSelectItem}
                     onJumpRun={onJumpRun}
                     onJumpProposal={onJumpProposal}
@@ -481,6 +651,49 @@ export function Inbox({
         </DetailPane>
       )}
 
+      {selectedIds.size > 0 && selectionEnabled && (
+        <BulkActionBar count={selectedIds.size} onClear={() => setSelectedIds(new Set())}>
+          <Button
+            variant="primary"
+            disabled={!connected || bulkAcking || ackableSelected.length === 0}
+            onClick={() => void handleBulkAck()}
+          >
+            {bulkAcking ? "Acking…" : "Ack"}
+            <span className="mono ml-1 text-[10px] text-(--text-faint)" aria-hidden="true">A</span>
+          </Button>
+          <Button
+            disabled={!connected || bulkResolving || resolvableSelected.length === 0}
+            onClick={() => setBulkResolveOpen(true)}
+          >
+            Resolve…
+            <span className="mono ml-1 text-[10px] text-(--text-faint)" aria-hidden="true">X</span>
+          </Button>
+        </BulkActionBar>
+      )}
+
+      {bulkResolveOpen && resolvableSelected.length > 0 && (
+        <Dialog
+          title={`Resolve ${resolvableSelected.length} inbox item${resolvableSelected.length === 1 ? "" : "s"}?`}
+          onClose={() => setBulkResolveOpen(false)}
+        >
+          <p className="mb-3 text-[12px] text-(--text-dim)">
+            Marks all {resolvableSelected.length} selected items as dealt with. They leave Open or Acked and stay in the
+            ledger under Resolved. This does not act on their underlying runs, proposals, or PRs.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setBulkResolveOpen(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={!connected || bulkResolving}
+              onClick={() => void handleBulkResolve()}
+              autoFocus
+            >
+              {bulkResolving ? "Resolving…" : `Resolve ${resolvableSelected.length} items`}
+            </Button>
+          </div>
+        </Dialog>
+      )}
+
       {confirmResolve && sel && (
         <Dialog title="Resolve inbox item?" onClose={() => setConfirmResolve(false)}>
           <p className="mb-3 text-[12px] text-(--text-dim)">
@@ -504,6 +717,9 @@ function GroupRows({
   rows,
   now,
   selectedId,
+  bulkSelectedIds,
+  selectionEnabled,
+  onToggleSelection,
   onSelect,
   onJumpRun,
   onJumpProposal,
@@ -514,6 +730,9 @@ function GroupRows({
   rows: InboxItem[];
   now: number;
   selectedId: string | null;
+  bulkSelectedIds: Set<string>;
+  selectionEnabled: boolean;
+  onToggleSelection: (id: string) => void;
   onSelect: (id: string) => void;
   onJumpRun: (runId: string) => void;
   onJumpProposal: (id: string) => void;
@@ -524,7 +743,7 @@ function GroupRows({
     <>
       <tr>
         <td
-          colSpan={5}
+          colSpan={5 + (selectionEnabled ? 1 : 0)}
           className="sticky top-7 z-10 border-b border-(--border) bg-(--surface-0) px-3 py-1 text-[11px] font-medium"
           style={{ color: group.hue }}
         >
@@ -542,6 +761,17 @@ function GroupRows({
             aria-selected={item.id === selectedId}
             className={`cursor-pointer hover:bg-(--surface-1) ${item.id === selectedId ? "row-selected" : ""}`}
           >
+            {selectionEnabled && (
+              <td className={`${tdCls} w-8`} onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  aria-label={`Select inbox item ${item.id}`}
+                  checked={bulkSelectedIds.has(item.id)}
+                  onChange={() => onToggleSelection(item.id)}
+                  className="cursor-pointer"
+                />
+              </td>
+            )}
             <td className={`${tdCls} w-32`}>
               <StateBadge state={item.kind} hues={INBOX_KIND_HUES} dot={false} />
             </td>
