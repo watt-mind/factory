@@ -336,19 +336,34 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-stale-"));
   const ticketId = makeTestTicket("STALE");
   const branch = `feat/${ticketId}`;
+  // Build the stale/base pair locally instead of relying on `origin/develop~1`:
+  // CI checkouts are shallow (fetch-depth 1), so the real base has no
+  // reachable parent there (WM-531). Synthesize a base commit on top of HEAD,
+  // publish it as a temporary remote-tracking ref, and point the stale branch
+  // at its parent; worktree-up is aimed at it via FACTORY_BASE_BRANCH.
+  const baseBranch = `test-base-${ticketId}`;
+  const baseRef = `refs/remotes/origin/${baseBranch}`;
   const git = (args) => Bun.spawnSync({ cmd: ["git", ...args], cwd: path.resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" });
 
   try {
-    expect(git(["branch", branch, "origin/develop~1"]).exitCode).toBe(0);
-    const staleSha = git(["rev-parse", branch]).stdout.toString().trim();
-    const baseSha = git(["rev-parse", "origin/develop"]).stdout.toString().trim();
+    const staleSha = git(["rev-parse", "HEAD"]).stdout.toString().trim();
+    expect(staleSha).toMatch(/^[0-9a-f]{40}$/);
+    const commitTree = git([
+      "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "commit-tree", `${staleSha}^{tree}`, "-p", staleSha, "-m", "synthetic base for stale re-dispatch test",
+    ]);
+    expect(commitTree.exitCode).toBe(0);
+    const baseSha = commitTree.stdout.toString().trim();
+    expect(baseSha).toMatch(/^[0-9a-f]{40}$/);
     expect(staleSha).not.toBe(baseSha);
+    expect(git(["update-ref", baseRef, baseSha]).exitCode).toBe(0);
+    expect(git(["branch", branch, staleSha]).exitCode).toBe(0);
 
     const upRes = Bun.spawnSync({
       cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, FACTORY_BASE_BRANCH: baseBranch },
     });
     expect(upRes.exitCode).toBe(0);
     expect(git(["-C", path.join(tempWtRoot, ticketId), "rev-parse", "HEAD"]).stdout.toString().trim()).toBe(baseSha);
@@ -356,6 +371,7 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
     Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
     rmSync(tempWtRoot, { recursive: true, force: true });
     git(["branch", "-D", branch]);
+    git(["update-ref", "-d", baseRef]);
   }
 });
 
