@@ -107,7 +107,34 @@ const TEXT_PREVIEW_CHARS = 4000;
 // tool removal. Containment for mutating: false is therefore the ephemeral or
 // pinned workspace as cwd — audited, not enforced, per §14 until stage 2's
 // native capability enforcement (OPS-515).
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write", "bash"];
+//   exec_command / apply_patch
+//          the third occurrence (WM-665), and the reason both name families are
+//          listed. Tool names are PER PROVIDER, not per pi version. On
+//          openai-codex models (sol/terra/luna — what `pi.*` resolves to in
+//          config/policy.yaml) there is no `read`, `write` or `bash` at all:
+//          the shell is `exec_command` and file writing is `apply_patch`.
+//          `grep`/`find`/`ls` do exist, so exactly those three survived the
+//          allowlist and the failure looked like a weak model rather than a
+//          config bug. pi drops an unrecognized name silently — no error, no
+//          warning — so a mutating: false agent kept its contract obligation
+//          and lost the only tool that could satisfy it, then failed closed
+//          with "this session exposes no shell or file-write tool"
+//          (run_b66e2338 merge-scan@2, run_06cfd301 work-scan@1, pi 0.84.2).
+// Both families are kept: an unrecognized name is inert, so listing them
+// together is what makes one allowlist correct across providers.
+// `apply_patch` conflates write and edit, so a mutating: false agent on codex
+// does get an edit-capable tool. That is deliberate and consistent with the
+// paragraph below: containment is the workspace, not the tool list.
+export const READ_ONLY_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "write",
+  "bash",
+  "exec_command",
+  "apply_patch",
+];
 
 // The mutating counterpart, and the reason it exists (WM-336): until now
 // `--tools` was passed ONLY for `mutating: false`, so a mutating agent ran on
@@ -133,7 +160,19 @@ export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "write", "bash"];
 // agent. `subagent` is deliberately included: dispatch delegates focused work —
 // notably the UX critique (WM-335) — and the alternative is one context doing
 // everything, which is what long-run degradation looks like.
-export const MUTATING_TOOLS = ["read", "grep", "find", "ls", "write", "bash", "edit", "subagent"];
+export const MUTATING_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "write",
+  "bash",
+  "edit",
+  "subagent",
+  // Codex-provider equivalents of bash/write+edit — see WM-665 above.
+  "exec_command",
+  "apply_patch",
+];
 
 export class CliNotFoundError extends Error {
   constructor(message) {

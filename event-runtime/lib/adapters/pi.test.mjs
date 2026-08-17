@@ -139,11 +139,14 @@ describe("buildPiArgv", () => {
     ]);
   });
 
-  test("mutating: false → --tools read,grep,find,ls,write,bash (pi's own read-only pattern, not -r)", () => {
+  test("mutating: false → pi's own read-only pattern plus the codex names, not -r", () => {
     const argv = buildPiArgv({ def: { mutating: false }, model: null });
     expect(argv).toContain("--tools");
     expect(argv[argv.indexOf("--tools") + 1]).toBe(READ_ONLY_TOOLS.join(","));
-    expect(argv).toEqual(["-p", "--mode", "json", "--tools", "read,grep,find,ls,write,bash"]);
+    expect(argv).toEqual([
+      "-p", "--mode", "json", "--tools",
+      "read,grep,find,ls,write,bash,exec_command,apply_patch",
+    ]);
   });
 
   test("mutating: true → an explicit allowlist, never pi's implicit defaults (WM-336)", () => {
@@ -152,7 +155,24 @@ describe("buildPiArgv", () => {
     // also holds push credentials — was the least constrained agent in the fleet.
     const argv = buildPiArgv({ def: { mutating: true }, model: null });
     expect(argv).toContain("--tools");
-    expect(argv[argv.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write,bash,edit,subagent");
+    expect(argv[argv.indexOf("--tools") + 1]).toBe(
+      "read,grep,find,ls,write,bash,edit,subagent,exec_command,apply_patch",
+    );
+  });
+
+  // WM-665: tool names are per PROVIDER, not per pi version. On openai-codex
+  // models — what every pi.* tier in config/policy.yaml resolves to — there is
+  // no read/write/bash; the shell is exec_command and file writing is
+  // apply_patch. pi drops an unrecognized name silently, so an allowlist
+  // carrying only the other family left agents with grep/find/ls and no way to
+  // write ./result.json, failing contract_violation: missing_result after
+  // exit 0. Both mutability classes must carry a shell and a writer.
+  test("both mutability classes expose a shell and a file writer on codex models (WM-665)", () => {
+    for (const mutating of [false, true]) {
+      const tools = piTools({ mutating });
+      expect(tools).toContain("exec_command");
+      expect(tools).toContain("apply_patch");
+    }
   });
 
   test("mutating: true keeps edit and subagent — the tools that make it a dispatch agent", () => {
@@ -556,7 +576,7 @@ process.stdin.on("end", () => {
     expect(record.argv).toContain("--model");
     expect(record.argv[record.argv.indexOf("--model") + 1]).toBe("openai-codex/gpt-5.6-terra");
     expect(record.argv).toContain("--tools");
-    expect(record.argv[record.argv.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write,bash");
+    expect(record.argv[record.argv.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write,bash,exec_command,apply_patch");
 
     // 4. .transcript.json artifact capture
     const transcriptPath = path.join(workspaceDir, ".transcript.json");
@@ -868,7 +888,7 @@ describe("sandboxed execution (WM-313)", () => {
     const piArgs = req.command.slice(4);
     expect(piArgs.slice(0, 3)).toEqual(["-p", "--mode", "json"]);
     expect(piArgs[piArgs.indexOf("--model") + 1]).toBe("openai/gpt-5.6-terra");
-    expect(piArgs[piArgs.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write,bash");
+    expect(piArgs[piArgs.indexOf("--tools") + 1]).toBe("read,grep,find,ls,write,bash,exec_command,apply_patch");
     expect(readFileSync(path.join(workspaceDir, SANDBOX_PROMPT_FILE), "utf8")).toBe(`You are a sandboxed test agent.${PROMPT_SUFFIX}`);
 
     // 3. Guest env is built, not inherited: no host key, no push token, no
