@@ -453,6 +453,29 @@ function isIdempotencyKeyCollision(err) {
   return err?.code === "SQLITE_CONSTRAINT_UNIQUE" || /UNIQUE constraint failed: runs\.idempotency_key/.test(String(err?.message ?? err));
 }
 
+function liveRunForInput(db, agentRef, { repo, ticket = null, includeFailed = false }) {
+  if (typeof repo !== "string" || (ticket !== null && typeof ticket !== "string")) return null;
+  return db.query(
+    `SELECT run_id, state FROM runs
+     WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+       AND (? = 1 OR state <> 'FAILED')
+       AND json_extract(spec_json, '$.agent') = ?
+       AND json_extract(spec_json, '$.input.repo') = ?
+       AND (? IS NULL OR json_extract(spec_json, '$.input.ticket') = ?)
+     ORDER BY created_at ASC, rowid ASC
+     LIMIT 1`,
+  ).get(includeFailed ? 1 : 0, agentRef, repo, ticket, ticket);
+}
+
+function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
+  const proposal = insertProposal(db, {
+    id: newProposalId(), event, runId: blockingRun.run_id, decision: "noop", status: "resolved",
+    reason, at, ttlSeconds,
+  });
+  setEventStatus(db, event, "noop");
+  return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
+}
+
 function humanNeeded(db, event, reason, at, ttlSeconds) {
   const proposal = insertProposal(db, {
     id: newProposalId(), event, decision: "human_needed", status: "open", reason, at, ttlSeconds,
@@ -541,11 +564,53 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     const scopeRefusal = repoNotAllowed(def, envelope.payload);
     if (scopeRefusal) return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
 
+    // A work scan reserves its repo as soon as its run is PROPOSED, before the
+    // expensive model read can select a ticket. This is deliberately stronger
+    // than schedule singleton semantics (which exclude watched PROPOSED runs):
+    // two operator/chain scans for one queue must never run concurrently. The
+    // IMMEDIATE transaction makes the reservation check and run creation
+    // atomic across planner connections.
+    if (
+      envelope.type === "factory.work.requested" &&
+      typeof envelope.payload?.repo === "string"
+    ) {
+      const blockingScan = liveRunForInput(db, mapping.agent, { repo: envelope.payload.repo });
+      if (blockingScan) {
+        return noopBehindLiveRun(
+          db, event, blockingScan, "work_scan_already_in_flight", at, ttlSeconds,
+        );
+      }
+    }
+
+    // Defense in depth for stale/advisory scan results: once any dispatch for
+    // this exact repo/ticket has a live run (including an unapproved PROPOSED
+    // run), a second dispatch is refused here with the worktree owner named.
+    // It therefore never reaches provisioning where the same deterministic
+    // worktree path and port pair would masquerade as a foreign port collision.
+    if (
+      envelope.type === "factory.dispatch.requested" &&
+      typeof envelope.payload?.repo === "string" &&
+      typeof envelope.payload?.ticket === "string"
+    ) {
+      const blockingDispatch = liveRunForInput(db, mapping.agent, {
+        repo: envelope.payload.repo,
+        ticket: envelope.payload.ticket,
+        // FAILED dispatches remain retryable and retain their worktree; a new
+        // run for the same ticket would still collide with that owner.
+        includeFailed: true,
+      });
+      if (blockingDispatch) {
+        const reason = `ticket_dispatch_already_live:${blockingDispatch.run_id}:same_ticket_worktree_held`;
+        return noopBehindLiveRun(db, event, blockingDispatch, reason, at, ttlSeconds);
+      }
+    }
+
     // §5 singleton is agent policy, not clock-envelope policy: operator and
     // chain origins mapped to an enabled singleton agent must not bypass it by
     // omitting payload.loop. Merge scans additionally obey the git-owned
     // global admission cap even when a concrete schedule opts out of
-    // singleton behavior. PROPOSED remains excluded (OPS-436).
+    // singleton behavior. PROPOSED remains excluded here (OPS-436); the
+    // repo-scoped work-scan reservation above intentionally includes it.
     const inFlight = inFlightRunsForAgent(db, mapping.agent);
     const singletonBlocked = singletonApplies(registry, envelope, mapping.agent) && inFlight.length > 0;
     const mergeCap = envelope.type === "factory.merge.requested" ? policyMaxConcurrentMerges() : null;

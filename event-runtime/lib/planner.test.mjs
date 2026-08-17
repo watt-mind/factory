@@ -297,6 +297,136 @@ describe("planEvent", () => {
     expect(db.query(`SELECT status FROM events WHERE event_id = ?`).get(collisionEventId).status).toBe("noop");
   });
 
+  test("concurrent work scans for one repo reserve selection before either can duplicate it (WM-491)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("work-scan@1", {
+      ...registry.agents.get("work-scan@1"),
+      // Keep this planner regression hermetic: repo pinning is unrelated to
+      // the reservation, whose scope comes from input.repo.
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const firstRef = admit(db, {
+      eventId: "work-hot-1",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-hot-1",
+      payload: { repo: "factory" },
+    });
+    const secondRef = admit(db, {
+      eventId: "work-hot-2",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-hot-2",
+      payload: { repo: "factory" },
+    });
+
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+    const second = planEvent(db, synthetic, secondRef, { now: NOW + 1000, policyVersion: "git:test" });
+
+    expect(first.decision).toBe("run");
+    expect(runState(db, first.runId)).toBe("PROPOSED");
+    expect(second).toMatchObject({
+      decision: "noop",
+      reason: "work_scan_already_in_flight",
+      runId: first.runId,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+
+    // The reservation is repo-scoped, not a global scanner singleton.
+    const otherRepoRef = admit(db, {
+      eventId: "work-other-repo",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-other-repo",
+      payload: { repo: "bj29" },
+    });
+    expect(planEvent(db, synthetic, otherRepoRef, { now: NOW + 2000, policyVersion: "git:test" }).decision).toBe("run");
+
+    // A failed read emitted no dispatch chain and must release the queue; unlike
+    // a failed dispatch, a failed scan owns no retained worktree to protect.
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+    const afterFailureRef = admit(db, {
+      eventId: "work-after-failure",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-after-failure",
+      payload: { repo: "factory" },
+    });
+    const afterFailure = planEvent(db, synthetic, afterFailureRef, { now: NOW + 3000, policyVersion: "git:test" });
+    expect(afterFailure.decision).toBe("run");
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: afterFailure.runId, to, actor: "test" });
+    }
+    const nextCycleRef = admit(db, {
+      eventId: "work-hot-next",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-hot-next",
+      payload: { repo: "factory" },
+    });
+    expect(planEvent(db, synthetic, nextCycleRef, { now: NOW + 4000, policyVersion: "git:test" }).decision).toBe("run");
+  });
+
+  test("a duplicate dispatch for a ticket with a live dispatch is refused at plan time (WM-491)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("dispatch@1", {
+      ...registry.agents.get("dispatch@1"),
+      // The duplicate ledger check is local planner admission; make external
+      // Linear/worktree eligibility irrelevant to this focused test.
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const dispatch = (eventId) => ({
+      eventId,
+      type: "factory.dispatch.requested",
+      source: "operator",
+      correlationId: eventId,
+      causationId: null,
+      payload: { repo: "factory", ticket: "WM-480" },
+    });
+    const firstRef = admit(db, dispatch("dispatch-hot-1"));
+    const secondRef = admit(db, dispatch("dispatch-hot-2"));
+
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+    const second = planEvent(db, synthetic, secondRef, { now: NOW + 1000, policyVersion: "git:test" });
+
+    expect(first.decision).toBe("run");
+    expect(second).toMatchObject({
+      decision: "noop",
+      reason: `ticket_dispatch_already_live:${first.runId}:same_ticket_worktree_held`,
+      runId: first.runId,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+
+    // A malformed dispatch remains an input error; a missing ticket must not
+    // wildcard-match the live dispatch above.
+    const malformedEnvelope = dispatch("dispatch-malformed");
+    delete malformedEnvelope.payload.ticket;
+    const malformedRef = admit(db, malformedEnvelope);
+    const malformed = planEvent(db, synthetic, malformedRef, { now: NOW + 2000, policyVersion: "git:test" });
+    expect(malformed.decision).toBe("human_needed");
+    expect(malformed.reason).toMatch(/^invalid_input: /);
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+    const failedRetryRef = admit(db, dispatch("dispatch-while-retryable"));
+    expect(planEvent(db, synthetic, failedRetryRef, { now: NOW + 3000, policyVersion: "git:test" })).toMatchObject({
+      decision: "noop",
+      reason: `ticket_dispatch_already_live:${first.runId}:same_ticket_worktree_held`,
+    });
+
+    for (const to of ["QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+    const nextRef = admit(db, dispatch("dispatch-next-cycle"));
+    expect(planEvent(db, synthetic, nextRef, { now: NOW + 4000, policyVersion: "git:test" }).decision).toBe("run");
+  });
+
   test("unregistered event type → human_needed", () => {
     const db = openDb(":memory:");
     const ref = admit(db, { type: "totally.unknown.type" });
