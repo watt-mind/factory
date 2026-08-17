@@ -1,7 +1,7 @@
 import { chmodSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
 
@@ -40,11 +40,17 @@ function pickPortBase() {
 }
 
 const PORT_BASE = pickPortBase();
+const PORT_RESERVATION_ROOT = mkdtempSync(path.join(tmpdir(), "factory-port-reservations-"));
 const P = (offset) => PORT_BASE + offset;
 const BAND_ENV = {
   FACTORY_PORT_BASE: String(PORT_BASE),
   FACTORY_PORT_SPAN: String(PORT_SPAN),
+  FACTORY_PORT_RESERVATION_ROOT: PORT_RESERVATION_ROOT,
 };
+
+afterAll(() => {
+  rmSync(PORT_RESERVATION_ROOT, { recursive: true, force: true });
+});
 
 function sh(body, extraEnv = {}) {
   const result = Bun.spawnSync({
@@ -157,6 +163,21 @@ test("listen_tcp_port rejects a recovered port outside the configured band", () 
   }
 });
 
+test("listen_tcp_port accepts the fixed --here web port below the ticket band", () => {
+  const dir = mockLsofDir();
+  const pidfile = path.join(dir, "here.pid");
+  try {
+    const r = sh(`printf '%s\\n' $$ > "${pidfile}"\nlisten_tcp_port "${pidfile}"`, {
+      PATH: `${dir}:${process.env.PATH}`,
+      MOCK_LSOF_PORT: "7392",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("7392");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolve_worktree_ports reuses free recorded ports for --here", () => {
   const wt = mkdtempSync(path.join(tmpdir(), "wm-176-recorded-"));
   try {
@@ -223,6 +244,40 @@ test("resolve_worktree_ports skips a preferred pair whose web port is occupied",
   }
 });
 
+test("overlapping odd and even preferred pairs cannot be reserved concurrently", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "wm-351-overlap-"));
+  const wtOdd = path.join(root, "odd");
+  const wtEven = path.join(root, "even");
+  const oddReady = path.join(root, "odd.ready");
+  const evenReady = path.join(root, "even.ready");
+  mkdirSync(wtOdd);
+  mkdirSync(wtEven);
+
+  const contend = (wt, preferred, ownReady, otherReady) => shAsync([
+    `resolve_worktree_ports "${wt}" ${preferred} "${wt}/.factory/event-runtime"`,
+    `touch "${ownReady}"`,
+    `for _ in {1..200}; do [[ -e "${otherReady}" ]] && break; sleep 0.01; done`,
+    `test -e "${otherReady}"`,
+    'printf "api=%s web=%s\\n" "$API_PORT" "$WEB_PORT"',
+  ].join("\n"));
+
+  try {
+    const [odd, even] = await Promise.all([
+      contend(wtOdd, P(359), oddReady, evenReady),
+      contend(wtEven, P(360), evenReady, oddReady),
+    ]);
+    expect(odd.status).toBe(0);
+    expect(even.status).toBe(0);
+    const oddPorts = [...odd.stdout.matchAll(/(?:api|web)=(\d+)/g)].map((match) => Number(match[1]));
+    const evenPorts = [...even.stdout.matchAll(/(?:api|web)=(\d+)/g)].map((match) => Number(match[1]));
+    expect(oddPorts).toHaveLength(2);
+    expect(evenPorts).toHaveLength(2);
+    expect(oddPorts.some((port) => evenPorts.includes(port))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("resolve_worktree_ports replaces recorded ports when the web port is occupied", async () => {
   const wt = mkdtempSync(path.join(tmpdir(), "wm-176-recorded-web-collision-"));
   const listener = Bun.listen({
@@ -270,6 +325,83 @@ test("resolve_worktree_ports reuses recorded ports owned by this checkout", asyn
     expect(r.stdout).toContain(`resolved=${api} ${P(375)}`);
   } finally {
     server.stop(true);
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("colliding WM-294 and WM-345 startups reserve distinct pairs and stop independently", async () => {
+  const wt1 = mkdtempSync(path.join(tmpdir(), "wm-351-runtime-a-"));
+  const wt2 = mkdtempSync(path.join(tmpdir(), "wm-351-runtime-b-"));
+  const preferred1 = sh("ticket_api_port WM-294");
+  const preferred2 = sh("ticket_api_port WM-345");
+  expect(preferred1.status).toBe(0);
+  expect(preferred2.status).toBe(0);
+  expect(preferred1.stdout).toBe(preferred2.stdout);
+  const preferred = Number(preferred1.stdout);
+
+  const launch = (wt) => shAsync([
+    `home="${wt}/.factory/event-runtime"`,
+    `resolve_worktree_ports "${wt}" ${preferred} "$home"`,
+    `spawn_daemon "$(run_dir "${wt}")/serve.pid" "$(run_dir "${wt}")/serve.log" "${wt}" env MOCK_HOME="$home" MOCK_PORT="$API_PORT" bun --eval 'Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.MOCK_PORT), fetch() { return Response.json({ env: { home: process.env.MOCK_HOME } }); } });'`,
+    `spawn_daemon "$(run_dir "${wt}")/web.pid" "$(run_dir "${wt}")/web.log" "${wt}" env MOCK_PORT="$WEB_PORT" bun --eval 'Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.MOCK_PORT), fetch() { return new Response("web"); } });'`,
+    'for _ in {1..100}; do port_listening "$API_PORT" && port_listening "$WEB_PORT" && break; sleep 0.01; done',
+    'port_listening "$API_PORT" && port_listening "$WEB_PORT"',
+    'printf "api=%s web=%s\\n" "$API_PORT" "$WEB_PORT"',
+  ].join("\n"));
+
+  const stop = (wt) => sh([
+    `rdir="$(run_dir "${wt}")"`,
+    'term_daemon "$rdir/web.pid" "web"',
+    'term_daemon "$rdir/serve.pid" "serve"',
+    'await_daemon "$rdir/web.pid" "web"',
+    'await_daemon "$rdir/serve.pid" "serve"',
+    `release_port_reservation "${wt}"`,
+  ].join("\n"));
+
+  try {
+    const [a, b] = await Promise.all([launch(wt1), launch(wt2)]);
+    expect(a.status).toBe(0);
+    expect(b.status).toBe(0);
+    const api1 = Number(a.stdout.match(/api=(\d+)/)?.[1]);
+    const api2 = Number(b.stdout.match(/api=(\d+)/)?.[1]);
+    expect(api1).not.toBe(api2);
+    expect(Math.abs(api1 - api2)).toBe(2);
+
+    const rerun = sh([
+      `resolve_worktree_ports "${wt1}" ${preferred} "${wt1}/.factory/event-runtime"`,
+      'printf "%s %s\\n" "$API_PORT" "$WEB_PORT"',
+    ].join("\n"));
+    expect(rerun.status).toBe(0);
+    expect(rerun.stdout).toContain(`${api1} ${api1 + 1}`);
+
+    expect(stop(wt1).status).toBe(0);
+    expect(sh(`port_listening ${api2}`).status).toBe(0);
+    expect(stop(wt2).status).toBe(0);
+    expect(sh(`port_listening ${api2}`).status).not.toBe(0);
+  } finally {
+    stop(wt1);
+    stop(wt2);
+    rmSync(wt1, { recursive: true, force: true });
+    rmSync(wt2, { recursive: true, force: true });
+  }
+});
+
+test("failed startup cleanup removes partial pid and port reservation state", () => {
+  const wt = mkdtempSync(path.join(tmpdir(), "wm-351-failed-startup-"));
+  try {
+    const r = sh([
+      `resolve_worktree_ports "${wt}" ${P(360)} "${wt}/.factory/event-runtime"`,
+      `rdir="$(run_dir "${wt}")"`,
+      'printf "2147483647\\n" >"$rdir/serve.pid"',
+      `reservation="$(port_reservation_dir "$API_PORT")"`,
+      'rm -f "$rdir/ports"',
+      `release_worktree_ports_if_idle "${wt}"`,
+      'test ! -e "$rdir/serve.pid"',
+      'test ! -e "$rdir/ports"',
+      'test ! -e "$reservation"',
+    ].join("\n"));
+    expect(r.status).toBe(0);
+  } finally {
     rmSync(wt, { recursive: true, force: true });
   }
 });

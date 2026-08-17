@@ -31,7 +31,7 @@ import { getAgent, getEventType, resolveModel } from "./registry.mjs";
 import { pinRepo } from "./repository.mjs";
 import { RepoError, getRepo, loadRepos, reposConfigPath, reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
-import { loopInFlight } from "./schedules.mjs";
+import { inFlightRunsForAgent } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
 import { autoApproveChains, buildChainApprovalPolicy } from "./auto-approval.mjs";
 
@@ -195,6 +195,37 @@ function policyMaxInFlight(root = reposRoot()) {
   }
 }
 
+/** Fail-safe merge admission cap when policy is absent or malformed. */
+export const DEFAULT_MAX_CONCURRENT_MERGES = 1;
+
+export function policyMaxConcurrentMerges(root = reposRoot()) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return DEFAULT_MAX_CONCURRENT_MERGES;
+  try {
+    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency?.max_concurrent_merges;
+    return Number.isInteger(value) && value > 0 ? value : DEFAULT_MAX_CONCURRENT_MERGES;
+  } catch {
+    return DEFAULT_MAX_CONCURRENT_MERGES;
+  }
+}
+
+function agentSingletonEnabled(registry, agentRef) {
+  return Object.values(registry.schedules ?? {}).some((candidate) =>
+    candidate.enabled &&
+    candidate.singleton !== false &&
+    registry.eventTypes?.[candidate.eventType]?.agent === agentRef
+  );
+}
+
+function singletonApplies(registry, envelope, agentRef) {
+  const loop = envelope.payload?.loop;
+  const schedule = loop ? registry.schedules?.[loop] : null;
+  if (schedule && registry.eventTypes?.[schedule.eventType]?.agent === agentRef) {
+    return schedule.singleton !== false;
+  }
+  return agentSingletonEnabled(registry, agentRef);
+}
+
 function loadRepoEscalatePaths(repoName, root = reposRoot()) {
   const file = reposConfigPath(root);
   if (!existsSync(file)) {
@@ -274,8 +305,16 @@ function evidenceInFlight(issue) {
   };
 }
 
-function refusal(reason, evidence, decision = "noop") {
-  return { ok: false, refusal: { decision, reason }, evidence };
+function refusal(reason, evidence, decision = "noop", detail = null) {
+  return {
+    ok: false,
+    refusal: {
+      decision,
+      reason,
+      ...(detail ? { detail } : {}),
+    },
+    evidence,
+  };
 }
 
 /**
@@ -347,6 +386,15 @@ export function worktreeDispatchAutoEligibility(payload, {
     return refusal("ticket_escalated", evidence);
   }
 
+  // Never let effectiveOwnedPaths' fail-closed `**` sentinel masquerade as a
+  // real path during a sensitive-path check. Unknown ticket scope is its own
+  // refusal, before overlap or escalate_paths can assign a misleading cause.
+  if (!evidence.ticket.ownedPathsParsed) {
+    evidence.checks.owned_paths_parsed = false;
+    return refusal("owned_paths_unknown", evidence);
+  }
+  evidence.checks.owned_paths_parsed = true;
+
   try {
     const gaps = ownedPathsClosureDetails(repo.name, repo, ticket.description);
     if (gaps.length) {
@@ -389,9 +437,13 @@ export function worktreeDispatchAutoEligibility(payload, {
     intersect: evidence.escalatePathIntersections,
   };
   if (evidence.escalatePathIntersections.length > 0) {
-    return refusal("escalate_paths_intersect", evidence);
+    return refusal(
+      "escalate_paths_intersect",
+      evidence,
+      "noop",
+      `intersecting escalate_paths globs: ${evidence.escalatePathIntersections.join(", ")}`,
+    );
   }
-  evidence.checks.owned_paths_parsed = evidence.ticket.ownedPathsParsed;
   return { ok: true, evidence };
 }
 
@@ -401,7 +453,14 @@ export function worktreeDispatchAutoEligibility(payload, {
  */
 export function worktreeDispatchGate(payload, options = {}) {
   const result = worktreeDispatchAutoEligibility(payload, options);
-  return result.ok ? null : result.refusal;
+  if (result.ok) return null;
+  // Keep the historical gate contract stable for planner/orchestrator callers;
+  // richer claim-time consumers use worktreeDispatchAutoEligibility directly
+  // to retain evidence and operator-facing detail.
+  return {
+    decision: result.refusal.decision,
+    reason: result.refusal.reason,
+  };
 }
 
 function insertProposal(db, { id, event, runId = null, decision, specJson = null, specHash = null, idempotencyKey = null, status, reason = null, at, ttlSeconds }) {
@@ -420,6 +479,31 @@ function setEventStatus(db, event, status) {
 
 function isIdempotencyKeyCollision(err) {
   return err?.code === "SQLITE_CONSTRAINT_UNIQUE" || /UNIQUE constraint failed: runs\.idempotency_key/.test(String(err?.message ?? err));
+}
+
+function liveRunForInput(db, agentRef, { repo, ticket = null, includeFailed = false }) {
+  if (typeof repo !== "string" || (ticket !== null && typeof ticket !== "string")) return null;
+  const versionSeparator = agentRef.lastIndexOf("@");
+  const agentFamily = versionSeparator > 0 ? `${agentRef.slice(0, versionSeparator)}@*` : agentRef;
+  return db.query(
+    `SELECT run_id, state FROM runs
+     WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+       AND (? = 1 OR state <> 'FAILED')
+       AND json_extract(spec_json, '$.agent') GLOB ?
+       AND json_extract(spec_json, '$.input.repo') = ?
+       AND (? IS NULL OR json_extract(spec_json, '$.input.ticket') = ?)
+     ORDER BY created_at ASC, rowid ASC
+     LIMIT 1`,
+  ).get(includeFailed ? 1 : 0, agentFamily, repo, ticket, ticket);
+}
+
+function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
+  const proposal = insertProposal(db, {
+    id: newProposalId(), event, runId: blockingRun.run_id, decision: "noop", status: "resolved",
+    reason, at, ttlSeconds,
+  });
+  setEventStatus(db, event, "noop");
+  return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
 }
 
 function humanNeeded(db, event, reason, at, ttlSeconds) {
@@ -473,7 +557,8 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
         typeof preEnvelope.payload?.ticket === "string" &&
         !repoNotAllowed(preDef, preEnvelope.payload)
       ) {
-        worktreeRefusal = worktreeDispatchGate(preEnvelope.payload, dispatch);
+        const eligibility = worktreeDispatchAutoEligibility(preEnvelope.payload, dispatch);
+        worktreeRefusal = eligibility.ok ? null : eligibility.refusal;
       }
     }
   }
@@ -510,18 +595,74 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     const scopeRefusal = repoNotAllowed(def, envelope.payload);
     if (scopeRefusal) return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
 
-    // §5 singleton: a scheduled loop whose previous run is still in flight
-    // plans a typed NOOP, never a second queued run. A reaper that takes 70
-    // minutes must not accumulate a backlog of reapers.
-    const loop = envelope.payload?.loop;
-    const schedule = loop ? registry.schedules?.[loop] : null;
-    if (schedule && schedule.singleton !== false && loopInFlight(db, mapping.agent)) {
+    // A work scan reserves its repo as soon as its run is PROPOSED, before the
+    // expensive model read can select a ticket. This is deliberately stronger
+    // than schedule singleton semantics (which exclude watched PROPOSED runs):
+    // two operator/chain scans for one queue must never run concurrently. The
+    // IMMEDIATE transaction makes the reservation check and run creation
+    // atomic across planner connections.
+    if (
+      envelope.type === "factory.work.requested" &&
+      typeof envelope.payload?.repo === "string"
+    ) {
+      const blockingScan = liveRunForInput(db, mapping.agent, { repo: envelope.payload.repo });
+      if (blockingScan) {
+        return noopBehindLiveRun(
+          db, event, blockingScan, "work_scan_already_in_flight", at, ttlSeconds,
+        );
+      }
+    }
+
+    // Defense in depth for stale/advisory scan results: once any dispatch for
+    // this exact repo/ticket has a live run (including an unapproved PROPOSED
+    // run), a second dispatch is refused here with the worktree owner named.
+    // It therefore never reaches provisioning where the same deterministic
+    // worktree path and port pair would masquerade as a foreign port collision.
+    if (
+      envelope.type === "factory.dispatch.requested" &&
+      typeof envelope.payload?.repo === "string" &&
+      typeof envelope.payload?.ticket === "string"
+    ) {
+      const blockingDispatch = liveRunForInput(db, mapping.agent, {
+        repo: envelope.payload.repo,
+        ticket: envelope.payload.ticket,
+        // FAILED dispatches remain retryable and retain their worktree; a new
+        // run for the same ticket would still collide with that owner.
+        includeFailed: true,
+      });
+      if (blockingDispatch) {
+        const reason = `ticket_dispatch_already_live:${blockingDispatch.run_id}:same_ticket_worktree_held`;
+        return noopBehindLiveRun(db, event, blockingDispatch, reason, at, ttlSeconds);
+      }
+    }
+
+    // §5 singleton is agent policy, not clock-envelope policy: operator and
+    // chain origins mapped to an enabled singleton agent must not bypass it by
+    // omitting payload.loop. Merge scans additionally obey the git-owned
+    // global admission cap even when a concrete schedule opts out of
+    // singleton behavior. PROPOSED remains excluded here (OPS-436); the
+    // repo-scoped work-scan reservation above intentionally includes it.
+    const inFlight = inFlightRunsForAgent(db, mapping.agent);
+    // factory.work.requested already has the stricter repo-scoped reservation
+    // above. Applying the schedule's legacy agent-global singleton as well
+    // would incorrectly serialize unrelated repo queues after PROPOSED.
+    const singletonBlocked = envelope.type !== "factory.work.requested" &&
+      singletonApplies(registry, envelope, mapping.agent) && inFlight.length > 0;
+    const mergeCap = envelope.type === "factory.merge.requested" ? policyMaxConcurrentMerges() : null;
+    const mergeCapBlocked = mergeCap !== null && inFlight.length >= mergeCap;
+    if (singletonBlocked || mergeCapBlocked) {
+      const blockingRun = inFlight[0];
       const proposal = insertProposal(db, {
-        id: newProposalId(), event, decision: "noop", status: "resolved",
+        id: newProposalId(), event, runId: blockingRun.run_id, decision: "noop", status: "resolved",
         reason: "previous_run_in_flight", at, ttlSeconds,
       });
       setEventStatus(db, event, "noop");
-      return { decision: "noop", proposal, reason: "previous_run_in_flight" };
+      return {
+        decision: "noop",
+        proposal,
+        runId: blockingRun.run_id,
+        reason: "previous_run_in_flight",
+      };
     }
 
     const input = validate(def.inputSchema, envelope.payload);
@@ -537,7 +678,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
       }
       const proposal = insertProposal(db, {
         id: newProposalId(), event, decision: "noop", status: "resolved",
-        reason: worktreeRefusal.reason, at, ttlSeconds,
+        reason: worktreeRefusal.detail ?? worktreeRefusal.reason, at, ttlSeconds,
       });
       setEventStatus(db, event, "noop");
       return { decision: "noop", proposal, reason: worktreeRefusal.reason };

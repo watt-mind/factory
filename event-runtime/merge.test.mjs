@@ -327,11 +327,12 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
   test("central mappings register scan, bounded fix, deterministic apply, landed verify, and explicit verify", () => {
     expect(registry.eventTypes["factory.merge.requested"]).toMatchObject({
       agent: "merge-scan@2",
-      adapter: "pi",
+      adapter: "cursor",
     });
-    expect(registry.eventTypes["factory.merge-fix.requested"].agent).toBe(
-      "merge-fix@1",
-    );
+    expect(registry.eventTypes["factory.merge-fix.requested"]).toMatchObject({
+      agent: "merge-fix@1",
+      adapter: "cursor",
+    });
     expect(registry.eventTypes["factory.merge-apply.requested"].agent).toBe(
       "merge-apply@2",
     );
@@ -366,6 +367,8 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
     expect(script).toContain("--required --json name,bucket,state");
     expect(script).toContain("mergeCi");
     expect(script).toContain("factory.merge-landed");
+    expect(script).toContain("{repo:p.REPO,prNumbers:[Number(p.PR)]}");
+    expect(script).toContain("`merge-refresh:${p.REPO}:${p.PR}:${p.HEAD}`");
     expect(script).not.toContain("--delete-branch");
     expect(script).not.toContain(" Done ");
   });
@@ -410,6 +413,7 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
     expect(schedules.map(([name]) => name)).toEqual(["merge-factory"]);
     for (const [, schedule] of schedules) {
       expect(schedule).toMatchObject({
+        every: "15m",
         eventType: "factory.merge.requested",
         singleton: true,
         approval: "auto",
@@ -625,7 +629,7 @@ describe("merge-scan repository workspace and result contract (WM-425)", () => {
       const summary = await runOnce(
         db,
         registry,
-        { pi: adapter },
+        { cursor: adapter },
         { workspacesRoot: workspaces, owner: "merge-test", policyVersion: PV },
       );
 

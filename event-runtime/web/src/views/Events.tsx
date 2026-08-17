@@ -179,6 +179,7 @@ export function Events({
   onSelectType,
   onJumpProposal,
   onJumpRun,
+  onJumpChain,
   onTriggerAgain,
   onInject,
   rejumpEpoch,
@@ -191,6 +192,8 @@ export function Events({
   onSelectType: (type: string | null) => void;
   onJumpProposal: (id: string) => void;
   onJumpRun: (runId: string) => void;
+  /** Open the chain trace this event belongs to (WM-527). Optional so tests can omit it. */
+  onJumpChain?: (correlationId: string, nodeId?: string) => void;
   onTriggerAgain: (envelope: Record<string, unknown>) => void;
   onInject: () => void;
   rejumpEpoch?: number;
@@ -708,27 +711,27 @@ export function Events({
                     aria-selected={isSelected}
                     className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${isSelected ? "row-selected" : ""}`}
                   >
-                    <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={e.eventId}>
+                    <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap" title={e.eventId}>
                       {shortId(e.eventId)}
                     </td>
                     {show.has("source") && (
-                      <td className="mono max-w-24 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.source}>
+                      <td className="mono max-w-24 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)" title={e.source}>
                         {e.source}
                       </td>
                     )}
                     {show.has("type") && (
-                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim)" title={e.type}>
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)" title={e.type}>
                         {e.type}
                       </td>
                     )}
                     {show.has("subject") && (
-                      <td className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={e.subject ?? undefined}>
+                      <td className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)" title={e.subject ?? undefined}>
                         {e.subject ?? "-"}
                       </td>
                     )}
                     {show.has("status") && (
-                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5">
-                        <div className="flex items-center">
+                      <td className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                        <div className="flex items-center whitespace-nowrap">
                           <StateBadge state={e.status} hues={EVENT_STATUS_HUES} />
                           {e.planFailures > 0 && (
                             <span className="ml-2 whitespace-nowrap text-[11px] text-(--hue-err)">
@@ -740,11 +743,11 @@ export function Events({
                             11.5px, so no size utility (it is unlayered and would win).
                             The detail pane keeps the untruncated error. */}
                         {e.lastPlanError ? (
-                          <div className="mono mt-0.5 truncate text-(--text-dim)" title={e.lastPlanError}>
+                          <div className="mono mt-0.5 truncate whitespace-nowrap text-(--text-dim)" title={e.lastPlanError}>
                             {e.lastPlanError}
                           </div>
                         ) : proposalReason ? (
-                          <div className="mono mt-0.5 truncate text-(--text-dim)" title={proposalReason}>
+                          <div className="mono mt-0.5 truncate whitespace-nowrap text-(--text-dim)" title={proposalReason}>
                             {proposalReason}
                           </div>
                         ) : null}
@@ -863,6 +866,13 @@ export function Events({
                 </Button>
               )}
               <div className="flex items-center gap-1.5">
+                {onJumpChain && (
+                  <Button
+                    onClick={() => onJumpChain(sel.correlationId ?? sel.eventId, `event:${sel.source}:${sel.eventId}`)}
+                  >
+                    View chain
+                  </Button>
+                )}
                 <Button disabled={!connected || replay.isPending} onClick={() => setConfirmReplay(true)}>
                   Replay…
                 </Button>
@@ -884,7 +894,28 @@ export function Events({
             <KV k="type" v={sel.type} />
             <KV k="subject" v={sel.subject} />
             <KV k="status" v={<StateBadge state={sel.status} hues={EVENT_STATUS_HUES} />} />
-            <KV k="correlationId" v={sel.correlationId} />
+            <KV
+              k="correlationId"
+              v={
+                sel.correlationId && onJumpChain ? (
+                  <JumpLink onClick={() => onJumpChain(sel.correlationId!)} title="Open chain trace">
+                    {sel.correlationId}
+                  </JumpLink>
+                ) : (
+                  sel.correlationId
+                )
+              }
+            />
+            <KV
+              k="causationId"
+              v={
+                sel.causationId ? (
+                  <JumpLink onClick={() => onJumpRun(sel.causationId!)} title="The run that emitted this event">
+                    {shortId(sel.causationId)}
+                  </JumpLink>
+                ) : null
+              }
+            />
             <KV k="occurredAt" v={<Ago iso={sel.occurredAt} now={now} />} />
             <KV k="receivedAt" v={<Ago iso={sel.receivedAt} now={now} />} />
             <KV k="admittedAt" v={<Ago iso={sel.admittedAt} now={now} />} />

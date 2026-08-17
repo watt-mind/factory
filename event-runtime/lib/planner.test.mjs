@@ -8,7 +8,14 @@ import { DEAD_LETTER_AFTER } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
-import { buildRunSpec, idempotencyKeyFor, planAdmittedEvents, planEvent } from "./planner.mjs";
+import {
+  buildRunSpec,
+  idempotencyKeyFor,
+  planAdmittedEvents,
+  planEvent,
+  policyMaxConcurrentMerges,
+  worktreeDispatchAutoEligibility,
+} from "./planner.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const registry = loadRegistry();
@@ -63,6 +70,22 @@ describe("idempotencyKeyFor", () => {
     expect(() => idempotencyKeyFor({ idempotencyScope: ["deliveryColor"] }, def, envelope(), "sha256:x")).toThrow(
       /unknown idempotency scope/,
     );
+  });
+});
+
+describe("merge concurrency policy", () => {
+  test("reads a positive integer max_concurrent_merges and fails safe otherwise", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-policy-"));
+    mkdirSync(path.join(root, "config"));
+    const policy = path.join(root, "config", "policy.yaml");
+
+    writeFileSync(policy, "concurrency:\n  max_concurrent_merges: 2\n");
+    expect(policyMaxConcurrentMerges(root)).toBe(2);
+
+    for (const invalid of ["0", "1.5", "many"]) {
+      writeFileSync(policy, `concurrency:\n  max_concurrent_merges: ${invalid}\n`);
+      expect(policyMaxConcurrentMerges(root)).toBe(1);
+    }
   });
 });
 
@@ -275,6 +298,177 @@ describe("planEvent", () => {
     expect(db.query(`SELECT status FROM events WHERE event_id = ?`).get(collisionEventId).status).toBe("noop");
   });
 
+  test("concurrent work scans for one repo reserve selection before either can duplicate it (WM-491)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("work-scan@1", {
+      ...registry.agents.get("work-scan@1"),
+      // Keep this planner regression hermetic: repo pinning is unrelated to
+      // the reservation, whose scope comes from input.repo.
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const firstRef = admit(db, {
+      eventId: "work-hot-1",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-hot-1",
+      payload: { repo: "factory" },
+    });
+    const secondRef = admit(db, {
+      eventId: "work-hot-2",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-hot-2",
+      payload: { repo: "factory" },
+    });
+
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+    const second = planEvent(db, synthetic, secondRef, { now: NOW + 1000, policyVersion: "git:test" });
+
+    expect(first.decision).toBe("run");
+    expect(runState(db, first.runId)).toBe("PROPOSED");
+    expect(second).toMatchObject({
+      decision: "noop",
+      reason: "work_scan_already_in_flight",
+      runId: first.runId,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+
+    // The reservation is repo-scoped, not a global scanner singleton — even
+    // after the first scan leaves PROPOSED and schedule singleton applies.
+    transition(db, { runId: first.runId, to: "APPROVED", actor: "test" });
+    const otherRepoRef = admit(db, {
+      eventId: "work-other-repo",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-other-repo",
+      payload: { repo: "bj29", loop: "work-bj29" },
+    });
+    expect(planEvent(db, synthetic, otherRepoRef, { now: NOW + 2000, policyVersion: "git:test" }).decision).toBe("run");
+
+    // A failed read emitted no dispatch chain and must release the queue; unlike
+    // a failed dispatch, a failed scan owns no retained worktree to protect.
+    for (const to of ["QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+    const afterFailureRef = admit(db, {
+      eventId: "work-after-failure",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-after-failure",
+      payload: { repo: "factory" },
+    });
+    const afterFailure = planEvent(db, synthetic, afterFailureRef, { now: NOW + 3000, policyVersion: "git:test" });
+    expect(afterFailure.decision).toBe("run");
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: afterFailure.runId, to, actor: "test" });
+    }
+    const nextCycleRef = admit(db, {
+      eventId: "work-hot-next",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-hot-next",
+      payload: { repo: "factory" },
+    });
+    expect(planEvent(db, synthetic, nextCycleRef, { now: NOW + 4000, policyVersion: "git:test" }).decision).toBe("run");
+  });
+
+  test("live reservations survive an agent version upgrade (WM-491)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents), eventTypes: { ...registry.eventTypes } };
+    synthetic.agents.set("work-scan@1", {
+      ...registry.agents.get("work-scan@1"),
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const firstRef = admit(db, {
+      eventId: "work-v1",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-v1",
+      payload: { repo: "factory" },
+    });
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+
+    synthetic.eventTypes["factory.work.requested"] = {
+      ...synthetic.eventTypes["factory.work.requested"],
+      agent: "work-scan@2",
+    };
+    synthetic.agents.set("work-scan@2", {
+      ...synthetic.agents.get("work-scan@1"),
+      version: 2,
+      ref: "work-scan@2",
+    });
+    const nextRef = admit(db, {
+      eventId: "work-v2",
+      type: "factory.work.requested",
+      source: "operator",
+      correlationId: "work-v2",
+      payload: { repo: "factory" },
+    });
+    expect(planEvent(db, synthetic, nextRef, { now: NOW + 1000, policyVersion: "git:test" })).toMatchObject({
+      decision: "noop",
+      reason: "work_scan_already_in_flight",
+      runId: first.runId,
+    });
+  });
+
+  test("a duplicate dispatch for a ticket with a live dispatch is refused at plan time (WM-491)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("dispatch@1", {
+      ...registry.agents.get("dispatch@1"),
+      // The duplicate ledger check is local planner admission; make external
+      // Linear/worktree eligibility irrelevant to this focused test.
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const dispatch = (eventId) => ({
+      eventId,
+      type: "factory.dispatch.requested",
+      source: "operator",
+      correlationId: eventId,
+      causationId: null,
+      payload: { repo: "factory", ticket: "WM-480" },
+    });
+    const firstRef = admit(db, dispatch("dispatch-hot-1"));
+    const secondRef = admit(db, dispatch("dispatch-hot-2"));
+
+    const first = planEvent(db, synthetic, firstRef, { now: NOW, policyVersion: "git:test" });
+    const second = planEvent(db, synthetic, secondRef, { now: NOW + 1000, policyVersion: "git:test" });
+
+    expect(first.decision).toBe("run");
+    expect(second).toMatchObject({
+      decision: "noop",
+      reason: `ticket_dispatch_already_live:${first.runId}:same_ticket_worktree_held`,
+      runId: first.runId,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+
+    // A malformed dispatch remains an input error; a missing ticket must not
+    // wildcard-match the live dispatch above.
+    const malformedEnvelope = dispatch("dispatch-malformed");
+    delete malformedEnvelope.payload.ticket;
+    const malformedRef = admit(db, malformedEnvelope);
+    const malformed = planEvent(db, synthetic, malformedRef, { now: NOW + 2000, policyVersion: "git:test" });
+    expect(malformed.decision).toBe("human_needed");
+    expect(malformed.reason).toMatch(/^invalid_input: /);
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+    const failedRetryRef = admit(db, dispatch("dispatch-while-retryable"));
+    expect(planEvent(db, synthetic, failedRetryRef, { now: NOW + 3000, policyVersion: "git:test" })).toMatchObject({
+      decision: "noop",
+      reason: `ticket_dispatch_already_live:${first.runId}:same_ticket_worktree_held`,
+    });
+
+    for (const to of ["QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+    const nextRef = admit(db, dispatch("dispatch-next-cycle"));
+    expect(planEvent(db, synthetic, nextRef, { now: NOW + 4000, policyVersion: "git:test" }).decision).toBe("run");
+  });
+
   test("unregistered event type → human_needed", () => {
     const db = openDb(":memory:");
     const ref = admit(db, { type: "totally.unknown.type" });
@@ -381,6 +575,74 @@ describe("planEvent worktree gate (WM-108)", () => {
       expect(outcome.reason).toMatch(/^repo_unknown: /);
       expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
     });
+  });
+
+  test("unknown Owned Paths refuses distinctly before wildcard escalation", () => {
+    withReposRoot(
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths:\n      - '**'\n`,
+      () => {
+        let fetchedInFlight = false;
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-2" },
+          {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-2",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "",
+            }),
+            fetchInFlight: () => { fetchedInFlight = true; return []; },
+          },
+        );
+        expect(result.refusal).toMatchObject({ decision: "noop", reason: "owned_paths_unknown" });
+        expect(result.evidence.ticket).toMatchObject({ ownedPaths: ["**"], ownedPathsParsed: false });
+        expect(result.evidence.escalatePathIntersections).toEqual([]);
+        expect(fetchedInFlight).toBe(false);
+      },
+    );
+  });
+
+  test("a genuine sensitive-path refusal names the intersecting configured globs", () => {
+    withReposRoot(
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths:\n      - src/auth/**\n      - infra/**\n`,
+      () => {
+        const dispatch = {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => ({
+            identifier: "WM-3",
+            state: { name: "Todo" },
+            assignee: null,
+            labels: { nodes: [{ name: "ai:agent-ready" }] },
+            description: "## Owned Paths\n- src/auth/session.ts\n",
+          }),
+          fetchInFlight: () => [],
+        };
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-3" },
+          dispatch,
+        );
+        expect(result.refusal).toEqual({
+          decision: "noop",
+          reason: "escalate_paths_intersect",
+          detail: "intersecting escalate_paths globs: src/auth/**",
+        });
+        expect(result.evidence.escalatePathIntersections).toEqual(["src/auth/**"]);
+
+        const db = openDb(":memory:");
+        const ref = admit(db, dispatchEnvelope({ repo: "gated", ticket: "WM-3" }));
+        const outcome = planEvent(db, syntheticRegistry(), ref, { now: NOW, dispatch });
+        expect(outcome).toMatchObject({ decision: "noop", reason: "escalate_paths_intersect" });
+        expect(outcome.proposal.reason).toBe("intersecting escalate_paths globs: src/auth/**");
+      },
+    );
   });
 });
 

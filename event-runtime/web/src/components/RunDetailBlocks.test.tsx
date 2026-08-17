@@ -1,18 +1,24 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup } from "@testing-library/react";
 import { RunDetailBlocks, isCancellable, modelTierText, pinnedModelText } from "./RunDetailBlocks";
-import { createLifecycleEventFixture, createRunDetailFixture } from "../test-render";
+import {
+  createLifecycleEventFixture,
+  createRunDetailFixture,
+  renderWithClient,
+  restoreApi,
+} from "../test-render";
 import type { RunDetail, RunState } from "../types";
 
 afterEach(() => {
   cleanup();
+  restoreApi();
 });
 
 const noop = () => {};
 
 function renderBlocks(d: RunDetail, overrides?: Partial<Parameters<typeof RunDetailBlocks>[0]>) {
-  return render(
+  return renderWithClient(
     <RunDetailBlocks
       d={d}
       now={Date.now()}

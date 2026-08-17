@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { buildClaudeArgv, execute as executeClaude } from "./adapters/claude.mjs";
 import * as fake from "./adapters/fake.mjs";
+import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
@@ -14,11 +16,12 @@ import { openDb, runUsage } from "./db.mjs";
 import { createRun, lifecycleOf, runState, transition, IllegalTransition } from "./lifecycle.mjs";
 import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
+import { transcriptSessionId } from "./transcripts.mjs";
 import {
   acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
   createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
   executeClaimed, classifyFailureCause, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
-  repositoryStatus, retryRun, runLinearCli, runOnce,
+  repositoryStatus, resolveLinearApiKey, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
 
@@ -394,6 +397,56 @@ describe("worker", () => {
     expect(runState(db, spec.runId)).toBe("TIMED_OUT");
   });
 
+  test("timeout accepts a valid result.json written before the adapter hangs (WM-538)", async () => {
+    const db = openDb(":memory:");
+    const writesThenHangs = {
+      async execute({ workspaceDir, timeoutMs }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "completed",
+          artifact: {
+            repos: [{ name: "late", triage: 1, agentReady: 2, inProgress: 0, blocked: 0 }],
+            recommendedAction: "dispatch",
+          },
+          evidence: { queries: ["fake"] },
+        }));
+        await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+        return { exitCode: null, timedOut: true };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "writes-then-hangs", timeoutSeconds: 0.01 }));
+
+    const summary = await runOnce(db, registry, { "writes-then-hangs": writesThenHangs }, opts());
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(summary.reasonCode).toBe("ok");
+    expect(runState(db, spec.runId)).toBe("COMPLETED");
+    expect(lifecycleOf(db, spec.runId)).toContainEqual(expect.objectContaining({
+      to_state: "VERIFYING",
+      reason: "late_completion_after_timeout",
+    }));
+    expect(db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId)).toBeTruthy();
+    expect(db.query(`SELECT * FROM outbox`).all()).toHaveLength(1);
+  });
+
+  test("timeout ignores an invalid result.json and remains TIMED_OUT", async () => {
+    const db = openDb(":memory:");
+    const invalidThenTimesOut = {
+      async execute({ workspaceDir }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), "{}\n");
+        return { exitCode: null, timedOut: true };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "invalid-then-timeout" }));
+
+    const summary = await runOnce(db, registry, { "invalid-then-timeout": invalidThenTimesOut }, opts());
+
+    expect(summary.terminalState).toBe("TIMED_OUT");
+    expect(summary.reasonCode).toBe("timeout");
+    expect(runState(db, spec.runId)).toBe("TIMED_OUT");
+    expect(db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId)).toBeNull();
+  });
+
   test("crash with maxAttempts 2: FAILED then auto re-QUEUED; second claim has higher fencing token", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["crash"] }, maxAttempts: 2 }));
@@ -418,6 +471,146 @@ describe("worker", () => {
     expect(summary.terminalState).toBe("FAILED");
     expect(runState(db, spec.runId)).toBe("FAILED");
     expect(claimNext(db, opts())).toBeNull();
+  });
+
+  test("attempt 2 resumes the prior harness session and stale attempt 1 remains fenced", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const o = opts();
+    const stale = claimNext(db, o);
+    const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    mkdirSync(priorWorkspace, { recursive: true });
+    const priorTranscript = path.join(priorWorkspace, ".transcript.json");
+    writeFileSync(priorTranscript, `${JSON.stringify({
+      type: "system", subtype: "init", cwd: priorWorkspace,
+      session_id: "11111111-2222-4333-8444-555555555555",
+    })}\n`);
+
+    const afterExpiry = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
+    expect(reapExpiredLeases(db, { now: afterExpiry, policyVersion: "test" })).toBe(1);
+    const fresh = claimNext(db, { ...o, now: afterExpiry });
+    expect(fresh.attempt).toBe(2);
+
+    let observedResume = null;
+    const resumeAdapter = {
+      async execute(args) {
+        observedResume = args.resume;
+        return fake.execute(args);
+      },
+    };
+    const done = await executeClaimed(db, registry, { claude: resumeAdapter }, fresh, { ...o, now: afterExpiry });
+    expect(done.terminalState).toBe("COMPLETED");
+    expect(observedResume).toEqual({
+      attempt: 1,
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      transcriptPath: priorTranscript,
+    });
+
+    const zombie = await executeClaimed(db, registry, { claude: resumeAdapter }, stale, { ...o, now: afterExpiry });
+    expect(zombie.fenced === true || zombie.cancelled === true).toBe(true);
+    expect(db.query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`).get(spec.runId).n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM outbox`).get().n).toBe(1);
+  });
+
+  test("attempt 2 cold-starts cleanly when the prior transcript has no resumable session", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const o = opts();
+    claimNext(db, o);
+    const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    mkdirSync(priorWorkspace, { recursive: true });
+    writeFileSync(path.join(priorWorkspace, ".transcript.json"), [
+      JSON.stringify({ type: "system", subtype: "init", cwd: priorWorkspace, session_id: "not-a-uuid" }),
+      JSON.stringify({
+        type: "system", subtype: "init", cwd: "/another/run",
+        session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ].join("\n") + "\n");
+
+    const afterExpiry = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
+    expect(reapExpiredLeases(db, { now: afterExpiry, policyVersion: "test" })).toBe(1);
+    const fresh = claimNext(db, { ...o, now: afterExpiry });
+
+    let observedResume = "not-called";
+    const coldAdapter = {
+      async execute(args) {
+        observedResume = args.resume;
+        return fake.execute(args);
+      },
+    };
+    const done = await executeClaimed(db, registry, { claude: coldAdapter }, fresh, { ...o, now: afterExpiry });
+    expect(done.terminalState).toBe("COMPLETED");
+    expect(observedResume).toBeNull();
+  });
+
+  test("adapter argv carries an extracted resume session identifier", () => {
+    const root = freshRoot();
+    const claudeTranscript = path.join(root, "claude.ndjson");
+    const piTranscript = path.join(root, "pi.ndjson");
+    const claudeId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    writeFileSync(claudeTranscript, `${JSON.stringify({
+      type: "system", subtype: "init", cwd: root, session_id: claudeId,
+    })}\n`);
+    writeFileSync(piTranscript, `${JSON.stringify({
+      type: "session", version: 3, cwd: root, id: "pi-session",
+    })}\n`);
+
+    const claudeSession = transcriptSessionId(claudeTranscript, "claude");
+    const piSession = transcriptSessionId(piTranscript, "pi");
+    expect(claudeSession).toBe(claudeId);
+    expect(piSession).toBe("pi-session");
+
+    const claude = buildClaudeArgv({
+      prompt: "continue", def: { mutating: false }, resumeSessionId: claudeSession,
+    });
+    expect(claude.slice(0, 4)).toEqual(["-p", "continue", "--resume", claudeId]);
+    expect(claude).toContain("--fork-session");
+
+    const pi = buildPiArgv({
+      def: { mutating: false }, model: null, resumeSessionId: piSession,
+    });
+    expect(pi).toContain("--fork");
+    expect(pi[pi.indexOf("--fork") + 1]).toBe("pi-session");
+  });
+
+  test("real adapter execute paths forward resume context to their spawned CLIs", async () => {
+    const root = freshRoot();
+    const bin = path.join(root, "bin");
+    mkdirSync(bin);
+    for (const command of ["claude", "pi"]) {
+      const executable = path.join(bin, command);
+      writeFileSync(executable, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FACTORY_TEST_ARGV\"\n");
+      chmodSync(executable, 0o755);
+    }
+    const promptPath = path.join(root, "prompt.md");
+    writeFileSync(promptPath, "Continue the run.\n");
+    const def = { promptPath, mutating: true, capabilities: { tools: [] } };
+    const spec = { model: null, input: {} };
+
+    const claudeWorkspace = path.join(root, "claude-workspace");
+    const claudeArgv = path.join(root, "claude-argv.txt");
+    mkdirSync(claudeWorkspace);
+    const claudeOutcome = await executeClaude({
+      spec, def, workspaceDir: claudeWorkspace, timeoutMs: 5_000,
+      env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, FACTORY_TEST_ARGV: claudeArgv },
+      resume: { sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+    });
+    expect(claudeOutcome.exitCode).toBe(0);
+    expect(readFileSync(claudeArgv, "utf8").split("\n")).toContain("--resume");
+    expect(readFileSync(claudeArgv, "utf8")).toContain("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    expect(readFileSync(claudeArgv, "utf8").split("\n")).toContain("--fork-session");
+
+    const piWorkspace = path.join(root, "pi-workspace");
+    const piArgv = path.join(root, "pi-argv.txt");
+    mkdirSync(piWorkspace);
+    const piOutcome = await executePi({
+      spec, def, workspaceDir: piWorkspace, timeoutMs: 5_000,
+      env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, FACTORY_TEST_ARGV: piArgv },
+      resume: { sessionId: "pi-session" },
+    });
+    expect(piOutcome.exitCode).toBe(0);
+    expect(readFileSync(piArgv, "utf8").split("\n")).toContain("--fork");
+    expect(readFileSync(piArgv, "utf8")).toContain("pi-session");
   });
 
   test("fencing: a stale claim can never publish over a newer attempt", async () => {
@@ -580,6 +773,7 @@ describe("worker", () => {
   test("failure cause taxonomy classifies retryable and fatal worker failures", () => {
     expect(classifyFailureCause("adapter_error")).toBe("environment");
     expect(classifyFailureCause("lease_expired")).toBe("environment");
+    expect(classifyFailureCause("linear_unconfigured")).toBe("environment");
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -1177,6 +1371,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       `#!/bin/bash\necho "dependency install failed" >&2\nexit 12\n`,
     );
     writeFileSync(
+      path.join(repoDir, "bin", "worktree-up-link-collision.sh"),
+      `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\nmkdir -p "$(dirname "$FACTORY_WORKTREE_REPORT")/repo"\n`,
+    );
+    writeFileSync(
       path.join(repoDir, "bin", "worktree-up-startup-crash.sh"),
       `#!/bin/bash\n` +
       `mkdir -p "${wtRoot}/$1/.factory/run"\n` +
@@ -1215,6 +1413,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         `  - name: wt-startup-crash\n    path: ${repoDir}\n    github: watt-mind/wt-startup-crash\n    base: develop\n` +
         `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
         `    worktree_up: bin/worktree-up-startup-crash.sh\n    worktree_down: bin/worktree-down.sh\n` +
+        `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n` +
+        `  - name: wt-link-collision\n    path: ${repoDir}\n    github: watt-mind/wt-link-collision\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
+        `    worktree_up: bin/worktree-up-link-collision.sh\n    worktree_down: bin/worktree-down.sh\n` +
         `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n`,
     );
     previousReposRoot = process.env.FACTORY_REPOS_ROOT;
@@ -1248,6 +1450,27 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     };
   }
 
+  const readyDispatchTicket = (identifier, overrides = {}) => ({
+    identifier,
+    state: { name: "Todo" },
+    assignee: null,
+    labels: { nodes: [{ name: "ai:agent-ready" }] },
+    description: "## Owned Paths\n- src/feature/**\n",
+    ...overrides,
+  });
+
+  const planTimeDispatchEvidence = (description = "## Owned Paths\n- src/feature/**\n") => ({
+    source: "chain",
+    mode: "auto",
+    eventType: "factory.dispatch.requested",
+    dispatchEvidence: {
+      ticket: {
+        descriptionHash: hashJson(description),
+        ownedPathsParsed: true,
+      },
+    },
+  });
+
   const dispatchFakeAdapter = {
     async execute({ spec, workspaceDir }) {
       writeFileSync(path.join(workspaceDir, ".transcript.json"), `{"fake":"dispatch transcript"}\n`, "utf8");
@@ -1276,6 +1499,77 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       return { exitCode: 0, timedOut: false };
     },
   };
+
+  test("resolves Linear credentials from env first, then the shared env file", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-linear-key-"));
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "OTHER=value\nLINEAR_API_KEY='file-key'\n", "utf8");
+
+    const fromEnv = { LINEAR_API_KEY: "process-key" };
+    expect(resolveLinearApiKey({ env: fromEnv, envFile })).toBe("process-key");
+
+    const fromFile = {};
+    expect(resolveLinearApiKey({ env: fromFile, envFile })).toBe("file-key");
+    expect(fromFile.LINEAR_API_KEY).toBe("file-key");
+  });
+
+  test("missing process credentials never activate the dispatch stub implicitly (WM-533)", async () => {
+    const previousHome = process.env.FACTORY_EVENT_HOME;
+    const previousKey = process.env.LINEAR_API_KEY;
+    const previousStub = process.env.FACTORY_DISPATCH_STUB;
+    process.env.FACTORY_EVENT_HOME = mkdtempSync(path.join(os.tmpdir(), "evrt-linear-unconfigured-"));
+    delete process.env.LINEAR_API_KEY;
+    delete process.env.FACTORY_DISPATCH_STUB;
+
+    try {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeDispatchSpec({ adapter: "pi", maxEnvironmentRetries: 1 }));
+      const runOpts = opts({ resolveLinearKey: () => null });
+      const first = await runOnce(db, registry, { pi: dispatchFakeAdapter }, runOpts);
+
+      expect(first).toMatchObject({ terminalState: "FAILED", reasonCode: "linear_unconfigured" });
+      expect(runState(db, spec.runId)).toBe("QUEUED");
+
+      const exhausted = await runOnce(db, registry, { pi: dispatchFakeAdapter }, runOpts);
+      expect(exhausted).toMatchObject({ terminalState: "FAILED", reasonCode: "linear_unconfigured" });
+      expect(runState(db, spec.runId)).toBe("FAILED");
+      expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ? ORDER BY attempt`).all(spec.runId))
+        .toEqual([{ reason_code: "linear_unconfigured" }, { reason_code: "linear_unconfigured" }]);
+    } finally {
+      if (previousHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousHome;
+      if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = previousKey;
+      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
+      else process.env.FACTORY_DISPATCH_STUB = previousStub;
+    }
+  });
+
+  test("FACTORY_DISPATCH_STUB explicitly enables the demo dispatch stub", async () => {
+    const previousStub = process.env.FACTORY_DISPATCH_STUB;
+    process.env.FACTORY_DISPATCH_STUB = "1";
+    try {
+      const db = openDb(":memory:");
+      queueRun(db, makeDispatchSpec({ adapter: "pi" }));
+      const summary = await runOnce(db, registry, { pi: dispatchFakeAdapter }, opts({
+        resolveLinearKey: () => null,
+      }));
+      expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+    } finally {
+      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
+      else process.env.FACTORY_DISPATCH_STUB = previousStub;
+    }
+  });
+
+  test("the fake adapter override explicitly enables the demo dispatch stub", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeDispatchSpec({ adapter: "pi" }));
+    const summary = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      adapterOverride: "fake",
+      resolveLinearKey: () => null,
+    }));
+    expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+  });
 
   test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
@@ -1316,7 +1610,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         random: () => 0,
-        fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-701"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1353,7 +1647,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         locksDir: lockDir,
         random: () => 0,
         maxClaimLockContentionRequeues: 1,
-        fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-701"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1388,7 +1682,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         random: () => 1,
-        fetchTicket: (ticket) => ({ identifier: ticket, state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: (ticket) => readyDispatchTicket(ticket),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: async ({ ticket }) => {
@@ -1434,7 +1728,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum1 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-702", state: { name: "In Review" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-702", { state: { name: "In Review" } }),
         fetchInFlight: () => [],
         countLeases: () => 0,
       },
@@ -1447,7 +1741,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum2 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-703", state: { name: "Todo" }, assignee: { id: "other" }, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-703", { assignee: { id: "other" } }),
         fetchInFlight: () => [],
         countLeases: () => 0,
       },
@@ -1460,7 +1754,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum3 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-704", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-704"),
         fetchInFlight: () => [],
         countLeases: () => 2, // cap is 2
       },
@@ -1473,7 +1767,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum4 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-705", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] }, description: "## Owned Paths\n- src/api/**\n" }),
+        fetchTicket: () => readyDispatchTicket("WM-705", { description: "## Owned Paths\n- src/api/**\n" }),
         fetchInFlight: () => [{ identifier: "WM-800", description: "## Owned Paths\n- src/api/routes.ts\n" }],
         countLeases: () => 0,
       },
@@ -1486,7 +1780,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum5 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-706", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-706"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: false, reasonCode: "ticket_claim_lost" }),
@@ -1494,6 +1788,82 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }));
     expect(sum5.terminalState).toBe("REFUSED");
     expect(sum5.reasonCode).toBe("ticket_claim_lost");
+  });
+
+  test("claim-time Linear read failure contradicting plan evidence requeues with backoff", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-transient-linear-"));
+    const description = "## Owned Paths\n- src/feature/**\n";
+    const spec = queueRun(db, makeDispatchSpec({
+      input: { repo: "wt-worker", ticket: "WM-707" },
+      approvalPolicy: planTimeDispatchEvidence(description),
+    }));
+    let now = T0;
+    let reads = 0;
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        random: () => 0,
+        fetchTicket: () => {
+          reads += 1;
+          if (reads === 1) throw new Error("linear_read_failed: HTTP 503");
+          return readyDispatchTicket("WM-707", { description });
+        },
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    });
+
+    const deferred = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(deferred).toMatchObject({ terminalState: "QUEUED", reasonCode: "linear_read_failed" });
+    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts).toBe(0);
+    expect(claimNext(db, o)).toBeNull();
+
+    now += deferred.requeueAfterMs;
+    const completed = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(completed).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok", attempt: 1 });
+  });
+
+  test("empty claim-time description retries only when its hash contradicts plan evidence, then explains recovery", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-transient-owned-paths-"));
+    const spec = queueRun(db, makeDispatchSpec({
+      input: { repo: "wt-worker", ticket: "WM-708" },
+      approvalPolicy: planTimeDispatchEvidence(),
+    }));
+    let now = T0;
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        random: () => 0,
+        maxTransientGateRequeues: 1,
+        fetchTicket: () => readyDispatchTicket("WM-708", { description: "" }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+      },
+    });
+
+    const deferred = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(deferred).toMatchObject({ terminalState: "QUEUED", reasonCode: "owned_paths_unknown" });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+
+    now += deferred.requeueAfterMs;
+    const exhausted = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(exhausted).toMatchObject({ terminalState: "REFUSED", reasonCode: "owned_paths_unknown" });
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(() => retryRun(db, spec.runId, {
+      actor: "operator",
+      force: true,
+      policyVersion: "test",
+      now,
+    })).toThrow(
+      `factory dispatch event factory.dispatch.requested --payload '{"repo":"wt-worker","ticket":"WM-708"}' --watch`,
+    );
   });
 
   test("worker lease is acquired during execution and released on completion", async () => {
@@ -1515,7 +1885,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-710", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-710"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1538,7 +1908,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-720", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-720"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1562,7 +1932,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-730", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-730"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1592,7 +1962,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-731", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-731"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1866,12 +2236,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           dispatch: {
             locksDir: lockDir,
             leasesDir: leaseDir,
-            fetchTicket: () => ({
-              identifier: ticket,
-              state: { name: "Todo" },
-              assignee: null,
-              labels: { nodes: [{ name: "ai:agent-ready" }] },
-            }),
+            fetchTicket: () => readyDispatchTicket(ticket),
             fetchInFlight: () => [],
             countLeases: () => 0,
             claimTicket: () => ({ ok: true }),
@@ -1941,7 +2306,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-732", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-732"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1955,6 +2320,31 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ?`).get(spec.runId).reason_code).toBe("workspace_provisioning_error");
   });
 
+  test("filesystem failures after worktree_up remain typed workspace provisioning errors", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-link-collision-locks-"));
+    let executed = false;
+    const observingAdapter = { async execute() { executed = true; return { exitCode: 0, timedOut: false }; } };
+
+    const spec = queueRun(db, makeDispatchSpec({ input: { repo: "wt-link-collision", ticket: "WM-734" } }));
+    const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
+      dispatch: {
+        locksDir: lockDir,
+        fetchTicket: () => readyDispatchTicket("WM-734"),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    }));
+
+    expect(executed).toBe(false);
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("workspace_provisioning_error");
+    expect(summary.error).toContain("worktree provisioning failed for wt-link-collision/WM-734");
+    expect(summary.error).toContain("EEXIST");
+    expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ?`).get(spec.runId).reason_code).toBe("workspace_provisioning_error");
+  });
+
   test("worktree_up daemon startup failure surfaces serve.log in provisioning error message", async () => {
     const db = openDb(":memory:");
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-crash-locks-"));
@@ -1964,7 +2354,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-733", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-733"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1995,7 +2385,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-740", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-740"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -2012,7 +2402,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-741", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-741"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),

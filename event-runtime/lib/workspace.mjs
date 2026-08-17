@@ -16,6 +16,7 @@ import { materializeArtifact } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
+import { findPriorResumeContext } from "./transcripts.mjs";
 
 /** Hard ceiling for repository-owned worktree lifecycle scripts (WM-262). */
 export const DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS = 120_000;
@@ -202,7 +203,12 @@ export function createWorkspace({
   workspace = {},
   artifactStore = artifactsRoot(),
   worktreeTimeoutMs = worktreeScriptTimeoutMs(),
+  adapter = null,
 }) {
+  // Lease loss can leave the prior attempt's scratch directory behind. Read
+  // recognized harness session metadata before creating the new attempt;
+  // absence (including normal cleanup after an orderly failure) means cold start.
+  const resume = findPriorResumeContext({ root, runId, attempt, adapter });
   const dir = path.join(root, `${runId}-a${attempt}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "input.json"), `${canonicalJson(input)}\n`, "utf8");
@@ -239,14 +245,23 @@ export function createWorkspace({
 
   let worktree = null;
   if (workspace.type === "worktree") {
-    worktree = materializeWorktree({
-      workspaceDir: dir,
-      input,
-      checkoutDir: workspace.checkoutDir ?? "repo",
-      timeoutMs: worktreeTimeoutMs,
-    });
+    try {
+      worktree = materializeWorktree({
+        workspaceDir: dir,
+        input,
+        checkoutDir: workspace.checkoutDir ?? "repo",
+        timeoutMs: worktreeTimeoutMs,
+      });
+    } catch (err) {
+      if (err instanceof WorktreeError) throw err;
+      const repoName = input?.repo ?? "unknown repo";
+      const ticket = input?.ticket ?? "unknown ticket";
+      throw new WorktreeError(
+        `worktree provisioning failed for ${repoName}/${ticket}: ${err?.message ?? String(err)}`,
+      );
+    }
   }
-  return { dir, checkout, materialized, worktree };
+  return { dir, checkout, materialized, worktree, resume };
 }
 
 /**
@@ -265,12 +280,12 @@ export function destroyWorkspace(
   // Deregister a repository checkout even when the directory is retained:
   // a mirror that keeps stale worktree registrations refuses future adds.
   if (checkout) releaseCheckout({ checkoutPath: checkout, repoName });
-  if (retain) return false;
 
   // Delegated worktree teardown (WM-108): run the repo's own `worktree_down`
-  // on every non-retained path, completion and failure alike. The script owns
-  // the safety property — it refuses dirty trees, and the runtime never adds
-  // `--force` (lib/client.mjs carries the same rule). A refusal or failure
+  // on completion and failure alike, including when the failed workspace's
+  // files are retained for inspection. The script owns daemon/port cleanup
+  // and the safety property — it refuses dirty trees, and the runtime never
+  // adds `--force` (lib/client.mjs carries the same rule). A refusal or failure
   // retains the whole workspace, marker included, so the leak is visible to
   // the janitor instead of an rm quietly orphaning a live dev server.
   const marker = path.join(dir, WORKTREE_MARKER);
@@ -288,8 +303,13 @@ export function destroyWorkspace(
       timeout: worktreeTimeoutMs,
     });
     if (down.error?.code === "ETIMEDOUT" || down.status !== 0) return false;
+    // A retained workspace may outlive a successfully removed worktree. Drop
+    // its teardown marker so a later operator cleanup does not invoke the
+    // repo script again against a tree that no longer exists.
+    if (retain) rmSync(marker, { force: true });
   }
 
+  if (retain) return false;
   rmSync(dir, { recursive: true, force: true });
   return true;
 }

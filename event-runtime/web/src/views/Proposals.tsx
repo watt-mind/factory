@@ -22,6 +22,8 @@ import { matchesRepo } from "../context";
 import { PROPOSAL_FACETS, matchesFilterQuery, parseFilterQuery, proposalRunState } from "../filterQuery";
 import { ScopeCaption } from "../components/ContextTabs";
 import { SpecDiff } from "../components/SpecDiff";
+import { AgentHoverCard } from "../components/AgentHoverCard";
+import { ApprovalRiskDetails, ApprovalSafetyCard } from "../components/ApprovalRisk";
 import { decideRevealFilters } from "../reveal";
 import {
   Ago,
@@ -428,6 +430,17 @@ export function Proposals({
   const sel = useMemo(
     () => (selectedId ? (visible.find((p) => p.id === selectedId) ?? null) : null),
     [visible, selectedId],
+  );
+
+  /** Agent behind the selected proposal — feeds the shared safety card / approve dialog. */
+  const selAgent = useMemo(
+    () =>
+      sel
+        ? (agentsQuery.data?.agents ?? []).find(
+            (a) => a.id === sel.agent || a.ref === sel.agent || a.id === sel.spec?.agent,
+          )
+        : undefined,
+    [agentsQuery.data, sel],
   );
 
   useEffect(() => {
@@ -848,7 +861,7 @@ export function Proposals({
           <tbody>
             {(() => {
               const totalColSpan = cols.length + (tab === "open" ? 1 : 0);
-              const tdCls = "border-b border-(--border) px-3 py-1.5";
+              const tdCls = "border-b border-(--border) px-3 py-1.5 whitespace-nowrap";
               const renderRow = (p: Proposal) => (
                 <tr
                   key={p.id}
@@ -872,12 +885,10 @@ export function Proposals({
                   )}
                   <td className={`${tdCls} max-w-32 truncate`}>
                     {p.agent ? (
-                      <JumpLink
-                        onClick={() => onJumpAgent(p.agent!)}
-                        title={`What is ${p.agent}? Open in Agents`}
-                      >
-                        {p.agent}
-                      </JumpLink>
+                      <AgentHoverCard
+                        agentRef={p.agent}
+                        onJumpAgent={onJumpAgent}
+                      />
                     ) : (
                       <span className="text-(--text-faint)" title="no agent: proposal rejected at planning">
                         —
@@ -1075,9 +1086,10 @@ export function Proposals({
               <KV
                 k="agent"
                 v={
-                  <JumpLink onClick={() => onJumpAgent(sel.agent!)} title={`What is ${sel.agent}? Open in Agents`}>
-                    {sel.agent}
-                  </JumpLink>
+                  <AgentHoverCard
+                    agentRef={sel.agent}
+                    onJumpAgent={onJumpAgent}
+                  />
                 }
               />
             )}
@@ -1134,58 +1146,29 @@ export function Proposals({
           )}
 
           {sel.spec && (() => {
-            const ag = (agentsQuery.data?.agents ?? []).find((a) => a.id === sel.agent || a.ref === sel.agent || a.id === sel.spec?.agent);
-            const inp = (typeof sel.spec.input === "object" && sel.spec.input ? sel.spec.input : {}) as Record<string, unknown>;
-            const repo = sel.repos.length ? sel.repos.join(", ") : String(inp.repo || inp.repository || "unscoped");
-            const branch = String(inp.branch || inp.targetBranch || inp.base || "default");
-            const issue = String(inp.issueId || inp.issue || inp.ticket || sel.eventId || "—");
-            const host = sel.spec.placement ? Object.entries(sel.spec.placement).map(([k, v]) => `${k}=${v}`).join(", ") : (ag?.hosts?.length ? ag.hosts.join(", ") : "any worker");
-            const mut = ag ? ag.mutating : (sel.spec.capabilities?.some((c) => /write|mutate|exec/i.test(c)) ?? false);
-            const egress = ag?.capabilities?.services ?? sel.spec.capabilities?.filter((c) => /net|http|api/i.test(c)) ?? [];
-            const caps = sel.spec.capabilities ?? [];
-            const score = (mut ? 2 : 0) + (["main", "master", "develop"].includes(branch.toLowerCase()) ? 1 : 0) + (egress.length ? 1 : 0) + (sel.spec.timeoutSeconds > 300 ? 1 : 0);
-            const blast = score >= 3 ? "HIGH" : score >= 1 ? "MEDIUM" : "LOW";
-            const blastHue = blast === "HIGH" ? "var(--hue-err)" : blast === "MEDIUM" ? "var(--hue-warn)" : "var(--hue-ok)";
             const prev = (runsQuery.data?.runs ?? []).find((r) => r.agent === sel.agent && r.state === "COMPLETED");
 
             return (
               <Section title="Summary Safety Card & Blast Radius Radar" card={false}>
-                <div className="mb-3 rounded-md border border-(--border) bg-(--surface-0) p-3 text-[12px]">
-                  <div className="mb-2 flex items-center justify-between border-b border-(--border) pb-2">
-                    <div className="flex gap-2">
-                      <span className="rounded px-2 py-0.5 text-[11px] font-semibold uppercase" style={{ color: mut ? "var(--hue-err)" : "var(--hue-ok)", background: `color-mix(in oklch, ${mut ? "var(--hue-err)" : "var(--hue-ok)"} 12%, transparent)` }}>
-                        {mut ? "Mutating" : "Read-Only"}
-                      </span>
-                      <span className="rounded px-2 py-0.5 text-[11px] font-semibold uppercase" style={{ color: blastHue, background: `color-mix(in oklch, ${blastHue} 12%, transparent)` }}>
-                        Radar: {blast} Risk
-                      </span>
-                    </div>
-                    <span className="mono text-[11px] text-(--text-faint)">{sel.spec.adapter}</span>
-                  </div>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    <div><div className="text-[11px] uppercase text-(--text-faint)">Target Repo</div><div className="mono truncate text-(--text-dim)" title={repo}>{repo}</div></div>
-                    <div><div className="text-[11px] uppercase text-(--text-faint)">Target Branch</div><div className="mono truncate text-(--text-dim)" title={branch}>{branch}</div></div>
-                    <div><div className="text-[11px] uppercase text-(--text-faint)">Issue ID</div><div className="mono truncate text-(--text-dim)" title={issue}>{issue}</div></div>
-                    <div><div className="text-[11px] uppercase text-(--text-faint)">Host</div><div className="mono truncate text-(--text-dim)" title={host}>{host}</div></div>
-                    <div><div className="text-[11px] uppercase text-(--text-faint)">Budget</div><div className="mono text-(--text-dim)">{sel.spec.timeoutSeconds}s · max {sel.spec.maxAttempts} att</div></div>
-                    <div><div className="text-[11px] uppercase text-(--text-faint)">Egress</div><div className="mono truncate text-(--text-dim)">{egress.length ? egress.join(", ") : "none"}</div></div>
-                    <div className="sm:col-span-2">
-                      <div className="text-[11px] uppercase text-(--text-faint)">Capabilities</div>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {caps.length ? caps.map((c) => <span key={c} className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11.5px] text-(--text-dim)">{c}</span>) : <span className="text-[11px] text-(--text-faint)">none (sandboxed)</span>}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-2.5 border-t border-(--border) pt-2 text-[11px]">
-                    <div className="uppercase text-(--text-faint) mb-0.5">Historical Comparison</div>
-                    {prev ? (
-                      <div className="flex justify-between text-(--text-dim)">
-                        <span>Prior: <JumpLink onClick={() => onRunQueued(prev.runId)}>{prev.runId}</JumpLink> (<Ago iso={prev.updated_at} now={now} />)</span>
-                        <span className="mono text-(--text-faint)">{prev.attempts} att</span>
-                      </div>
-                    ) : <div className="text-(--text-faint)">No prior run for {sel.agent}.</div>}
-                  </div>
-                </div>
+                {/*
+                  Shared with the Runs view's approve dialog (WM-505) so both
+                  approval paths present identical risk context.
+                */}
+                <ApprovalSafetyCard
+                  proposal={sel}
+                  agent={selAgent}
+                  footer={
+                    <>
+                      <div className="uppercase text-(--text-faint) mb-0.5">Historical Comparison</div>
+                      {prev ? (
+                        <div className="flex justify-between text-(--text-dim)">
+                          <span>Prior: <JumpLink onClick={() => onRunQueued(prev.runId)}>{prev.runId}</JumpLink> (<Ago iso={prev.updated_at} now={now} />)</span>
+                          <span className="mono text-(--text-faint)">{prev.attempts} att</span>
+                        </div>
+                      ) : <div className="text-(--text-faint)">No prior run for {sel.agent}.</div>}
+                    </>
+                  }
+                />
                 <Disclosure label="immutable RunSpec" defaultOpen={isOpen}>
                   <JsonBlock value={sel.spec} />
                 </Disclosure>
@@ -1270,19 +1253,8 @@ export function Proposals({
             You are approving this exact immutable spec — the agent below runs with these
             capabilities the moment you confirm.
           </div>
-          <div className="mb-3">
-            <KV k="agent" v={sel.spec?.agent} />
-            <KV k="adapter" v={sel.spec?.adapter} />
-            <KV k="capabilities" v={sel.spec?.capabilities.join(", ") || "none"} />
-            <KV k="timeout" v={`${sel.spec?.timeoutSeconds}s`} />
-            <KV k="attempts" v={String(sel.spec?.maxAttempts)} />
-            <KV k="ttl" v={<Countdown createdAt={sel.created_at} ttlSeconds={sel.ttl_seconds} />} />
-          </div>
-          {sel.spec && (
-            <div className="mb-3 max-h-[38vh] overflow-auto">
-              <JsonBlock value={sel.spec} />
-            </div>
-          )}
+          {/* Shared with the Runs view's approve dialog (WM-505). */}
+          <ApprovalRiskDetails proposal={sel} agent={selAgent} />
           <div className="mt-3 flex justify-end gap-2">
             <Button onClick={() => setConfirmApprove(false)}>Not yet</Button>
             <Button

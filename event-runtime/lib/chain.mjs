@@ -48,7 +48,9 @@ function resolvePath(expr, context) {
 export function buildChainInput(mapping, context) {
   const input = {};
   for (const [field, expr] of Object.entries(mapping)) {
-    input[field] = resolvePath(expr, context);
+    input[field] = Array.isArray(expr)
+      ? expr.map((item) => resolvePath(item, context))
+      : resolvePath(expr, context);
   }
   return input;
 }
@@ -118,7 +120,30 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
             }
             return items.length > 0;
           })
-        : [[recommendation, rule.edges[recommendation]]].filter(([, candidate]) => candidate !== undefined);
+        : (() => {
+            const primary = rule.edges[recommendation];
+            if (primary === undefined) return [];
+            const additionalKeys = primary.also ?? [];
+            if (!Array.isArray(additionalKeys) || additionalKeys.some((key) => typeof key !== "string")) {
+              throw new Error(`chain edge "${recommendation}" also must be an array of edge keys`);
+            }
+            return [recommendation, ...additionalKeys]
+              .map((key) => {
+                const candidate = rule.edges[key];
+                if (candidate === undefined) {
+                  throw new Error(`chain edge "${recommendation}" references unknown sibling "${key}"`);
+                }
+                return [key, candidate];
+              })
+              .filter(([, candidate]) => {
+                if (candidate.whenPath === undefined) return true;
+                try {
+                  return resolvePath(candidate.whenPath, selectionContext) !== null;
+                } catch {
+                  return false;
+                }
+              });
+          })();
       if (selectedEdges.length === 0) {
         // An unmapped value or an independent result with no actionable items
         // is a legitimate terminal — record nothing, chain nothing.

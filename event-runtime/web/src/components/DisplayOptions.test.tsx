@@ -71,8 +71,18 @@ afterEach(() => {
   goPrefix.armedAt = 0;
 });
 
+function chooseOption(
+  r: ReturnType<typeof render>,
+  label: string,
+  option: string,
+) {
+  fireEvent.click(r.getByRole("combobox", { name: label }));
+  const listbox = r.getByRole("listbox", { name: `${label} options` });
+  fireEvent.mouseDown(within(listbox).getByRole("option", { name: option }));
+}
+
 describe("DisplayOptions panel", () => {
-  test("opens, changes grouping, and reflects it in the select", () => {
+  test("opens, changes grouping, and reflects it in the listbox trigger", () => {
     let latest: DisplayState | undefined;
     const r = render(<Harness onState={(s) => (latest = s)} />);
     const trigger = r.getByRole("button", { name: /display/i });
@@ -80,19 +90,48 @@ describe("DisplayOptions panel", () => {
     fireEvent.click(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
 
-    const groupSelect = r.getByLabelText("Group by") as HTMLSelectElement;
-    fireEvent.change(groupSelect, { target: { value: "state" } });
+    const groupSelect = r.getByRole("combobox", { name: "Group by" });
+    chooseOption(r, "Group by", "State");
     expect(latest?.groupBy).toBe("state");
-    expect(groupSelect.value).toBe("state");
+    expect(groupSelect.textContent).toContain("State");
+  });
+
+  test("uses styled, keyboard-navigable listboxes instead of native selects", () => {
+    let latest: DisplayState | undefined;
+    const r = render(<Harness onState={(s) => (latest = s)} />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+
+    expect(r.container.querySelector("select")).toBeNull();
+    const group = r.getByRole("combobox", { name: "Group by" });
+    fireEvent.keyDown(group, { key: "ArrowDown" });
+    const listbox = r.getByRole("listbox", { name: "Group by options" });
+    expect(listbox).toBeTruthy();
+    fireEvent.keyDown(group, { key: "ArrowDown" });
+    expect(group.getAttribute("aria-activedescendant")).toBe(
+      within(listbox).getByRole("option", { name: "State" }).id,
+    );
+    fireEvent.keyDown(group, { key: "Enter" });
+    expect(latest?.groupBy).toBe("state");
+    expect(r.queryByRole("listbox", { name: "Group by options" })).toBeNull();
+  });
+
+  test("Escape dismisses an open nested listbox without closing Display options", () => {
+    const r = render(<Harness />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+    const group = r.getByRole("combobox", { name: "Group by" });
+    fireEvent.click(group);
+    fireEvent.keyDown(group, { key: "Escape" });
+    expect(r.queryByRole("listbox", { name: "Group by options" })).toBeNull();
+    expect(r.getByRole("dialog", { name: "Display options" })).toBeTruthy();
   });
 
   test("choosing the group as sub-group is prevented by option filtering", () => {
     const r = render(<Harness />);
     fireEvent.click(r.getByRole("button", { name: /display/i }));
-    fireEvent.change(r.getByLabelText("Group by"), { target: { value: "agent" } });
-    const sub = r.getByLabelText("Sub-group by") as HTMLSelectElement;
-    const values = [...sub.options].map((o) => o.value);
-    expect(values).not.toContain("agent");
+    chooseOption(r, "Group by", "Agent");
+    fireEvent.click(r.getByRole("combobox", { name: "Sub-group by" }));
+    const subOptions = within(r.getByRole("listbox", { name: "Sub-group by options" })).getAllByRole("option");
+    expect(subOptions.map((option) => option.textContent)).not.toContain("Agent");
   });
 
   test("column pills toggle visibility but always-on columns are not offered", () => {
@@ -102,9 +141,25 @@ describe("DisplayOptions panel", () => {
     expect(r.queryByRole("button", { name: "Run" })).toBeNull();
     const pill = r.getByRole("button", { name: "Agent" });
     expect(pill.getAttribute("aria-pressed")).toBe("true");
+    expect(pill.textContent).toContain("✓");
     fireEvent.click(pill);
     expect(latest?.hiddenColumns).toEqual(["agent"]);
     expect(pill.getAttribute("aria-pressed")).toBe("false");
+    expect(pill.textContent).not.toContain("✓");
+  });
+
+  test("ordering direction is a two-state aria-pressed segment", () => {
+    let latest: DisplayState | undefined;
+    const r = render(<Harness onState={(s) => (latest = s)} />);
+    fireEvent.click(r.getByRole("button", { name: /display/i }));
+    const asc = r.getByRole("button", { name: "Ascending order" });
+    const desc = r.getByRole("button", { name: "Descending order" });
+    expect(asc.getAttribute("aria-pressed")).toBe("true");
+    expect(desc.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(desc);
+    expect(latest?.sortDir).toBe("desc");
+    expect(asc.getAttribute("aria-pressed")).toBe("false");
+    expect(desc.getAttribute("aria-pressed")).toBe("true");
   });
 
   test("groups every discovered path and derives a view-aware placeholder", () => {
@@ -218,7 +273,7 @@ describe("DisplayOptions panel", () => {
     const r = render(<Harness onState={(s) => (latest = s)} />);
     fireEvent.click(r.getByRole("button", { name: /display/i }));
     expect(r.queryByRole("button", { name: /reset/i })).toBeNull();
-    fireEvent.change(r.getByLabelText("Group by"), { target: { value: "state" } });
+    chooseOption(r, "Group by", "State");
     fireEvent.click(r.getByRole("button", { name: /reset/i }));
     expect(latest?.groupBy).toBe("none");
   });
@@ -226,17 +281,16 @@ describe("DisplayOptions panel", () => {
   test("default sort option uses operator-facing label", () => {
     const r = render(<Harness />);
     fireEvent.click(r.getByRole("button", { name: /display/i }));
-    const orderSelect = r.getByLabelText("Order by") as HTMLSelectElement;
-    const defaultOption = [...orderSelect.options].find((o) => o.value === "default");
-    expect(defaultOption?.textContent).toBe("Default order");
-    expect(defaultOption?.textContent).not.toBe("API order");
+    const orderSelect = r.getByRole("combobox", { name: "Order by" });
+    expect(orderSelect.textContent).toContain("Default order");
+    expect(orderSelect.textContent).not.toContain("API order");
   });
 
   test("opening moves focus to the first interactive control", () => {
     const r = render(<Harness />);
     const trigger = r.getByRole("button", { name: /display/i });
     fireEvent.click(trigger);
-    expect(document.activeElement).toBe(r.getByLabelText("Group by"));
+    expect(document.activeElement).toBe(r.getByRole("combobox", { name: "Group by" }));
   });
 
   test("outside-click dismiss restores focus to the Display trigger", () => {

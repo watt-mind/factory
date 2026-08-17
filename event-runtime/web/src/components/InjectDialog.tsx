@@ -9,7 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { api } from "../api";
-import { buildTemplates, triggerId, type TriggerTemplate } from "../templates";
+import { buildTemplates, groupTemplates, triggerId, type TriggerTemplate } from "../templates";
 import { validate } from "../lib/schema";
 import {
   PLANNER_FIELDS,
@@ -237,6 +237,31 @@ const parses = (raw: string): boolean => {
   }
 };
 
+export interface JsonEnvelopeStatus {
+  syntaxValid: boolean;
+  envelopeValid: boolean;
+  label: string;
+}
+
+/** Distinguish syntactically valid JSON from an envelope that is ready to inject. */
+export function jsonEnvelopeStatus(raw: string): JsonEnvelopeStatus {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { syntaxValid: false, envelopeValid: false, label: "Invalid JSON syntax" };
+  }
+  if (!isPlainObject(value)) {
+    return { syntaxValid: true, envelopeValid: false, label: "JSON ok · envelope must be an object" };
+  }
+  for (const field of ["type", "source", "subject"] as const) {
+    if (typeof value[field] !== "string" || value[field].trim() === "") {
+      return { syntaxValid: true, envelopeValid: false, label: `JSON ok · ${field} missing` };
+    }
+  }
+  return { syntaxValid: true, envelopeValid: true, label: "Valid JSON" };
+}
+
 const warnStyle = {
   color: "var(--hue-warn)",
   background: "color-mix(in oklch, var(--hue-warn) 10%, transparent)",
@@ -396,6 +421,7 @@ export function InjectDialog({
         (t.summary?.toLowerCase().includes(q) ?? false),
     );
   }, [templates, search]);
+  const groupedTemplates = useMemo(() => groupTemplates(filteredTemplates), [filteredTemplates]);
 
   const inject = useMutation({
     mutationFn: (envelope: Record<string, unknown>) => api.replay(envelope),
@@ -530,7 +556,7 @@ export function InjectDialog({
     return [
       ...(initialEnvelope ? ["__given__"] : []),
       ...filteredRecent.map((r) => `__recent_${r.eventId}__`),
-      ...filteredTemplates.map((t) => t.eventType),
+      ...groupedTemplates.flatMap((group) => group.templates.map((t) => t.eventType)),
       null,
     ];
   }
@@ -824,7 +850,7 @@ export function InjectDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const isValidJson = useMemo(() => parses(text), [text]);
+  const jsonStatus = useMemo(() => jsonEnvelopeStatus(text), [text]);
 
   /** Live JSON-tab error summary: payload vs the registered schema of the typed event type. */
   const jsonSchemaErrors = useMemo(() => {
@@ -1130,32 +1156,46 @@ export function InjectDialog({
               </div>
             )}
 
-            {filteredTemplates.length > 0 && (
+            {groupedTemplates.length > 0 && (
               <div className={filteredRecent.length > 0 ? "pt-1" : ""}>
                 {filteredRecent.length > 0 && (
                   <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-(--text-faint)">
                     Templates
                   </div>
                 )}
-                <div className="space-y-1">
-                  {filteredTemplates.map((t) => (
-                    <button
-                      key={t.eventType}
-                      type="button"
-                      {...radioA11y(t.eventType)}
-                      onClick={() => applySelection(t.eventType)}
-                      className={`w-full rounded-md border p-2 text-left transition-colors ${
-                        checkedId === t.eventType
-                          ? "border-(--accent) bg-(--surface-3) text-(--text)"
-                          : "border-(--border) text-(--text-dim) hover:bg-(--surface-2)"
-                      }`}
-                    >
-                      <div className="mono font-medium text-[12px] truncate">{t.eventType}</div>
-                      <div className="mt-0.5 flex items-center justify-between text-[11px] text-(--text-faint)">
-                        <span className="truncate">{t.agent}</span>
-                        <span className="ml-1 shrink-0 opacity-75">{t.summary || "no params"}</span>
+                <div className="space-y-2">
+                  {groupedTemplates.map((group) => (
+                    <div key={group.domain} data-template-domain={group.domain}>
+                      <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-(--text-faint)">
+                        {group.domain}
                       </div>
-                    </button>
+                      <div className="space-y-1">
+                        {group.templates.map((t) => {
+                          const summary = t.summary || "no params";
+                          return (
+                            <button
+                              key={t.eventType}
+                              type="button"
+                              {...radioA11y(t.eventType)}
+                              onClick={() => applySelection(t.eventType)}
+                              className={`w-full overflow-hidden rounded-md border p-2 text-left transition-colors ${
+                                checkedId === t.eventType
+                                  ? "border-(--accent) bg-(--surface-3) text-(--text)"
+                                  : "border-(--border) text-(--text-dim) hover:bg-(--surface-2)"
+                              }`}
+                            >
+                              <div className="mono truncate text-[12px] font-medium">{t.eventType}</div>
+                              <div className="mt-0.5 flex min-w-0 items-center justify-between text-[11px] text-(--text-faint)">
+                                <span className="min-w-0 truncate">{t.agent}</span>
+                                <span title={summary} className="ml-1 min-w-0 max-w-[55%] truncate opacity-75">
+                                  {summary}
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -1205,9 +1245,23 @@ export function InjectDialog({
                 <div className="flex items-center gap-2 text-[11px]">
                   <span
                     className="size-1.5 rounded-full"
-                    style={{ background: isValidJson ? "var(--hue-ok)" : "var(--hue-err)" }}
+                    style={{
+                      background: jsonStatus.envelopeValid
+                        ? "var(--hue-ok)"
+                        : jsonStatus.syntaxValid
+                          ? "var(--text-muted, var(--text-faint))"
+                          : "var(--hue-err)",
+                    }}
                   />
-                  <span className="text-(--text-faint)">{isValidJson ? "Valid JSON" : "Invalid JSON syntax"}</span>
+                  <span
+                    style={{
+                      color: jsonStatus.envelopeValid || !jsonStatus.syntaxValid
+                        ? "var(--text-faint)"
+                        : "var(--text-muted, var(--text-faint))",
+                    }}
+                  >
+                    {jsonStatus.label}
+                  </span>
                 </div>
                 <button
                   type="button"

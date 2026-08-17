@@ -229,11 +229,35 @@ describe("CommandPalette", () => {
     expect(document.activeElement).toBe(opener);
   });
 
-  test("search input uses an accent focus border and no outline", () => {
+  test("ArrowDown visibly highlights the active row", () => {
     const r = renderPalette();
     chordK();
-    const classes = r.getByPlaceholderText("Type a command…").className.split(/\s+/);
-    expect(classes).toContain("outline-none");
-    expect(classes).toContain("focus:border-(--accent)");
+    const input = r.getByPlaceholderText("Type a command…");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    const activeItem = r.getByText("Copy id").closest<HTMLElement>("[cmdk-item]");
+    expect(activeItem?.getAttribute("aria-selected")).toBe("true");
+    const classes = activeItem?.className.split(/\s+/) ?? [];
+    expect(classes).toContain("data-[selected=true]:bg-(--surface-2)");
+    expect(classes).toContain("data-[selected=true]:border-l-(--accent)");
+  });
+
+  test("uses a single focus border, scroll fade, and theme-aware backdrop", () => {
+    const r = renderPalette();
+    chordK();
+    const inputClasses = r.getByPlaceholderText("Type a command…").className.split(/\s+/);
+    expect(inputClasses).toContain("border-0");
+    expect(inputClasses).toContain("border-b");
+    expect(inputClasses).toContain("outline-none");
+    expect(inputClasses).toContain("ring-0");
+    expect(inputClasses).toContain("focus:border-(--accent)");
+    expect(inputClasses).toContain("focus:ring-0");
+
+    expect(r.getByTestId("palette-results").className).toContain("overflow-y-auto");
+    expect(r.getByTestId("palette-results").className).toContain("scroll-pb-10");
+    expect(r.getByTestId("palette-results-fade").className).toContain("bg-linear-to-t");
+    const overlayClasses = r.getByTestId("palette-overlay").className.split(/\s+/);
+    expect(overlayClasses).toContain("bg-black/40");
+    expect(overlayClasses).toContain("[[data-theme=light]_&]:bg-black/20");
   });
 });

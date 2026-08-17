@@ -80,6 +80,49 @@ export interface AdmittedEvent {
   repos: string[];
 }
 
+/** One event in a chain trace (`GET /chain/:correlationId`, WM-527). */
+export interface ChainEvent {
+  source: string;
+  eventId: string;
+  type: string;
+  subject: string | null;
+  status: string;
+  occurredAt: string;
+  receivedAt: string;
+  admittedAt: string;
+  correlationId: string | null;
+  /** The run id that emitted this event; null on the origin. */
+  causationId: string | null;
+  proposalId: string | null;
+  proposalStatus: string | null;
+  proposalDecision: string | null;
+  runId: string | null;
+  repos: string[];
+}
+
+/** One run in a chain trace. */
+export interface ChainRun {
+  runId: string;
+  state: RunState;
+  attempts: number;
+  agent: string | null;
+  adapter: string | null;
+  reasonCode: string | null;
+  eventId: string | null;
+  eventSource: string | null;
+  created_at: string;
+  updated_at: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  repos: string[];
+}
+
+export interface ChainView {
+  correlationId: string;
+  events: ChainEvent[];
+  runs: ChainRun[];
+}
+
 export interface RunListItem {
   runId: string;
   state: RunState;

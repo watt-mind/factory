@@ -152,16 +152,26 @@ export function emitDueTicks(db, registry, { now = Date.now() } = {}) {
   return { emitted, errors };
 }
 
-/** Is a run for this loop's agent still in flight? (§5 singleton; OPS-436 excludes PROPOSED) */
-export function loopInFlight(db, agentRef) {
-  const row = db
+/**
+ * Runs for an agent that are still in flight, oldest first. PROPOSED remains
+ * excluded (OPS-436): an unapproved watched proposal must not silence later
+ * schedule slots. Returning the rows lets singleton NOOPs identify the run
+ * they deferred to instead of dropping that audit evidence.
+ */
+export function inFlightRunsForAgent(db, agentRef) {
+  return db
     .query(
-      `SELECT COUNT(*) AS n FROM runs
+      `SELECT run_id, state, created_at FROM runs
        WHERE state NOT IN ('PROPOSED','COMPLETED','REFUSED','FAILED','TIMED_OUT','CANCELLED')
-         AND json_extract(spec_json, '$.agent') = ?`,
+         AND json_extract(spec_json, '$.agent') = ?
+       ORDER BY created_at ASC, rowid ASC`,
     )
-    .get(agentRef);
-  return row.n > 0;
+    .all(agentRef);
+}
+
+/** Is a run for this loop's agent still in flight? (§5 singleton) */
+export function loopInFlight(db, agentRef) {
+  return inFlightRunsForAgent(db, agentRef).length > 0;
 }
 
 /** The newest slot that successfully completed for a loop, or null if never completed (OPS-436). */

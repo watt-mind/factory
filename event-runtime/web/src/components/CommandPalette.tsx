@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Command } from "cmdk";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { GO_CHORD_MS, goPrefix, goSequence } from "../goSequence";
 import { keyGuard, modal, registerFocusReturnScope } from "../hooks";
@@ -14,6 +14,9 @@ export interface PaletteAction {
   group?: "Go" | "Commands";
   run: () => void;
 }
+
+const PALETTE_ITEM_CLASS =
+  "flex cursor-pointer items-center justify-between rounded-md border-l-2 border-l-transparent px-3 py-2 text-[13px] data-[selected=true]:border-l-(--accent) data-[selected=true]:bg-(--surface-2)";
 
 /** ⌘K palette (webui spec §5): navigation, selection verbs, jump-to-ID. */
 export function CommandPalette({
@@ -34,7 +37,9 @@ export function CommandPalette({
   onJumpProject?: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [hasMoreBelow, setHasMoreBelow] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
   const contextActions = useContextActions();
@@ -60,6 +65,35 @@ export function CommandPalette({
   const agents = useQuery({ queryKey: ["agents"], queryFn: api.agents, enabled: open });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, enabled: open });
   const repos = useQuery({ queryKey: ["repos"], queryFn: api.repos, enabled: open });
+  const resultCount =
+    actions.length +
+    contextActions.length +
+    (runs.data?.runs?.length ?? 0) +
+    (proposals.data?.proposals?.length ?? 0) +
+    (events.data?.events?.length ?? 0) +
+    (agents.data?.agents?.length ?? 0) +
+    (workers.data?.workers?.length ?? 0) +
+    (repos.data?.repos?.length ?? 0);
+
+  const updateOverflow = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    setHasMoreBelow(el.scrollHeight - el.scrollTop - el.clientHeight > 4);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current;
+    if (!el) return;
+    updateOverflow();
+    const resizeObserver = new ResizeObserver(updateOverflow);
+    resizeObserver.observe(el);
+    el.addEventListener("scroll", updateOverflow, { passive: true });
+    return () => {
+      resizeObserver.disconnect();
+      el.removeEventListener("scroll", updateOverflow);
+    };
+  }, [open, resultCount, updateOverflow]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -112,7 +146,7 @@ export function CommandPalette({
   return (
     <div
       data-testid="palette-overlay"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-[16vh]"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-[16vh] [[data-theme=light]_&]:bg-black/20"
       onMouseDown={(e) => e.target === e.currentTarget && setOpen(false)}
     >
       <Command
@@ -126,13 +160,15 @@ export function CommandPalette({
           aria-modal="true"
           aria-label="Command palette"
           tabIndex={-1}
+          className="outline-none focus:outline-none focus-visible:outline-none"
         >
         <Command.Input
           autoFocus
           placeholder="Type a command…"
-          className="w-full border-b border-(--border) bg-transparent px-4 py-3 text-[14px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)"
+          className="w-full border-0 border-b border-(--border) bg-transparent px-4 py-3 text-[14px] text-(--text) outline-none ring-0 placeholder:text-(--text-faint) focus:border-(--accent) focus:outline-none focus:ring-0"
         />
-        <Command.List className="max-h-72 overflow-auto p-1.5">
+        <div className="relative">
+        <Command.List ref={listRef} data-testid="palette-results" className="max-h-72 overflow-y-auto scroll-pb-10 p-1.5">
           <Command.Empty className="px-3 py-6 text-center text-(--text-faint)">
             No matching command
           </Command.Empty>
@@ -145,7 +181,7 @@ export function CommandPalette({
                     setOpen(false);
                     a.run();
                   }}
-                  className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+                  className={PALETTE_ITEM_CLASS}
                 >
                   <span>{a.label}</span>
                   {a.hint && <span className="mono text-[11px] text-(--text-faint)">{a.hint}</span>}
@@ -163,7 +199,7 @@ export function CommandPalette({
                     setOpen(false);
                     a.run();
                   }}
-                  className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+                  className={PALETTE_ITEM_CLASS}
                 >
                   <span>{a.label}</span>
                   {a.hint && <span className="mono text-[11px] text-(--text-faint)">{a.hint}</span>}
@@ -180,7 +216,7 @@ export function CommandPalette({
                     setOpen(false);
                     a.run();
                   }}
-                  className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+                  className={PALETTE_ITEM_CLASS}
                 >
                   <span>{a.label}</span>
                   {a.hint && <span className="mono text-[11px] text-(--text-faint)">{a.hint}</span>}
@@ -197,7 +233,7 @@ export function CommandPalette({
                 setOpen(false);
                 onJumpProposal(p.id);
               }}
-              className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+              className={PALETTE_ITEM_CLASS}
             >
               <span className="mono truncate">{p.id}</span>
               <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">
@@ -218,7 +254,7 @@ export function CommandPalette({
                 setOpen(false);
                 onJumpEvent(e.source, e.eventId);
               }}
-              className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+              className={PALETTE_ITEM_CLASS}
             >
               <span className="mono truncate">{e.eventId}</span>
               <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">
@@ -238,7 +274,7 @@ export function CommandPalette({
                 setOpen(false);
                 onJumpRun(r.runId);
               }}
-              className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+              className={PALETTE_ITEM_CLASS}
             >
               <span className="mono truncate">{r.runId}</span>
               <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">run · {r.state}</span>
@@ -256,7 +292,7 @@ export function CommandPalette({
                 setOpen(false);
                 onJumpAgent(a.ref);
               }}
-              className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+              className={PALETTE_ITEM_CLASS}
             >
               <span className="mono truncate">{a.ref}</span>
               <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">agent · {a.outputContract}</span>
@@ -276,7 +312,7 @@ export function CommandPalette({
                 setOpen(false);
                 onJumpWorker(w.workerId);
               }}
-              className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+              className={PALETTE_ITEM_CLASS}
             >
               <span className="mono truncate">{w.workerId}</span>
               <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">
@@ -297,7 +333,7 @@ export function CommandPalette({
                     setOpen(false);
                     onJumpProject?.(r.name);
                   }}
-                  className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-[13px] data-[selected=true]:bg-(--surface-3)"
+                  className={PALETTE_ITEM_CLASS}
                 >
                   <span className="mono truncate">
                     {r.name}
@@ -311,6 +347,12 @@ export function CommandPalette({
             </Command.Group>
           )}
         </Command.List>
+        <div
+          data-testid="palette-results-fade"
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-linear-to-t from-(--surface-1) to-transparent transition-opacity ${hasMoreBelow ? "opacity-100" : "opacity-0"}`}
+        />
+        </div>
         <div className="flex items-center justify-between border-t border-(--border) px-4 py-2 text-[11px] text-(--text-faint)">
           <span><span className="mono font-medium">↑↓</span> Navigate</span>
           <span><span className="mono font-medium">↵</span> Select</span>
