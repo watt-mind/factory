@@ -3,6 +3,12 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { keyGuard, useListKeys, useNow, useTabKeys } from "../hooks";
 import { goPrefixActive } from "../goSequence";
+import {
+  cycleColumnSort,
+  defaultDisplayState,
+  sortRows,
+  type DisplayConfig,
+} from "../displayOptions";
 import type { InboxItem } from "../types";
 import {
   Ago,
@@ -102,6 +108,34 @@ const DELIVERY_HUES: Record<DeliveryState, string> = {
   none: "var(--hue-idle)",
 };
 
+const refSortValue = (item: InboxItem): string => {
+  const r = item.refs;
+  return [r.runId, r.proposalId, r.eventSource, r.eventId, r.issue, r.pr, r.repo]
+    .filter((value): value is string => Boolean(value))
+    .join(" ");
+};
+
+const INBOX_SORT: DisplayConfig<InboxItem> = {
+  view: "inbox",
+  groups: [],
+  sorts: [
+    { key: "kind", label: "Kind", get: (item) => item.kind, column: "kind" },
+    { key: "title", label: "Title", get: (item) => item.title, column: "title" },
+    // Age increases as the creation timestamp recedes, so negate the timestamp:
+    // aria-sort="ascending" must mean the displayed ages are ascending too.
+    { key: "age", label: "Age", get: (item) => -Date.parse(item.createdAt), column: "age" },
+    { key: "refs", label: "Refs", get: refSortValue, column: "refs" },
+    { key: "sent", label: "Sent", get: (item) => deliveryState(item), column: "sent" },
+  ],
+  columns: [
+    { key: "kind", label: "Kind" },
+    { key: "title", label: "Title" },
+    { key: "age", label: "Age" },
+    { key: "refs", label: "Refs" },
+    { key: "sent", label: "Sent" },
+  ],
+};
+
 /** Group in triage order, oldest first inside a group; empty groups are dropped. */
 export function groupItems(items: InboxItem[]): { group: InboxGroup; items: InboxItem[] }[] {
   const byGroup = new Map<InboxGroupId, InboxItem[]>();
@@ -154,13 +188,18 @@ export function Inbox({
   const items = query.data?.items ?? [];
 
   const [tab, setTab] = useState<InboxTab>("open");
+  const [sort, setSort] = useState(() => defaultDisplayState(INBOX_SORT));
   const counts = useMemo(() => {
     const c: Record<InboxTab, number> = { open: 0, acked: 0, resolved: 0, all: items.length };
     for (const it of items) c[itemStatus(it)] += 1;
     return c;
   }, [items]);
 
-  const visibleGroups = useMemo(() => groupItems(items.filter((it) => matchesTab(it, tab))), [items, tab]);
+  const visibleGroups = useMemo(
+    () => groupItems(items.filter((it) => matchesTab(it, tab)))
+      .map(({ group, items: rows }) => ({ group, items: sortRows(rows, INBOX_SORT, sort) })),
+    [items, tab, sort],
+  );
   const visible = useMemo(() => visibleGroups.flatMap((g) => g.items), [visibleGroups]);
 
   const sel = focusItemId ? (items.find((it) => it.id === focusItemId) ?? null) : null;
@@ -319,11 +358,19 @@ export function Inbox({
             <table className="w-full border-separate border-spacing-0">
               <thead>
                 <tr className="text-left text-[11px] text-(--text-faint)">
-                  <Th label="Kind" />
-                  <Th label="Title" />
-                  <Th label="Age" />
-                  <Th label="Refs" />
-                  <Th label="Sent" title="Telegram delivery: sent, failed, or not attempted" />
+                  {INBOX_SORT.columns.map((column) => {
+                    const field = INBOX_SORT.sorts.find((candidate) => candidate.column === column.key)!;
+                    return (
+                      <Th
+                        key={column.key}
+                        label={column.label}
+                        title={column.key === "sent" ? "Telegram delivery: sent, failed, or not attempted" : undefined}
+                        dir={sort.sortBy === field.key ? sort.sortDir : null}
+                        naturalDir={field.defaultDir ?? "asc"}
+                        onSort={() => setSort((state) => cycleColumnSort(INBOX_SORT, state, column.key))}
+                      />
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>

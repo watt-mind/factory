@@ -158,6 +158,54 @@ describe("Inbox view", () => {
     expect(view.getByText("Red")).toBeTruthy();
   });
 
+  test("column headers cycle ascending, descending, and default order while keyboard selection follows rendered rows", async () => {
+    ledger = [
+      item({ id: "inbox_middle", kind: "BLOCKED", title: "Mike", createdAt: T0 }),
+      item({ id: "inbox_zulu", kind: "ESCALATED", title: "Zulu", createdAt: T1 }),
+      item({ id: "inbox_alpha", kind: "human_needed", title: "Alpha", createdAt: T2 }),
+    ];
+    const onSelectItem = mock(() => {});
+    const { view } = renderInbox({ onSelectItem });
+    await waitFor(() => view.getByText("Alpha"));
+
+    for (const label of ["Kind", "Title", "Age", "Refs", "Sent"]) {
+      const header = view.getByRole("columnheader", { name: new RegExp(label) });
+      expect(header.getAttribute("aria-sort")).toBe("none");
+      expect(header.querySelector("button")).toBeTruthy();
+    }
+
+    const renderedTitles = () => Array.from(view.container.querySelectorAll("tbody tr[aria-selected]"))
+      .map((row) => row.querySelector("td:nth-child(2)")?.textContent);
+    const titleHeader = view.getByRole("columnheader", { name: /Title/ });
+    expect(renderedTitles()).toEqual(["Mike", "Zulu", "Alpha"]);
+
+    fireEvent.click(view.getByRole("button", { name: /Title/ }));
+    expect(titleHeader.getAttribute("aria-sort")).toBe("ascending");
+    expect(renderedTitles()).toEqual(["Alpha", "Mike", "Zulu"]);
+    act(() => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+    });
+    expect(onSelectItem).toHaveBeenLastCalledWith("inbox_alpha");
+
+    fireEvent.click(view.getByRole("button", { name: /Title/ }));
+    expect(titleHeader.getAttribute("aria-sort")).toBe("descending");
+    expect(renderedTitles()).toEqual(["Zulu", "Mike", "Alpha"]);
+
+    fireEvent.click(view.getByRole("button", { name: /Title/ }));
+    expect(titleHeader.getAttribute("aria-sort")).toBe("none");
+    expect(renderedTitles()).toEqual(["Mike", "Zulu", "Alpha"]);
+
+    const ageHeader = view.getByRole("columnheader", { name: /Age/ });
+    fireEvent.click(view.getByRole("button", { name: /Age/ }));
+    expect(ageHeader.getAttribute("aria-sort")).toBe("ascending");
+    expect(renderedTitles()).toEqual(["Alpha", "Zulu", "Mike"]);
+    fireEvent.click(view.getByRole("button", { name: /Age/ }));
+    expect(ageHeader.getAttribute("aria-sort")).toBe("descending");
+    expect(renderedTitles()).toEqual(["Mike", "Zulu", "Alpha"]);
+    fireEvent.click(view.getByRole("button", { name: /Age/ }));
+    expect(ageHeader.getAttribute("aria-sort")).toBe("none");
+  });
+
   test("empty Open tab is a sentence, not a table", async () => {
     ledger = ledger.filter((it) => itemStatus(it) !== "open");
     const { view } = renderInbox();
