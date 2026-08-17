@@ -2,9 +2,10 @@ import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { ReactFlowProvider } from "@xyflow/react";
+import { useRef } from "react";
 import { AgentNode, EventTypeNode, ProposalNode, TerminalNode, nodeAccessibleName } from "./nodes";
 import type { GraphNode } from "./model";
-import { Graph, focusedNodeFit } from "../views/Graph";
+import { Graph, focusedNodeFit, useSelectedNodeReveal } from "../views/Graph";
 import {
   changeInput,
   createAgentsFixture,
@@ -334,6 +335,20 @@ const graphAgents = (): AgentsView =>
     ],
   });
 
+function SelectedNodeRevealHarness({
+  focusNodeId,
+  overlayVersion,
+  fitView,
+}: {
+  focusNodeId: string | null;
+  overlayVersion: number;
+  fitView: (options: unknown) => void;
+}) {
+  const flowRef = useRef({ getZoom: () => 1, fitView });
+  useSelectedNodeReveal(focusNodeId, 1, flowRef);
+  return <div>overlay {overlayVersion}</div>;
+}
+
 function renderGraph(props: Partial<Parameters<typeof Graph>[0]> = {}) {
   return renderWithClient(
     <Graph
@@ -465,6 +480,32 @@ describe("Graph view inspect loop", () => {
         expect(onSelectNode).toHaveBeenCalledWith(null);
       },
     );
+  });
+
+  test("background overlay rerenders do not re-center an unchanged focused node", async () => {
+    const fitView = mock((_options: unknown) => {});
+    const view = render(
+      <SelectedNodeRevealHarness
+        focusNodeId="event:gh.failed"
+        overlayVersion={0}
+        fitView={fitView}
+      />,
+    );
+    await waitFor(() => expect(fitView).toHaveBeenCalledTimes(1));
+    expect(fitView.mock.calls[0]?.[0]).toMatchObject({
+      nodes: [{ id: "event:gh.failed" }],
+      duration: 180,
+    });
+
+    view.rerender(
+      <SelectedNodeRevealHarness
+        focusNodeId="event:gh.failed"
+        overlayVersion={1}
+        fitView={fitView}
+      />,
+    );
+    expect(view.getByText("overlay 1")).toBeTruthy();
+    expect(fitView).toHaveBeenCalledTimes(1);
   });
 
   test("selected proposal node shows Open in Proposals jumping via hashPath", async () => {

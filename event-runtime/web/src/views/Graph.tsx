@@ -58,6 +58,36 @@ export function focusedNodeFit(id: string, zoom: number): GraphFitViewOptions {
   };
 }
 
+type FlowViewport = {
+  getZoom: () => number;
+  fitView: (opts: GraphFitViewOptions) => void;
+};
+
+// Reveal the selected node without fighting the operator's viewport: the effect
+// depends only on `revealSelected` (which changes with `focusNodeId`) and
+// `flowReady`, so the 5s background poll — which rebuilds `positioned` on every
+// refetch — cannot re-center or interrupt a drag.
+export function useSelectedNodeReveal(
+  focusNodeId: string | null,
+  flowReady: number,
+  flowRef: { current: FlowViewport | null },
+) {
+  const revealSelected = useCallback(() => {
+    if (!focusNodeId || !flowRef.current) return;
+    const zoom = flowRef.current.getZoom();
+    flowRef.current.fitView(focusedNodeFit(focusNodeId, zoom));
+  }, [focusNodeId, flowRef]);
+
+  // `flowReady` makes an initial deep link wait for React Flow's onInit.
+  // Deliberately exclude `positioned`: Reset layout should fit the whole
+  // graph instead of immediately snapping back to the selected node.
+  useEffect(() => {
+    revealSelected();
+  }, [revealSelected, flowReady]);
+
+  return revealSelected;
+}
+
 function flowEdges(graph: { edges: Array<{ id: string; source: string; target: string; kind: keyof typeof EDGE_STYLES; label?: string }> }): Edge[] {
   return graph.edges.map((edge) => ({
     id: edge.id,
@@ -128,10 +158,7 @@ export function Graph({
   const lastIdentityRef = useRef<string | null>(null);
   const epochLaidOutRef = useRef(0);
   const [completedLayoutEpoch, setCompletedLayoutEpoch] = useState(-1);
-  const flowRef = useRef<{
-    getZoom: () => number;
-    fitView: (opts: GraphFitViewOptions) => void;
-  } | null>(null);
+  const flowRef = useRef<FlowViewport | null>(null);
   const [flowReady, setFlowReady] = useState(0);
 
   const { graph, mappingError } = useMemo(() => {
@@ -244,11 +271,7 @@ export function Graph({
 
   const pendingC = useRef<number>(0);
 
-  const revealSelected = useCallback(() => {
-    if (!focusNodeId || !flowRef.current) return;
-    const zoom = flowRef.current.getZoom();
-    flowRef.current.fitView(focusedNodeFit(focusNodeId, zoom));
-  }, [focusNodeId]);
+  const revealSelected = useSelectedNodeReveal(focusNodeId, flowReady, flowRef);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -320,14 +343,6 @@ export function Graph({
     lastFittedLayoutEpoch.current = layoutEpoch;
     flowRef.current.fitView({ padding: GRAPH_FIT_PADDING, maxZoom: 1 });
   }, [completedLayoutEpoch, flowReady, graph, layoutEpoch, positioned]);
-
-  useEffect(() => {
-    revealSelected();
-    // `flowReady` makes an initial deep link wait for React Flow's onInit.
-    // Deliberately exclude `positioned`: Reset layout should fit the whole
-    // graph instead of immediately snapping back to the selected node.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusNodeId, flowReady]);
 
   // Center the current search match at the operator's zoom; `currentMatch` is
   // a stable string, so background refetches do not re-center the viewport.
