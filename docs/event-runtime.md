@@ -220,6 +220,8 @@ The LLM appears only inside `execute`.
 
 ## 5. Versioned contracts
 
+`factory.decision-request/v1` and `factory.decision-response/v1` define bounded human questions and their hash-bound answers.
+
 ### 5.1 Event envelope
 
 ```json

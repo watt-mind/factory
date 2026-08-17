@@ -1,0 +1,14 @@
+{
+  "title": "factory.decision-response/v1 — an operator answer bound to a decision request",
+  "type": "object",
+  "required": ["schemaVersion", "requestHash", "optionId", "fields", "decidedBy", "decidedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "factory.decision-response/v1" },
+    "requestHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "optionId": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+    "fields": { "type": "object", "additionalProperties": {} },
+    "decidedBy": { "type": "string", "minLength": 1 },
+    "decidedAt": { "type": "string", "minLength": 1 }
+  }
+}
