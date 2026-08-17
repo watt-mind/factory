@@ -305,8 +305,16 @@ function evidenceInFlight(issue) {
   };
 }
 
-function refusal(reason, evidence, decision = "noop") {
-  return { ok: false, refusal: { decision, reason }, evidence };
+function refusal(reason, evidence, decision = "noop", detail = null) {
+  return {
+    ok: false,
+    refusal: {
+      decision,
+      reason,
+      ...(detail ? { detail } : {}),
+    },
+    evidence,
+  };
 }
 
 /**
@@ -378,6 +386,15 @@ export function worktreeDispatchAutoEligibility(payload, {
     return refusal("ticket_escalated", evidence);
   }
 
+  // Never let effectiveOwnedPaths' fail-closed `**` sentinel masquerade as a
+  // real path during a sensitive-path check. Unknown ticket scope is its own
+  // refusal, before overlap or escalate_paths can assign a misleading cause.
+  if (!evidence.ticket.ownedPathsParsed) {
+    evidence.checks.owned_paths_parsed = false;
+    return refusal("owned_paths_unknown", evidence);
+  }
+  evidence.checks.owned_paths_parsed = true;
+
   try {
     const gaps = ownedPathsClosureDetails(repo.name, repo, ticket.description);
     if (gaps.length) {
@@ -420,9 +437,13 @@ export function worktreeDispatchAutoEligibility(payload, {
     intersect: evidence.escalatePathIntersections,
   };
   if (evidence.escalatePathIntersections.length > 0) {
-    return refusal("escalate_paths_intersect", evidence);
+    return refusal(
+      "escalate_paths_intersect",
+      evidence,
+      "noop",
+      `intersecting escalate_paths globs: ${evidence.escalatePathIntersections.join(", ")}`,
+    );
   }
-  evidence.checks.owned_paths_parsed = evidence.ticket.ownedPathsParsed;
   return { ok: true, evidence };
 }
 
@@ -432,7 +453,14 @@ export function worktreeDispatchAutoEligibility(payload, {
  */
 export function worktreeDispatchGate(payload, options = {}) {
   const result = worktreeDispatchAutoEligibility(payload, options);
-  return result.ok ? null : result.refusal;
+  if (result.ok) return null;
+  // Keep the historical gate contract stable for planner/orchestrator callers;
+  // richer claim-time consumers use worktreeDispatchAutoEligibility directly
+  // to retain evidence and operator-facing detail.
+  return {
+    decision: result.refusal.decision,
+    reason: result.refusal.reason,
+  };
 }
 
 function insertProposal(db, { id, event, runId = null, decision, specJson = null, specHash = null, idempotencyKey = null, status, reason = null, at, ttlSeconds }) {
@@ -504,7 +532,8 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
         typeof preEnvelope.payload?.ticket === "string" &&
         !repoNotAllowed(preDef, preEnvelope.payload)
       ) {
-        worktreeRefusal = worktreeDispatchGate(preEnvelope.payload, dispatch);
+        const eligibility = worktreeDispatchAutoEligibility(preEnvelope.payload, dispatch);
+        worktreeRefusal = eligibility.ok ? null : eligibility.refusal;
       }
     }
   }
@@ -578,7 +607,7 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
       }
       const proposal = insertProposal(db, {
         id: newProposalId(), event, decision: "noop", status: "resolved",
-        reason: worktreeRefusal.reason, at, ttlSeconds,
+        reason: worktreeRefusal.detail ?? worktreeRefusal.reason, at, ttlSeconds,
       });
       setEventStatus(db, event, "noop");
       return { decision: "noop", proposal, reason: worktreeRefusal.reason };

@@ -14,6 +14,7 @@ import {
   planAdmittedEvents,
   planEvent,
   policyMaxConcurrentMerges,
+  worktreeDispatchAutoEligibility,
 } from "./planner.mjs";
 import { loadRegistry } from "./registry.mjs";
 
@@ -403,6 +404,74 @@ describe("planEvent worktree gate (WM-108)", () => {
       expect(outcome.reason).toMatch(/^repo_unknown: /);
       expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
     });
+  });
+
+  test("unknown Owned Paths refuses distinctly before wildcard escalation", () => {
+    withReposRoot(
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths:\n      - '**'\n`,
+      () => {
+        let fetchedInFlight = false;
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-2" },
+          {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-2",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "",
+            }),
+            fetchInFlight: () => { fetchedInFlight = true; return []; },
+          },
+        );
+        expect(result.refusal).toMatchObject({ decision: "noop", reason: "owned_paths_unknown" });
+        expect(result.evidence.ticket).toMatchObject({ ownedPaths: ["**"], ownedPathsParsed: false });
+        expect(result.evidence.escalatePathIntersections).toEqual([]);
+        expect(fetchedInFlight).toBe(false);
+      },
+    );
+  });
+
+  test("a genuine sensitive-path refusal names the intersecting configured globs", () => {
+    withReposRoot(
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths:\n      - src/auth/**\n      - infra/**\n`,
+      () => {
+        const dispatch = {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => ({
+            identifier: "WM-3",
+            state: { name: "Todo" },
+            assignee: null,
+            labels: { nodes: [{ name: "ai:agent-ready" }] },
+            description: "## Owned Paths\n- src/auth/session.ts\n",
+          }),
+          fetchInFlight: () => [],
+        };
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-3" },
+          dispatch,
+        );
+        expect(result.refusal).toEqual({
+          decision: "noop",
+          reason: "escalate_paths_intersect",
+          detail: "intersecting escalate_paths globs: src/auth/**",
+        });
+        expect(result.evidence.escalatePathIntersections).toEqual(["src/auth/**"]);
+
+        const db = openDb(":memory:");
+        const ref = admit(db, dispatchEnvelope({ repo: "gated", ticket: "WM-3" }));
+        const outcome = planEvent(db, syntheticRegistry(), ref, { now: NOW, dispatch });
+        expect(outcome).toMatchObject({ decision: "noop", reason: "escalate_paths_intersect" });
+        expect(outcome.proposal.reason).toBe("intersecting escalate_paths globs: src/auth/**");
+      },
+    );
   });
 });
 
