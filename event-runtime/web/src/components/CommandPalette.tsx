@@ -28,6 +28,7 @@ export function CommandPalette({
   onJumpWorker,
   onJumpProject,
   onJumpTicket,
+  onJumpPr,
 }: {
   actions: PaletteAction[];
   onJumpRun: (runId: string) => void;
@@ -37,6 +38,7 @@ export function CommandPalette({
   onJumpWorker: (id: string) => void;
   onJumpProject?: (name: string) => void;
   onJumpTicket?: (ticketId: string) => void;
+  onJumpPr?: (number: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -72,9 +74,15 @@ export function CommandPalette({
   const typedTicket = /^[A-Z][A-Z0-9]{1,9}-\d+$/.test(search.trim().toUpperCase())
     ? search.trim().toUpperCase()
     : null;
+  // `#541`, `PR 541`, `pr:541` — a PR journey jump (WM-640). Inlined like the
+  // ticket pattern above: importing subjectJourney here would pull the whole
+  // journey module into the entry chunk.
+  const prMatch = onJumpPr ? search.trim().match(/^(?:#|pr[:#\s-]?|pull\/)(\d{1,7})$/i) : null;
+  const typedPr = prMatch ? Number(prMatch[1]) : null;
   const resultCount =
     actions.length +
     (typedTicket ? 1 : 0) +
+    (typedPr ? 1 : 0) +
     contextActions.length +
     (runs.data?.runs?.length ?? 0) +
     (proposals.data?.proposals?.length ?? 0) +
@@ -259,6 +267,22 @@ export function CommandPalette({
               >
                 <span>Open ticket <span className="mono">{typedTicket}</span></span>
                 <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">ticket journey</span>
+              </Command.Item>
+            </Command.Group>
+          )}
+          {typedPr && onJumpPr && (
+            <Command.Group heading="Pull requests">
+              <Command.Item
+                value={`pr #${typedPr} pull request ${search.trim()} open journey`}
+                onSelect={() => {
+                  setOpen(false);
+                  setSearch("");
+                  onJumpPr(typedPr);
+                }}
+                className={PALETTE_ITEM_CLASS}
+              >
+                <span>Open PR <span className="mono">#{typedPr}</span></span>
+                <span className="ml-3 shrink-0 text-[11px] text-(--text-faint)">PR journey</span>
               </Command.Item>
             </Command.Group>
           )}

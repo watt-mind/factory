@@ -406,6 +406,17 @@ describe("ticket journey navigation (WM-595)", () => {
     expect(window.location.hash).toBe("#/tickets/WM-400");
   });
 
+  test("typing a PR reference in the command palette opens #/prs/<n> (WM-640)", async () => {
+    const utils = renderApp();
+    fireEvent.keyDown(document.body, { key: "k", metaKey: true });
+    const input = utils.getByPlaceholderText("Type a command…");
+    fireEvent.input(input, { target: { value: "#541" } });
+    const command = await utils.findByText("#541", { selector: "span.mono" });
+    fireEvent.click(command.closest("[cmdk-item]")!);
+    expect(window.location.hash).toBe("#/prs/541");
+    await utils.findByText("no runtime activity for PR #541");
+  });
+
   test("typing a ticket id in the command palette offers its journey", async () => {
     const utils = renderApp();
     fireEvent.keyDown(document.body, { key: "k", metaKey: true });

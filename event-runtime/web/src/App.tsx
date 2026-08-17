@@ -60,6 +60,8 @@ const Proposals = lazy(() => import("./views/Proposals").then((m) => ({ default:
 const Agents = lazy(() => import("./views/Agents").then((m) => ({ default: m.Agents })));
 const RunFull = lazy(() => import("./views/RunFull").then((m) => ({ default: m.RunFull })));
 const Ticket = lazy(() => import("./views/Ticket").then((m) => ({ default: m.Ticket })));
+// The PR journey (WM-640) shares the ticket journey chunk — same layout, other subject.
+const PullRequest = lazy(() => import("./views/Ticket").then((m) => ({ default: m.PullRequest })));
 const Workers = lazy(() => import("./views/Workers").then((m) => ({ default: m.Workers })));
 const Inbox = lazy(() => import("./views/Inbox").then((m) => ({ default: m.Inbox })));
 const ShortcutsDialog = lazy(() =>
@@ -143,7 +145,7 @@ export function App() {
     if (!root) return;
     let disposed = false;
     let uninstall = () => {};
-    void import("./ticketJourney").then(({ installTicketJourneyLinks }) => {
+    void import("./subjectJourney").then(({ installTicketJourneyLinks }) => {
       if (!disposed) uninstall = installTicketJourneyLinks(root, jumpToTicket);
     });
     return () => {
@@ -154,6 +156,8 @@ export function App() {
 
   const focusRunId = view === "runs" ? (route[1] ?? null) : null;
   const focusTicketId = view === "tickets" ? (route[1] ?? null) : null;
+  // `#/prs/:number` — the PR journey (WM-640); a drill-in like `#/tickets/:id`.
+  const focusPrNumber = view === "prs" ? (route[1] ?? null) : null;
   // `#/run/:id` is the full-page run view — a distinct first segment, so
   // crossing from `#/runs/:id` pushes history and Back restores the panel.
   const fullRunId = view === "run" ? (route[1] ?? null) : null;
@@ -204,6 +208,7 @@ export function App() {
   };
   const openRunFull = (runId: string) => navigate(hashPath("run", runId));
   const jumpToTicket = (ticketId: string) => navigate(hashPath("tickets", ticketId));
+  const jumpToPr = (number: number) => navigate(hashPath("prs", String(number)));
   const jumpToRuns = (state?: string) => {
     if (state) setFocusRunState(state);
     setRejumpEpoch((n) => n + 1);
@@ -634,7 +639,11 @@ export function App() {
             />
           ) : view === "tickets" ? (
             <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading ticket journey…</div>}>
-              <Ticket ticketId={focusTicketId} onNavigate={jumpToTicket} />
+              <Ticket ticketId={focusTicketId} onNavigate={jumpToTicket} onNavigatePr={jumpToPr} />
+            </Suspense>
+          ) : view === "prs" ? (
+            <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading PR journey…</div>}>
+              <PullRequest number={focusPrNumber} onNavigateTicket={jumpToTicket} />
             </Suspense>
           ) : view === "projects" ? (
             <Suspense fallback={<div className="p-5 text-(--text-faint)">Loading projects…</div>}>
@@ -828,6 +837,7 @@ export function App() {
         onJumpWorker={jumpToWorker}
         onJumpProject={jumpToProject}
         onJumpTicket={jumpToTicket}
+        onJumpPr={jumpToPr}
       />
       {injectOpen && (
         <Suspense fallback={null}>

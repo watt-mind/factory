@@ -6,7 +6,9 @@
  * `#/proposals` `#/proposals/:id` `#/runs` `#/runs/:id` `#/run/:id` (the
  * full-page run view — distinct first segment so expand/back get push
  * semantics) `#/tickets` `#/tickets/:id` (the ticket journey; an id-less
- * route presents the ticket picker) `#/agents` `#/agents/:ref` `#/artifacts`
+ * route presents the ticket picker) `#/prs/:number` (the PR journey, WM-640 —
+ * the same layout keyed on a pull request; reached from PR chips and ⌘K, not
+ * the nav rail) `#/agents` `#/agents/:ref` `#/artifacts`
  * `#/artifacts?kind=…` `#/workers` `#/workers/:id` `#/graph` `#/graph/:nodeId`
  * `#/chain/:correlationId` `#/chain/:correlationId/:nodeId` (the chain trace,
  * WM-527 — a drill-in like `#/run/:id`, not a nav item)
