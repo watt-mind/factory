@@ -19,6 +19,7 @@ import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
 import { AgentHoverCard } from "../components/AgentHoverCard";
+import { ApprovalRiskDetails, useProposalAgent } from "../components/ApprovalRisk";
 import {
   BudgetClock,
   IN_FLIGHT,
@@ -508,6 +509,9 @@ export function Runs({
     return null;
   }, [sel?.runId, d?.run.runId, proposalByRunId]);
 
+  /** Agent behind the selected proposal — drives the approve dialog's risk card. */
+  const approveAgent = useProposalAgent(selProposal);
+
   const canApprove = Boolean(
     selProposal &&
       selProposal.status === "open" &&
@@ -728,8 +732,15 @@ export function Runs({
                   <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap" title={r.runId}>
                     {shortId(r.runId)}
                   </td>
+                  {/*
+                    State cell carries no `max-w-*`/`truncate` (WM-505): its content is a
+                    bounded-length badge plus an optional `proposal` jump link, and
+                    `truncate` cannot ellipsize a flex child — it hard-clipped the link
+                    mid-glyph and left most of its hit area unclickable. The column sizes
+                    to its content instead, which keeps the link fully rendered.
+                  */}
                   {show.has("state") && (
-                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                       <div className="flex items-center gap-1.5 whitespace-nowrap">
                         <StateBadge state={r.state} />
                         {r.state === "PROPOSED" && (() => {
@@ -1051,12 +1062,16 @@ export function Runs({
           wide
         >
           <div className="mb-3 text-[12px] text-(--text-dim)">
-            Approving proposal <span className="mono font-semibold">{selProposal.id}</span> queues this run for execution.
+            You are approving this exact immutable spec — the agent below runs with these
+            capabilities the moment you confirm. Approving proposal{" "}
+            <span className="mono font-semibold">{selProposal.id}</span> queues this run for execution.
           </div>
+          <ApprovalRiskDetails proposal={selProposal} agent={approveAgent} />
           <VerbError error={approve.error} />
           <div className="flex justify-end gap-2">
             <Button onClick={() => setConfirmApprove(false)}>Not yet</Button>
             <Button
+              variant="primary"
               disabled={!connected || approve.isPending}
               onClick={() => {
                 approve.mutate(selProposal.id);
