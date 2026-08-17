@@ -28,7 +28,7 @@
     ]
   },
   "limits": {
-    "timeout_seconds": 2700,
+    "timeout_seconds": 5400,
     "attempts": 1,
     "budget_usd": 15
   },

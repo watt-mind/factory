@@ -130,7 +130,13 @@ limits:
   # Without it, raising a harness timeout to let long work finish also raises
   # how long a stuck run holds a concurrency slot — that trade is only
   # acceptable when something else guarantees the slot eventually frees.
-  max_run_minutes: 45
+  #
+  # 90 min: raised from 45 (WM-567) after WM-470 run_5aec6675 — a large
+  # architecture ticket — hit the 45-min cap right after pushing its PR and
+  # lost the run. Must not sit below the dispatch agent's own
+  # `limits.timeout_seconds` (event-runtime/agents/dispatch.json, 5400s);
+  # a runtime "extend" for individual runs is WM-566.
+  max_run_minutes: 90
 
 circuit_breaker:
   # Two consecutive environment/build failures (not ticket-specific ones) stop
