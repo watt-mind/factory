@@ -155,7 +155,7 @@
   },
   "factory.merge.requested": {
     "agent": "merge-scan@2",
-    "adapter": "pi",
+    "adapter": "cursor",
     "idempotencyScope": [
       "inputHash"
     ],
@@ -179,7 +179,7 @@
   },
   "factory.merge-fix.requested": {
     "agent": "merge-fix@1",
-    "adapter": "pi",
+    "adapter": "cursor",
     "idempotencyScope": [
       "inputHash"
     ],
