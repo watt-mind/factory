@@ -46,13 +46,15 @@ test("factory routes to WM / Factory and caps in-flight at 20", () => {
   expect(factory.maxInFlight).toBe(20);
 });
 
-test("factory branches are unchanged by OPS-463; verify is the fast lib-only gate (WM-528)", () => {
+test("factory branches are unchanged by OPS-463; verify is the fast lib-only gate (WM-528, WM-651)", () => {
   expect(factory.base).toBe("develop");
   expect(factory.deployBranch).toBe("main");
   // The local VERIFYING gate is deliberately a strict subset of CI: unit-only
   // event-runtime/lib (no daemons/ports/demo seed) plus the emit contract check.
   // The full `bun test` stays in .github/workflows/ci.yml, the real merge gate.
+  // `--timeout 20000` (WM-651) lifts bun's 5 s per-test default so spawn/timing
+  // tests don't go red under host load; explicit per-test timeouts still win.
   expect(factory.verify).toBe(
-    "bun test event-runtime/lib && bun build/emit.mjs --check",
+    "bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check",
   );
 });

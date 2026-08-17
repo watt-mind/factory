@@ -411,7 +411,16 @@ repos:
     # demo/, web/, bin/, orchestrator/ and stay CI-only). Measured 70-72s wall
     # on the loaded host, 0 failures over repeated runs. `emit.mjs --check` is
     # the contract check that must never be skipped locally.
-    verify: bun test event-runtime/lib && bun build/emit.mjs --check
+    #
+    # `--timeout 20000` (WM-651): bun's default 5 s per-test timeout kept
+    # failing VERIFYING on the loaded host for spawn/timing tests that pass in
+    # CI — 2026-08-17: WM-616/625/549/618/627 on the OPS-404 reaper-tick test
+    # (fixed WM-629), WM-563 on 'execute conformance (OPS-427) > abort kills a
+    # real long-lived grandchild (WM-263)' at 5000 ms, WM-551/538 on
+    # api-schedules. CI already runs with a higher timeout (WM-600). Tests that
+    # are genuine liveness bounds keep their explicit shorter timeouts; this
+    # only raises the default for tests that don't set one.
+    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check
 
     # Owned Paths closure rules for this repo's control-plane ticket types.
     owned_paths_policy:
