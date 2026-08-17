@@ -239,7 +239,15 @@ export async function runSandboxed({
       `[sandbox] boot=${outcome.bootMs ?? "?"}ms exit=${outcome.exitCode ?? "null"} timedOut=${outcome.timedOut} elapsed=${elapsed}ms${abortSignal?.aborted ? " cancelled=true" : ""}`,
     );
   }
-  await new Promise((done) => consoleStream.end(done));
+  // Settle on close OR error: a stream that already errored (ENOSPC, EACCES)
+  // is not guaranteed to run the end() callback, and an adapter promise that
+  // never settles is a wedged run until the lease reaper (cold review #543).
+  await new Promise((done) => {
+    if (consoleStream.destroyed || consoleStream.closed) return done();
+    consoleStream.once("close", done);
+    consoleStream.once("error", done);
+    consoleStream.end();
+  });
 
   try {
     onTrace?.("lifecycle", {
