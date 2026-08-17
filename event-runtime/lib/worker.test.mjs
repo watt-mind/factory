@@ -21,7 +21,7 @@ import {
   acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
   createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
   executeClaimed, classifyFailureCause, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
-  repositoryStatus, retryRun, runLinearCli, runOnce,
+  repositoryStatus, resolveLinearApiKey, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
 
@@ -723,6 +723,7 @@ describe("worker", () => {
   test("failure cause taxonomy classifies retryable and fatal worker failures", () => {
     expect(classifyFailureCause("adapter_error")).toBe("environment");
     expect(classifyFailureCause("lease_expired")).toBe("environment");
+    expect(classifyFailureCause("linear_unconfigured")).toBe("environment");
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -1399,6 +1400,27 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     };
   }
 
+  const readyDispatchTicket = (identifier, overrides = {}) => ({
+    identifier,
+    state: { name: "Todo" },
+    assignee: null,
+    labels: { nodes: [{ name: "ai:agent-ready" }] },
+    description: "## Owned Paths\n- src/feature/**\n",
+    ...overrides,
+  });
+
+  const planTimeDispatchEvidence = (description = "## Owned Paths\n- src/feature/**\n") => ({
+    source: "chain",
+    mode: "auto",
+    eventType: "factory.dispatch.requested",
+    dispatchEvidence: {
+      ticket: {
+        descriptionHash: hashJson(description),
+        ownedPathsParsed: true,
+      },
+    },
+  });
+
   const dispatchFakeAdapter = {
     async execute({ spec, workspaceDir }) {
       writeFileSync(path.join(workspaceDir, ".transcript.json"), `{"fake":"dispatch transcript"}\n`, "utf8");
@@ -1427,6 +1449,77 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       return { exitCode: 0, timedOut: false };
     },
   };
+
+  test("resolves Linear credentials from env first, then the shared env file", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-linear-key-"));
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "OTHER=value\nLINEAR_API_KEY='file-key'\n", "utf8");
+
+    const fromEnv = { LINEAR_API_KEY: "process-key" };
+    expect(resolveLinearApiKey({ env: fromEnv, envFile })).toBe("process-key");
+
+    const fromFile = {};
+    expect(resolveLinearApiKey({ env: fromFile, envFile })).toBe("file-key");
+    expect(fromFile.LINEAR_API_KEY).toBe("file-key");
+  });
+
+  test("missing process credentials never activate the dispatch stub implicitly (WM-533)", async () => {
+    const previousHome = process.env.FACTORY_EVENT_HOME;
+    const previousKey = process.env.LINEAR_API_KEY;
+    const previousStub = process.env.FACTORY_DISPATCH_STUB;
+    process.env.FACTORY_EVENT_HOME = mkdtempSync(path.join(os.tmpdir(), "evrt-linear-unconfigured-"));
+    delete process.env.LINEAR_API_KEY;
+    delete process.env.FACTORY_DISPATCH_STUB;
+
+    try {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeDispatchSpec({ adapter: "pi", maxEnvironmentRetries: 1 }));
+      const runOpts = opts({ resolveLinearKey: () => null });
+      const first = await runOnce(db, registry, { pi: dispatchFakeAdapter }, runOpts);
+
+      expect(first).toMatchObject({ terminalState: "FAILED", reasonCode: "linear_unconfigured" });
+      expect(runState(db, spec.runId)).toBe("QUEUED");
+
+      const exhausted = await runOnce(db, registry, { pi: dispatchFakeAdapter }, runOpts);
+      expect(exhausted).toMatchObject({ terminalState: "FAILED", reasonCode: "linear_unconfigured" });
+      expect(runState(db, spec.runId)).toBe("FAILED");
+      expect(db.query(`SELECT reason_code FROM attempts WHERE run_id = ? ORDER BY attempt`).all(spec.runId))
+        .toEqual([{ reason_code: "linear_unconfigured" }, { reason_code: "linear_unconfigured" }]);
+    } finally {
+      if (previousHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousHome;
+      if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = previousKey;
+      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
+      else process.env.FACTORY_DISPATCH_STUB = previousStub;
+    }
+  });
+
+  test("FACTORY_DISPATCH_STUB explicitly enables the demo dispatch stub", async () => {
+    const previousStub = process.env.FACTORY_DISPATCH_STUB;
+    process.env.FACTORY_DISPATCH_STUB = "1";
+    try {
+      const db = openDb(":memory:");
+      queueRun(db, makeDispatchSpec({ adapter: "pi" }));
+      const summary = await runOnce(db, registry, { pi: dispatchFakeAdapter }, opts({
+        resolveLinearKey: () => null,
+      }));
+      expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+    } finally {
+      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
+      else process.env.FACTORY_DISPATCH_STUB = previousStub;
+    }
+  });
+
+  test("the fake adapter override explicitly enables the demo dispatch stub", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeDispatchSpec({ adapter: "pi" }));
+    const summary = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+      adapterOverride: "fake",
+      resolveLinearKey: () => null,
+    }));
+    expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+  });
 
   test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
@@ -1467,7 +1560,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         random: () => 0,
-        fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-701"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1504,7 +1597,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         locksDir: lockDir,
         random: () => 0,
         maxClaimLockContentionRequeues: 1,
-        fetchTicket: () => ({ identifier: "WM-701", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-701"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1539,7 +1632,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         random: () => 1,
-        fetchTicket: (ticket) => ({ identifier: ticket, state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: (ticket) => readyDispatchTicket(ticket),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: async ({ ticket }) => {
@@ -1585,7 +1678,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum1 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-702", state: { name: "In Review" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-702", { state: { name: "In Review" } }),
         fetchInFlight: () => [],
         countLeases: () => 0,
       },
@@ -1598,7 +1691,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum2 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-703", state: { name: "Todo" }, assignee: { id: "other" }, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-703", { assignee: { id: "other" } }),
         fetchInFlight: () => [],
         countLeases: () => 0,
       },
@@ -1611,7 +1704,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum3 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-704", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-704"),
         fetchInFlight: () => [],
         countLeases: () => 2, // cap is 2
       },
@@ -1624,7 +1717,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum4 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-705", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] }, description: "## Owned Paths\n- src/api/**\n" }),
+        fetchTicket: () => readyDispatchTicket("WM-705", { description: "## Owned Paths\n- src/api/**\n" }),
         fetchInFlight: () => [{ identifier: "WM-800", description: "## Owned Paths\n- src/api/routes.ts\n" }],
         countLeases: () => 0,
       },
@@ -1637,7 +1730,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const sum5 = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-706", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-706"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: false, reasonCode: "ticket_claim_lost" }),
@@ -1645,6 +1738,82 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }));
     expect(sum5.terminalState).toBe("REFUSED");
     expect(sum5.reasonCode).toBe("ticket_claim_lost");
+  });
+
+  test("claim-time Linear read failure contradicting plan evidence requeues with backoff", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-transient-linear-"));
+    const description = "## Owned Paths\n- src/feature/**\n";
+    const spec = queueRun(db, makeDispatchSpec({
+      input: { repo: "wt-worker", ticket: "WM-707" },
+      approvalPolicy: planTimeDispatchEvidence(description),
+    }));
+    let now = T0;
+    let reads = 0;
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        random: () => 0,
+        fetchTicket: () => {
+          reads += 1;
+          if (reads === 1) throw new Error("linear_read_failed: HTTP 503");
+          return readyDispatchTicket("WM-707", { description });
+        },
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+      },
+    });
+
+    const deferred = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(deferred).toMatchObject({ terminalState: "QUEUED", reasonCode: "linear_read_failed" });
+    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId).attempts).toBe(0);
+    expect(claimNext(db, o)).toBeNull();
+
+    now += deferred.requeueAfterMs;
+    const completed = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(completed).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok", attempt: 1 });
+  });
+
+  test("empty claim-time description retries only when its hash contradicts plan evidence, then explains recovery", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-transient-owned-paths-"));
+    const spec = queueRun(db, makeDispatchSpec({
+      input: { repo: "wt-worker", ticket: "WM-708" },
+      approvalPolicy: planTimeDispatchEvidence(),
+    }));
+    let now = T0;
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        random: () => 0,
+        maxTransientGateRequeues: 1,
+        fetchTicket: () => readyDispatchTicket("WM-708", { description: "" }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+      },
+    });
+
+    const deferred = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(deferred).toMatchObject({ terminalState: "QUEUED", reasonCode: "owned_paths_unknown" });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+
+    now += deferred.requeueAfterMs;
+    const exhausted = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    expect(exhausted).toMatchObject({ terminalState: "REFUSED", reasonCode: "owned_paths_unknown" });
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(() => retryRun(db, spec.runId, {
+      actor: "operator",
+      force: true,
+      policyVersion: "test",
+      now,
+    })).toThrow(
+      `factory dispatch event factory.dispatch.requested --payload '{"repo":"wt-worker","ticket":"WM-708"}' --watch`,
+    );
   });
 
   test("worker lease is acquired during execution and released on completion", async () => {
@@ -1666,7 +1835,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-710", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-710"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1689,7 +1858,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-720", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-720"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1713,7 +1882,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-730", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-730"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -1743,7 +1912,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-731", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-731"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -2017,12 +2186,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           dispatch: {
             locksDir: lockDir,
             leasesDir: leaseDir,
-            fetchTicket: () => ({
-              identifier: ticket,
-              state: { name: "Todo" },
-              assignee: null,
-              labels: { nodes: [{ name: "ai:agent-ready" }] },
-            }),
+            fetchTicket: () => readyDispatchTicket(ticket),
             fetchInFlight: () => [],
             countLeases: () => 0,
             claimTicket: () => ({ ok: true }),
@@ -2092,7 +2256,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-732", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-732"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -2116,7 +2280,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-734", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-734"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -2140,7 +2304,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const summary = await runOnce(db, registry, { fake: observingAdapter }, opts({
       dispatch: {
         locksDir: lockDir,
-        fetchTicket: () => ({ identifier: "WM-733", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-733"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -2171,7 +2335,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-740", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-740"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),
@@ -2188,7 +2352,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       dispatch: {
         locksDir: lockDir,
         leasesDir: leaseDir,
-        fetchTicket: () => ({ identifier: "WM-741", state: { name: "Todo" }, assignee: null, labels: { nodes: [{ name: "ai:agent-ready" }] } }),
+        fetchTicket: () => readyDispatchTicket("WM-741"),
         fetchInFlight: () => [],
         countLeases: () => 0,
         claimTicket: () => ({ ok: true }),

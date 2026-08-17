@@ -280,12 +280,12 @@ export function destroyWorkspace(
   // Deregister a repository checkout even when the directory is retained:
   // a mirror that keeps stale worktree registrations refuses future adds.
   if (checkout) releaseCheckout({ checkoutPath: checkout, repoName });
-  if (retain) return false;
 
   // Delegated worktree teardown (WM-108): run the repo's own `worktree_down`
-  // on every non-retained path, completion and failure alike. The script owns
-  // the safety property — it refuses dirty trees, and the runtime never adds
-  // `--force` (lib/client.mjs carries the same rule). A refusal or failure
+  // on completion and failure alike, including when the failed workspace's
+  // files are retained for inspection. The script owns daemon/port cleanup
+  // and the safety property — it refuses dirty trees, and the runtime never
+  // adds `--force` (lib/client.mjs carries the same rule). A refusal or failure
   // retains the whole workspace, marker included, so the leak is visible to
   // the janitor instead of an rm quietly orphaning a live dev server.
   const marker = path.join(dir, WORKTREE_MARKER);
@@ -303,8 +303,13 @@ export function destroyWorkspace(
       timeout: worktreeTimeoutMs,
     });
     if (down.error?.code === "ETIMEDOUT" || down.status !== 0) return false;
+    // A retained workspace may outlive a successfully removed worktree. Drop
+    // its teardown marker so a later operator cleanup does not invoke the
+    // repo script again against a tree that no longer exists.
+    if (retain) rmSync(marker, { force: true });
   }
 
+  if (retain) return false;
   rmSync(dir, { recursive: true, force: true });
   return true;
 }
