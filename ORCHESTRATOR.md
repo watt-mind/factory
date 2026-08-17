@@ -197,6 +197,51 @@ The factory automatically merges PRs targeting `develop` once all gates pass.
 3. **Fail-Closed Stance**:
    - If the API (`:7381`) is unreachable or returns 500s, treat the worker pool as **FULL** and hold dispatch until recovery.
 
+4. **Keep the Main Checkout Pullable — a Dirty Tree Is Yours to Clear**:
+
+   The live stack pins `policyVersion` at startup and loads agent definitions
+   once, so **the factory keeps running whatever was on disk when it booted**.
+   After work lands on `develop`, the stack is stale until it is restarted, and
+   it cannot be restarted onto new code if the checkout will not fast-forward.
+   A dirty main checkout therefore silently freezes the factory at an old
+   commit. Clearing it is part of the loop, not a question for the operator.
+
+   ```bash
+   git status --porcelain        # non-empty means dirty
+   git rev-list --count HEAD..origin/develop   # >0 means behind
+   ```
+
+   **Never `git stash`.** The stash stack (`.git/refs/stash`) is repo-global,
+   not per-worktree, so a stash here can be popped into a concurrent agent's
+   worktree — silent cross-session data loss. See the trap table below and
+   `AGENTS.md`. The escape is always a **commit**, never a stash:
+
+   - **Uncommitted work that matters** → commit it on a branch (file the ticket
+     first, per the Linear protocol), push, and open the PR. This is the normal
+     case and it loses nothing.
+   - **Not yours and not obviously disposable** → still commit it to a branch
+     and say so in the report. A branch is recoverable; a discarded diff is not.
+   - **Genuinely disposable build litter** → confirm it is untracked/generated
+     before removing it. Read the diff first; never blanket-`checkout --` a tree
+     you have not looked at.
+
+   Then pull, restart, and confirm the stack came up on the new SHA:
+
+   ```bash
+   git checkout develop && git pull --ff-only
+   bin/live-stack.sh down && bin/live-stack.sh up --workers 3:10
+   curl -sf http://127.0.0.1:7381/health    # policyVersion must be the new SHA
+   ```
+
+   **Restart is required — not optional — when `develop` changed** any of
+   `event-runtime/agents/**`, `event-runtime/schemas/**`,
+   `event-runtime/event-types.json`, `event-runtime/schedules.json`, or
+   `config/**`. Model-tier and routing changes resolve at *plan* time inside
+   `serve`, so a `serve`-only restart is enough for those and leaves running
+   workers untouched; a definition change needs the workers restarted too.
+   Drain first — `bin/live-stack.sh down` finishes in-flight runs — and prefer
+   restarting when no dispatch is mid-flight.
+
 ---
 
 ### Loop 5: Decision & Human Escalation Protocol
