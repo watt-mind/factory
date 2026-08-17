@@ -330,7 +330,9 @@ export function App() {
     setViewAnnouncement(`${viewLabel} view`);
     // `/` intentionally sends focus to the destination view's filter instead.
     // Fall back to main when a lazy destination has not mounted its filter yet.
-    if (!document.activeElement?.matches("[data-view-filter]")) mainRef.current?.focus();
+    if (!document.activeElement?.matches("[data-view-filter]")) {
+      mainRef.current?.focus({ preventScroll: true });
+    }
   }, [view, viewLabel]);
 
   useEffect(() => {
