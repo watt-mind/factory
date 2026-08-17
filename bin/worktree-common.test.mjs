@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
@@ -74,6 +74,22 @@ async function shAsync(body, extraEnv = {}) {
   return { status, stdout, stderr };
 }
 
+function mockLsofDir() {
+  const dir = mkdtempSync(path.join(tmpdir(), "wm-473-lsof-"));
+  const executable = path.join(dir, "lsof");
+  writeFileSync(executable, `#!/usr/bin/env bash
+pid=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-p" ]]; then pid="$2"; shift 2; else shift; fi
+done
+pid="\${MOCK_LSOF_PID:-$pid}"
+printf '%s\\n' 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME'
+printf 'mock %s user 1u IPv4 0 0t0 TCP 127.0.0.1:%s (LISTEN)\\n' "$pid" "$MOCK_LSOF_PORT"
+`);
+  chmodSync(executable, 0o755);
+  return dir;
+}
+
 
 test("ticket_api_port hashes the full id so N and N+200 do not share a slot", () => {
   const a = sh('ticket_api_port OPS-201');
@@ -105,6 +121,39 @@ test("write_ports / read_ports round-trip", () => {
     expect(written.stdout.trim()).toBe(`${P(352)} ${P(353)}`);
   } finally {
     rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("listen_tcp_port rejects a dead pid even if lsof returns a listener", () => {
+  const dir = mockLsofDir();
+  const pidfile = path.join(dir, "dead.pid");
+  writeFileSync(pidfile, "2147483647\n");
+  try {
+    // Override the initial guard to reproduce the kill/lsof TOCTOU window on
+    // platforms where lsof correctly rejects a dead -p value.
+    const r = sh(`pid_alive() { return 0; }\nlisten_tcp_port "${pidfile}"`, {
+      PATH: `${dir}:${process.env.PATH}`,
+      MOCK_LSOF_PORT: String(P(352)),
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toBe("");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listen_tcp_port rejects a recovered port outside the configured band", () => {
+  const dir = mockLsofDir();
+  const pidfile = path.join(dir, "live.pid");
+  try {
+    const r = sh(`printf '%s\\n' $$ > "${pidfile}"\nlisten_tcp_port "${pidfile}"`, {
+      PATH: `${dir}:${process.env.PATH}`,
+      MOCK_LSOF_PORT: String(PORT_BASE + 2 * PORT_SPAN),
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toBe("");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

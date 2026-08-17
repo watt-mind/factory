@@ -182,12 +182,18 @@ write_ports() { # <worktree> <api> <web>
 # Listening TCP port for a pidfile, or fail. Used to recover ports from a
 # daemon started before .factory/run/ports existed.
 listen_tcp_port() { # <pidfile>
-  pid_alive "$1" || return 1
+  [[ -f "$1" ]] || return 1
   command -v lsof >/dev/null || return 1
-  local port
-  port=$(lsof -nP -iTCP -sTCP:LISTEN -p "$(cat "$1")" 2>/dev/null \
-    | awk 'NR>1 {print $9; exit}' | awk -F: '{print $NF}')
+  local pid port
+  pid=$(cat "$1" 2>/dev/null) || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  port=$(lsof -nP -iTCP -sTCP:LISTEN -p "$pid" 2>/dev/null \
+    | awk -v pid="$pid" 'NR > 1 && $2 == pid {name=$9; sub(/^.*:/, "", name); print name; exit}') \
+    || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
   [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  (( port >= PORT_BASE && port < PORT_BASE + 2 * PORT_SPAN )) || return 1
   printf '%s' "$port"
 }
 
