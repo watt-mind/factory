@@ -39,6 +39,7 @@ import {
   KV,
   ListEmpty,
   ListPane,
+  ModelCell,
   GroupHeaderRow,
   Section,
   StateBadge,
@@ -759,15 +760,8 @@ export function Workers({
                     </td>
                   )}
                   {show.has("activeModel") && (
-                    <td
-                      className="mono max-w-40 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
-                      title={w.activeModel !== "-" ? w.activeModel : undefined}
-                    >
-                      {w.activeModel !== "-" ? (
-                        <span>{w.activeModel}</span>
-                      ) : (
-                        <span className="text-(--text-faint)">-</span>
-                      )}
+                    <td className="max-w-40 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <ModelCell model={w.activeModel} className="text-(--text-faint)" />
                     </td>
                   )}
                   {show.has("run") && (
@@ -931,7 +925,7 @@ export function Workers({
               {sel.runItem && (
                 <KV
                   k="model"
-                  v={<span className="mono">{pinnedModelText(sel.runItem.adapter, sel.runItem.model)}</span>}
+                  v={<ModelCell model={pinnedModelText(sel.runItem.adapter, sel.runItem.model)} />}
                 />
               )}
               {sel.runItem && <KV k="adapter" v={<span className="mono">{sel.runItem.adapter}</span>} />}
