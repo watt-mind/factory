@@ -111,10 +111,15 @@ models:
     light: gemini-3.7-flash
   # cursor (WM-440), Cursor Agent CLI login/subscription window.
   # IDs from `agent --list-models` on 2026.08.11.
+  # Grok 4.6 rather than Composer (WM-489). Grok ships eight variants —
+  # low/medium/high/xhigh, each with a -fast twin — so the tiers are effort
+  # levels of one model, not three different models. `-high` is the variant
+  # the CLI displays as plain "Cursor Grok 4.6"; `-xhigh` is available if
+  # strong should reach higher.
   cursor:
-    strong: composer-2.5
-    standard: composer-2.5
-    light: composer-2.5-fast
+    strong: cursor-grok-4.6-high
+    standard: cursor-grok-4.6-high
+    light: cursor-grok-4.6-low-fast
 
 limits:
   # Hard wall-clock cap the FACTORY enforces, independent of whatever the

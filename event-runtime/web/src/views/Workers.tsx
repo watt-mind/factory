@@ -915,7 +915,7 @@ export function Workers({
           )}
 
           {sel.currentRun && (
-            <Section title="Active Run">
+            <Section title="Active Run" icons>
               <KV
                 k="runId"
                 v={
@@ -957,7 +957,7 @@ export function Workers({
             </div>
           </Section>
 
-          <Section title="Process">
+          <Section title="Process" icons>
             <KV k="workerId" v={sel.workerId} />
             <KV k="host" v={sel.host} />
             <KV k="pid" v={String(sel.pid)} />

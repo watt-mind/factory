@@ -1,4 +1,5 @@
-import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
+import { attrIcon } from "./attrIcons";
 import { createPortal } from "react-dom";
 import { modal, useFocusReturn, useNow } from "../hooks";
 import type { Section, SortDir } from "../displayOptions";
@@ -1252,18 +1253,29 @@ function saveCollapsedSection(id: string, collapsed: boolean): void {
  * `card={false}` is for sections whose children already draw their own
  * bordered containers — nesting a card inside a card doubles the border.
  */
+/**
+ * "This section carries attribute icons" (§5.2 tier 4, WM-483). Set by
+ * `<Section icons>`; every `KV` beneath it resolves its glyph from the
+ * registry by label and reserves the slot when the label is unmapped, so
+ * label text starts at one x down the whole section.
+ */
+const KVIconsContext = createContext(false);
+
 export function Section({
   title,
   id,
   children,
   card = true,
   collapsible = true,
+  icons = false,
 }: {
   title: string;
   id?: string;
   children: ReactNode;
   card?: boolean;
   collapsible?: boolean;
+  /** Resolve attribute icons for every `KV` in this section (see `attrIcons.tsx`). */
+  icons?: boolean;
 }) {
   const key = id ?? title;
   const [collapsed, setCollapsed] = useState(() => collapsible && loadCollapsedSections().includes(key));
@@ -1279,6 +1291,7 @@ export function Section({
   );
 
   return (
+    <KVIconsContext.Provider value={icons}>
     <div className="mb-5">
       {collapsible ? (
         <button
@@ -1305,6 +1318,7 @@ export function Section({
           children
         ))}
     </div>
+    </KVIconsContext.Provider>
   );
 }
 
@@ -1316,18 +1330,50 @@ export function Section({
  */
 const looksLikeIdentifier = (text: string) => !/\s/.test(text);
 
-export function KV({ k, v, mono }: { k: string; v: ReactNode; mono?: boolean }) {
+/**
+ * `-` is the app-wide "unset" value. It is not copyable and it is not
+ * information; render it fainter than the label so a panel with five unset
+ * rows still lets the eye land on the five that are set (WM-482).
+ */
+const isUnset = (v: ReactNode) => v == null || v === "-";
+
+export function KV({
+  k,
+  v,
+  mono,
+  icon,
+}: {
+  k: string;
+  v: ReactNode;
+  mono?: boolean;
+  /**
+   * Attribute icon per §5.2 tier 4 (WM-482): a Radix icon at 14px,
+   * `currentColor`, leading the label at `gap-1.5`. Normally left unset —
+   * inside `<Section icons>` the glyph resolves from `attrIcons.tsx` by
+   * label (WM-483) so the same attribute wears the same icon everywhere.
+   * `null` reserves an empty slot; an explicit node overrides the registry.
+   */
+  icon?: ReactNode;
+}) {
+  const autoIcons = useContext(KVIconsContext);
+  const resolvedIcon = icon !== undefined ? icon : autoIcons ? attrIcon(k) : undefined;
   const text = typeof v === "string" ? v : null;
   const copyable = !!text && text !== "-";
   const isMono = mono ?? (text !== null && looksLikeIdentifier(text));
+  const unset = isUnset(v);
   // Fixed label column with the value left-aligned beside it: right-aligning
   // values left a ragged edge (`1/1` next to `multi-dispatch-WM-127`) that the
   // eye had to re-find on every row (WM-136).
   return (
     <div className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] items-baseline gap-3 py-[3px]">
-      <span className="truncate text-(--text-faint)" title={k}>
-        {k}
-      </span>
+      <div className="flex min-w-0 items-center gap-1.5 text-(--text-faint)" title={k}>
+        {resolvedIcon !== undefined && (
+          <i className="inline-flex size-3.5 shrink-0 items-center justify-center not-italic [&>svg]:size-3.5" aria-hidden="true">
+            {resolvedIcon}
+          </i>
+        )}
+        <span className="truncate">{k}</span>
+      </div>
       {copyable ? (
         <button
           type="button"
@@ -1341,12 +1387,26 @@ export function KV({ k, v, mono }: { k: string; v: ReactNode; mono?: boolean }) 
         </button>
       ) : (
         <span
-          className={`truncate text-left text-(--text-dim) ${isMono ? "mono" : ""}`}
+          className={`truncate text-left ${unset ? "text-(--text-faint)" : "text-(--text-dim)"} ${isMono ? "mono" : ""}`}
           title={text ?? undefined}
         >
           {v ?? "-"}
         </span>
       )}
+    </div>
+  );
+}
+
+/**
+ * Sub-grouping inside a `Section` of `KV` rows (WM-482). A flat run of
+ * fifteen rows has no landmarks; a faint title plus a hairline every four or
+ * five rows gives the eye somewhere to land without adding a second card.
+ */
+export function KVGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="not-first:mt-2 not-first:border-t not-first:border-(--border) not-first:pt-2">
+      <div className="pb-0.5 text-[11px] font-medium text-(--text-faint)">{title}</div>
+      {children}
     </div>
   );
 }

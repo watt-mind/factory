@@ -30,9 +30,11 @@ Made by the operator, recorded here so nobody relitigates them mid-build:
   `src/components/ui.tsx` — `StateBadge`, `StatTile`, `ListPane`,
   `DetailPane`, `ListEmpty`, `FilterInput`, `Section`, `KV`, `Disclosure`,
   `JsonBlock`, `Button`, `Dialog` (with its own focus trap and Tab cycle),
-  `Countdown`, `Ago`, `JumpLink`, and the toast region. Radix is still in the
-  lockfile, but only transitively beneath `cmdk`. Two later additions round
-  the stack out: `@xyflow/react` + `elkjs` for the graph canvas (§10.13,
+  `Countdown`, `Ago`, `JumpLink`, and the toast region. Radix _primitives_
+  are still in the lockfile only transitively beneath `cmdk`; the one direct
+  Radix dependency is `@radix-ui/react-icons`, the attribute-icon set (§5.2
+  tier 4, WM-482) — icons, not components. Two later additions round the
+  stack out: `@xyflow/react` + `elkjs` for the graph canvas (§10.13,
   code-split off the entry chunk) and `@fontsource-variable/inter` for
   §5.1's typeface.
 - **No authentication.** This narrows §14's "the web-app step requires real
@@ -330,15 +332,78 @@ no shared set. Every rule below is checkable in review.
    `title` + `aria-label`; **no emoji anywhere** in the UI. Adding a glyph to
    this table is a spec change, not a local decision.
 
-3. **Inline SVG icons.** The only tier for _state_ iconography, per OPS-498:
-   14px viewBox, 1.5px stroke (matches the app's hairline weight),
+3. **State icons — inline SVG.** The only tier for _state_ iconography, per
+   OPS-498: 14px viewBox, 1.5px stroke (matches the app's hairline weight),
    `currentColor` fill/stroke so the hue system does the coloring,
    shape-coded per lifecycle state (dashed circle = proposed, half-disc =
    running, disc+check = completed, disc+× = failed, …). Icons sit **left of
    the text label at `gap-1.5` and never replace it** — shape is redundancy
-   for color-blind and peripheral reading, not a substitute for words. No
-   icon font, no icon npm package: hand-rolled inline SVG keeps the bundle
-   honest and the set closed.
+   for color-blind and peripheral reading, not a substitute for words. State
+   shapes stay hand-rolled in `StateIcon` (`ui.tsx`): the set is closed and
+   each shape encodes one lifecycle meaning; a library glyph would not.
+
+4. **Attribute icons — `@radix-ui/react-icons`** (WM-482, 2026-08-17). For
+   _what a thing is_, not _what state it is in_: the workspace, model tier,
+   timeout, adapter, capabilities of a definition. Radix Icons is the one
+   sanctioned package — 15×15 viewBox, ~1px optical weight, `currentColor`,
+   tree-shaken per-icon imports (`import { TimerIcon } from
+   "@radix-ui/react-icons"`). Rendered at **14px** (`size-3.5`) next to
+   12–13px body text — the 15-grid glyph at 14px sits at the label's own
+   optical weight, which is the point: it must not out-shout the word. Rules:
+
+   - An attribute icon **leads its label** (`KV icon=`, `gap-1.5`) and the
+     label is always present. Icon-only attribute rows do not exist.
+   - It takes the label's color (`--text-faint` in `KV`), never a state hue.
+     Hue still means state (below); an attribute icon in `--hue-err` is a
+     state claim it cannot back.
+   - **One glyph, one meaning, app-wide — resolved by label, never by hand.**
+     The registry is `components/attrIcons.tsx`. A `<Section icons>` opts
+     its `KV` rows in; each row looks its glyph up by normalised label
+     (`modelTier` ≡ `model tier` ≡ `model-tier`; `input.<field>` ≡ `input`),
+     so `adapter` wears the same icon on Runs, Workers, Agents, and Proposals
+     by construction (WM-483). Views do not pass `icon=` themselves except to
+     override deliberately. Current map:
+
+     | Glyph              | Attribute(s)                                                        |
+     | ------------------ | ------------------------------------------------------------------- |
+     | `PersonIcon`       | agent, decided by                                                   |
+     | `Component1Icon`   | adapter                                                             |
+     | `Pencil1Icon`      | mutating                                                            |
+     | `CubeIcon`         | workspace                                                           |
+     | `LockClosedIcon`   | capabilities                                                        |
+     | `DesktopIcon`      | host, hosts                                                         |
+     | `CodeIcon`         | command                                                             |
+     | `ListBulletIcon`   | actionRegistry                                                      |
+     | `PlayIcon`         | execution, execution mode                                           |
+     | `SewingPinIcon`    | placement                                                           |
+     | `GearIcon`         | worker (the entity; `workerId` is an id and stays unmapped)          |
+     | `TargetIcon`       | target                                                              |
+     | `LightningBoltIcon`| model tier                                                          |
+     | `Crosshair2Icon`   | model, model override, model (pinned) — an exact model id           |
+     | `EyeOpenIcon`      | model (observed)                                                    |
+     | `TimerIcon`        | timeout                                                             |
+     | `ReloadIcon`       | attempts                                                            |
+     | `LapTimerIcon`     | ttl, proposal ttl, cadence — an interval, not a moment              |
+     | `FileTextIcon`     | input, input.*                                                      |
+     | `PaperPlaneIcon`   | origin event, event type, type, planned/admitted events             |
+     | `EnterIcon`        | source — where an event came in from; distinct from its type        |
+     | `ChatBubbleIcon`   | reason, proposal reason, planner reason                             |
+     | `CheckCircledIcon` | approval                                                            |
+     | `ClockIcon`        | created, updated, occurredAt, receivedAt, admittedAt, startedAt, stoppedAt, decided at, last fire, last completed, next due — a moment |
+     | `LoopIcon`         | loop, loop name                                                     |
+     | `UpdateIcon`       | catch-up                                                            |
+     | `ArchiveIcon`      | repository                                                          |
+     | `GitHubLogoIcon`   | GitHub                                                              |
+     | `CommitIcon`       | base branch, deploy branch                                          |
+
+     Add to this table in the same PR that adds the registry row.
+   - Identity rows (`id`, `run`, `version`, hashes, keys, contract) and
+     state rows (`state`, `status`, `decision` — those carry a `StateBadge`)
+     are **not** in the registry. Inside an iconed section they get an empty
+     reserved slot, so label text starts at one x down the whole section.
+   - `aria-hidden` on the slot; the label carries the name.
+   - Still no icon font, and no second icon package: one library keeps the
+     stroke weight and the visual language uniform.
 
    The nav rail stays **text-only** deliberately. An icon rail is deferred
    until the label list outgrows the 52-width rail — icons there would be
@@ -393,6 +458,7 @@ not in this table is not a placement.
 | Context                    | Position                  | Rule                                                                                                           |
 | -------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | State badge / status label | leading, `gap-1.5`        | Icon then word. Never trailing, never alone.                                                                   |
+| `KV` label (attribute icon)| leading, `gap-1.5`        | Icon then label, in the label column, label color. `<Section icons>` opts a section in; every row then resolves from `attrIcons.tsx` by label and unmapped rows keep an empty slot. |
 | Button                     | leading only              | A trailing glyph is reserved for one meaning: `…` = "opens a dialog". Nothing else trails.                     |
 | Table cell                 | leading, baseline-aligned | Same column as its text; a cell is never icon-only unless the header names the meaning and `title` repeats it. |
 | Section / group header     | between chevron and label | Chevron → dot/icon → label → count, in that order (`GroupHeaderRow`).                                          |
@@ -410,7 +476,7 @@ Icon size follows the type size next to it — it is never set independently:
 | Text size        | Icon | Where                                            |
 | ---------------- | ---- | ------------------------------------------------ |
 | 11px (badges)    | 12px | `StateBadge`, table cells, chips                 |
-| 12–13px (body)   | 14px | Default. Buttons, list rows, KV values           |
+| 12–13px (body)   | 14px | Default. Buttons, list rows, KV labels and values (Radix attribute icons render at 14px too) |
 | 14–15px (titles) | 16px | `DetailPane` title, `Dialog` title, empty states |
 
 Chevrons and sort arrows are the exception: 9px, because they are affordance
@@ -474,8 +540,11 @@ Before a PR introduces one, in this order:
 
 1. Would a word do? Then use the word.
 2. Is it in the approved glyph table? Use exactly that glyph for exactly that
-   meaning. If not, and it is a state, it is an OPS-498 SVG icon. If neither,
-   this section changes first (own PR), then the code.
+   meaning. If not, and it is a state, it is an OPS-498 SVG icon. If it names
+   an attribute, it comes from the tier-4 registry (`attrIcons.tsx`) via
+   `<Section icons>` — add a registry row + table entry in the same PR rather
+   than passing `icon=` by hand. If none of these, this section
+   changes first (own PR), then the code.
 3. Does it appear in at least two places, or is it a one-off decoration? A
    one-off is not added.
 4. Placement matches the grammar table; size matches the scale table.

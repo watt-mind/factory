@@ -25,6 +25,7 @@ import {
   GroupHeaderRow,
   JsonBlock,
   KV,
+  KVGroup,
   ListEmpty,
   ListPane,
   Section,
@@ -446,50 +447,65 @@ export function Agents({
           close={<Button onClick={() => onSelectAgent(null)}>Close</Button>}
         >
 
-          <Section title="Definition">
-            <KV k="id" v={sel.id} />
-            <KV k="version" v={String(sel.version)} />
-            <KV k="outputContract" v={sel.outputContract} />
-            <KV
-              k="mutating"
-              v={
-                <span style={{ color: sel.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
-                  {sel.mutating ? "yes" : "no"}
-                </span>
-              }
-            />
-            <KV
-              k="workspace"
-              v={`${sel.workspace.type}${sel.workspace.retainOnFailure ? " · retain on failure" : ""}`}
-            />
-            <KV k="capabilities" v={caps(sel)} />
-            <KV k="adapter" v={adapterText(sel)} />
+          <Section title="Definition" icons>
+            {/* Grouped + attribute icons per §5.2 tier 4 (WM-482). Glyphs
+                resolve from the registry by label (WM-483); identity rows are
+                unmapped there and reserve an empty slot so label text starts
+                at one x across the whole panel. */}
+            <KVGroup title="Identity">
+              <KV k="id" v={sel.id} />
+              <KV k="version" v={String(sel.version)} />
+              <KV k="outputContract" v={sel.outputContract} />
+            </KVGroup>
+            <KVGroup title="Execution">
+              <KV
+                k="mutating"
+                v={
+                  <span style={{ color: sel.mutating ? "var(--hue-err)" : "var(--text-faint)" }}>
+                    {sel.mutating ? "yes" : "no"}
+                  </span>
+                }
+              />
+              <KV
+                k="workspace"
+                v={`${sel.workspace.type}${sel.workspace.retainOnFailure ? " · retain on failure" : ""}`}
+              />
+              <KV k="capabilities" v={caps(sel)} />
+              <KV k="adapter" v={adapterText(sel)} />
+              <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : "-"} />
+              <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : "-"} />
+              <KV
+                k="actionRegistry"
+                v={
+                  sel.actionRegistry && Object.keys(sel.actionRegistry).length > 0
+                    ? Object.keys(sel.actionRegistry).join(", ")
+                    : "-"
+                }
+              />
+            </KVGroup>
             {/* Declared intent and the exact-id escape hatch (WM-135). What each
                 route actually resolves to is per adapter, and lives on the
                 Event routing lines below — the same split `cli.mjs agents` prints. */}
-            <KV k="modelTier" v={sel.modelTier ?? "-"} />
-            <KV
-              k="model override"
-              v={
-                sel.model ? (
-                  <span title="Exact model id — resolved verbatim, whatever the tier says.">{sel.model}</span>
-                ) : (
-                  "-"
-                )
-              }
-            />
-            <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : "-"} />
-            <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : "-"} />
-            <KV
-              k="actionRegistry"
-              v={
-                sel.actionRegistry && Object.keys(sel.actionRegistry).length > 0
-                  ? Object.keys(sel.actionRegistry).join(", ")
-                  : "-"
-              }
-            />
-            <KV k="timeout" v={sel.limits.timeout_seconds != null ? `${sel.limits.timeout_seconds}s` : "-"} />
-            <KV k="attempts" v={String(sel.limits.attempts ?? "-")} />
+            <KVGroup title="Model">
+              <KV k="modelTier" v={sel.modelTier ?? "-"} />
+              <KV
+                k="model override"
+                v={
+                  sel.model ? (
+                    <span title="Exact model id — resolved verbatim, whatever the tier says.">{sel.model}</span>
+                  ) : (
+                    "-"
+                  )
+                }
+              />
+            </KVGroup>
+            <KVGroup title="Limits">
+              <KV
+                k="timeout"
+                v={sel.limits.timeout_seconds != null ? `${sel.limits.timeout_seconds}s` : "-"}
+              />
+              <KV k="attempts" v={String(sel.limits.attempts ?? "-")} />
+            </KVGroup>
           </Section>
 
           {sel.command && (

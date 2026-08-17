@@ -879,7 +879,7 @@ export function Events({
           close={<Button onClick={() => onSelectEvent(null)}>Close</Button>}
         >
 
-          <Section title="Event">
+          <Section title="Event" icons>
             <KV k="source" v={sel.source} />
             <KV k="type" v={sel.type} />
             <KV k="subject" v={sel.subject} />
@@ -916,7 +916,7 @@ export function Events({
             const err = sel.lastPlanError;
             const hue = err ? "var(--hue-err)" : "var(--hue-warn)";
             return (
-              <Section title="Planning">
+              <Section title="Planning" icons>
                 {sel.planFailures > 0 && <KV k="planFailures" v={String(sel.planFailures)} />}
                 {r && <KV k="proposalReason" v={r} />}
                 {(err || r) && (

@@ -144,11 +144,16 @@ function materializeWorktree({ workspaceDir, input, checkoutDir, timeoutMs }) {
     env: { ...process.env, FACTORY_WORKTREE_REPORT: reportPath },
     timeout: timeoutMs,
   });
+  // A timeout surfaces as up.error, not a non-zero status, so both are failures
+  // (WM-262). The full stderr/stdout beats its last line — a bash `set -e` abort
+  // often puts the useful message above the final one (WM-481).
   if (up.error?.code === "ETIMEDOUT" || up.status !== 0) {
     const timedOut = up.error?.code === "ETIMEDOUT";
+    const stderr = (up.stderr || "").trim();
+    const stdout = (up.stdout || "").trim();
     const why = timedOut
       ? `timed out after ${timeoutMs}ms`
-      : (up.stderr || up.stdout || "").trim().split("\n").pop() || `exit ${up.status}`;
+      : stderr || stdout || `exit ${up.status}`;
     throw new WorktreeError(`worktree_up failed for ${repoName}/${ticket}: ${why}`);
   }
 
