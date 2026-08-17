@@ -160,6 +160,18 @@ export interface ScheduleItem {
   error: string | null;
 }
 
+export const extendRun = (id: string, seconds: number, override = false) =>
+  call<ExtendOutcome>("POST", `/runs/${encodeURIComponent(id)}/extend`, { seconds, override });
+
+export interface ExtendOutcome {
+  extended: true;
+  runId: string;
+  seconds: number;
+  deadlineAt: string;
+  leaseExpiresAt: string;
+  override: boolean;
+}
+
 export interface TriggerOutcome {
   admitted: boolean;
   duplicate: boolean;

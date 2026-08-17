@@ -1,5 +1,8 @@
 /** Event, proposal, run, journal, outbox, and worker-action endpoints. */
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { artifactHead } from "./api-artifacts.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import { runUsage } from "./db.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
@@ -9,7 +12,35 @@ import {
   rejectProposal,
 } from "./proposals.mjs";
 import { traceOf } from "./trace.mjs";
-import { cancelRun, releaseStalledWorkerLease, retryRun } from "./worker.mjs";
+import {
+  attemptDeadline,
+  cancelRun,
+  extendRunDeadline,
+  releaseStalledWorkerLease,
+  retryRun,
+} from "./worker.mjs";
+
+export const MAX_EXTENSION_SECONDS = 3600;
+
+export function policyMaxRunMinutes(root = FACTORY_ROOT) {
+  try {
+    const value = Bun.YAML.parse(
+      readFileSync(path.join(root, "config", "policy.yaml"), "utf8"),
+    )?.limits?.max_run_minutes;
+    return Number.isFinite(value) && value > 0 ? Number(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function extensionRefusal(send, status, code, detail = {}) {
+  return send(status, {
+    error: code,
+    extended: false,
+    refusal: { code, retryable: false, ...detail },
+  });
+}
+
 
 /** Optional repository names named by a run/event input (OPS-356). */
 export function repoNamesFromInput(input) {
@@ -308,7 +339,8 @@ function runsView(db, state) {
   const where = state ? `WHERE r.state = ?` : ``;
   const rows = db
     .query(
-      `SELECT r.*, a.reason_code, a.terminal_state AS attempt_terminal, p.event_id, p.event_source
+      `SELECT r.*, a.reason_code, a.terminal_state AS attempt_terminal,
+              a.started_at, a.lease_expires_at, p.event_id, p.event_source
        FROM runs r
        LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
        LEFT JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
@@ -332,6 +364,15 @@ function runsView(db, state) {
       updated_at: row.updated_at,
       modelTier: spec.modelTier ?? null,
       model: spec.model ?? null,
+      startedAt: row.started_at ?? null,
+      leaseExpiresAt: row.lease_expires_at ?? null,
+      deadlineAt: row.attempts > 0
+        ? (() => {
+            const deadline = attemptDeadline(db, row.run_id, row.attempts, spec);
+            return Number.isFinite(deadline) ? new Date(deadline).toISOString() : null;
+          })()
+        : null,
+      timeoutSeconds: spec.timeoutSeconds,
       repos: repoNamesFromInput(spec.input),
     };
   });
@@ -428,6 +469,9 @@ function runView(db, runId, { artifactsDir } = {}) {
     (a) => a.kind === "transcript",
   );
   const latest = attempts[attempts.length - 1];
+  const deadline = latest
+    ? attemptDeadline(db, runId, latest.attempt, JSON.parse(row.spec_json))
+    : null;
   return {
     run: {
       runId: row.run_id,
@@ -444,6 +488,7 @@ function runView(db, runId, { artifactsDir } = {}) {
     result,
     receipt: resultRow ? JSON.parse(resultRow.receipt_json) : null,
     workspace: latest?.workspace_path ?? null,
+    deadlineAt: Number.isFinite(deadline) ? new Date(deadline).toISOString() : null,
     observedModel:
       artifactsDir && transcript?.sha256
         ? observedModelFromTranscript(
@@ -596,6 +641,59 @@ export async function handleRunApiRoute({
       return send(200, journey);
     }
     return send(200, { runs: runsView(db, url.searchParams.get("state")) });
+  }
+
+  const runExtend = url.pathname.match(/^\/runs\/([^/]+)\/extend$/);
+  if (req.method === "POST" && runExtend) {
+    const runId = decodeURIComponent(runExtend[1]);
+    const body = parseJson(await readBody(req)).value ?? {};
+    const seconds = Number(body.seconds);
+    if (!Number.isInteger(seconds) || seconds <= 0) {
+      return extensionRefusal(send, 422, "invalid_extension_seconds", {
+        message: "seconds must be a positive integer",
+      });
+    }
+    if (seconds > MAX_EXTENSION_SECONDS) {
+      return extensionRefusal(send, 422, "extension_too_large", {
+        message: `seconds must be <= ${MAX_EXTENSION_SECONDS}`,
+        maxSeconds: MAX_EXTENSION_SECONDS,
+      });
+    }
+
+    const row = db.query(
+      `SELECT r.state, r.attempts, a.started_at
+         FROM runs r
+         LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
+        WHERE r.run_id = ?`,
+    ).get(runId);
+    if (!row) return extensionRefusal(send, 404, "unknown_run", { runId });
+
+    const override = body.override === true;
+    const maxMinutes = policyMaxRunMinutes();
+    if (!override && !Number.isFinite(maxMinutes)) {
+      return extensionRefusal(send, 409, "run_limit_policy_unavailable");
+    }
+    const startedMs = Date.parse(row.started_at ?? "");
+    const maxDeadlineMs = Number.isFinite(startedMs) && Number.isFinite(maxMinutes)
+      ? startedMs + maxMinutes * 60 * 1000
+      : null;
+    const outcome = extendRunDeadline(db, runId, {
+      seconds,
+      actor,
+      override,
+      maxDeadlineMs,
+      policyVersion,
+      now: nowMs,
+    });
+    if (outcome.refused) {
+      return extensionRefusal(send, outcome.status ?? 409, outcome.code, {
+        state: outcome.state,
+        adapter: outcome.adapter,
+        deadlineAt: outcome.deadlineAt,
+        maxDeadlineAt: outcome.maxDeadlineAt,
+      });
+    }
+    return send(200, { extended: true, ...outcome });
   }
 
   const runVerb = url.pathname.match(/^\/runs\/([^/]+)\/(cancel|retry)$/);

@@ -20,7 +20,7 @@ import { transcriptSessionId } from "./transcripts.mjs";
 import {
   acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
   createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
-  executeClaimed, classifyFailureCause, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
+  executeClaimed, classifyFailureCause, expireRunDeadline, extendRunDeadline, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
   repositoryStatus, resolveLinearApiKey, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
@@ -395,6 +395,160 @@ describe("worker", () => {
     expect(summary.terminalState).toBe("TIMED_OUT");
     expect(summary.reasonCode).toBe("timeout");
     expect(runState(db, spec.runId)).toBe("TIMED_OUT");
+  });
+
+  test("a running adapter honors a DB deadline extension past its original timeout (WM-566)", async () => {
+    const db = openDb(":memory:");
+    const completesAfterOriginalDeadline = {
+      async execute({ workspaceDir, abortSignal }) {
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+              schemaVersion: "factory.agent-result/v1",
+              terminalState: "completed",
+              artifact: {
+                repos: [{ name: "extended", triage: 1, agentReady: 2, inProgress: 0, blocked: 0 }],
+                recommendedAction: "dispatch",
+              },
+              evidence: { queries: ["fake"] },
+            }));
+            resolve({ exitCode: 0, timedOut: false });
+          }, 120);
+          abortSignal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve({ exitCode: null, timedOut: false });
+          }, { once: true });
+        });
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 0.05 }));
+    const running = runOnce(db, registry, { fake: completesAfterOriginalDeadline }, opts());
+
+    for (let i = 0; i < 50 && runState(db, spec.runId) !== "RUNNING"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(runState(db, spec.runId)).toBe("RUNNING");
+    const extension = extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 20,
+    });
+    expect(extension.deadlineAt).toBe(new Date(T0 + 1_050).toISOString());
+
+    const summary = await running;
+    expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+    const receipt = JSON.parse(
+      db.query(`SELECT receipt_json FROM results WHERE run_id = ?`).get(spec.runId).receipt_json,
+    );
+    expect(JSON.parse(receipt.deadlineExtensions)).toEqual([
+      expect.objectContaining({
+        actor: "operator",
+        seconds: 1,
+        deadlineAt: extension.deadlineAt,
+        type: "deadline_extended",
+      }),
+    ]);
+    expect(db.query(`SELECT lease_expires_at FROM attempts WHERE run_id = ?`).get(spec.runId).lease_expires_at)
+      .toBe(new Date(T0 + 121_050).toISOString());
+  });
+
+  test("expiry wins atomically and refuses extension throughout adapter kill grace (WM-566)", async () => {
+    const db = openDb(":memory:");
+    let releaseKillGrace;
+    const killGrace = new Promise((resolve) => { releaseKillGrace = resolve; });
+    let termStarted;
+    const term = new Promise((resolve) => { termStarted = resolve; });
+    const ignoresTermBriefly = {
+      async execute({ abortSignal }) {
+        abortSignal.addEventListener("abort", () => termStarted(), { once: true });
+        await killGrace;
+        return { exitCode: null, timedOut: false };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 0.03 }));
+    const running = runOnce(db, registry, { fake: ignoresTermBriefly }, opts());
+
+    await term;
+    expect(runState(db, spec.runId)).toBe("RUNNING");
+    const refused = extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 40,
+    });
+    expect(refused).toMatchObject({
+      refused: true,
+      code: "deadline_already_expired",
+      status: 409,
+    });
+    const expiryRows = lifecycleOf(db, spec.runId).filter((row) => {
+      try { return JSON.parse(row.reason)?.type === "deadline_expired"; } catch { return false; }
+    });
+    expect(expiryRows).toHaveLength(1);
+
+    releaseKillGrace();
+    const summary = await running;
+    expect(summary).toMatchObject({ terminalState: "TIMED_OUT", reasonCode: "timeout" });
+  });
+
+  test("extension refuses after the edge even before the worker records expiry", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ timeoutSeconds: 1 }));
+    const claim = claimNext(db, opts());
+    transition(db, {
+      runId: spec.runId,
+      to: "RUNNING",
+      expectFrom: "LEASED",
+      actor: "w1",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    db.query(`UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`)
+      .run(new Date(T0).toISOString(), spec.runId, claim.attempt);
+
+    expect(extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 1_001,
+    })).toMatchObject({
+      refused: true,
+      code: "deadline_already_expired",
+      status: 409,
+      deadlineAt: new Date(T0 + 1_000).toISOString(),
+    });
+    expect(lifecycleOf(db, spec.runId).some((row) => {
+      try { return JSON.parse(row.reason)?.type === "deadline_extended"; } catch { return false; }
+    })).toBe(false);
+  });
+
+  test("expire transaction observes an extension that committed before the old edge", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ timeoutSeconds: 1 }));
+    const claim = claimNext(db, opts());
+    transition(db, {
+      runId: spec.runId,
+      to: "RUNNING",
+      expectFrom: "LEASED",
+      actor: "w1",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    db.query(`UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`)
+      .run(new Date(T0).toISOString(), spec.runId, claim.attempt);
+    const extension = extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 999,
+    });
+    expect(extension.refused).toBeUndefined();
+    expect(expireRunDeadline(db, spec.runId, claim.attempt, claim.fencingToken, {
+      actor: "w1",
+      policyVersion: "test",
+      now: T0 + 1_001,
+    })).toMatchObject({ expired: false, deadlineMs: T0 + 2_000 });
   });
 
   test("timeout accepts a valid result.json written before the adapter hangs (WM-538)", async () => {

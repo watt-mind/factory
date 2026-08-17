@@ -88,5 +88,9 @@ export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
       }),
     retry: (id, { force = false } = {}) =>
       call("POST", `/runs/${encodeURIComponent(id)}/retry`, { body: JSON.stringify({ force }) }),
+    extend: (id, seconds, { override = false } = {}) =>
+      call("POST", `/runs/${encodeURIComponent(id)}/extend`, {
+        body: JSON.stringify({ seconds, override }),
+      }),
   };
 }

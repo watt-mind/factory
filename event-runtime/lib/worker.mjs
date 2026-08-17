@@ -37,8 +37,221 @@ import { createWorkspace, destroyWorkspace, PathViolation, safeJoin } from "./wo
  */
 const RUNTIME_ARTIFACTS = [{ kind: "transcript", path: ".transcript.json" }];
 
-/** Grace added to the spec timeout before a lease is considered abandoned. */
-const LEASE_GRACE_SECONDS = 120;
+/** Grace added to the execution deadline before a lease is considered abandoned. */
+export const LEASE_GRACE_SECONDS = 120;
+
+/**
+ * Process adapters keep their own TERM/KILL timer. Give adapters that honor
+ * AbortSignal a ceiling above any normal policy window; the worker's durable
+ * DB-backed deadline monitor is the authoritative timer and can move while an
+ * attempt is running.
+ */
+const DYNAMIC_ADAPTER_TIMEOUT_MS = 2_147_000_000;
+const DYNAMIC_DEADLINE_ADAPTERS = new Set([
+  "agy", "claude", "command", "cursor", "fake", "pi",
+]);
+const DEADLINE_POLL_MS = 100;
+
+function deadlineEventFromReason(reason, type) {
+  if (typeof reason !== "string" || !reason.startsWith("{")) return null;
+  try {
+    const value = JSON.parse(reason);
+    if (
+      value?.type === type &&
+      typeof value.deadlineAt === "string" &&
+      Number.isFinite(Date.parse(value.deadlineAt))
+    ) return value;
+  } catch {}
+  return null;
+}
+
+function deadlineExtensionFromReason(reason) {
+  const value = deadlineEventFromReason(reason, "deadline_extended");
+  return value && Number.isInteger(value.seconds) && value.seconds > 0 ? value : null;
+}
+
+function deadlineExpiredFromReason(reason) {
+  return deadlineEventFromReason(reason, "deadline_expired");
+}
+
+/** Durable attempt deadline: latest extension, then the immutable initial budget. */
+export function attemptDeadline(db, runId, attempt, spec = null) {
+  const extensionRows = db.query(
+    `SELECT reason FROM lifecycle_events WHERE run_id = ? AND attempt = ? ORDER BY seq DESC`,
+  ).all(runId, attempt);
+  for (const row of extensionRows) {
+    const extension = deadlineExtensionFromReason(row.reason);
+    if (extension) return Date.parse(extension.deadlineAt);
+  }
+  const row = db.query(
+    `SELECT started_at, lease_expires_at FROM attempts WHERE run_id = ? AND attempt = ?`,
+  ).get(runId, attempt);
+  if (!row) return null;
+  const parsedSpec = spec ?? (() => {
+    const run = db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId);
+    return run?.spec_json ? JSON.parse(run.spec_json) : null;
+  })();
+  if (row.started_at && Number.isFinite(Number(parsedSpec?.timeoutSeconds))) {
+    return Date.parse(row.started_at) + Number(parsedSpec.timeoutSeconds) * 1000;
+  }
+  if (row.lease_expires_at) {
+    return Date.parse(row.lease_expires_at) - LEASE_GRACE_SECONDS * 1000;
+  }
+  return null;
+}
+
+export function deadlineExtensions(db, runId) {
+  return db.query(
+    `SELECT seq, actor, reason, at FROM lifecycle_events WHERE run_id = ? ORDER BY seq`,
+  ).all(runId).flatMap((row) => {
+    const extension = deadlineExtensionFromReason(row.reason);
+    return extension ? [{ seq: row.seq, actor: row.actor, at: row.at, ...extension }] : [];
+  });
+}
+
+/** Append an audited extension and move the current attempt's lease atomically. */
+export function extendRunDeadline(db, runId, {
+  seconds,
+  actor,
+  override = false,
+  maxDeadlineMs = null,
+  policyVersion = "unknown",
+  now = Date.now(),
+} = {}) {
+  return txImmediate(db, () => {
+    const run = db.query(`SELECT state, attempts, spec_json FROM runs WHERE run_id = ?`).get(runId);
+    if (!run) return { refused: true, code: "unknown_run", status: 404 };
+    if (!["RUNNING", "VERIFYING"].includes(run.state)) {
+      return { refused: true, code: "run_not_extendable", status: 409, state: run.state };
+    }
+    const spec = JSON.parse(run.spec_json);
+    if (spec.adapter === "actions") {
+      return {
+        refused: true,
+        code: "adapter_deadline_not_extendable",
+        status: 409,
+        adapter: spec.adapter,
+      };
+    }
+    const deadlineRows = db.query(
+      `SELECT reason FROM lifecycle_events WHERE run_id = ? AND attempt = ? ORDER BY seq DESC`,
+    ).all(runId, run.attempts);
+    if (deadlineRows.some((row) => deadlineExpiredFromReason(row.reason))) {
+      return { refused: true, code: "deadline_already_expired", status: 409 };
+    }
+    const currentDeadline = attemptDeadline(db, runId, run.attempts, spec);
+    if (!Number.isFinite(currentDeadline)) {
+      return { refused: true, code: "deadline_unavailable", status: 409 };
+    }
+    // Serialize the edge decision under the same write lock as worker expiry.
+    // A delayed worker poll must not let an operator revive an already-spent
+    // deadline merely because the durable expiry marker has not landed yet.
+    if (resolveNow(now) >= currentDeadline) {
+      return {
+        refused: true,
+        code: "deadline_already_expired",
+        status: 409,
+        deadlineAt: new Date(currentDeadline).toISOString(),
+      };
+    }
+    const deadlineMs = currentDeadline + seconds * 1000;
+    if (!override && Number.isFinite(maxDeadlineMs) && deadlineMs > maxDeadlineMs) {
+      return {
+        refused: true,
+        code: "policy_run_limit",
+        status: 409,
+        deadlineAt: new Date(currentDeadline).toISOString(),
+        maxDeadlineAt: new Date(maxDeadlineMs).toISOString(),
+      };
+    }
+    const at = iso(now);
+    const deadlineAt = new Date(deadlineMs).toISOString();
+    const leaseExpiresAt = new Date(deadlineMs + LEASE_GRACE_SECONDS * 1000).toISOString();
+    const reason = canonicalJson({
+      type: "deadline_extended",
+      seconds,
+      deadlineAt,
+      override: override === true,
+    });
+    const record = {
+      runId,
+      from: run.state,
+      to: run.state,
+      actor,
+      reason,
+      attempt: run.attempts,
+      policyVersion,
+      at,
+    };
+    db.query(
+      `INSERT INTO lifecycle_events
+         (run_id, from_state, to_state, actor, reason, attempt, correlation_id, causation_id, policy_version, at, record_hash)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+    ).run(
+      runId, run.state, run.state, actor, reason, run.attempts,
+      policyVersion, at, hashJson(record),
+    );
+    db.query(
+      `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
+    ).run(leaseExpiresAt, runId, run.attempts);
+    db.query(`UPDATE runs SET updated_at = ? WHERE run_id = ?`).run(at, runId);
+    return { runId, seconds, deadlineAt, leaseExpiresAt, override: override === true };
+  });
+}
+
+/**
+ * Durably claim expiry before signalling the adapter. This transaction races
+ * the extension transaction under the same SQLite write lock: an extension
+ * that commits first moves the deadline, while an expiry that commits first
+ * makes every later extension a typed refusal throughout TERM/KILL grace.
+ */
+export function expireRunDeadline(db, runId, attempt, fencingToken, {
+  actor,
+  policyVersion = "unknown",
+  now = Date.now(),
+} = {}) {
+  return txImmediate(db, () => {
+    const run = db.query(`SELECT state, attempts, spec_json FROM runs WHERE run_id = ?`).get(runId);
+    if (!run || run.attempts !== attempt || !["RUNNING", "VERIFYING"].includes(run.state)) {
+      return { expired: false, inactive: true };
+    }
+    if (!assertCurrentToken(db, runId, fencingToken)) return { expired: false, fenced: true };
+    const rows = db.query(
+      `SELECT reason FROM lifecycle_events WHERE run_id = ? AND attempt = ? ORDER BY seq DESC`,
+    ).all(runId, attempt);
+    const prior = rows.map((row) => deadlineExpiredFromReason(row.reason)).find(Boolean);
+    if (prior) return { expired: true, deadlineAt: prior.deadlineAt, existing: true };
+
+    const deadlineMs = attemptDeadline(db, runId, attempt, JSON.parse(run.spec_json));
+    const currentNow = resolveNow(now);
+    if (!Number.isFinite(deadlineMs) || currentNow < deadlineMs) {
+      return { expired: false, deadlineMs };
+    }
+
+    const at = iso(currentNow);
+    const deadlineAt = new Date(deadlineMs).toISOString();
+    const reason = canonicalJson({ type: "deadline_expired", deadlineAt });
+    const record = {
+      runId,
+      from: run.state,
+      to: run.state,
+      actor,
+      reason,
+      attempt,
+      policyVersion,
+      at,
+    };
+    db.query(
+      `INSERT INTO lifecycle_events
+         (run_id, from_state, to_state, actor, reason, attempt, correlation_id, causation_id, policy_version, at, record_hash)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+    ).run(
+      runId, run.state, run.state, actor, reason, attempt,
+      policyVersion, at, hashJson(record),
+    );
+    return { expired: true, deadlineAt };
+  });
+}
 
 /** Infrastructure retries are independent from the agent-error attempt budget. */
 export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
@@ -179,6 +392,14 @@ function latestJournalHash(db, runId) {
   return db
     .query(`SELECT record_hash FROM lifecycle_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1`)
     .get(runId)?.record_hash ?? null;
+}
+
+function receiptWithDeadlineExtensions(db, runId, options) {
+  const receipt = createReceipt(options);
+  const extensions = deadlineExtensions(db, runId);
+  return extensions.length > 0
+    ? { ...receipt, deadlineExtensions: canonicalJson(extensions) }
+    : receipt;
 }
 
 /** The admitted event this run was planned from, via its proposal (may be absent). */
@@ -883,7 +1104,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         runId, to: "REFUSED", expectFrom: "VERIFYING",
         actor: owner, reason: journalReason, attempt, policyVersion, now: currentNow,
       });
-      const receipt = createReceipt({
+      const receipt = receiptWithDeadlineExtensions(db, runId, {
         runId,
         spec,
         def,
@@ -1135,20 +1356,93 @@ export async function executeClaimed(db, registry, adapters, claim, {
     const onUsage = (usage) => {
       attemptUsage = { adapter: adapterKey, ...(usage ?? {}) };
     };
+
+    // The extension endpoint changes the durable deadline while this promise
+    // is in flight. Re-read it both on a short cadence and at the timer edge:
+    // an extension committed just before the old edge must win the race.
+    const logicalBase = nowFn();
+    const wallBase = Date.now();
+    const logicalNow = () => logicalBase + (Date.now() - wallBase);
+    let deadlineTimer = null;
+    let deadlinePoll = null;
+    let deadlineExpired = false;
+    const refreshDeadline = () => {
+      if (abortController.signal.aborted) return;
+      const deadlineMs = attemptDeadline(db, runId, attempt, spec);
+      if (!Number.isFinite(deadlineMs)) return;
+      try {
+        const leaseExpiresAt = new Date(
+          deadlineMs + LEASE_GRACE_SECONDS * 1000,
+        ).toISOString();
+        db.query(
+          `UPDATE attempts SET lease_expires_at = ?
+            WHERE run_id = ? AND attempt = ? AND fencing_token = ?
+              AND (lease_expires_at IS NULL OR lease_expires_at < ?)`,
+        ).run(
+          leaseExpiresAt,
+          runId,
+          attempt,
+          fencingToken,
+          leaseExpiresAt,
+        );
+      } catch {}
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      const leftMs = deadlineMs - logicalNow();
+      if (leftMs <= 0) {
+        const expiry = expireRunDeadline(db, runId, attempt, fencingToken, {
+          actor: owner,
+          policyVersion,
+          now: logicalNow(),
+        });
+        if (expiry.expired) {
+          deadlineExpired = true;
+          abortController.abort("deadline_expired");
+          return;
+        }
+        if (Number.isFinite(expiry.deadlineMs)) {
+          deadlineTimer = setTimeout(refreshDeadline, Math.max(1, expiry.deadlineMs - logicalNow()));
+          deadlineTimer.unref?.();
+        }
+        return;
+      }
+      deadlineTimer = setTimeout(refreshDeadline, leftMs);
+      deadlineTimer.unref?.();
+    };
+    refreshDeadline();
+    deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
+    deadlinePoll.unref?.();
+    const stopDeadlineMonitor = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (deadlinePoll) clearInterval(deadlinePoll);
+      deadlineTimer = null;
+      deadlinePoll = null;
+    };
+
     let outcome;
     try {
       outcome = await adapter.execute({
-        spec, def, workspaceDir, timeoutMs: spec.timeoutSeconds * 1000, env, onTrace, onUsage,
+        spec,
+        def,
+        workspaceDir,
+        timeoutMs: DYNAMIC_DEADLINE_ADAPTERS.has(adapterKey)
+          ? DYNAMIC_ADAPTER_TIMEOUT_MS
+          : spec.timeoutSeconds * 1000,
+        env,
+        onTrace,
+        onUsage,
         resume: created.resume ?? null,
-        abortSignal: abortController.signal, signal: abortController.signal,
+        abortSignal: abortController.signal,
+        signal: abortController.signal,
       });
     } finally {
+      stopDeadlineMonitor();
       stopCancellationMonitor();
     }
 
     if (outcome?.usage) attemptUsage = { adapter: adapterKey, ...outcome.usage };
+    if (deadlineExpired) outcome = { ...(outcome ?? {}), timedOut: true };
 
-    if (abortController.signal.aborted) {
+    if (abortController.signal.aborted && !deadlineExpired) {
       if (mayMutateClaimedTicket()) {
         try { unclaimTicketFn({ repo: repoName, ticket: ticketId, why: "cancelled", log: null }); } catch {}
       }
@@ -1338,7 +1632,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
           runId, to: "REFUSED", expectFrom: "VERIFYING",
           actor: owner, reason: verified.reasonCode, attempt, policyVersion, now: currentNow,
         });
-        const receipt = createReceipt({
+        const receipt = receiptWithDeadlineExtensions(db, runId, {
           runId,
           spec,
           def,
@@ -1376,7 +1670,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         return { fenced: true };
       }
 
-      const receipt = createReceipt({
+      const receipt = receiptWithDeadlineExtensions(db, runId, {
         runId,
         spec,
         def,

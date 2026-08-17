@@ -3,6 +3,7 @@ import approve from "./approve.mjs";
 import cancel from "./cancel.mjs";
 import doctor from "./doctor.mjs";
 import events from "./events.mjs";
+import extend from "./extend.mjs";
 import inbox from "./inbox.mjs";
 import inject from "./inject.mjs";
 import inspect from "./inspect.mjs";
@@ -45,6 +46,7 @@ export const COMMANDS = Object.freeze({
   requeue,
   cancel,
   retry,
+  extend,
   inspect,
   trace,
   "update-pins": updatePins,

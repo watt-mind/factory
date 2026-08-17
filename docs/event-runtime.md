@@ -644,6 +644,32 @@ timeout discipline (TERM, then KILL) and terminates as `cancelled`. Every
 transition records actor, reason code, attempt, correlation ID, causation ID,
 and policy version. Illegal transitions are rejected rather than repaired.
 
+A `RUNNING` or `VERIFYING` run may be extended through
+`POST /runs/:runId/extend` with `{ "seconds": N }`. Each call is limited to
+3600 seconds and the resulting deadline may not exceed
+`limits.max_run_minutes` from `config/policy.yaml` unless the operator supplies
+`override: true`. The runtime appends an audited `deadline_extended` lifecycle
+record (actor, increment, resulting deadline), moves the attempt lease to the
+new deadline plus grace, and includes those extension records in a terminal
+receipt. Refusals are typed and non-retryable. The CLI equivalent is:
+
+```bash
+bun event-runtime/cli.mjs extend <runId> --seconds 900
+```
+
+The worker re-reads the deadline while the adapter is running. Expiry and
+extension acceptance serialize through the database: an extension committed
+before the old edge postpones adapter TERM/KILL and lease renewal, while expiry
+commits a durable marker before TERM and makes later requests typed refusals
+throughout kill grace. Neither changes the approved `RunSpec`.
+
+The synchronous `actions` adapter is explicitly not extendable: it blocks the
+worker event loop inside bounded child calls and its timeout machinery cannot
+be rescheduled safely from the owned worker/API boundary. The API returns
+`adapter_deadline_not_extendable` rather than accepting an extension it cannot
+honor. Making actions extendable requires a separately owned adapter change to
+use cooperative asynchronous execution.
+
 Delivery is **at least once**, never assumed exactly once:
 
 - unique source event IDs deduplicate intake;
