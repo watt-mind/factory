@@ -31,7 +31,7 @@ import { getAgent, getEventType, resolveModel } from "./registry.mjs";
 import { pinRepo } from "./repository.mjs";
 import { RepoError, getRepo, loadRepos, reposConfigPath, reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
-import { loopInFlight } from "./schedules.mjs";
+import { inFlightRunsForAgent } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
 import { autoApproveChains, buildChainApprovalPolicy } from "./auto-approval.mjs";
 
@@ -193,6 +193,37 @@ function policyMaxInFlight(root = reposRoot()) {
   } catch {
     return DEFAULT_MAX_IN_FLIGHT;
   }
+}
+
+/** Fail-safe merge admission cap when policy is absent or malformed. */
+export const DEFAULT_MAX_CONCURRENT_MERGES = 1;
+
+export function policyMaxConcurrentMerges(root = reposRoot()) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return DEFAULT_MAX_CONCURRENT_MERGES;
+  try {
+    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency?.max_concurrent_merges;
+    return Number.isInteger(value) && value > 0 ? value : DEFAULT_MAX_CONCURRENT_MERGES;
+  } catch {
+    return DEFAULT_MAX_CONCURRENT_MERGES;
+  }
+}
+
+function agentSingletonEnabled(registry, agentRef) {
+  return Object.values(registry.schedules ?? {}).some((candidate) =>
+    candidate.enabled &&
+    candidate.singleton !== false &&
+    registry.eventTypes?.[candidate.eventType]?.agent === agentRef
+  );
+}
+
+function singletonApplies(registry, envelope, agentRef) {
+  const loop = envelope.payload?.loop;
+  const schedule = envelope.source === "schedule" && loop ? registry.schedules?.[loop] : null;
+  if (schedule && registry.eventTypes?.[schedule.eventType]?.agent === agentRef) {
+    return schedule.singleton !== false;
+  }
+  return agentSingletonEnabled(registry, agentRef);
 }
 
 function loadRepoEscalatePaths(repoName, root = reposRoot()) {
@@ -510,18 +541,28 @@ export function planEvent(db, registry, { source, eventId }, { now = Date.now(),
     const scopeRefusal = repoNotAllowed(def, envelope.payload);
     if (scopeRefusal) return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
 
-    // §5 singleton: a scheduled loop whose previous run is still in flight
-    // plans a typed NOOP, never a second queued run. A reaper that takes 70
-    // minutes must not accumulate a backlog of reapers.
-    const loop = envelope.payload?.loop;
-    const schedule = loop ? registry.schedules?.[loop] : null;
-    if (schedule && schedule.singleton !== false && loopInFlight(db, mapping.agent)) {
+    // §5 singleton is agent policy, not clock-envelope policy: operator and
+    // chain origins mapped to an enabled singleton agent must not bypass it by
+    // omitting payload.loop. Merge scans additionally obey the git-owned
+    // global admission cap even when a concrete schedule opts out of
+    // singleton behavior. PROPOSED remains excluded (OPS-436).
+    const inFlight = inFlightRunsForAgent(db, mapping.agent);
+    const singletonBlocked = singletonApplies(registry, envelope, mapping.agent) && inFlight.length > 0;
+    const mergeCap = envelope.type === "factory.merge.requested" ? policyMaxConcurrentMerges() : null;
+    const mergeCapBlocked = mergeCap !== null && inFlight.length >= mergeCap;
+    if (singletonBlocked || mergeCapBlocked) {
+      const blockingRun = inFlight[0];
       const proposal = insertProposal(db, {
-        id: newProposalId(), event, decision: "noop", status: "resolved",
+        id: newProposalId(), event, runId: blockingRun.run_id, decision: "noop", status: "resolved",
         reason: "previous_run_in_flight", at, ttlSeconds,
       });
       setEventStatus(db, event, "noop");
-      return { decision: "noop", proposal, reason: "previous_run_in_flight" };
+      return {
+        decision: "noop",
+        proposal,
+        runId: blockingRun.run_id,
+        reason: "previous_run_in_flight",
+      };
     }
 
     const input = validate(def.inputSchema, envelope.payload);

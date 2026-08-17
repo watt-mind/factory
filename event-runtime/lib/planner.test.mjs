@@ -8,7 +8,13 @@ import { DEAD_LETTER_AFTER } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
-import { buildRunSpec, idempotencyKeyFor, planAdmittedEvents, planEvent } from "./planner.mjs";
+import {
+  buildRunSpec,
+  idempotencyKeyFor,
+  planAdmittedEvents,
+  planEvent,
+  policyMaxConcurrentMerges,
+} from "./planner.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const registry = loadRegistry();
@@ -63,6 +69,22 @@ describe("idempotencyKeyFor", () => {
     expect(() => idempotencyKeyFor({ idempotencyScope: ["deliveryColor"] }, def, envelope(), "sha256:x")).toThrow(
       /unknown idempotency scope/,
     );
+  });
+});
+
+describe("merge concurrency policy", () => {
+  test("reads a positive integer max_concurrent_merges and fails safe otherwise", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-policy-"));
+    mkdirSync(path.join(root, "config"));
+    const policy = path.join(root, "config", "policy.yaml");
+
+    writeFileSync(policy, "concurrency:\n  max_concurrent_merges: 2\n");
+    expect(policyMaxConcurrentMerges(root)).toBe(2);
+
+    for (const invalid of ["0", "1.5", "many"]) {
+      writeFileSync(policy, `concurrency:\n  max_concurrent_merges: ${invalid}\n`);
+      expect(policyMaxConcurrentMerges(root)).toBe(1);
+    }
   });
 });
 

@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { openDb } from "./db.mjs";
-import { planAdmittedEvents } from "./planner.mjs";
+import { admitEvent } from "./intake.mjs";
+import { planAdmittedEvents, planEvent } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
 import {
@@ -40,6 +41,26 @@ const withLoop = (overrides = {}) => ({
 });
 
 const at = (iso) => Date.parse(iso);
+
+function planMergeRequest(d, registry, {
+  eventId,
+  source = "operator",
+  now = at("2026-08-17T10:30:45Z"),
+} = {}) {
+  const admitted = admitEvent(d, registry, {
+    schemaVersion: "factory.event/v1",
+    eventId,
+    type: "factory.merge.requested",
+    source,
+    subject: "factory",
+    occurredAt: new Date(now).toISOString(),
+    correlationId: eventId,
+    causationId: source === "chain" ? "run-parent" : null,
+    payload: { repo: "factory" },
+  }, { now });
+  expect(admitted.admitted).toBe(true);
+  return planEvent(d, registry, { source, eventId }, { now, policyVersion: PV });
+}
 
 describe("cadence and slots", () => {
   test("parses the interval forms and rejects everything else", () => {
@@ -368,6 +389,79 @@ describe("planning a tick (§5, §6)", () => {
       .query(`SELECT decision, reason FROM proposals WHERE decision = 'noop' ORDER BY rowid DESC LIMIT 1`)
       .get();
     expect(noop.reason).toBe("previous_run_in_flight");
+    expect(d.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+  });
+
+  test("scheduled merge in flight makes an operator request a named typed NOOP", () => {
+    const d = db();
+    const registry = withLoop({
+      eventType: "factory.merge.requested",
+      payload: { repo: "factory" },
+      approval: "auto",
+    });
+    emitDueTicks(d, registry, { now: at("2026-08-17T10:30:00Z") });
+    planAdmittedEvents(d, registry, { policyVersion: PV });
+    const [approved] = autoApproveScheduled(d, registry, approveProposal, { policyVersion: PV }).approved;
+
+    const operator = planMergeRequest(d, registry, { eventId: "operator-merge-overlap" });
+    expect(operator).toMatchObject({
+      decision: "noop",
+      reason: "previous_run_in_flight",
+      runId: approved.runId,
+    });
+    expect(operator.proposal.run_id).toBe(approved.runId);
+    expect(d.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+  });
+
+  test("operator merge in flight makes a scheduled request a named NOOP via max_concurrent_merges", () => {
+    const d = db();
+    const registry = withLoop({
+      eventType: "factory.merge.requested",
+      payload: { repo: "factory" },
+      singleton: false,
+      approval: "auto",
+    });
+    const operator = planMergeRequest(d, registry, { eventId: "operator-merge-first" });
+    approveProposal(d, registry, operator.proposal.id, { actor: "operator", policyVersion: PV });
+
+    const tickAt = at("2026-08-17T11:00:00Z");
+    emitDueTicks(d, registry, { now: tickAt });
+    const scheduled = planEvent(
+      d,
+      registry,
+      { source: "schedule", eventId: tickEventId("reaper", "2026-08-17T11:00:00.000Z") },
+      { now: tickAt, policyVersion: PV },
+    );
+    expect(scheduled).toMatchObject({
+      decision: "noop",
+      reason: "previous_run_in_flight",
+      runId: operator.runId,
+    });
+    expect(scheduled.proposal.run_id).toBe(operator.runId);
+    expect(d.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+  });
+
+  test("chain-originated merge request uses the same named singleton NOOP", () => {
+    const d = db();
+    const registry = withLoop({
+      eventType: "factory.merge.requested",
+      payload: { repo: "factory" },
+      approval: "auto",
+    });
+    const operator = planMergeRequest(d, registry, { eventId: "operator-before-chain" });
+    approveProposal(d, registry, operator.proposal.id, { actor: "operator", policyVersion: PV });
+
+    const chained = planMergeRequest(d, registry, {
+      eventId: "chain-merge-overlap",
+      source: "chain",
+      now: at("2026-08-17T10:31:00Z"),
+    });
+    expect(chained).toMatchObject({
+      decision: "noop",
+      reason: "previous_run_in_flight",
+      runId: operator.runId,
+    });
+    expect(chained.proposal.run_id).toBe(operator.runId);
     expect(d.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
   });
 
