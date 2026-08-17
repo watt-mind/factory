@@ -1,1 +1,0 @@
-/Users/hdkiller/Develop/factory/plugins/core/commands/factory-ship.md
