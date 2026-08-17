@@ -411,6 +411,8 @@ exec "${realGit}" "$@"
         FACTORY_WT_ROOT: tempWtRoot,
         FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
         FACTORY_WORKTREE_PRESERVATION_REPORT: reportPath,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
         PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
       },
     });
@@ -434,7 +436,7 @@ exec "${realGit}" "$@"
     rmSync(mockBin, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", branch, ...(wipBranch ? [wipBranch] : [])], cwd: path.resolve(import.meta.dir, "..") });
   }
-});
+}, 20_000);
 
 test("re-dispatch refuses a dirty worktree with typed worktree_in_use when a live owner exists", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-live-dirty-"));

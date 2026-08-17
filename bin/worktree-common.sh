@@ -97,7 +97,10 @@ preserve_abandoned_worktree() { # <worktree> <ticket> <ticket-branch> <report-pa
     git -C "$wt" branch -D "$wip_branch" >/dev/null 2>&1 || true
     die "worktree_wip_preserve_failed: could not stage dirty worktree on '$wip_branch'"
   fi
-  if ! git -C "$wt" commit -m "chore(wip): preserve $ticket worktree changes ($ticket)" >/dev/null; then
+  if ! git -C "$wt" \
+    -c user.name="Factory Worktree Recovery" \
+    -c user.email="factory@users.noreply.github.com" \
+    commit -m "chore(wip): preserve $ticket worktree changes ($ticket)" >/dev/null; then
     # Both refs still point at the same commit, so switching back carries the
     # staged/unstaged files with it and restores the exact dirty ticket tree.
     git -C "$wt" switch "$ticket_branch" >/dev/null 2>&1 || true
