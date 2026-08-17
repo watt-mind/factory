@@ -44,7 +44,6 @@
           "reason": {
             "type": "string",
             "minLength": 1,
-            "pattern": "\\b(Urgent|High|Medium|Low|No priority)\\b",
             "description": "One line of why this ticket made the plan at this position, naming its priority by label (Urgent, High, Medium, Low, or No priority) rather than only by number, plus age and path disjointness"
           }
         }
