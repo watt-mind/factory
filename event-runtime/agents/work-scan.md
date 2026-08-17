@@ -21,16 +21,49 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
 
 ## Method
 
-1. **Enumerate candidates**: the repo's `Todo` + `ai:agent-ready` +
-   **unassigned** tickets (`bun "$FACTORY_ROOT/tools/linear.mjs"`). The
-   `assignee` field is the ticket lock (docs/event-runtime-dispatch.md §2) —
-   check the actual field on each ticket; an `agent:*` or `ai:*` label proves
-   nothing either way. Any assignee at all excludes the ticket. Record this as a
-   complete read (all pages, no sampling). If the read errors, truncates, or
-   returns malformed JSON, refuse with `reasonCode: "needs_human"` rather than
-   inventing candidate order.
-2. **Order them**: priority ascending (urgent first), then `createdAt`
-   ascending — the same queue order the orchestrator dispatches in.
+1. **Enumerate and filter candidates** with a complete repo queue read
+   (`bun "$FACTORY_ROOT/tools/linear.mjs"`; all pages, no sampling). Build the
+   candidate set yourself from the returned fields. A ticket is a candidate
+   only when **all three** predicates hold:
+
+   - its state name is exactly `Todo`;
+   - its labels include `ai:agent-ready`; and
+   - its `assignee` field is `null`.
+
+   Apply this filter before ordering, cap checks, or path checks. `Blocked`,
+   `Backlog`, `In Progress`, `In Review`, and `Done` are never candidates. Any
+   assignee at all is the ticket lock (docs/event-runtime-dispatch.md §2) and
+   excludes the ticket, regardless of state or labels; an `agent:*` or `ai:*`
+   label proves nothing about assignment. A ticket without `ai:agent-ready` is
+   also excluded. An excluded ticket must never appear in `plan` or `deferred`.
+   `readyCandidates` counts only tickets left after this complete filter and
+   before cap/overlap pruning. If the read errors, truncates, or returns
+   malformed JSON, refuse with `reasonCode: "needs_human"` rather than inventing
+   candidate order.
+2. **Order the filtered candidates** with this explicit Linear priority rank,
+   then by `createdAt` ascending within the same rank:
+
+   | Rank | Linear value | Label used in `reason` |
+   | ---: | ---: | --- |
+   | 1 | 1 | Urgent |
+   | 2 | 2 | High |
+   | 3 | 3 | Medium |
+   | 4 | 4 | Low |
+   | 5 | 0 | No priority |
+
+   Do **not** sort the raw numeric value ascending: Linear's `0` means no
+   priority and belongs last. Every selected item's `reason` must include the
+   priority label from the table (for example, `priority Urgent`), never only a
+   bare priority number.
+
+   Before planning the live queue, check the filter and comparator against this
+   fixed fixture using the same rules: `URGENT` is Urgent/Todo/unassigned with
+   `ai:agent-ready`; `NONE` is No priority/Todo/unassigned with
+   `ai:agent-ready`; `BLOCKED` is Low/Blocked/assigned with
+   `ai:agent-ready`. The resulting candidate order must be exactly
+   `[URGENT, NONE]`; `BLOCKED` must be absent. Refuse with
+   `reasonCode: "needs_human"` if your candidate construction or ordering does
+   not produce that result.
 3. **Count the cap**: the repo's `max_in_flight` from
    `$FACTORY_ROOT/config/repos.yaml`, falling back to
    `concurrency.max_in_flight_per_repo` in `config/policy.yaml`, else 3. The
@@ -99,8 +132,8 @@ re-plans the deferred tickets against a fresh world.
     "repo": "bj29",
     "ticket": "CLNT-123",
     "plan": [
-      { "ticket": "CLNT-123", "ownedPaths": ["src/feature-a/**"], "reason": "priority 1, paths disjoint from all in-flight" },
-      { "ticket": "CLNT-124", "ownedPaths": ["src/feature-b/**"], "reason": "priority 2, disjoint from CLNT-123 and in-flight" }
+      { "ticket": "CLNT-123", "ownedPaths": ["src/feature-a/**"], "reason": "priority Urgent, paths disjoint from all in-flight" },
+      { "ticket": "CLNT-124", "ownedPaths": ["src/feature-b/**"], "reason": "priority High, disjoint from CLNT-123 and in-flight" }
     ],
     "deferred": ["CLNT-124"],
     "summary": "one line an operator can act on",
