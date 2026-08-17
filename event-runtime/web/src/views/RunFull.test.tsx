@@ -64,6 +64,57 @@ describe("RunFull layout (WM-194)", () => {
   });
 });
 
+describe("RunFull header (WM-193)", () => {
+  test("keeps run identity and actions without duplicating sidebar metadata", async () => {
+    const runId = "run_clean_header";
+    const detail = createRunDetailFixture({
+      run: {
+        runId,
+        state: "RUNNING",
+        attempts: 2,
+        spec: {
+          agent: "header-agent@1",
+          adapter: "header-adapter",
+          maxAttempts: 5,
+        },
+      } as RunDetail["run"],
+    });
+
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "RUNNING" })],
+        }),
+      },
+      async () => {
+        const { container, getByRole } = renderRunFull(runId);
+
+        await waitFor(() => {
+          expect(container.querySelector("aside")?.textContent).toContain(
+            "header-agent@1",
+          );
+        });
+
+        const header = container.querySelector("header");
+        expect(header?.textContent).toContain("← Runs");
+        expect(header?.textContent).toContain(runId);
+        expect(header?.textContent).toContain("RUNNING");
+        expect(getByRole("button", { name: /Open in tab/ })).toBeTruthy();
+        expect(getByRole("button", { name: /Cancel/ })).toBeTruthy();
+        expect(header?.textContent).not.toContain("header-agent@1");
+        expect(header?.textContent).not.toContain("header-adapter");
+        expect(header?.textContent).not.toContain("2/5 attempts");
+
+        const sidebar = container.querySelector("aside");
+        expect(sidebar?.textContent).toContain("header-agent@1");
+        expect(sidebar?.textContent).toContain("header-adapter");
+        expect(sidebar?.textContent).toContain("2/5");
+      },
+    );
+  });
+});
+
 describe("RunFull cancel dialog (WM-144)", () => {
   test("a simulated 409 on cancel shows a persistent inline message in the dialog", async () => {
     const runId = "run_cancel_race";
@@ -243,7 +294,7 @@ describe("RunFull model rows (WM-221)", () => {
       async () => {
         const { getByText } = renderRunFull(runId);
         await waitFor(() => getByText("model (observed)"));
-        // The header already names the adapter; the sidebar now names the model.
+        // The sidebar keeps the harness and model details together.
         expect(getByText("model tier")).toBeTruthy();
         expect(getByText("strong")).toBeTruthy();
         expect(getByText("default (CLI)")).toBeTruthy();

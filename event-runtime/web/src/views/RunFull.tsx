@@ -263,18 +263,6 @@ export function RunFull({
               </li>
             </ol>
           </nav>
-          {d && (
-            <span className="text-[12px] text-(--text-faint)">
-              <JumpLink
-                onClick={() => onJumpAgent(d.run.spec.agent)}
-                title={`What is ${d.run.spec.agent}? Open in Agents`}
-              >
-                {d.run.spec.agent}
-              </JumpLink>{" "}
-              · {d.run.spec.adapter} · {d.run.attempts}/{d.run.spec.maxAttempts}{" "}
-              attempts
-            </span>
-          )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-3">
           {d && (
