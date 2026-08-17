@@ -376,7 +376,7 @@ no shared set. Every rule below is checkable in review.
      | `ListBulletIcon`   | actionRegistry                                                      |
      | `PlayIcon`         | execution, execution mode                                           |
      | `SewingPinIcon`    | placement                                                           |
-     | `GearIcon`         | worker, workerId                                                    |
+     | `GearIcon`         | worker (the entity; `workerId` is an id and stays unmapped)          |
      | `TargetIcon`       | target                                                              |
      | `LightningBoltIcon`| model tier                                                          |
      | `Crosshair2Icon`   | model, model override, model (pinned) — an exact model id           |
@@ -385,7 +385,8 @@ no shared set. Every rule below is checkable in review.
      | `ReloadIcon`       | attempts                                                            |
      | `LapTimerIcon`     | ttl, proposal ttl, cadence — an interval, not a moment              |
      | `FileTextIcon`     | input, input.*                                                      |
-     | `PaperPlaneIcon`   | origin event, event type, type, source, planned/admitted events     |
+     | `PaperPlaneIcon`   | origin event, event type, type, planned/admitted events             |
+     | `EnterIcon`        | source — where an event came in from; distinct from its type        |
      | `ChatBubbleIcon`   | reason, proposal reason, planner reason                             |
      | `CheckCircledIcon` | approval                                                            |
      | `ClockIcon`        | created, updated, occurredAt, receivedAt, admittedAt, startedAt, stoppedAt, decided at, last fire, last completed, next due — a moment |

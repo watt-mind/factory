@@ -10,6 +10,7 @@ import {
   Crosshair2Icon,
   CubeIcon,
   DesktopIcon,
+  EnterIcon,
   EyeOpenIcon,
   FileTextIcon,
   GearIcon,
@@ -61,7 +62,6 @@ const REGISTRY: Record<string, () => ReactNode> = {
   execution: () => <PlayIcon />,
   executionmode: () => <PlayIcon />,
   placement: () => <SewingPinIcon />,
-  workerid: () => <GearIcon />,
   worker: () => <GearIcon />,
   target: () => <TargetIcon />,
 
@@ -84,7 +84,9 @@ const REGISTRY: Record<string, () => ReactNode> = {
   originevent: () => <PaperPlaneIcon />,
   eventtype: () => <PaperPlaneIcon />,
   type: () => <PaperPlaneIcon />,
-  source: () => <PaperPlaneIcon />,
+  // `source` sits next to `type` on Events/Proposals; it must not share the
+  // event glyph — "where it came in from" vs "what it is" (ux-critic, WM-483).
+  source: () => <EnterIcon />,
   plannedevents: () => <PaperPlaneIcon />,
   admittedevents: () => <PaperPlaneIcon />,
   reason: () => <ChatBubbleIcon />,
