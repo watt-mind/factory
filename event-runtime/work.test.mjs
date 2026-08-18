@@ -456,26 +456,31 @@ describe("work-scan registration (WM-110)", () => {
     );
   });
 
-  test("every LLM route is the pi adapter except the WM-722 merge exceptions; command/actions routes are untouched (WM-215)", () => {
+  test("every LLM route is the pi adapter except the merge exceptions (agy since 2026-08-18); command/actions routes are untouched (WM-215)", () => {
     const byAdapter = {};
     for (const mapping of Object.values(registry.eventTypes)) {
       if (!mapping.agent) continue;
       (byAdapter[mapping.adapter] ??= []).push(mapping.agent);
     }
-    // The default harness is pi. The only committed claude routes are the
-    // WM-722 merge-scan/merge-fix exceptions (standard tier → sonnet); any
-    // other route riding claude must be an explicit, reviewed decision.
-    expect([...byAdapter.claude].sort()).toEqual([
+    // The default harness is pi. The only committed non-pi LLM routes are the
+    // merge-scan/merge-fix exceptions (WM-722 put them on claude/sonnet;
+    // operator decision 2026-08-18 moved them to agy, gemini-3.7-flash, which
+    // is fast and on a separate subscription). agy-smoke rides agy by
+    // definition. Any other route leaving pi must be an explicit, reviewed
+    // decision. No route rides claude any more.
+    expect(byAdapter.claude).toBeUndefined();
+    expect([...byAdapter.agy].sort()).toEqual([
+      "agy-smoke@1",
       "merge-fix@1",
       "merge-scan@2",
     ]);
-    for (const ref of byAdapter.claude) {
+    for (const ref of ["merge-fix@1", "merge-scan@2"]) {
       const resolved = resolveModel(
         registry.agents.get(ref),
-        "claude",
+        "agy",
         registry.modelTiers,
       );
-      expect(resolved).toBe(registry.modelTiers.claude.standard);
+      expect(resolved).toBe(registry.modelTiers.agy.standard);
     }
     expect(byAdapter.pi.length).toBeGreaterThan(0);
     // Every pi route resolves a model: loadRegistry fails closed otherwise,
