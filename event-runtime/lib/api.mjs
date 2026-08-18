@@ -34,6 +34,7 @@ import { storeStats } from "./artifacts.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
+  FACTORY_ROOT,
   artifactsRoot,
   environmentName,
   runtimeHome,
@@ -84,6 +85,8 @@ export function createApi({
   inboxCommand = notifyCommand(),
   inboxWebUrl = process.env.FACTORY_WEB_URL,
   inboxApplyEffect = applyDecisionEffect,
+  // Root of the config/policy.yaml the run endpoints consult (tests point it elsewhere).
+  policyRoot = FACTORY_ROOT,
 } = {}) {
   const actor = "operator";
   const storeStatsTtlMs = 10_000;
@@ -231,6 +234,7 @@ export function createApi({
         const result = await handleRunApiRoute({
           ...common,
           artifactsDir: artifactsRoot(env?.home),
+          policyRoot,
         });
         if (result !== false) return result;
       }

@@ -1,6 +1,4 @@
 /** Event, proposal, run, journal, outbox, and worker-action endpoints. */
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { artifactHead } from "./api-artifacts.mjs";
 import { FACTORY_ROOT } from "./config.mjs";
 import { runUsage } from "./db.mjs";
@@ -16,22 +14,14 @@ import {
   attemptDeadline,
   cancelRun,
   extendRunDeadline,
+  policyMaxRunMinutes,
   releaseStalledWorkerLease,
   retryRun,
 } from "./worker.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
 
-export function policyMaxRunMinutes(root = FACTORY_ROOT) {
-  try {
-    const value = Bun.YAML.parse(
-      readFileSync(path.join(root, "config", "policy.yaml"), "utf8"),
-    )?.limits?.max_run_minutes;
-    return Number.isFinite(value) && value > 0 ? Number(value) : null;
-  } catch {
-    return null;
-  }
-}
+export { policyMaxRunMinutes };
 
 function extensionRefusal(send, status, code, detail = {}) {
   return send(status, {
@@ -335,6 +325,9 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   };
 }
 
+/** States whose attempt deadline is live and render-relevant on the run list. */
+const IN_FLIGHT_STATES = new Set(["LEASED", "RUNNING", "VERIFYING"]);
+
 function runsView(db, state) {
   const where = state ? `WHERE r.state = ?` : ``;
   const rows = db
@@ -366,7 +359,9 @@ function runsView(db, state) {
       model: spec.model ?? null,
       startedAt: row.started_at ?? null,
       leaseExpiresAt: row.lease_expires_at ?? null,
-      deadlineAt: row.attempts > 0
+      // Two extra queries per row: only worth it while the deadline can
+      // still move (WM-692). Terminal rows on this 2s-polled list get null.
+      deadlineAt: row.attempts > 0 && IN_FLIGHT_STATES.has(row.state)
         ? (() => {
             const deadline = attemptDeadline(db, row.run_id, row.attempts, spec);
             return Number.isFinite(deadline) ? new Date(deadline).toISOString() : null;
@@ -513,6 +508,7 @@ export async function handleRunApiRoute({
   policyVersion,
   artifactsDir,
   onEvent,
+  policyRoot = FACTORY_ROOT,
 }) {
   if (route === "GET /events") {
     return send(200, {
@@ -669,7 +665,7 @@ export async function handleRunApiRoute({
     if (!row) return extensionRefusal(send, 404, "unknown_run", { runId });
 
     const override = body.override === true;
-    const maxMinutes = policyMaxRunMinutes();
+    const maxMinutes = policyMaxRunMinutes(policyRoot);
     if (!override && !Number.isFinite(maxMinutes)) {
       return extensionRefusal(send, 409, "run_limit_policy_unavailable");
     }

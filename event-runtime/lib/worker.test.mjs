@@ -18,9 +18,10 @@ import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { transcriptSessionId } from "./transcripts.mjs";
 import {
-  acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
-  createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
-  executeClaimed, classifyFailureCause, expireRunDeadline, extendRunDeadline, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
+  acquireClaimLock, adapterExecuteTimeoutMs, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
+  createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath, DYNAMIC_DEADLINE_ADAPTERS,
+  executeClaimed, classifyFailureCause, expireRunDeadline, extendRunDeadline, LEASE_GRACE_SECONDS, policyMaxRunMinutes,
+  reapExpiredLeases, releaseClaimLock, repositoryIsClean,
   repositoryStatus, resolveLinearApiKey, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
@@ -585,6 +586,57 @@ describe("worker", () => {
     ]);
     expect(db.query(`SELECT lease_expires_at FROM attempts WHERE run_id = ?`).get(spec.runId).lease_expires_at)
       .toBe(new Date(T0 + 121_050).toISOString());
+  });
+
+  test("a dynamic-deadline adapter's timeoutMs is bounded by policy, not 24.8 days (WM-692)", async () => {
+    const db = openDb(":memory:");
+    const seen = [];
+    const recording = {
+      async execute(options) {
+        seen.push(options);
+        return fake.execute(options);
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 5 }));
+    expect(DYNAMIC_DEADLINE_ADAPTERS.has(spec.adapter)).toBe(true);
+    const liveMaxMinutes = policyMaxRunMinutes();
+    expect(liveMaxMinutes).toBeGreaterThan(0);
+
+    const summary = await runOnce(db, registry, { fake: recording }, opts());
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(seen).toHaveLength(1);
+    // The ceiling every policy-bounded extension can reach, and nothing beyond it.
+    const ceilingMs = liveMaxMinutes * 60_000 + LEASE_GRACE_SECONDS * 1000;
+    expect(seen[0].timeoutMs).toBeGreaterThanOrEqual(spec.timeoutSeconds * 1000);
+    expect(seen[0].timeoutMs).toBeLessThanOrEqual(ceilingMs);
+    expect(seen[0].timeoutMs).toBe(ceilingMs);
+  });
+
+  test("the adapter backstop follows the policy root it is given (WM-692)", async () => {
+    const db = openDb(":memory:");
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"));
+    writeFileSync(path.join(policyRoot, "config", "policy.yaml"), "limits:\n  max_run_minutes: 3\n");
+    const seen = [];
+    const recording = {
+      async execute(options) {
+        seen.push(options.timeoutMs);
+        return fake.execute(options);
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 5 }));
+    await runOnce(db, registry, { fake: recording }, opts({ policyRoot }));
+    expect(seen).toEqual([3 * 60_000 + LEASE_GRACE_SECONDS * 1000]);
+
+    // A budget above the policy ceiling still gets its whole budget plus grace,
+    // and an adapter outside the dynamic set keeps its exact budget.
+    expect(adapterExecuteTimeoutMs({ adapterKey: "fake", spec: { ...spec, timeoutSeconds: 600 }, maxRunMinutes: 3 }))
+      .toBe(600_000 + LEASE_GRACE_SECONDS * 1000);
+    expect(adapterExecuteTimeoutMs({ adapterKey: "actions", spec: { ...spec, timeoutSeconds: 600 }, maxRunMinutes: 3 }))
+      .toBe(600_000);
+    // No policy at all: fall back to the run budget plus grace, never to a sentinel.
+    expect(adapterExecuteTimeoutMs({ adapterKey: "fake", spec, maxRunMinutes: null }))
+      .toBe(spec.timeoutSeconds * 1000 + LEASE_GRACE_SECONDS * 1000);
   });
 
   test("expiry wins atomically and refuses extension throughout adapter kill grace (WM-566)", async () => {

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV as CLAUDE_PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import { adapterExecuteTimeoutMs, DYNAMIC_DEADLINE_ADAPTERS, LEASE_GRACE_SECONDS } from "../worker.mjs";
 import {
   buildAgyArgv,
   CliNotFoundError,
@@ -280,6 +281,25 @@ describe("buildAgyArgv", () => {
       timeoutMs: 2_000,
     });
     expect(argv[argv.indexOf("--print-timeout") + 1]).toBe("1s");
+  });
+
+  test("print-timeout under a dynamic-deadline run is bounded by policy, not ~2×10⁶ s (WM-692)", () => {
+    // agy is a dynamic-deadline adapter, so the worker's `timeoutMs` — the
+    // value that becomes `--print-timeout` out of process — must stay a real
+    // backstop for a wedged child rather than a 24.8-day sentinel.
+    expect(DYNAMIC_DEADLINE_ADAPTERS.has("agy")).toBe(true);
+    const maxRunMinutes = 90;
+    const timeoutMs = adapterExecuteTimeoutMs({
+      adapterKey: "agy",
+      spec: { timeoutSeconds: 1_800 },
+      maxRunMinutes,
+    });
+    const argv = buildAgyArgv({ prompt: "x", def: {}, model: "default", workspaceDir: "/w", timeoutMs });
+    const printSeconds = Number.parseInt(argv[argv.indexOf("--print-timeout") + 1], 10);
+    expect(Number.isFinite(printSeconds)).toBe(true);
+    expect(printSeconds).toBeGreaterThanOrEqual(1_800);
+    expect(printSeconds).toBeLessThanOrEqual(maxRunMinutes * 60 + LEASE_GRACE_SECONDS);
+    expect(printSeconds).toBeLessThan(1_000_000);
   });
 
   test("model and effort parameters", () => {

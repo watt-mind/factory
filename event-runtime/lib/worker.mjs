@@ -43,15 +43,42 @@ const RUNTIME_ARTIFACTS = [{ kind: "transcript", path: ".transcript.json" }];
 export const LEASE_GRACE_SECONDS = 120;
 
 /**
- * Process adapters keep their own TERM/KILL timer. Give adapters that honor
- * AbortSignal a ceiling above any normal policy window; the worker's durable
- * DB-backed deadline monitor is the authoritative timer and can move while an
- * attempt is running.
+ * Adapters that honor AbortSignal, so the worker's durable DB-backed deadline
+ * monitor — not the adapter's own TERM/KILL timer — is the authoritative
+ * timer and can move while an attempt is running (WM-566). Their `timeoutMs`
+ * is only a runaway backstop, but it must be a real one: agy forwards it out
+ * of process as `--print-timeout` and the gondolin guest timer uses it to
+ * stop a wedged runner from pinning the run slot open (WM-692).
  */
-const DYNAMIC_ADAPTER_TIMEOUT_MS = 2_147_000_000;
-const DYNAMIC_DEADLINE_ADAPTERS = new Set([
+export const DYNAMIC_DEADLINE_ADAPTERS = new Set([
   "agy", "claude", "command", "cursor", "fake", "pi",
 ]);
+
+/** `limits.max_run_minutes` from config/policy.yaml, or null when unavailable. */
+export function policyMaxRunMinutes(root = FACTORY_ROOT) {
+  try {
+    const value = Bun.YAML.parse(
+      readFileSync(path.join(root, "config", "policy.yaml"), "utf8"),
+    )?.limits?.max_run_minutes;
+    return Number.isFinite(value) && value > 0 ? Number(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `timeoutMs` handed to `adapter.execute`. Dynamic-deadline adapters get
+ * the policy ceiling: no non-override extension can move a deadline past
+ * `started_at + max_run_minutes`, so `max(budget, max_run_minutes) + lease
+ * grace` keeps every policy-bounded extension alive while still bounding a
+ * wedged child. Every other adapter keeps its exact run budget.
+ */
+export function adapterExecuteTimeoutMs({ adapterKey, spec, maxRunMinutes = policyMaxRunMinutes() }) {
+  const budgetMs = spec.timeoutSeconds * 1000;
+  if (!DYNAMIC_DEADLINE_ADAPTERS.has(adapterKey)) return budgetMs;
+  const policyMs = Number.isFinite(maxRunMinutes) && maxRunMinutes > 0 ? maxRunMinutes * 60_000 : 0;
+  return Math.max(budgetMs, policyMs) + LEASE_GRACE_SECONDS * 1000;
+}
 const DEADLINE_POLL_MS = 100;
 
 function deadlineEventFromReason(reason, type) {
@@ -1003,7 +1030,7 @@ const ACTIVE_EXECUTIONS = new Map();
  */
 export async function executeClaimed(db, registry, adapters, claim, {
   workspacesRoot, artifactStore = artifactsRoot(), now = () => Date.now(), policyVersion = "unknown", adapterOverride, env = {},
-  dispatch, resolveLinearKey = resolveLinearApiKey,
+  dispatch, resolveLinearKey = resolveLinearApiKey, policyRoot = FACTORY_ROOT,
 } = {}) {
   const { runId, attempt, fencingToken, spec } = claim;
   const owner = db
@@ -1473,9 +1500,7 @@ export async function executeClaimed(db, registry, adapters, claim, {
         spec,
         def,
         workspaceDir,
-        timeoutMs: DYNAMIC_DEADLINE_ADAPTERS.has(adapterKey)
-          ? DYNAMIC_ADAPTER_TIMEOUT_MS
-          : spec.timeoutSeconds * 1000,
+        timeoutMs: adapterExecuteTimeoutMs({ adapterKey, spec, maxRunMinutes: policyMaxRunMinutes(policyRoot) }),
         env,
         onTrace,
         onUsage,

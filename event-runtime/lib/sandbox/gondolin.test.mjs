@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { adapterExecuteTimeoutMs, DYNAMIC_DEADLINE_ADAPTERS, LEASE_GRACE_SECONDS } from "../worker.mjs";
 import {
+  KILL_GRACE_MS,
   MIN_NODE_MAJOR,
   nodeVersionSatisfies,
   parseEvents,
@@ -107,6 +109,25 @@ describe("NDJSON protocol", () => {
   test("a malformed line is skipped rather than killing the run", () => {
     const { events } = parseEvents('not json\n{"type":"exit","exitCode":3}\n');
     expect(events).toEqual([{ type: "exit", exitCode: 3 }]);
+  });
+});
+
+describe("guest timeout under a dynamic-deadline run (WM-692)", () => {
+  test("the guest request timeout and the runner kill timer are bounded by policy", () => {
+    // `pi` and sandboxed `command` forward the worker's `timeoutMs` into the
+    // guest request and arm `setTimeout(kill, timeoutMs + KILL_GRACE_MS)`;
+    // that timer is what stops a wedged runner from pinning the run slot.
+    for (const adapterKey of ["pi", "command"]) {
+      expect(DYNAMIC_DEADLINE_ADAPTERS.has(adapterKey)).toBe(true);
+      const maxRunMinutes = 90;
+      const timeoutMs = adapterExecuteTimeoutMs({ adapterKey, spec: { timeoutSeconds: 1_800 }, maxRunMinutes });
+      const ceilingMs = maxRunMinutes * 60_000 + LEASE_GRACE_SECONDS * 1000;
+      expect(timeoutMs).toBeGreaterThanOrEqual(1_800_000);
+      expect(timeoutMs).toBeLessThanOrEqual(ceilingMs);
+      expect(timeoutMs + KILL_GRACE_MS).toBeLessThanOrEqual(ceilingMs + KILL_GRACE_MS);
+      expect(timeoutMs + KILL_GRACE_MS).toBeLessThan(2 ** 31 - 1);
+      expect(timeoutMs).toBeLessThan(24 * 60 * 60_000);
+    }
   });
 });
 
