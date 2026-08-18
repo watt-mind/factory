@@ -417,6 +417,11 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
       view.getByRole("region", { name: "Artifact metadata" }).textContent,
     ).toContain("1.0 KB");
     expect(view.getByRole("link", { name: "Download" })).toBeTruthy();
+    expect(
+      view
+        .getByRole("button", { name: "Copy Raw Content" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
   });
 
   test("short text with one replacement character remains previewable", async () => {
