@@ -571,6 +571,53 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  test("merge-fix@1 bypasses the tier-2 dispatch gate while dispatch@1 does not", () => {
+    const mergeFixDb = openDb(":memory:");
+    const mergeFix = admit(mergeFixDb, {
+      type: "factory.merge-fix.requested",
+      eventId: "merge-fix-dispatch-gate-characterization",
+      payload: {
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr: 469,
+        headSha: "a".repeat(40),
+        baseSha: "b".repeat(40),
+        headRef: "feat/WM-469",
+        ticket: "WM-469",
+        finding: "characterization fixture",
+        findingHash: "c".repeat(64),
+        round: 1,
+        mechanical: true,
+        withinOwnedPaths: true,
+        ownedPaths: ["event-runtime/lib/planner.mjs"],
+      },
+    });
+    expect(
+      planEvent(mergeFixDb, registry, mergeFix, {
+        now: NOW,
+        dispatch: {
+          fetchTicket: () => {
+            throw new Error("merge-fix must bypass the dispatch gate");
+          },
+        },
+      }).decision,
+    ).toBe("run");
+
+    const dispatchDb = openDb(":memory:");
+    const dispatch = admit(dispatchDb, {
+      type: "factory.dispatch.requested",
+      eventId: "dispatch-gate-characterization",
+      payload: { repo: "factory", ticket: "WM-469" },
+    });
+    const outcome = planEvent(dispatchDb, registry, dispatch, {
+      now: NOW,
+      dispatch: { fetchTicket: () => null },
+    });
+    expect(outcome.decision).toBe("human_needed");
+    expect(outcome.reason).toBe("ticket_not_found");
+  });
+
   test("merge-fix eligibility expects assigned review tickets and returns merge-fix typed refusals", () => {
     const payload = {
       repo: "factory",
@@ -1184,5 +1231,4 @@ describe("planAdmittedEvents", () => {
     expect(replannedSpec.idempotencyKey).toBe(originalSpec.idempotencyKey);
   });
 });
-
 
