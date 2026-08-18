@@ -664,7 +664,47 @@ export function ListPane({
   );
 }
 
-/** Pinned title, verb, and utility rows; the spec and payload scroll underneath (WM-209). */
+/**
+ * Shared detail-pane chrome: identity and Close, then verbs, then copy/share.
+ * Keeping these rows here prevents each view from inventing its own spacing or
+ * moving a primary action above the selected record's identity (WM-552).
+ */
+export function PaneHeader({
+  title,
+  actions,
+  utility,
+  close,
+}: {
+  title: ReactNode;
+  actions?: ReactNode;
+  utility?: ReactNode;
+  /** Escape hatch pinned at the top-right, outside the wrapping action row,
+   *  so it stays visible and clickable no matter how many actions the view
+   *  stacks up or how narrow the panel gets (WM-97). */
+  close?: ReactNode;
+}) {
+  return (
+    <div className="shrink-0 border-b border-(--border) px-4 py-3">
+      {/* Row 1: Title & Close */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">{title}</div>
+        {close != null && <div className="shrink-0">{close}</div>}
+      </div>
+      {/* Row 2: Verb Row (≤ 3 bordered buttons) */}
+      {actions != null && (
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">{actions}</div>
+      )}
+      {/* Row 3: Utility Row (copy/share quiet text line) */}
+      {utility != null && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
+          {utility}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Pinned header chrome; the spec and payload scroll underneath (WM-209). */
 export function DetailPane({
   widthClass,
   title,
@@ -677,9 +717,6 @@ export function DetailPane({
   title: ReactNode;
   actions?: ReactNode;
   utility?: ReactNode;
-  /** Escape hatch pinned at the top-right, outside the wrapping action row,
-   *  so it stays visible and clickable no matter how many actions the view
-   *  stacks up or how narrow the panel gets (WM-97). */
   close?: ReactNode;
   children: ReactNode;
 }) {
@@ -687,27 +724,12 @@ export function DetailPane({
     <aside
       className={`${widthClass} flex min-h-0 shrink-0 flex-col border-l border-(--border) bg-(--surface-1)`}
     >
-      <div className="shrink-0 border-b border-(--border) px-4 py-3">
-        {/* Row 1: Title & Close */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">
-            {title}
-          </div>
-          {close != null && <div className="shrink-0">{close}</div>}
-        </div>
-        {/* Row 2: Verb Row (≤ 3 bordered buttons) */}
-        {actions != null && (
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">
-            {actions}
-          </div>
-        )}
-        {/* Row 3: Utility Row (copy/share quiet text line) */}
-        {utility != null && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
-            {utility}
-          </div>
-        )}
-      </div>
+      <PaneHeader
+        title={title}
+        actions={actions}
+        utility={utility}
+        close={close}
+      />
       <div className="min-h-0 flex-1 overflow-auto p-4">{children}</div>
     </aside>
   );

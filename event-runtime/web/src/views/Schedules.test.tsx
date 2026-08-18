@@ -544,6 +544,15 @@ describe("Schedules copy chords and hints (WM-233)", () => {
 });
 
 describe("Schedules action shortcut badge (WM-236)", () => {
+  test("renders the shared Schedules breadcrumb in the standard pane width (WM-552)", async () => {
+    const view = renderSchedules({ focusScheduleLoop: "loop-enabled-running" });
+    const breadcrumb = await view.findByRole("navigation", { name: "Breadcrumb" });
+
+    expect(breadcrumb.textContent).toContain("Schedules/");
+    expect(breadcrumb.textContent).toContain("loop-enabled-running");
+    expect(view.container.querySelector("aside")?.className).toContain("w-[440px]");
+  });
+
   test("detail pane 'Run now…' button renders 'r' shortcut hint badge with aria-hidden", async () => {
     const { container } = renderWithClient(
       <StatefulSchedules connected={true} initialLoop="loop-enabled-running" />,

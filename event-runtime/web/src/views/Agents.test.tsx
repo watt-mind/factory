@@ -293,6 +293,18 @@ describe("Agents table keyboard navigation (WM-732)", () => {
 });
 
 describe("Agents detail pane (WM-211)", () => {
+  test("renders the shared Agents breadcrumb in the standard pane width (WM-552)", async () => {
+    const agent = stubAgent("dispatch");
+    await withAgents([agent], async () => {
+      const view = renderAgents(agent.ref);
+      const breadcrumb = await view.findByRole("navigation", { name: "Breadcrumb" });
+
+      expect(breadcrumb.textContent).toContain("Agents/");
+      expect(breadcrumb.textContent).toContain("dispatch@1");
+      expect(view.container.querySelector("aside")?.className).toContain("w-[440px]");
+    });
+  });
+
   test("declared tier, exact override, and the per-route resolved model are all readable", async () => {
     const agents = [
       stubAgent("pi-smoke", {

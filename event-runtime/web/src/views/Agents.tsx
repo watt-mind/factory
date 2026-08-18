@@ -38,6 +38,7 @@ import {
   Th,
   copyText,
   copyLink,
+  shortId,
 } from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
 import { AgentMutationBadge } from "../components/AgentHoverCard";
@@ -648,15 +649,28 @@ export function Agents({
 
       {sel && (
         <DetailPane
-          widthClass="w-full lg:w-[520px]"
+          widthClass="w-[440px]"
           title={
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="mono truncate" title={sel.ref}>
-                {sel.ref}
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectAgent(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to agents list"
+              >
+                Agents
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
               </span>
-              <CopyActions id={sel.ref} idLabel="agent ref" />
-            </div>
+              <span className="min-w-0 truncate font-semibold text-(--text)" aria-current="page">
+                <span className="mono truncate" title={sel.ref}>
+                  {shortId(sel.ref)}
+                </span>
+              </span>
+            </nav>
           }
+          utility={<CopyActions id={sel.ref} idLabel="agent ref" />}
           close={<Button onClick={() => onSelectAgent(null)}>Close</Button>}
         >
           <Section title="Definition" icons>

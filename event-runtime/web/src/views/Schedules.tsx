@@ -32,6 +32,7 @@ import {
   copyLink,
   copyText,
   notify,
+  shortId,
 } from "../components/ui";
 
 export type { ScheduleItem, TriggerOutcome };
@@ -699,27 +700,40 @@ export function Schedules({
 
       {sel && (
         <DetailPane
-          widthClass="w-[520px]"
+          widthClass="w-[440px]"
           title={
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="mono truncate" title={sel.loop}>
-                {sel.loop}
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+              <button
+                type="button"
+                onClick={() => onSelectSchedule(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to schedules list"
+              >
+                Schedules
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
               </span>
-              {sel.approval === "auto" && (
-                <span
-                  className="rounded border px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
-                  style={{
-                    color: "var(--hue-warn)",
-                    borderColor:
-                      "color-mix(in oklch, var(--hue-warn) 40%, var(--border))",
-                    background:
-                      "color-mix(in oklch, var(--hue-warn) 12%, transparent)",
-                  }}
-                >
-                  auto
+              <span
+                className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
+                aria-current="page"
+              >
+                <ScheduleStateBadge
+                  state={scheduleState(sel)}
+                  hue={
+                    sel.error || sel.stopped
+                      ? "var(--hue-err)"
+                      : sel.enabled
+                        ? "var(--hue-ok)"
+                        : "var(--text-faint)"
+                  }
+                  title={`Schedule state: ${scheduleState(sel)}`}
+                />
+                <span className="mono truncate" title={sel.loop}>
+                  {shortId(sel.loop)}
                 </span>
-              )}
-            </span>
+              </span>
+            </nav>
           }
           actions={
             <Button

@@ -40,7 +40,6 @@ import {
   CopyActions,
   DetailPane,
   FilterInput,
-  JsonBlock,
   JumpLink,
   KV,
   ListEmpty,
@@ -1099,17 +1098,36 @@ export function Workers({
 
       {sel && (
         <DetailPane
-          widthClass="w-[460px]"
+          widthClass="w-[440px]"
           title={
-            <span className="flex min-w-0 items-center gap-2">
-              <StateBadge
-                state={workerDisplayState(sel)}
-                hues={WORKER_STATE_HUES}
-              />
-              <span className="mono truncate" title={sel.workerId}>
-                {sel.workerId}
+            <nav
+              aria-label="Breadcrumb"
+              className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
+            >
+              <button
+                type="button"
+                onClick={() => onSelectWorker(null)}
+                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                title="Back to workers list"
+              >
+                Workers
+              </button>
+              <span className="text-(--text-faint)" aria-hidden="true">
+                /
               </span>
-            </span>
+              <span
+                className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
+                aria-current="page"
+              >
+                <StateBadge
+                  state={workerDisplayState(sel)}
+                  hues={WORKER_STATE_HUES}
+                />
+                <span className="mono truncate" title={sel.workerId}>
+                  {shortId(sel.workerId)}
+                </span>
+              </span>
+            </nav>
           }
           actions={
             sel.currentRun ? (
@@ -1149,7 +1167,7 @@ export function Workers({
           {sel.currentRun && (
             <Section title="Active Run" icons>
               <KV
-                k="runId"
+                k="run ID"
                 v={
                   <JumpLink
                     onClick={() => openRun(sel.currentRun!)}
@@ -1220,7 +1238,7 @@ export function Workers({
           </Section>
 
           <Section title="Process" icons>
-            <KV k="workerId" v={sel.workerId} />
+            <KV k="worker ID" v={sel.workerId} />
             <KV k="host" v={sel.host} />
             <KV k="pid" v={String(sel.pid)} />
             <KV
@@ -1239,7 +1257,7 @@ export function Workers({
               }
             />
             <KV
-              k="currentRun"
+              k="current run"
               v={
                 sel.currentRun ? (
                   <JumpLink
@@ -1254,7 +1272,7 @@ export function Workers({
               }
             />
             <KV
-              k="startedAt"
+              k="started at"
               v={
                 <span title={sel.startedAt}>
                   {formatRelative(sel.startedAt, now)}
@@ -1263,7 +1281,7 @@ export function Workers({
             />
             {sel.stoppedAt && (
               <KV
-                k="stoppedAt"
+                k="stopped at"
                 v={
                   <span title={sel.stoppedAt}>
                     {formatRelative(sel.stoppedAt, now)}
@@ -1279,14 +1297,14 @@ export function Workers({
                 No adapters declared — this worker claims nothing.
               </div>
             ) : (
-              <div className="rounded-md border border-(--border) px-3 py-1">
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Worker adapters">
                 {sel.adapters.map((a) => (
-                  <div
+                  <span
                     key={a}
-                    className="mono border-b border-(--border) py-1.5 last:border-0"
+                    className="mono rounded-full bg-(--surface-2) px-2 py-0.5 text-[11px] text-(--text-dim)"
                   >
                     {a}
-                  </div>
+                  </span>
                 ))}
               </div>
             )}
@@ -1297,7 +1315,11 @@ export function Workers({
               Placement labels the worker declared at registration — what a
               run&apos;s placement constraints are matched against.
             </div>
-            <JsonBlock value={sel.labels} />
+            {Object.keys(sel.labels).length === 0 ? (
+              <div className="text-(--text-faint)">No placement labels declared.</div>
+            ) : (
+              Object.entries(sel.labels).map(([key, value]) => <KV key={key} k={key} v={value} />)
+            )}
           </Section>
         </DetailPane>
       )}

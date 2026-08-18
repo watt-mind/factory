@@ -457,6 +457,38 @@ describe("Workers copy chords and hints (WM-233)", () => {
 });
 
 describe("Workers Open run action shortcut badge (WM-236)", () => {
+  test("uses the shared breadcrumb and compacts adapters, labels, and field names (WM-552)", async () => {
+    const worker: Worker = {
+      ...stubWorker("worker_30596_413d70b7", "idle"),
+      adapters: ["claude", "pi", "codex", "gemini", "command", "actions", "fake"],
+      labels: { sandbox: "gondolin" },
+    };
+    await withWorkers([worker], async () => {
+      const view = renderWithClient(
+        <Workers context={{ kind: "all" }} focusWorkerId={worker.workerId} onSelectWorker={noop} />,
+      );
+      const breadcrumb = await view.findByRole("navigation", { name: "Breadcrumb" });
+
+      expect(breadcrumb.textContent).toContain("Workers/");
+      expect(breadcrumb.textContent).toContain("worker_30596");
+      expect(view.container.querySelector("aside")?.className).toContain("w-[440px]");
+
+      const adapters = view.getByRole("group", { name: "Worker adapters" });
+      expect(adapters.querySelectorAll("span")).toHaveLength(7);
+      expect(adapters.textContent).toContain("claude");
+      expect(adapters.textContent).toContain("fake");
+
+      const paneText = view.container.querySelector("aside")?.textContent ?? "";
+      expect(paneText).toContain("worker ID");
+      expect(paneText).toContain("current run");
+      expect(paneText).toContain("started at");
+      expect(paneText).toContain("sandboxgondolin");
+      expect(paneText).not.toContain("workerId");
+      expect(paneText).not.toContain("currentRun");
+      expect(paneText).not.toContain("startedAt");
+    });
+  });
+
   test("detail pane renders 'Open run' action button with 'o' shortcut badge when worker has currentRun", async () => {
     const workerWithRun: Worker = {
       ...stubWorker("w_busy_1", "busy"),
