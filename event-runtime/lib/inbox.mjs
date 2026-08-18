@@ -492,16 +492,37 @@ export function resolveInboxItem(db, id, {
     "SELECT id, decision_json, response_json FROM inbox_items WHERE id = ?",
   ).get(id);
   if (!row) throw new Error(`unknown inbox item ${id}`);
+  const resolvedAt = new Date(now).toISOString();
   if (row.decision_json && !row.response_json) {
-    const err = new Error(`inbox item ${id} has a pending decision`);
-    err.code = "decision_pending";
-    throw err;
+    if (!resolvedBy.startsWith("auto:")) {
+      const err = new Error(`inbox item ${id} has a pending decision`);
+      err.code = "decision_pending";
+      throw err;
+    }
+    // The runtime observed the referent leave its waiting state, so the ask is
+    // moot. Record a superseded response so a late operator answer is refused
+    // as already_decided instead of applying an effect nobody wants any more.
+    db.query(
+      `UPDATE inbox_items
+       SET response_json = ?, decided_at = ?, decided_by = ?
+       WHERE id = ? AND response_json IS NULL AND decided_at IS NULL`,
+    ).run(
+      JSON.stringify({
+        superseded: true,
+        reason: resolvedBy,
+        decidedBy: resolvedBy,
+        decidedAt: resolvedAt,
+      }),
+      resolvedAt,
+      resolvedBy,
+      id,
+    );
   }
   db.query(
     `UPDATE inbox_items
      SET resolved_at = COALESCE(resolved_at, ?), resolved_by = COALESCE(resolved_by, ?)
      WHERE id = ?`,
-  ).run(new Date(now).toISOString(), resolvedBy, id);
+  ).run(resolvedAt, resolvedBy, id);
   return getInboxItem(db, id);
 }
 
@@ -580,7 +601,8 @@ export function reconcileInbox(db, { now = Date.now() } = {}) {
      ORDER BY created_at, rowid`,
   ).all();
   for (const row of rows) {
-    if (row.decision_json && !row.response_json) continue;
+    // Pending decisions are not skipped: once the referent stops waiting the
+    // ask is moot and resolveInboxItem records it as superseded (auto:*).
     const refs = parseObject(row.refs_json);
     let resolvedBy = null;
     if (row.kind === "decision_needed" || row.kind === "proposal_expired") {

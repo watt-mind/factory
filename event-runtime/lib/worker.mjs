@@ -338,10 +338,13 @@ function iso(now) {
   return new Date(resolveNow(now)).toISOString();
 }
 
+// Must mirror the refs verify.mjs validated the authored decision against
+// (issue = input.ticket, repo, runId); a divergence here would let a decision
+// that passed verify fail createInboxItem's legality check at write time.
 function refusalInboxRefs(spec) {
   const refs = { runId: spec.runId };
   const input = spec.input ?? {};
-  const issue = input.issue ?? input.ticket;
+  const issue = input.ticket;
   const repo = input.repo;
   const pr = input.pr ?? input.prNumber;
   if (issue !== undefined && issue !== null && String(issue).trim()) refs.issue = String(issue);
@@ -1694,7 +1697,15 @@ export async function executeClaimed(db, registry, adapters, claim, {
           runId, attempt, canonicalJson(refusedResult), "none", null,
           canonicalJson(refusedResult.verification), canonicalJson(receipt), iso(currentNow),
         );
-        createRefusalInboxItem(db, spec, refusedResult, { now: currentNow });
+        // Best-effort projection: the inbox row must never un-record the
+        // terminal REFUSED state or its result row by throwing out of this tx.
+        try {
+          createRefusalInboxItem(db, spec, refusedResult, { now: currentNow });
+        } catch (err) {
+          console.error(
+            `[worker] refusal inbox item not created for ${runId}: ${err?.message ?? err}`,
+          );
+        }
         finishAttempt(db, runId, attempt, "REFUSED", verified.reasonCode, currentNow, attemptUsage);
         return { ok: true, receipt };
       });

@@ -297,6 +297,39 @@ describe("human inbox ledger (WM-285)", () => {
     ]);
   });
 
+  test("a pending decision becomes moot when its event leaves human_needed", () => {
+    const db = openDb(":memory:");
+    insertEvent(db, { eventId: "evt-2" });
+    createInboxItem(db, {
+      kind: "BLOCKED",
+      title: "parked",
+      refs: { eventSource: "test", eventId: "evt-2" },
+      source: "serve:notify",
+      decision: decision([
+        { id: "requeue", label: "Requeue the event", effect: "requeue" },
+        { id: "dismiss", label: "Not now", effect: "dismiss" },
+      ]),
+    }, { id: "parked" });
+
+    expect(reconcileInbox(db)).toEqual([]);
+    expect(() => resolveInboxItem(db, "parked", { resolvedBy: "operator" }))
+      .toThrow(/pending decision/);
+
+    db.query("UPDATE events SET status = 'admitted' WHERE source = 'test' AND event_id = 'evt-2'").run();
+    expect(reconcileInbox(db, { now: 5000 })).toEqual([
+      { id: "parked", resolvedBy: "auto:event_requeued" },
+    ]);
+    const item = getInboxItem(db, "parked");
+    expect(item.resolvedBy).toBe("auto:event_requeued");
+    expect(item.resolvedAt).toBe(new Date(5000).toISOString());
+    expect(item.response).toMatchObject({ superseded: true, reason: "auto:event_requeued" });
+    expect(item.decidedBy).toBe("auto:event_requeued");
+    // A late operator answer is refused rather than applied.
+    expect(() => decideInboxItem(db, "parked", { optionId: "requeue" }))
+      .toThrow(/already decided/);
+    expect(reconcileInbox(db, { now: 6000 })).toEqual([]);
+  });
+
   test("the serve tick runs auto-resolution as an isolated inbox subsystem", async () => {
     const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
     const db = openDb(":memory:");

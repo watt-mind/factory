@@ -430,6 +430,38 @@ describe("worker", () => {
     }
   });
 
+  test("a failing refusal inbox write never rolls back the terminal REFUSED state", async () => {
+    const db = openDb(":memory:");
+    // Force createInboxItem to throw inside the REFUSED transaction; the
+    // projection is best-effort and the terminal state and result row must land.
+    db.exec(`CREATE TRIGGER inbox_write_fails BEFORE INSERT ON inbox_items
+             BEGIN SELECT RAISE(ABORT, 'inbox write refused by test'); END`);
+    const spec = queueRun(db, makeSpec({
+      adapter: "refuse-inbox-fails",
+      input: { repos: ["inbox-fails"], ticket: "WM-390", repo: "factory" },
+    }));
+    const adapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "refused",
+          reasonCode: "needs_human",
+        }));
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const summary = await runOnce(
+      db,
+      registry,
+      { "refuse-inbox-fails": adapter },
+      opts(),
+    );
+    expect(summary).toMatchObject({ terminalState: "REFUSED", reasonCode: "needs_human" });
+    expect(db.query("SELECT state FROM runs WHERE run_id = ?").get(spec.runId).state).toBe("REFUSED");
+    expect(db.query("SELECT * FROM results WHERE run_id = ?").get(spec.runId)).toBeTruthy();
+    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(0);
+  });
+
   test("refusal reasons other than needs_human do not create inbox items", async () => {
     const db = openDb(":memory:");
     queueRun(db, makeSpec({

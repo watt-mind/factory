@@ -190,11 +190,17 @@ export async function runNotifierDeliveryCase({
     writeFileSync(releaseFile, "release\n");
     const delivery = await awaitNotifierDelivery(db, "test/evt-tick");
     deliverySettled = true;
-    expect(readFileSync(outFile, "utf8").trim()).toBe(
+    // The parked-event projection carries its decision question and options
+    // (WM-390), so one delivery is a four-line message.
+    const expectedMessage = [
       "BLOCKED linear.ticket.agent_ready evt-tick: no_worktree_scripts",
-    );
+      "Should this parked event be requeued?",
+      "1. Requeue the event",
+      "2. Not now",
+    ].join("\n");
+    expect(readFileSync(outFile, "utf8").trim()).toBe(expectedMessage);
     expect(
-      logs.some((l) => l.includes("notify human_needed test/evt-tick")),
+      logs.some((l) => l.includes("notify BLOCKED test/evt-tick")),
     ).toBe(true);
     await tick({
       db,
@@ -202,7 +208,8 @@ export async function runNotifierDeliveryCase({
       policyVersion: "git:test",
       log: () => {},
     });
-    expect(readFileSync(outFile, "utf8").trim().split("\n")).toHaveLength(1);
+    // Exactly one delivery: the file still holds the single message.
+    expect(readFileSync(outFile, "utf8").trim()).toBe(expectedMessage);
     return { delivery };
   } finally {
     // This is the critical cleanup contract: first unblock an in-flight child,
