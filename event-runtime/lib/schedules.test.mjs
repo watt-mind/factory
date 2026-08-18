@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-schedules-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import os from "node:os";
+
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { openDb } from "./db.mjs";
@@ -22,10 +22,7 @@ import { runOnce } from "./worker.mjs";
 
 const PV = "git:test-pv";
 const base = loadRegistry();
-const db = () =>
-  openDb(
-    path.join(mkdtempSync(path.join(os.tmpdir(), "evrt-sched-")), "runtime.db"),
-  );
+const db = () => openDb(path.join(tmpDir("evrt-sched-"), "runtime.db"));
 
 /** The real registry with one loop overridden — schedules are just data. */
 const withLoop = (overrides = {}) => ({
@@ -400,8 +397,8 @@ describe("emitDueTicks (§3)", () => {
 describe("planning a tick (§5, §6)", () => {
   const adapters = { command: fake, claude: fake };
   const workerOpts = () => ({
-    workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-sched-ws-")),
-    artifactStore: mkdtempSync(path.join(os.tmpdir(), "evrt-sched-store-")),
+    workspacesRoot: tmpDir("evrt-sched-ws-"),
+    artifactStore: tmpDir("evrt-sched-store-"),
     owner: "w",
     policyVersion: PV,
   });
@@ -615,8 +612,8 @@ describe("planning a tick (§5, §6)", () => {
 describe("scheduleView (§9)", () => {
   const adapters = { command: fake, claude: fake };
   const workerOpts = () => ({
-    workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-sched-ws-")),
-    artifactStore: mkdtempSync(path.join(os.tmpdir(), "evrt-sched-store-")),
+    workspacesRoot: tmpDir("evrt-sched-ws-"),
+    artifactStore: tmpDir("evrt-sched-store-"),
     owner: "w",
     policyVersion: PV,
   });

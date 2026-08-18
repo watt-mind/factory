@@ -1,3 +1,4 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-actions-test-mjs";
 import { describe, expect, test } from "bun:test";
 import {
   buildArgv,
@@ -7,12 +8,11 @@ import {
   substituteRemote,
   validateRemotePlaceholders,
 } from "./actions.mjs";
-import { mkdtempSync, readFileSync } from "node:fs";
-import os from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { appendIssueDetail } from "../../../tools/linear.mjs";
 
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 describe("appendIssueDetail (WM-343)", () => {
   test("appends the same detail only once", () => {

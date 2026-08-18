@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-intake-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { spawnTracked } from "./test-helpers-process.mjs";
@@ -17,12 +21,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -36,6 +38,12 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 describe("webhook intake (§14)", () => {
   let s;
@@ -459,7 +467,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
   });
 
   test("GET /status reports proposalsPilingUp anomaly when open proposals exceed threshold (WM-124)", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-piling-test-"));
+    const dir = tmpDir("evrt-piling-test-");
     const db = openDb(path.join(dir, "runtime.db"));
     const at = new Date().toISOString();
 
@@ -496,7 +504,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
   });
 
   test("serve with invalid non-numeric FACTORY_EVENT_PORT fails loudly", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-port-err-"));
+    const home = tmpDir("evrt-port-err-");
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
 
     const child = spawnTracked("bun", [CLI, "serve"], {
@@ -518,7 +526,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
   });
 
   test("serve startup banner warns when FACTORY_EVENT_SECRET is unset", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-banner-"));
+    const home = tmpDir("evrt-banner-");
     const port = String(59600 + (process.pid % 200));
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
 

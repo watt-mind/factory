@@ -1,18 +1,17 @@
-import { expect } from "bun:test";
+import { afterAll, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { policyVersion } from "../lib/config.mjs";
 import { openDb } from "../lib/db.mjs";
+import { cleanupTmpDirs, tmpDir } from "../test-support/tmp.mjs";
 export {
   cleanupTrackedProcesses,
   processOwnerWatchdogSource,
@@ -43,16 +42,20 @@ export const loadAdjustedTimeout = (timeoutMs) =>
 /** A loopback port nothing in these tests ever listens on. */
 export const DEAD_PORT = "59987";
 
+/** Register cleanup for this shared helper's cached temp-directory tracker. */
+export function registerCliTmpCleanup() {
+  afterAll(cleanupTmpDirs);
+}
+
 /**
  * A throwaway run dir, so nothing here reads this machine's real
  * ~/.factory/run — `status` reports the local worker pool from pidfiles
  * (WM-226), and a developer's own running stack must not change a test result.
  */
-export const throwawayRunDir = () =>
-  mkdtempSync(path.join(os.tmpdir(), "evrt-cli-run-"));
+export const throwawayRunDir = () => tmpDir("evrt-cli-run-");
 
 export function runCli(args, env = {}) {
-  const home = mkdtempSync(path.join(os.tmpdir(), "evrt-cli-"));
+  const home = tmpDir("evrt-cli-");
   const result = spawnSync("bun", [CLI, ...args], {
     encoding: "utf8",
     env: {
@@ -119,7 +122,7 @@ export function writeGatedNotifier(dir, { exitCode = 0 } = {}) {
 }
 
 export async function assertHealthyLiveServe() {
-  const home = mkdtempSync(path.join(os.tmpdir(), "evrt-doc-healthy-"));
+  const home = tmpDir("evrt-doc-healthy-");
   const port = String(59700 + (process.pid % 100));
   const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
     env: {
@@ -167,7 +170,7 @@ export async function runNotifierDeliveryCase({
 } = {}) {
   const { tick } = await import("../cli.mjs");
   const { loadRegistry } = await import("../lib/registry.mjs");
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-tick-notify-"));
+  const dir = tmpDir("evrt-tick-notify-");
   const { outFile, pidFile, startedFile, releaseFile, stub } =
     writeGatedNotifier(dir);
   const db = openDb(path.join(dir, "runtime.db"));
@@ -247,7 +250,7 @@ export async function runNotifierDeliveryCase({
 
 /** A throwaway checkout for the code stamp to watch, so tests never dirty this repo. */
 export function makeStampRoot() {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-reload-src-"));
+  const root = tmpDir("evrt-reload-src-");
   mkdirSync(path.join(root, "event-runtime", "lib"), { recursive: true });
   mkdirSync(path.join(root, "event-runtime", "cli"), { recursive: true });
   writeFileSync(

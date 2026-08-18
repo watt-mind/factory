@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-work-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { policyVersion } from "../lib/config.mjs";
 import { openDb } from "../lib/db.mjs";
@@ -29,7 +28,10 @@ import {
   spawnSupervisor,
   spawnWorker,
   waitFor,
+  registerCliTmpCleanup,
 } from "./test-helpers.mjs";
+
+registerCliTmpCleanup();
 
 const WORKER_POLICY_VERSION = policyVersion();
 
@@ -138,7 +140,7 @@ describe("work command", () => {
       },
     };
 
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-override-"));
+    const home = tmpDir("evrt-override-");
     const claim = claimNext(db, { owner: "w1", adapterOverride: "fake" });
     expect(claim).toBeTruthy();
 
@@ -157,7 +159,7 @@ describe("work command", () => {
     const { createRun, transition } = await import("../lib/lifecycle.mjs");
     const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");
 
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-work-proc-"));
+    const home = tmpDir("evrt-work-proc-");
     const db = openDb(path.join(home, "runtime.db"));
 
     const input = { repos: ["ok"] };
@@ -247,7 +249,7 @@ describe("work command", () => {
   });
 
   test("work --adapter-override pi is accepted at the work call site (OPS-517)", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-work-pi-"));
+    const home = tmpDir("evrt-work-pi-");
     const child = spawnTracked(
       "bun",
       [CLI, "work", "--adapter-override", "pi"],
@@ -363,7 +365,7 @@ describe("work command", () => {
       },
     };
 
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-pi-smoke-"));
+    const home = tmpDir("evrt-pi-smoke-");
     const claim = claimNext(db, { owner: "w1" });
     expect(claim).toBeTruthy();
 
@@ -458,7 +460,7 @@ describe("work command", () => {
       },
     };
 
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-agy-smoke-"));
+    const home = tmpDir("evrt-agy-smoke-");
     const claim = claimNext(db, { owner: "w1" });
     expect(claim).toBeTruthy();
 
@@ -476,7 +478,7 @@ describe("work command", () => {
   });
 
   test("work --adapter-override cursor is accepted at the work call site (WM-440)", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-work-cursor-"));
+    const home = tmpDir("evrt-work-cursor-");
     const child = spawnTracked(
       "bun",
       [CLI, "work", "--adapter-override", "cursor"],
@@ -585,7 +587,7 @@ describe("work command", () => {
       },
     };
 
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-cursor-smoke-"));
+    const home = tmpDir("evrt-cursor-smoke-");
     const claim = claimNext(db, { owner: "w1" });
     expect(claim).toBeTruthy();
 
@@ -607,7 +609,7 @@ describe("work --reload-on-change (WM-213)", () => {
   test(
     "plain work never arms the watcher",
     async () => {
-      const home = mkdtempSync(path.join(os.tmpdir(), "evrt-reload-off-"));
+      const home = tmpDir("evrt-reload-off-");
       const stampRoot = makeStampRoot();
       const box = spawnWorker(
         ["--adapter-override", "fake", "--poll-ms", "50"],
@@ -639,7 +641,7 @@ describe("work --reload-on-change (WM-213)", () => {
   test(
     "an idle worker exits 75 within a poll interval of an uncommitted edit",
     async () => {
-      const home = mkdtempSync(path.join(os.tmpdir(), "evrt-reload-idle-"));
+      const home = tmpDir("evrt-reload-idle-");
       const stampRoot = makeStampRoot();
       const box = spawnWorker(
         ["--adapter-override", "fake", "--poll-ms", "50", "--reload-on-change"],
@@ -674,7 +676,7 @@ describe("work --reload-on-change (WM-213)", () => {
   test(
     "an idle worker reloads when a per-command module changes",
     async () => {
-      const home = mkdtempSync(path.join(os.tmpdir(), "evrt-reload-command-"));
+      const home = tmpDir("evrt-reload-command-");
       const stampRoot = makeStampRoot();
       const box = spawnWorker(
         ["--adapter-override", "fake", "--poll-ms", "50", "--reload-on-change"],
@@ -710,7 +712,7 @@ describe("work --reload-on-change (WM-213)", () => {
       const { createRun, transition } = await import("../lib/lifecycle.mjs");
       const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");
 
-      const home = mkdtempSync(path.join(os.tmpdir(), "evrt-reload-busy-"));
+      const home = tmpDir("evrt-reload-busy-");
       const stampRoot = makeStampRoot();
       const db = openDb(path.join(home, "runtime.db"));
 
@@ -812,8 +814,8 @@ describe("work --drain-file (WM-226)", () => {
   test(
     "a drain-signalled worker holding a lease finishes its run first, then exits 0",
     async () => {
-      const home = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-busy-"));
-      const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-busy-run-"));
+      const home = tmpDir("evrt-drain-busy-");
+      const dir = tmpDir("evrt-drain-busy-run-");
       const drainFile = path.join(dir, "worker-1.drain");
       await seedRun(home, {
         runId: "run_drain_busy",
@@ -856,8 +858,8 @@ describe("work --drain-file (WM-226)", () => {
   test(
     "plain work ignores a drain file it was never given",
     async () => {
-      const home = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-off-"));
-      const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-drain-off-run-"));
+      const home = tmpDir("evrt-drain-off-");
+      const dir = tmpDir("evrt-drain-off-run-");
       writeFileSync(path.join(dir, "worker-1.drain"), "scale-down\n", "utf8");
       const box = spawnWorker(
         ["--adapter-override", "fake", "--poll-ms", "50"],

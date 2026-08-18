@@ -1,3 +1,4 @@
+import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-work-test-mjs";
 /**
  * Work chain (WM-110): work-scan@1 reads a repo's agent-ready Linear queue
  * against a pinned tree and emits a typed DISPATCH plan; the chain edge feeds
@@ -9,8 +10,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as fake from "./lib/adapters/fake.mjs";
 import { resolveChains } from "./lib/chain.mjs";
@@ -45,7 +45,7 @@ let previousReposRoot;
 let previousEventHome;
 
 function makeGitRepo(name) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), `evrt-work-${name}-`));
+  const dir = tmpDir(`evrt-work-${name}-`);
   fixtures.push(dir);
   git(["init", "--quiet", "--initial-branch=develop"], dir);
   git(["config", "user.email", "test@example.com"], dir);
@@ -57,7 +57,7 @@ function makeGitRepo(name) {
 }
 
 beforeAll(() => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-work-factory-"));
+  const root = tmpDir("evrt-work-factory-");
   fixtures.push(root);
   mkdirSync(path.join(root, "config"), { recursive: true });
   const wm29 = makeGitRepo("wm29");
@@ -66,7 +66,7 @@ beforeAll(() => {
   const overlap = low;
   const cap = low;
   const lowBad = low;
-  const wtRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-work-trees-"));
+  const wtRoot = tmpDir("evrt-work-trees-");
   fixtures.push(wtRoot);
 
   for (const r of [wm29, clean, low]) {
@@ -118,9 +118,7 @@ beforeAll(() => {
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;
   previousEventHome = process.env.FACTORY_EVENT_HOME;
-  process.env.FACTORY_EVENT_HOME = mkdtempSync(
-    path.join(os.tmpdir(), "evrt-work-home-"),
-  );
+  process.env.FACTORY_EVENT_HOME = tmpDir("evrt-work-home-");
   fixtures.push(process.env.FACTORY_EVENT_HOME);
 });
 
@@ -364,9 +362,9 @@ const openWorld = {
 };
 
 function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-work-"));
+  const dir = tmpDir("evrt-work-");
   const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-work-ws-"));
+  const workspaces = tmpDir("evrt-work-ws-");
   const adapters = { pi: workFake };
   const workerOpts = {
     workspacesRoot: workspaces,

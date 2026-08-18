@@ -1,14 +1,13 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-pi-test-mjs";
 import { describe, expect, test, afterAll, afterEach } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
 import {
@@ -514,9 +513,7 @@ describe("safeChildEnvironment", () => {
 });
 
 describe("execute conformance (OPS-296, docs/event-runtime.md §6)", () => {
-  const tmpBase = realpathSync(
-    mkdtempSync(path.join(tmpdir(), "evrt-pi-test-")),
-  );
+  const tmpBase = realpathSync(tmpDir("evrt-pi-test-"));
   const stubBinDir = path.join(tmpBase, "bin");
   mkdirSync(stubBinDir, { recursive: true });
   const emptyBinDir = path.join(tmpBase, "empty-bin");
@@ -634,7 +631,7 @@ process.stdin.on("end", () => {
     rmSync(tmpBase, { recursive: true, force: true });
   });
 
-  const ws = () => realpathSync(mkdtempSync(path.join(tmpBase, "ws-")));
+  const ws = () => realpathSync(tmpDir("ws-", tmpBase));
   const defaultDef = {
     ref: "test-pi-agent@1",
     promptPath: promptFile,
@@ -1002,11 +999,9 @@ process.stdin.on("end", () => {
  * an actual guest, skipping (not failing) where `preflight()` says no.
  */
 describe("sandboxed execution (WM-313)", () => {
-  const tmpBase = realpathSync(
-    mkdtempSync(path.join(tmpdir(), "evrt-pi-sandbox-")),
-  );
+  const tmpBase = realpathSync(tmpDir("evrt-pi-sandbox-"));
   afterAll(() => rmSync(tmpBase, { recursive: true, force: true }));
-  const ws = () => realpathSync(mkdtempSync(path.join(tmpBase, "ws-")));
+  const ws = () => realpathSync(tmpDir("ws-", tmpBase));
   const promptFile = path.join(tmpBase, "prompt.md");
   writeFileSync(promptFile, "You are a sandboxed test agent.", "utf8");
 

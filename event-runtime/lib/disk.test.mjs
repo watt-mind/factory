@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-disk-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
+import { rmSync } from "node:fs";
 import path from "node:path";
 import {
   DEFAULT_MIN_FREE_BYTES,
@@ -13,7 +13,7 @@ import {
   getDiskSpace,
 } from "./disk.mjs";
 
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 describe("DiskSpaceError", () => {
   test("creates error with proper message and properties", () => {

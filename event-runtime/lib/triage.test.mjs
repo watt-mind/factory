@@ -1,13 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-triage-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import os from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as actions from "./adapters/actions.mjs";
 import * as fake from "./adapters/fake.mjs";
@@ -42,7 +36,7 @@ let previousReposRoot;
 let mirrorsDir;
 
 function makeGitRepo(name) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), `evrt-${name}-`));
+  const dir = tmpDir(`evrt-${name}-`);
   fixtures.push(dir);
   git(["init", "--quiet", "--initial-branch=develop"], dir);
   git(["config", "user.email", "test@example.com"], dir);
@@ -54,7 +48,7 @@ function makeGitRepo(name) {
 }
 
 beforeAll(() => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-factory-"));
+  const root = tmpDir("evrt-factory-");
   fixtures.push(root);
   mkdirSync(path.join(root, "config"), { recursive: true });
   const bj29 = makeGitRepo("bj29");
@@ -68,7 +62,7 @@ beforeAll(() => {
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;
   // Mirrors land under the runtime home, which these tests also isolate.
-  mirrorsDir = mkdtempSync(path.join(os.tmpdir(), "evrt-home-"));
+  mirrorsDir = tmpDir("evrt-home-");
   fixtures.push(mirrorsDir);
   process.env.FACTORY_EVENT_HOME = mirrorsDir;
 });
@@ -132,9 +126,9 @@ function triagePlanScan({ action, detail }) {
 }
 
 function harness({ adapters = { pi: fake, actions: fake } } = {}) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-triage-"));
+  const dir = tmpDir("evrt-triage-");
   const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-triage-ws-"));
+  const workspaces = tmpDir("evrt-triage-ws-");
   const workerOpts = {
     workspacesRoot: workspaces,
     owner: "w-test",
@@ -412,8 +406,8 @@ describe("triage-apply is closed by construction (OPS-229)", () => {
   }
 
   test("applies one registered action per item and records what landed", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-apply-"));
-    const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-apply-ws-"));
+    const dir = tmpDir("evrt-apply-");
+    const workspaceDir = tmpDir("evrt-apply-ws-");
     const outcome = await actions.execute({
       spec: {
         input: {
@@ -441,8 +435,8 @@ describe("triage-apply is closed by construction (OPS-229)", () => {
   });
 
   test("an unregistered action refuses before applying ANY item — including the valid ones", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-apply-"));
-    const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-apply-ws-"));
+    const dir = tmpDir("evrt-apply-");
+    const workspaceDir = tmpDir("evrt-apply-ws-");
     const outcome = await actions.execute({
       spec: {
         input: {

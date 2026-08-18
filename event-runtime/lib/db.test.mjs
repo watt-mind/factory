@@ -1,14 +1,16 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-db-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
   appendFileSync,
   mkdirSync,
-  mkdtempSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
@@ -25,8 +27,7 @@ import {
 } from "./db.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
 
-const freshFile = () =>
-  path.join(mkdtempSync(path.join(os.tmpdir(), "evrt-db-")), "runtime.db");
+const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
 
 describe("cold start (OPS-376, OPS-424)", () => {
   test("a second connection to a brand-new database does not fight for the WAL switch", () => {
@@ -507,7 +508,7 @@ describe("hermetic execution guard (OPS-425)", () => {
 
   test("isolated home directories never mutate the operator's real ~/.factory", () => {
     const before = realFactorySnapshot();
-    const isolated = createIsolatedHome("evrt-guard-test-");
+    const isolated = trackTmpDir(createIsolatedHome("evrt-guard-test-"));
     const testDbPath = path.join(isolated, "runtime.db");
     const db = openDb(testDbPath);
     db.query(`INSERT INTO counters (name, value) VALUES ('guard', 42)`).run();
@@ -520,7 +521,7 @@ describe("hermetic execution guard (OPS-425)", () => {
   });
 
   test("detects a write to runtime.db in a supplied real-home fixture", () => {
-    const factoryHome = mkdtempSync(path.join(os.tmpdir(), "evrt-real-home-"));
+    const factoryHome = tmpDir("evrt-real-home-");
     const eventHome = path.join(factoryHome, "event-runtime");
     const dbPath = path.join(eventHome, "runtime.db");
     try {

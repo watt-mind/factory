@@ -1,3 +1,4 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-sandboxed-test-mjs";
 /**
  * The sandbox decision seam (WM-313) — and the conformance sweep that makes
  * "no adapter ignores def.sandbox" a property of the suite rather than a
@@ -8,8 +9,7 @@
  * behaviour is proven in pi.test.mjs behind `preflight()`.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { SandboxExecutionError } from "../sandbox/gondolin.mjs";
 import {
@@ -26,7 +26,7 @@ import {
   withStdinFile,
 } from "./sandboxed.mjs";
 
-const ws = () => mkdtempSync(path.join(os.tmpdir(), "evrt-sandboxed-"));
+const ws = () => tmpDir("evrt-sandboxed-");
 const sandboxDef = (extra = {}) => ({
   ref: "sandboxed@1",
   sandbox: { provider: "gondolin", allowedHosts: [] },

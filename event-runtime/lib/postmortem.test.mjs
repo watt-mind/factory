@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-postmortem-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
-import os from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
@@ -13,7 +13,7 @@ import { runOnce } from "./worker.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 function harness() {
   const db = openDb(path.join(tmp("evrt-pm-"), "runtime.db"));

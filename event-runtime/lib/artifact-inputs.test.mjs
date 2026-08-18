@@ -1,12 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-artifact-inputs-test-mjs";
 import { describe, expect, test } from "bun:test";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
-import os from "node:os";
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   materializeArtifact,
@@ -27,7 +21,7 @@ import { createWorkspace, resolveInputRef } from "./workspace.mjs";
 
 const registry = loadRegistry();
 
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 /** Put bytes in a store the way the worker does: keyed by their own hash. */
 function store(bytes, storeRoot = tmp("evrt-store-")) {

@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-artifacts-test-mjs";
 import { describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   artifactPath,
@@ -24,7 +23,7 @@ import {
 import { sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 function makeStore(bytes, storeRoot = tmp("evrt-store-")) {
   mkdirSync(storeRoot, { recursive: true });

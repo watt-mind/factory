@@ -1,15 +1,14 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-backup-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   backupArtifacts,
@@ -20,8 +19,7 @@ import {
 } from "./backup.mjs";
 import { openDb } from "./db.mjs";
 
-const freshDir = (prefix = "evrt-backup-") =>
-  mkdtempSync(path.join(os.tmpdir(), prefix));
+const freshDir = (prefix = "evrt-backup-") => tmpDir(prefix);
 
 describe("WAL-safe backup and integrity check (OPS-414)", () => {
   test("checkIntegrity reports ok on a valid database", () => {

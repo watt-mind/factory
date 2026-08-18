@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-workspace-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import {
@@ -23,7 +22,7 @@ import {
 } from "./workspace.mjs";
 
 function tmpRoot() {
-  return mkdtempSync(path.join(os.tmpdir(), "evrt-ws-"));
+  return tmpDir("evrt-ws-");
 }
 
 describe("safeJoin", () => {
@@ -195,13 +194,9 @@ describe("worktree workspaces (WM-108)", () => {
       : [];
 
   beforeAll(() => {
-    factoryRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-wt-factory-"));
-    repoDir = realpathSync(
-      mkdtempSync(path.join(os.tmpdir(), "evrt-wt-repo-")),
-    );
-    wtRoot = realpathSync(
-      mkdtempSync(path.join(os.tmpdir(), "evrt-wt-trees-")),
-    );
+    factoryRoot = tmpDir("evrt-wt-factory-");
+    repoDir = realpathSync(tmpDir("evrt-wt-repo-"));
+    wtRoot = realpathSync(tmpDir("evrt-wt-trees-"));
     callsLog = path.join(repoDir, "calls.log");
 
     mkdirSync(path.join(repoDir, "bin"), { recursive: true });

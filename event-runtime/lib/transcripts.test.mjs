@@ -1,12 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-transcripts-test-mjs";
 import { describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import os from "node:os";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Readable, PassThrough } from "node:stream";
 import { sha256Hex } from "./canonical.mjs";
@@ -18,7 +12,7 @@ import {
   waitForStreamFlush,
 } from "./transcripts.mjs";
 
-const tmpWs = () => mkdtempSync(path.join(os.tmpdir(), "evrt-transcript-"));
+const tmpWs = () => tmpDir("evrt-transcript-");
 
 describe("transcripts (OPS-426)", () => {
   test("waitForStreamFlush resolves immediately for null or already finished streams", async () => {

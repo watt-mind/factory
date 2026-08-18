@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-registry-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -34,6 +36,12 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 describe("agent and repository registry surfacing (OPS-212)", () => {
   test("GET /agents exposes definitions, prompt text, schemas, pins, and routing", async () => {
@@ -66,7 +74,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
   });
 
   test("GET /repos serves the repos.yaml registry, dispatch mode included (OPS-299)", async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-api-repos-"));
+    const root = tmpDir("evrt-api-repos-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     writeFileSync(
       path.join(root, "config", "repos.yaml"),
@@ -118,7 +126,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
   });
 
   test("GET /repos names a missing repos.yaml instead of a bare internal_error", async () => {
-    const empty = mkdtempSync(path.join(os.tmpdir(), "evrt-api-norepos-"));
+    const empty = tmpDir("evrt-api-norepos-");
     const { server, port, close } = await makeServer({
       repos: () => loadRepos({ root: empty }),
     });
@@ -135,7 +143,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
   });
 
   test("GET /repos surfaces malformed repos.yaml as RepoError instead of internal_error (OPS-346)", async () => {
-    const malformed = mkdtempSync(path.join(os.tmpdir(), "evrt-api-badrepos-"));
+    const malformed = tmpDir("evrt-api-badrepos-");
     mkdirSync(path.join(malformed, "config"), { recursive: true });
     writeFileSync(
       path.join(malformed, "config", "repos.yaml"),

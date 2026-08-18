@@ -1,12 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-registry-test-mjs";
 import { describe, expect, test } from "bun:test";
-import {
-  cpSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes } from "./canonical.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
@@ -27,7 +21,7 @@ import { computeDefHash } from "./receipts.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry() {
-  const root = mkdtempSync(path.join(tmpdir(), "event-registry-"));
+  const root = tmpDir("event-registry-");
   for (const dir of ["agents", "schemas"]) {
     cpSync(path.join(RUNTIME_ROOT, dir), path.join(root, dir), {
       recursive: true,
@@ -62,7 +56,7 @@ function samplePack(
 }
 
 function tempPack({ name = "sample", namespace = "sample" } = {}) {
-  const root = mkdtempSync(path.join(tmpdir(), "event-pack-"));
+  const root = tmpDir("event-pack-");
   cpSync(SAMPLE_PACK_ROOT, root, { recursive: true });
   writeFileSync(
     path.join(root, "pack.json"),
@@ -395,7 +389,7 @@ describe("registry", () => {
   });
 
   test("loadPackRoots reads only policy-listed roots and validates fail-closed", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "event-policy-packs-"));
+    const root = tmpDir("event-policy-packs-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     const policy = path.join(root, "config", "policy.yaml");
     expect(loadPackRoots({ root })).toEqual([]);
@@ -729,7 +723,7 @@ describe("registry", () => {
   });
 
   test("loadModelTierMap: reads policy.yaml, validates shape fail-closed, tolerates absence (WM-135)", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "event-policy-"));
+    const root = tmpDir("event-policy-");
     expect(loadModelTierMap({ root })).toEqual({}); // no policy.yaml at all
     mkdirSync(path.join(root, "config"), { recursive: true });
     const write = (yaml) =>

@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -40,6 +42,12 @@ import { createInboxItem } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
 import { hashJson } from "./canonical.mjs";
 import { spawnTracked } from "./test-helpers-process.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 describe("inbox decision API (WM-390)", () => {
   const request = {
@@ -342,7 +350,7 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
   });
 
   test("a drifted view is served as null and named in /status.anomalies.configuration", async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-view-"));
+    const root = tmpDir("evrt-view-");
     for (const dir of ["agents", "schemas"]) {
       cpSync(path.join(registry.root, dir), path.join(root, dir), {
         recursive: true,
@@ -378,7 +386,7 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
 
 describe("environment identity (webui chip)", () => {
   test("health and status expose the env the server was started with", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-env-"));
+    const dir = tmpDir("evrt-env-");
     const db = openDb(path.join(dir, "runtime.db"));
     const server = startApi({
       db,
@@ -404,7 +412,7 @@ describe("serve PID lock (OPS-458)", () => {
   test("acquireServeLock acquires lock in empty runtime home and releaseServeLock removes it", async () => {
     const { acquireServeLock, releaseServeLock, serveLockPath } =
       await import("../cli.mjs");
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
+    const home = tmpDir("evrt-lock-");
     const lock = acquireServeLock(home, 7381);
     expect(lock.pid).toBe(process.pid);
     expect(lock.port).toBe(7381);
@@ -423,7 +431,7 @@ describe("serve PID lock (OPS-458)", () => {
   test("acquireServeLock fails when locked by a live process with clear PID and port", async () => {
     const { acquireServeLock, releaseServeLock, serveLockPath } =
       await import("../cli.mjs");
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
+    const home = tmpDir("evrt-lock-");
     const lockFile = serveLockPath(home);
     const { writeFileSync } = await import("node:fs");
     const { spawn } = await import("node:child_process");
@@ -451,7 +459,7 @@ describe("serve PID lock (OPS-458)", () => {
   test("acquireServeLock reclaims a stale lock from a dead process", async () => {
     const { acquireServeLock, releaseServeLock, serveLockPath } =
       await import("../cli.mjs");
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
+    const home = tmpDir("evrt-lock-");
     const lockFile = serveLockPath(home);
     const { writeFileSync, readFileSync } = await import("node:fs");
 
@@ -475,7 +483,7 @@ describe("serve PID lock (OPS-458)", () => {
   });
 
   test("concurrent duplicate serve on same home fails second instance and releasing first allows next", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-cli-"));
+    const home = tmpDir("evrt-lock-cli-");
     const port1 = String(59500 + (process.pid % 200));
     const port2 = String(59700 + (process.pid % 200));
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");

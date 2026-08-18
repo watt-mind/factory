@@ -1,3 +1,4 @@
+import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-inbox-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,9 +16,8 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
   os,
@@ -34,6 +34,12 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 describe("human inbox API (WM-285)", () => {
   test("POST writes before a failed delivery, rejects unknown kinds, and GET/ack/resolve filter rows", async () => {

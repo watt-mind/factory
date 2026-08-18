@@ -1,12 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-tick-test-mjs";
 import { describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
-import os from "node:os";
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { PRUNE_INTERVAL_MS, TICK_SUBSYSTEMS, tick } from "../cli.mjs";
 import { sha256Hex } from "./canonical.mjs";
@@ -14,7 +8,7 @@ import { openDb } from "./db.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const registry = loadRegistry();
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 function harness() {
   const dir = tmp("evrt-tick-");

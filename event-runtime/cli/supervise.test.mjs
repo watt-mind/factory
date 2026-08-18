@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-supervise-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
 import { workerPassthroughArgs } from "./supervise.mjs";
@@ -27,7 +26,10 @@ import {
   spawnSupervisor,
   spawnWorker,
   waitFor,
+  registerCliTmpCleanup,
 } from "./test-helpers.mjs";
+
+registerCliTmpCleanup();
 
 describe("supervise (WM-226)", () => {
   test("passes reload and worker-shaping flags through to every pool slot (WM-613)", () => {
@@ -74,7 +76,7 @@ describe("supervise (WM-226)", () => {
   });
 
   test("refuses to be the second supervisor on one run dir — two would orphan each other's workers", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-dup-"));
+    const dir = tmpDir("evrt-pool-dup-");
     try {
       // This process stands in for a live incumbent supervisor.
       writeFileSync(
@@ -112,8 +114,8 @@ describe("supervise (WM-226)", () => {
   });
 
   test("a queued run with no idle worker spawns one within a tick, and the pool stops at workers.max", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-up-"));
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-up-run-"));
+    const home = tmpDir("evrt-pool-up-");
+    const dir = tmpDir("evrt-pool-up-run-");
     // "hang" occupies a worker for the whole spec timeout, so the queue stays
     // hot long enough for the ceiling to be the thing that stops the pool.
     for (const runId of ["run_pool_a", "run_pool_b", "run_pool_c"]) {
@@ -159,8 +161,8 @@ describe("supervise (WM-226)", () => {
   }, 60_000);
 
   test("surplus idle workers drain back to workers.min, and the pool is not respawned past target", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-down-"));
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-down-run-"));
+    const home = tmpDir("evrt-pool-down-");
+    const dir = tmpDir("evrt-pool-down-run-");
     // Two short hangs: long enough to force a second worker, short enough that
     // both go idle while the supervisor is still watching.
     for (const runId of ["run_drain_a", "run_drain_b"]) {

@@ -1,8 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-demo-seed-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadAdjustedTimeout } from "../cli/test-helpers.mjs";
 import { validate } from "../lib/schema.mjs";
@@ -142,7 +141,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
   let initialTriageApplyRun;
 
   beforeAll(async () => {
-    home = mkdtempSync(path.join(os.tmpdir(), "evrt-seed-test-"));
+    home = tmpDir("evrt-seed-test-");
     // Ask the OS for a genuinely free port instead of pid-modulo arithmetic:
     // on a shared self-hosted runner a leftover server from an earlier
     // (aborted) job can squat any precomputed port, and the seed then fails

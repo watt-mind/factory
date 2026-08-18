@@ -1,7 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-sweep-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { resolveChains } from "./chain.mjs";
@@ -32,7 +32,7 @@ let previousReposRoot;
 let previousHome;
 
 function makeGitRepo(name) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), `evrt-${name}-`));
+  const dir = tmpDir(`evrt-${name}-`);
   fixtures.push(dir);
   git(["init", "--quiet", "--initial-branch=develop"], dir);
   git(["config", "user.email", "test@example.com"], dir);
@@ -44,7 +44,7 @@ function makeGitRepo(name) {
 }
 
 beforeAll(() => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-factory-"));
+  const root = tmpDir("evrt-factory-");
   fixtures.push(root);
   mkdirSync(path.join(root, "config"), { recursive: true });
   const bj29 = makeGitRepo("bj29");
@@ -58,7 +58,7 @@ beforeAll(() => {
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;
   previousHome = process.env.FACTORY_EVENT_HOME;
-  const home = mkdtempSync(path.join(os.tmpdir(), "evrt-home-"));
+  const home = tmpDir("evrt-home-");
   fixtures.push(home);
   process.env.FACTORY_EVENT_HOME = home;
 });
@@ -72,10 +72,10 @@ afterAll(() => {
 });
 
 function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-sweep-"));
+  const dir = tmpDir("evrt-sweep-");
   fixtures.push(dir);
   const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-sweep-ws-"));
+  const workspaces = tmpDir("evrt-sweep-ws-");
   fixtures.push(workspaces);
   const adapters = { pi: fake, actions: fake };
   const workerOpts = {

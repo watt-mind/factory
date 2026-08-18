@@ -1,3 +1,4 @@
+import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-loop-test-mjs";
 /**
  * Closing the loop (WM-112): a finished dispatch re-fires the work-scan —
  * dispatch@1 outcomes PR_OPEN and NOT_CLAIMED chain into
@@ -11,8 +12,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { resolveChains } from "./lib/chain.mjs";
 import { openDb } from "./lib/db.mjs";
@@ -47,10 +47,10 @@ let previousReposRoot;
 let previousEventHome;
 
 beforeAll(() => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-loop-factory-"));
+  const root = tmpDir("evrt-loop-factory-");
   fixtures.push(root);
-  const repoDir = mkdtempSync(path.join(os.tmpdir(), "evrt-loop-repo-"));
-  const wtRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-loop-trees-"));
+  const repoDir = tmpDir("evrt-loop-repo-");
+  const wtRoot = tmpDir("evrt-loop-trees-");
   fixtures.push(repoDir, wtRoot);
 
   git(["init", "--quiet", "--initial-branch=develop"], repoDir);
@@ -87,9 +87,7 @@ beforeAll(() => {
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;
   previousEventHome = process.env.FACTORY_EVENT_HOME;
-  process.env.FACTORY_EVENT_HOME = mkdtempSync(
-    path.join(os.tmpdir(), "evrt-loop-home-"),
-  );
+  process.env.FACTORY_EVENT_HOME = tmpDir("evrt-loop-home-");
   fixtures.push(process.env.FACTORY_EVENT_HOME);
 });
 
@@ -152,13 +150,8 @@ const dispatchFake = (outcome) => ({
 
 /** Admit → plan → approve → execute one dispatch run ending in `outcome`. */
 async function dispatchTo(outcome, eventId, ticket) {
-  const db = openDb(
-    path.join(
-      mkdtempSync(path.join(os.tmpdir(), "evrt-loop-db-")),
-      "runtime.db",
-    ),
-  );
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-loop-ws-"));
+  const db = openDb(path.join(tmpDir("evrt-loop-db-"), "runtime.db"));
+  const workspaces = tmpDir("evrt-loop-ws-");
   fixtures.push(workspaces);
   const planAll = () =>
     planAdmittedEvents(db, registry, {

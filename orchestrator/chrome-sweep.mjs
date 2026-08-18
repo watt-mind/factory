@@ -22,8 +22,14 @@
  *      agent's Chrome still has its MCP server as parent and is left alone.
  */
 import { execSync } from "node:child_process";
-import { existsSync, lstatSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 const APPLY = process.argv.includes("--apply");
@@ -34,7 +40,38 @@ const SHARED_PROFILE = path.join(
 
 /** Does this ps line look like an agent-launched Chrome profile? */
 const AGENT_PROFILE =
-  /--user-data-dir=[^ ]*(chrome-devtools-mcp|puppeteer_dev_(chrome|firefox)_profile)/;
+  /--user-data-dir=[^ ]*(chrome-devtools-mcp|pi-chrome-devtools|puppeteer_dev_(chrome|firefox)_profile)/;
+
+export const TMP_PREFIXES = [
+  "evrt-",
+  "wm334-real-",
+  "pi-chrome-devtools-",
+  "puppeteer_dev_chrome_profile-",
+  "factory-wt-",
+];
+const TMP_MIN_AGE_MS = 30 * 60 * 1000;
+
+/** Find stale factory-owned temp directories without following symlinks. */
+export function staleTmpDirectories({
+  root = tmpdir(),
+  nowMs = Date.now(),
+  inUsePaths = [],
+} = {}) {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    if (!entry.isDirectory()) return [];
+    if (!TMP_PREFIXES.some((prefix) => entry.name.startsWith(prefix)))
+      return [];
+    const candidate = path.join(root, entry.name);
+    if (inUsePaths.includes(candidate)) return [];
+    try {
+      return nowMs - lstatSync(candidate).mtimeMs > TMP_MIN_AGE_MS
+        ? [candidate]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
 
 /**
  * Pure classifier over `ps -axo pid=,ppid=,command=` rows so the kill logic is
@@ -66,6 +103,10 @@ if (import.meta.main) {
     }),
   );
   const { orphans, live } = classify(rows);
+  const inUsePaths = rows.flatMap((row) => {
+    const profile = row.command.match(/--user-data-dir=([^ ]+)/)?.[1];
+    return profile ? [profile] : [];
+  });
 
   if (live.length)
     console.log(
@@ -118,6 +159,11 @@ if (import.meta.main) {
         /* not present */
       }
     }
+  }
+
+  for (const dir of staleTmpDirectories({ inUsePaths })) {
+    console.log(`  ${APPLY ? "removing" : "would remove"} stale ${dir}`);
+    if (APPLY) rmSync(dir, { recursive: true, force: true });
   }
 
   if (!APPLY && orphans.length)

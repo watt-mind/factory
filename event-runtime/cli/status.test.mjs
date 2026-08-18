@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-status-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
 import {
@@ -28,7 +27,10 @@ import {
   spawnWorker,
   throwawayRunDir,
   waitFor,
+  registerCliTmpCleanup,
 } from "./test-helpers.mjs";
+
+registerCliTmpCleanup();
 
 describe("status and doctor commands", () => {
   test("status against a dead port says serve is not running, non-zero exit", () => {
@@ -115,7 +117,7 @@ describe("status and doctor commands", () => {
   });
 
   test("doctor against a healthy live serve outputs anomalies none and exits 0", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-doc-healthy-"));
+    const home = tmpDir("evrt-doc-healthy-");
     const port = String(59700 + (process.pid % 100));
     const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
       env: {
@@ -159,7 +161,7 @@ describe("status and doctor commands", () => {
   });
 
   test("doctor against a live serve with an anomaly exits non-zero and reports anomaly", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-doc-anomaly-"));
+    const home = tmpDir("evrt-doc-anomaly-");
     const port = String(59600 + (process.pid % 100));
     const db = openDb(path.join(home, "runtime.db"));
     const at = new Date(Date.now() - 200_000).toISOString();
@@ -218,7 +220,7 @@ describe("status and doctor commands", () => {
 describe("pool visibility in status/doctor (WM-226)", () => {
   test("no pool ever started → no pool line and no anomaly (single-worker stacks look unchanged)", async () => {
     const { getPoolLines, readPool } = await import("../cli.mjs");
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-view-none-"));
+    const dir = tmpDir("evrt-pool-view-none-");
     try {
       const view = getPoolLines(readPool(dir), {
         runs: { byState: { QUEUED: 4 } },
@@ -232,7 +234,7 @@ describe("pool visibility in status/doctor (WM-226)", () => {
 
   test("a live supervisor reports its pool size; a dead one with a queue is an anomaly", async () => {
     const { getPoolLines, readPool } = await import("../cli.mjs");
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-view-"));
+    const dir = tmpDir("evrt-pool-view-");
     try {
       // This process stands in for a live supervisor and a live worker.
       writeFileSync(path.join(dir, "supervisor.pid"), `${process.pid}\n`);

@@ -1,7 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { DEAD_LETTER_AFTER } from "./config.mjs";
@@ -88,7 +88,7 @@ describe("idempotencyKeyFor", () => {
 
 describe("merge concurrency policy", () => {
   test("reads a positive integer max_concurrent_merges and fails safe otherwise", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-policy-"));
+    const root = tmpDir("evrt-merge-policy-");
     mkdirSync(path.join(root, "config"));
     const policy = path.join(root, "config", "policy.yaml");
 
@@ -744,7 +744,7 @@ describe("planEvent worktree gate (WM-108)", () => {
   }
 
   function withReposRoot(yaml, fn) {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-plan-wt-"));
+    const root = tmpDir("evrt-plan-wt-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
     const previous = process.env.FACTORY_REPOS_ROOT;
@@ -1662,7 +1662,7 @@ describe("planAdmittedEvents", () => {
   });
 
   test("holds write transaction from second connection and does not increment plan_failures or dead-letter (OPS-451)", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-planner-"));
+    const dir = tmpDir("evrt-planner-");
     const file = path.join(dir, "test.db");
     const db1 = openDb(file);
     const db2 = openDb(file);
@@ -1690,7 +1690,7 @@ describe("planAdmittedEvents", () => {
   });
 
   test("three consecutive lock collisions leave the event admitted, not dead_lettered (OPS-451)", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-planner-"));
+    const dir = tmpDir("evrt-planner-");
     const file = path.join(dir, "test.db");
     const db1 = openDb(file);
     const db2 = openDb(file);
@@ -1716,9 +1716,9 @@ describe("planAdmittedEvents", () => {
   });
 
   test("TTL re-plan preserves repoPin for repository workspace agent across expiry (OPS-418)", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-plan-factory-"));
+    const root = tmpDir("evrt-plan-factory-");
     mkdirSync(path.join(root, "config"), { recursive: true });
-    const repoDir = mkdtempSync(path.join(os.tmpdir(), "evrt-repo-"));
+    const repoDir = tmpDir("evrt-repo-");
     execFileSync("git", ["init", "--quiet", "--initial-branch=develop"], {
       cwd: repoDir,
     });
@@ -1737,9 +1737,7 @@ describe("planAdmittedEvents", () => {
     const oldReposRoot = process.env.FACTORY_REPOS_ROOT;
     const oldHome = process.env.FACTORY_EVENT_HOME;
     process.env.FACTORY_REPOS_ROOT = root;
-    process.env.FACTORY_EVENT_HOME = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-plan-home-"),
-    );
+    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-plan-home-");
 
     try {
       const db = openDb(":memory:");
@@ -1811,7 +1809,7 @@ describe("planAdmittedEvents", () => {
       new Date(NOW).toISOString(),
     );
 
-    const artifactStore = mkdtempSync(path.join(os.tmpdir(), "evrt-pm-store-"));
+    const artifactStore = tmpDir("evrt-pm-store-");
     const transcriptSha =
       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     writeFileSync(path.join(artifactStore, transcriptSha), "{}");

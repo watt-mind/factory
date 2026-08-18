@@ -35,6 +35,11 @@ jobs:
     runs-on: [self-hosted, verify-lane]
     timeout-minutes: 45
     steps:
+      - name: Sweep stale shared-host temp directories
+        shell: bash
+        run: |
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+
       - name: Checkout (no action download)
         shell: bash
         env:
@@ -121,3 +126,9 @@ jobs:
         env:
           PLAYWRIGHT_CHANNEL: chromium
         run: cd event-runtime/web && bun run test:e2e
+
+      - name: Sweep stale shared-host temp directories
+        if: always()
+        shell: bash
+        run: |
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +

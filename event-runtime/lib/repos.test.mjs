@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-repos-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   loadRepos,
@@ -21,7 +21,7 @@ afterAll(() => {
  * make these assertions a description of today's registry.
  */
 function factoryRoot(yaml) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-repos-"));
+  const root = tmpDir("evrt-repos-");
   scratch.push(root);
   mkdirSync(path.join(root, "config"), { recursive: true });
   writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
@@ -134,7 +134,7 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
   });
 
   test("a missing config fails closed rather than reporting an empty registry", () => {
-    const empty = mkdtempSync(path.join(os.tmpdir(), "evrt-repos-empty-"));
+    const empty = tmpDir("evrt-repos-empty-");
     scratch.push(empty);
     expect(() => loadRepos({ root: empty })).toThrow(RepoError);
   });

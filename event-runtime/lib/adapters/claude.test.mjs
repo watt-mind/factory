@@ -1,14 +1,13 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-claude-test-mjs";
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   BASE_INHERITED_ENV,
@@ -49,9 +48,7 @@ describe("sandbox decision (WM-313): deferred, so refused — never ignored", ()
   });
 
   test("a sandboxed definition is refused with a typed error naming the adapter, before any spawn or workspace write", async () => {
-    const workspaceDir = realpathSync(
-      mkdtempSync(path.join(tmpdir(), "evrt-claude-sandbox-")),
-    );
+    const workspaceDir = realpathSync(tmpDir("evrt-claude-sandbox-"));
     const promptPath = path.join(workspaceDir, "prompt.md");
     writeFileSync(promptPath, "hello", "utf8");
     let caught;
@@ -520,9 +517,7 @@ describe("buildClaudeArgv (OPS-407, WM-62, WM-137)", () => {
 });
 
 describe("execute conformance (OPS-427, docs/event-runtime.md §6)", () => {
-  const tmpBase = realpathSync(
-    mkdtempSync(path.join(tmpdir(), "evrt-claude-test-")),
-  );
+  const tmpBase = realpathSync(tmpDir("evrt-claude-test-"));
   const stubBinDir = path.join(tmpBase, "bin");
   mkdirSync(stubBinDir, { recursive: true });
 
@@ -688,7 +683,7 @@ if (behavior === "emit_denial_then_recovery") {
     rmSync(tmpBase, { recursive: true, force: true });
   });
 
-  const ws = () => realpathSync(mkdtempSync(path.join(tmpBase, "ws-")));
+  const ws = () => realpathSync(tmpDir("ws-", tmpBase));
   const defaultDef = {
     ref: "test-agent@1",
     promptPath: promptFile,

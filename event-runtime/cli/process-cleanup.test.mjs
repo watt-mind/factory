@@ -1,13 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-process-cleanup-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from "node:fs";
-import os from "node:os";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -79,7 +73,7 @@ describe("tracked test processes (WM-654)", () => {
   });
 
   test("detached fixtures self-destruct when their test owner disappears", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-owner-watch-"));
+    const dir = tmpDir("evrt-owner-watch-");
     const script = path.join(dir, "fixture.mjs");
     writeFileSync(
       script,
@@ -94,7 +88,7 @@ describe("tracked test processes (WM-654)", () => {
   });
 
   test("cleanup kills a spawned wrapper and its long-lived grandchild", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-tracked-group-"));
+    const dir = tmpDir("evrt-tracked-group-");
     const pidFile = path.join(dir, "grandchild.pid");
     const child = spawnTracked(
       "bash",
@@ -115,7 +109,7 @@ describe("tracked test processes (WM-654)", () => {
   });
 
   test("live-stack down warns and kills old fake-adapter test runtimes", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-stale-fake-"));
+    const dir = tmpDir("evrt-stale-fake-");
     const fakeCli = path.join(dir, "event-runtime", "cli.mjs");
     mkdirSync(path.dirname(fakeCli), { recursive: true });
     writeFileSync(fakeCli, "setInterval(() => {}, 10_000);\n", "utf8");
@@ -144,7 +138,7 @@ describe("tracked test processes (WM-654)", () => {
   });
 
   test("live-stack down leaves unmarked fake-adapter runtimes alone", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-unmarked-fake-"));
+    const dir = tmpDir("evrt-unmarked-fake-");
     const fakeCli = path.join(dir, "event-runtime", "cli.mjs");
     mkdirSync(path.dirname(fakeCli), { recursive: true });
     writeFileSync(fakeCli, "setInterval(() => {}, 10_000);\n", "utf8");

@@ -1,14 +1,13 @@
+import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-merge-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { substituteArgv } from "./lib/adapters/actions.mjs";
@@ -493,9 +492,7 @@ describe("merge-scan required-context resolution (WM-433)", () => {
   });
 
   test("the resolver executes when the selected non-Factory repo has no event-runtime tree", () => {
-    const fixture = mkdtempSync(
-      path.join(os.tmpdir(), "merge-scan-cross-repo-"),
-    );
+    const fixture = tmpDir("merge-scan-cross-repo-");
     const target = path.join(fixture, "repo");
     mkdirSync(target);
     writeFileSync(path.join(target, "README.md"), "# non-Factory fixture\n");
@@ -549,7 +546,7 @@ describe("merge-scan repository workspace and result contract (WM-425)", () => {
   });
 
   test("a planned scan reads pinned config and a schema-valid fail-closed result is refused, not contract-invalid", async () => {
-    const fixture = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-scan-"));
+    const fixture = tmpDir("evrt-merge-scan-");
     const source = path.join(fixture, "source");
     const eventHome = path.join(fixture, "event-home");
     const workspaces = path.join(fixture, "workspaces");

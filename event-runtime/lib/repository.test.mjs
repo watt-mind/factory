@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-repository-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { expandHome, getRepo, loadRepos, RepoError } from "./repos.mjs";
 import {
@@ -22,7 +21,7 @@ import {
 
 const scratch = [];
 const tmp = (prefix) => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = tmpDir(prefix);
   scratch.push(dir);
   return dir;
 };

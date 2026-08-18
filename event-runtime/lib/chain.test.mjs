@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-chain-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { cpSync, mkdtempSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { cpSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { admitChainEvent, buildChainInput, resolveChains } from "./chain.mjs";
@@ -32,9 +32,9 @@ function failedRunEnvelope(overrides = {}) {
 }
 
 function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-"));
+  const dir = tmpDir("evrt-chain-");
   const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-ws-"));
+  const workspaces = tmpDir("evrt-chain-ws-");
   // Chain flow under test never spawns real processes: pi AND command
   // both back onto the contract-shaped fake.
   const adapters = { pi: fake, command: fake };
@@ -282,7 +282,7 @@ describe("registry gates (OPS-223)", () => {
   });
 
   test("edges validation fails closed: unregistered targets and stray input roots", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-reg-"));
+    const root = tmpDir("evrt-reg-");
     cpSync(path.join(registry.root, "agents"), path.join(root, "agents"), {
       recursive: true,
     });
@@ -417,7 +417,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
   }
 
   test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-multi-"));
+    const dir = tmpDir("evrt-chain-multi-");
     const db = openDb(path.join(dir, "runtime.db"));
 
     seedCompletedRun(db, {
@@ -460,7 +460,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
   });
 
   test("empty plan skips cleanly without error", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-empty-"));
+    const dir = tmpDir("evrt-chain-empty-");
     const db = openDb(path.join(dir, "runtime.db"));
 
     seedCompletedRun(db, {
@@ -482,7 +482,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
   });
 
   test("custom eventId templating and perItem mapping overlays", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-tmpl-"));
+    const dir = tmpDir("evrt-chain-tmpl-");
     const db = openDb(path.join(dir, "runtime.db"));
 
     const customRegistry = {
@@ -528,7 +528,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
   });
 
   test("missing itemKey records error cleanly", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-err-"));
+    const dir = tmpDir("evrt-chain-err-");
     const db = openDb(path.join(dir, "runtime.db"));
 
     seedCompletedRun(db, {
@@ -549,9 +549,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
   });
 
   test("triage-apply outcome edges route to the correct follow-up", () => {
-    const dir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-chain-triage-apply-1"),
-    );
+    const dir = tmpDir("evrt-chain-triage-apply-1");
     const db = openDb(path.join(dir, "runtime.db"));
 
     seedCompletedRun(db, {
@@ -575,9 +573,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
       repo: "wm/triage",
     });
 
-    const dir2 = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-chain-triage-apply-2"),
-    );
+    const dir2 = tmpDir("evrt-chain-triage-apply-2");
     const db2 = openDb(path.join(dir2, "runtime.db"));
     seedCompletedRun(db2, {
       runId: "run-triage-detail",
@@ -600,9 +596,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
       .get("chain-run-triage-detail");
     expect(detailEvent).toBeNull();
 
-    const dir3 = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-chain-triage-apply-3"),
-    );
+    const dir3 = tmpDir("evrt-chain-triage-apply-3");
     const db3 = openDb(path.join(dir3, "runtime.db"));
     seedCompletedRun(db3, {
       runId: "run-triage-nochange",
@@ -669,7 +663,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
   });
 
   test("non-completed runs do not generate chain candidates", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-chain-triage-fail-"));
+    const dir = tmpDir("evrt-chain-triage-fail-");
     const db = openDb(path.join(dir, "runtime.db"));
     const now = new Date().toISOString();
 

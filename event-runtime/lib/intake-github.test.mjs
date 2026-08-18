@@ -1,3 +1,4 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-intake-github-test-mjs";
 /**
  * GitHub webhook intake (WM-112): GitHub's raw-body HMAC verified with a
  * dedicated secret, deliveries translated into `factory.event/v1` envelopes
@@ -6,8 +7,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdtempSync } from "node:fs";
-import os from "node:os";
+
 import path from "node:path";
 import { startApi } from "./api.mjs";
 import { openDb } from "./db.mjs";
@@ -370,7 +370,7 @@ describe("translateGitHubEvent (WM-112)", () => {
 describe("POST /github route (WM-112)", () => {
   let s;
   beforeAll(async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-gh-api-"));
+    const dir = tmpDir("evrt-gh-api-");
     const db = openDb(path.join(dir, "runtime.db"));
     const onEvents = [];
     const server = startApi({

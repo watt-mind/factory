@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-runs-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -35,13 +37,19 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
+
 describe("run deadline extension (WM-566)", () => {
   const start = Date.parse("2026-08-12T10:00:00Z");
   // The policy cap the extend endpoint enforces, owned by this suite rather
   // than by the live config/policy.yaml (WM-692).
   const MAX_RUN_MINUTES = 60;
   function policyRootWith(maxRunMinutes) {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-policy-"));
+    const root = tmpDir("evrt-policy-");
     mkdirSync(path.join(root, "config"));
     if (maxRunMinutes !== null) {
       writeFileSync(
@@ -441,7 +449,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
   let s;
   let flowProposalId;
   let flowRunId;
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-api-ws-"));
+  const workspaces = tmpDir("evrt-api-ws-");
   // event-types.json maps to the "pi" adapter (WM-215); back it with the fake so
   // no real pi process ever spawns in tests.
   const adapters = { pi: fake };
@@ -709,7 +717,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         registry,
         { pi: fake, fake },
         {
-          workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
+          workspacesRoot: tmpDir("evrt-ws-"),
           owner: "test-worker",
           policyVersion: PV,
         },
@@ -754,7 +762,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         registry,
         { pi: fake, fake },
         {
-          workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
+          workspacesRoot: tmpDir("evrt-ws-"),
           owner: "test-worker",
           policyVersion: PV,
         },
@@ -935,7 +943,7 @@ describe("run trace surfacing (OPS-295)", () => {
         registry,
         { pi: fake, fake },
         {
-          workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-ws-")),
+          workspacesRoot: tmpDir("evrt-ws-"),
           owner: "test-worker",
           policyVersion: PV,
         },

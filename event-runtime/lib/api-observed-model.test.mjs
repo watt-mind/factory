@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-observed-model-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -34,6 +36,12 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 describe("model surfacing on run views (WM-221)", () => {
   test("reads the claude harness's own init line", () => {
@@ -91,7 +99,7 @@ describe("model surfacing on run views (WM-221)", () => {
   });
 
   test("the run list carries the plan-time pins and the detail carries observedModel", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-home-"));
+    const home = tmpDir("evrt-home-");
     const { db, server, port, close } = await makeServer({
       env: { name: "test", home },
     });

@@ -1,15 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-serve-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { openDb } from "../lib/db.mjs";
 import {
   CLI,
@@ -27,11 +25,14 @@ import {
   spawnSupervisor,
   spawnWorker,
   waitFor,
+  registerCliTmpCleanup,
 } from "./test-helpers.mjs";
+
+registerCliTmpCleanup();
 
 describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-watch-"));
+    const home = tmpDir("evrt-watch-");
     const port = String(59000 + (process.pid % 800));
     const child = spawnTracked(
       "bun",
@@ -64,7 +65,7 @@ describe("serve command", () => {
   });
 
   test("serve binds the control API, starts the loop, and answers /health", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-serve-"));
+    const home = tmpDir("evrt-serve-");
     const port = String(59800 + (process.pid % 100));
     const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
@@ -98,7 +99,7 @@ describe("serve command", () => {
   });
 
   test("serve --adapter-override pi is accepted at the serve call site (OPS-517)", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-serve-pi-"));
+    const home = tmpDir("evrt-serve-pi-");
     const port = String(59800 + (process.pid % 150));
     const child = spawnTracked(
       "bun",

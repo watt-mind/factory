@@ -1,7 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-trace-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+
 import * as fake from "./adapters/fake.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
@@ -228,7 +227,7 @@ function queueRun(db, spec, now = T0) {
 function opts(extra = {}) {
   return {
     owner: "w1",
-    workspacesRoot: mkdtempSync(path.join(os.tmpdir(), "evrt-trace-")),
+    workspacesRoot: tmpDir("evrt-trace-"),
     now: T0,
     policyVersion: "test",
     ...extra,

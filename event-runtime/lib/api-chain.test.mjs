@@ -1,7 +1,19 @@
+import path from "node:path";
+import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-chain-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chainKeyOf, chainView } from "./api-chain.mjs";
-import { envelope, makeServer, registry } from "./api-test-helpers.mjs";
+import {
+  envelope,
+  makeServer as makeApiServer,
+  registry,
+} from "./api-test-helpers.mjs";
 import { admitChainEvent } from "./chain.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 /**
  * Chain trace endpoint (WM-527). Fixture is a fan-out tree:

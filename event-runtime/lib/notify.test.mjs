@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-notify-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
@@ -12,7 +12,7 @@ import {
   sendNotification,
 } from "./notify.mjs";
 
-const tmp = (p) => mkdtempSync(path.join(os.tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 
 /** A stub notifier that appends its message argument to `outFile`. */
 function stubNotifier(dir, { exitCode = 0 } = {}) {

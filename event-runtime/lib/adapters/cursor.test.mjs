@@ -1,14 +1,13 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-cursor-test-mjs";
 import { describe, expect, test, afterAll, afterEach } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
 import {
@@ -337,9 +336,7 @@ describe("safeChildEnvironment", () => {
 });
 
 describe("execute conformance (WM-440, docs/event-runtime.md §6)", () => {
-  const tmpBase = realpathSync(
-    mkdtempSync(path.join(tmpdir(), "evrt-cursor-test-")),
-  );
+  const tmpBase = realpathSync(tmpDir("evrt-cursor-test-"));
   const stubBinDir = path.join(tmpBase, "bin");
   mkdirSync(stubBinDir, { recursive: true });
   const emptyBinDir = path.join(tmpBase, "empty-bin");
@@ -450,7 +447,7 @@ if (behavior === "emit_error_tool_result") {
     rmSync(tmpBase, { recursive: true, force: true });
   });
 
-  const ws = () => realpathSync(mkdtempSync(path.join(tmpBase, "ws-")));
+  const ws = () => realpathSync(tmpDir("ws-", tmpBase));
   const defaultDef = {
     ref: "test-cursor-agent@1",
     promptPath: promptFile,

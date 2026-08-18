@@ -1,5 +1,5 @@
+import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-concurrency-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDb } from "./db.mjs";
@@ -48,7 +48,7 @@ function queueRun(
 
 describe("multi-process concurrency (OPS-424, OPS-233)", () => {
   test("multi-process claiming: N concurrent workers claim M runs with zero duplicates and monotonic tokens", async () => {
-    const home = createIsolatedHome("evrt-mp-claim-");
+    const home = trackTmpDir(createIsolatedHome("evrt-mp-claim-"));
     const dbFile = path.join(home, "runtime.db");
     const db = openDb(dbFile);
 
@@ -136,7 +136,7 @@ describe("multi-process concurrency (OPS-424, OPS-233)", () => {
   });
 
   test("multi-process placement: concurrent workers with distinct placement labels claim correct runs", async () => {
-    const home = createIsolatedHome("evrt-mp-placement-");
+    const home = trackTmpDir(createIsolatedHome("evrt-mp-placement-"));
     const dbFile = path.join(home, "runtime.db");
     const db = openDb(dbFile);
 

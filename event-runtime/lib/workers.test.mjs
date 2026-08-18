@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-workers-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { openDb } from "./db.mjs";
 import { createRun } from "./lifecycle.mjs";
@@ -22,13 +22,7 @@ import {
 } from "./workers.mjs";
 
 const PV = "git:test-pv";
-const db = () =>
-  openDb(
-    path.join(
-      mkdtempSync(path.join(os.tmpdir(), "evrt-workers-")),
-      "runtime.db",
-    ),
-  );
+const db = () => openDb(path.join(tmpDir("evrt-workers-"), "runtime.db"));
 
 /** A QUEUED run, straight through the real lifecycle. */
 function queueRun(database, { runId, placement, adapter = "fake" }) {
@@ -242,7 +236,7 @@ describe("worker registry and heartbeats (OPS-233)", () => {
 
 describe("worker pool policy (WM-226)", () => {
   const configRoot = (yaml) => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-pool-cfg-"));
+    const root = tmpDir("evrt-pool-cfg-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     if (yaml !== null)
       writeFileSync(path.join(root, "config", "policy.yaml"), yaml, "utf8");

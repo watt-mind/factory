@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-artifacts-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -35,9 +37,15 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
+
 describe("artifact store and agent registry surfacing (OPS-212)", () => {
   test("GET /artifacts catalogues and filters metadata; POST /artifacts/prune dry-runs and applies", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-artifacts-api-"));
+    const home = tmpDir("evrt-artifacts-api-");
     const store = path.join(home, "artifacts");
     mkdirSync(store, { recursive: true });
     const reportHash = "a".repeat(64);
@@ -167,7 +175,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
   test("declared artifacts and the transcript survive the workspace and stream from the API", async () => {
     const { db, server, port } = await makeServer();
     const client = apiClient({ port });
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-home-"));
+    const home = tmpDir("evrt-home-");
     try {
       await client.replay(
         envelope({ eventId: "art-1", payload: { repos: ["with-artifact"] } }),
@@ -205,7 +213,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
   });
 
   test("GET /artifacts/:hash streams stored bytes; unknown and malformed hashes 404", async () => {
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-home-"));
+    const home = tmpDir("evrt-home-");
     const db = openDb(path.join(home, "runtime.db"));
     const server = startApi({
       db,

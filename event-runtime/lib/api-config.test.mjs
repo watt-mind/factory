@@ -1,10 +1,19 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-config-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { configView } from "./api-config.mjs";
-import { makeServer } from "./api-test-helpers.mjs";
+import { makeServer as makeApiServer } from "./api-test-helpers.mjs";
 import { reposView } from "./repos.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 function repo(name = "factory") {
   return {
@@ -28,7 +37,7 @@ function repo(name = "factory") {
 }
 
 function fixtureRoot() {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-config-view-"));
+  const root = tmpDir("evrt-config-view-");
   mkdirSync(path.join(root, "config"), { recursive: true });
   writeFileSync(
     path.join(root, "config", "policy.yaml"),

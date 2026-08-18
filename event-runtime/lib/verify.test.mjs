@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-verify-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { hashJson, sha256Hex } from "./canonical.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
@@ -41,7 +41,7 @@ function makeSpec(input = { repos: ["bj29"] }) {
 }
 
 function makeWorkspace(result) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-verify-"));
+  const dir = tmpDir("evrt-verify-");
   if (result !== undefined) {
     writeFileSync(
       path.join(dir, "result.json"),

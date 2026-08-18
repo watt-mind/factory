@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-status-cache-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -35,10 +37,16 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
+
 describe("status artifact store stats caching (OPS-456)", () => {
   test("GET /status caches storeStats across repeated calls within TTL", async () => {
     let nowMs = 1000000;
-    const home = mkdtempSync(path.join(os.tmpdir(), "evrt-status-cache-"));
+    const home = tmpDir("evrt-status-cache-");
     const s = await makeServer({
       env: { name: "test-env", home, adapter: null },
       now: () => nowMs,
@@ -79,7 +87,7 @@ describe("status artifact store stats caching (OPS-456)", () => {
   });
 
   test("statusView resolves artifacts root from env.home", async () => {
-    const customHome = mkdtempSync(path.join(os.tmpdir(), "evrt-custom-home-"));
+    const customHome = tmpDir("evrt-custom-home-");
     const storeDir = path.join(customHome, "artifacts");
     mkdirSync(storeDir, { recursive: true });
     const hash = "c".repeat(64);

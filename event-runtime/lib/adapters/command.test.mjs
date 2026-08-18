@@ -1,6 +1,6 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-command-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import os from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
 import { openDb } from "../db.mjs";
@@ -14,7 +14,7 @@ import { SANDBOX_CONSOLE_FILE } from "./sandboxed.mjs";
 
 const def = (command) => ({ ref: "test-cmd@1", command });
 const spec = (input) => ({ input });
-const ws = () => mkdtempSync(path.join(os.tmpdir(), "evrt-cmd-"));
+const ws = () => tmpDir("evrt-cmd-");
 const REAPER_SCRIPT = path.join(FACTORY_ROOT, "orchestrator", "reaper.mjs");
 
 describe("resolveTemplate", () => {
@@ -287,12 +287,7 @@ describe("command-adapter registry (OPS-404)", () => {
   });
 
   test("a reaper run planned from a clock tick resolves its argv and executes", async () => {
-    const db = openDb(
-      path.join(
-        mkdtempSync(path.join(os.tmpdir(), "evrt-reaper-")),
-        "runtime.db",
-      ),
-    );
+    const db = openDb(path.join(tmpDir("evrt-reaper-"), "runtime.db"));
     // Only the reaper schedule may tick here (WM-629). Spreading the shipped
     // schedules pulled in every enabled one — e.g. merge-factory — whose
     // repository-workspace agent makes planAdmittedEvents run pinRepo(), i.e.

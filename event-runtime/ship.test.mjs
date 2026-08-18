@@ -1,3 +1,4 @@
+import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-ship-test-mjs";
 /**
  * Ship chain (WM-111): ship-scan@1 assembles the release candidate — base
  * ahead of the deploy branch, real checks green on the head commit, changelog
@@ -13,11 +14,9 @@ import {
   chmodSync,
   cpSync,
   existsSync,
-  mkdtempSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as fake from "./lib/adapters/fake.mjs";
@@ -95,7 +94,7 @@ describe("ship-scan registration (WM-111)", () => {
  * to $SHIM_LOG.
  */
 async function runApply(plan, env = {}) {
-  const shims = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-shims-"));
+  const shims = tmpDir("evrt-ship-shims-");
   const log = path.join(shims, "shim.log");
   writeFileSync(
     path.join(shims, "gh"),
@@ -140,7 +139,7 @@ fi
       `console.log(JSON.stringify(outcome));\n`,
   );
 
-  const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-ws-"));
+  const workspaceDir = tmpDir("evrt-ship-ws-");
   const input = {
     repo: "bj29",
     github: "watt-mind/bj29",
@@ -330,7 +329,7 @@ describe("ship-apply is closed by construction (WM-111)", () => {
   // The endpoint runs as a child process: runApply's spawnSync blocks this
   // process's event loop, so an in-process Bun.serve could never answer.
   async function withSmokeServer(payload, fn) {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-smoke-"));
+    const dir = tmpDir("evrt-ship-smoke-");
     const script = path.join(dir, "server.mjs");
     writeFileSync(
       script,
@@ -482,7 +481,7 @@ function openShipApplyProposal(db) {
 describe("ship-apply approval is structurally human-only (WM-111)", () => {
   test("schedules.json declaring approval auto on the ship-apply event type cannot load", () => {
     // Copy the real registry into a temp root so the test can corrupt it safely.
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-registry-"));
+    const root = tmpDir("evrt-ship-registry-");
     for (const dir of ["agents", "schemas"]) {
       cpSync(path.join(RUNTIME_ROOT, dir), path.join(root, dir), {
         recursive: true,
@@ -513,7 +512,7 @@ describe("ship-apply approval is structurally human-only (WM-111)", () => {
   });
 
   test("a schedule-actor approval attempt is rejected fail-closed with a typed reason — then the human's still works", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-"));
+    const dir = tmpDir("evrt-ship-");
     const db = openDb(path.join(dir, "runtime.db"));
     const proposal = openShipApplyProposal(db);
 
@@ -658,9 +657,9 @@ const shipFake = {
 };
 
 function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-e2e-"));
+  const dir = tmpDir("evrt-ship-e2e-");
   const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-ship-e2e-ws-"));
+  const workspaces = tmpDir("evrt-ship-e2e-ws-");
   const adapters = { pi: shipFake, actions: shipFake, command: shipFake };
   const workerOpts = {
     workspacesRoot: workspaces,

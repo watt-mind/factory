@@ -94,6 +94,11 @@ jobs:
     runs-on: [self-hosted, shadow]
     timeout-minutes: 15
     steps:
+      - name: Sweep stale shared-host temp directories
+        shell: bash
+        run: |
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+
       - name: Checkout (no action download)
         shell: bash
         env:
@@ -149,6 +154,12 @@ jobs:
         # Explicit liveness bounds declared by individual tests still win.
         run: bun test --timeout 20000 --max-concurrency=4 event-runtime/lib
 
+      - name: Sweep stale shared-host temp directories
+        if: always()
+        shell: bash
+        run: |
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+
   verify:
     name: Full verification
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -164,6 +175,11 @@ jobs:
     # Runaway guard only — queue time is now spent in GitHub's queue, not here.
     timeout-minutes: 45
     steps:
+      - name: Sweep stale shared-host temp directories
+        shell: bash
+        run: |
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+
       # No `uses:` steps in this job on purpose (WM-573). Every marketplace
       # action is fetched from codeload.github.com at "Set up job", and the
       # shadow fleet (eight runners, one egress IP, no action archive cache)
@@ -373,6 +389,12 @@ jobs:
 
           bun event-runtime/demo/seed.mjs --port "$PORT" --prefix "ci-demo"
           bun event-runtime/demo/verify.mjs --port "$PORT"
+
+      - name: Sweep stale shared-host temp directories
+        if: always()
+        shell: bash
+        run: |
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
 
   required-verify:
     name: Verify

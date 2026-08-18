@@ -1,6 +1,6 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-slice2-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as actions from "./adapters/actions.mjs";
 import * as fake from "./adapters/fake.mjs";
@@ -37,9 +37,9 @@ function alertEnvelope(overrides = {}) {
 }
 
 function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-s2-"));
+  const dir = tmpDir("evrt-s2-");
   const db = openDb(path.join(dir, "runtime.db"));
-  const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-s2-ws-"));
+  const workspaces = tmpDir("evrt-s2-ws-");
   const adapters = { pi: fake, actions: fake };
   const workerOpts = {
     workspacesRoot: workspaces,
@@ -172,9 +172,9 @@ describe("actions adapter (OPS-208)", () => {
   }
 
   test("probes before/after, executes registered actions, artifact matches evidence", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-act-"));
+    const dir = tmpDir("evrt-act-");
     writeFileSync(path.join(dir, "blob"), Buffer.alloc(1000));
-    const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-act-ws-"));
+    const workspaceDir = tmpDir("evrt-act-ws-");
 
     const outcome = await actions.execute({
       spec: {
@@ -199,9 +199,9 @@ describe("actions adapter (OPS-208)", () => {
   });
 
   test("unregistered action ID refuses before executing anything", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-act-"));
+    const dir = tmpDir("evrt-act-");
     writeFileSync(path.join(dir, "blob"), Buffer.alloc(1000));
-    const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-act-ws-"));
+    const workspaceDir = tmpDir("evrt-act-ws-");
 
     const outcome = await actions.execute({
       spec: {
@@ -224,9 +224,9 @@ describe("actions adapter (OPS-208)", () => {
   });
 
   test("unknown host refuses before executing", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-act-"));
+    const dir = tmpDir("evrt-act-");
     writeFileSync(path.join(dir, "blob"), Buffer.alloc(1000));
-    const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "evrt-act-ws-"));
+    const workspaceDir = tmpDir("evrt-act-ws-");
     const outcome = await actions.execute({
       spec: {
         input: { host: "prod-db", mount: "/", actions: [{ action: "shrink" }] },

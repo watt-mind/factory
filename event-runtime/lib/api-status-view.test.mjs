@@ -1,3 +1,7 @@
+import {
+  tmpDir,
+  trackTmpDir,
+} from "../test-support/tmp.mjs?file=event-runtime-lib-api-status-view-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   GH_SECRET,
@@ -15,12 +19,10 @@ import {
   janitorArgv,
   loadRegistry,
   loadRepos,
-  makeServer,
+  makeServer as makeApiServer,
   mkdirSync,
-  mkdtempSync,
   observedModelFromTranscript,
   openDb,
-  os,
   path,
   planAdmittedEvents,
   readFileSync,
@@ -34,6 +36,12 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+
+const makeServer = async (...args) => {
+  const result = await makeApiServer(...args);
+  trackTmpDir(path.dirname(result.db.filename));
+  return result;
+};
 
 describe("StatusView and Worker client types pinned to API response (OPS-284)", () => {
   const typesPath = path.resolve(import.meta.dir, "../web/src/types.ts");
@@ -102,7 +110,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
   }
 
   test("GET /status keys and types strictly match StatusView and nested types", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-status-contract-"));
+    const dir = tmpDir("evrt-status-contract-");
     const db = openDb(path.join(dir, "runtime.db"));
     const nowMs = 100000000;
 
@@ -314,7 +322,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
   });
 
   test("GET /workers keys and types strictly match Worker verbatim", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-workers-contract-"));
+    const dir = tmpDir("evrt-workers-contract-");
     const db = openDb(path.join(dir, "runtime.db"));
     const nowMs = 100000000;
 
@@ -409,7 +417,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
   });
 
   test("noWorkers anomaly transitions to true when QUEUED runs exist and live worker count is 0", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-noworkers-contract-"));
+    const dir = tmpDir("evrt-noworkers-contract-");
     const db = openDb(path.join(dir, "runtime.db"));
     const nowMs = 100000000;
     const atIso = new Date(nowMs).toISOString();
@@ -463,9 +471,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
   });
 
   test("GET /status identifies queued runs whose placement matches no active, non-stale worker", async () => {
-    const dir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-unmatched-placement-contract-"),
-    );
+    const dir = tmpDir("evrt-unmatched-placement-contract-");
     const db = openDb(path.join(dir, "runtime.db"));
     const nowMs = 100000000;
     const atIso = new Date(nowMs).toISOString();

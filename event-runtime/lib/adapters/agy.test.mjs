@@ -1,14 +1,13 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-agy-test-mjs";
 import { describe, expect, test, afterAll, afterEach } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   PROMPT_SUFFIX,
@@ -439,7 +438,7 @@ describe("execute with fake binary", () => {
   }
 
   test("spawns agy, pipes transcript, records a trace of the real event shapes", async () => {
-    tmp = mkdtempSync(path.join(tmpdir(), "agy-test-"));
+    tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");
     mkdirSync(binDir, { recursive: true });
     writeFakeAgy(binDir, [
@@ -486,7 +485,7 @@ describe("execute with fake binary", () => {
   });
 
   test("a failed run still produces a trace carrying the error (WM-435)", async () => {
-    tmp = mkdtempSync(path.join(tmpdir(), "agy-test-"));
+    tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");
     mkdirSync(binDir, { recursive: true });
     // The exact shape of the 2026-08-16 agy-smoke failures: init, then a
@@ -524,7 +523,7 @@ describe("execute with fake binary", () => {
   });
 
   test("a throwing onTrace observer cannot strand execution (cf. WM-305)", async () => {
-    tmp = mkdtempSync(path.join(tmpdir(), "agy-test-"));
+    tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");
     mkdirSync(binDir, { recursive: true });
     writeFakeAgy(binDir, [

@@ -1,3 +1,4 @@
+import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-sandbox-invariants-test-mjs";
 /**
  * Real-VM invariant tests (WM-185).
  *
@@ -17,8 +18,7 @@
  * generous; warm boots measured 51-93ms on macOS arm64.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { KILL_GRACE_MS, preflight, runInSandbox } from "./gondolin.mjs";
 
@@ -29,7 +29,7 @@ if (!report.available) {
 }
 
 const VM_TIMEOUT_MS = 180_000;
-const workspace = () => mkdtempSync(path.join(os.tmpdir(), "evrt-sandbox-"));
+const workspace = () => tmpDir("evrt-sandbox-");
 
 describe("gondolin sandbox invariants", () => {
   itVM(

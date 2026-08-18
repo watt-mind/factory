@@ -1,14 +1,13 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-dispatch-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { writeWorkerLease } from "../../lib/worker-leases.mjs";
 import { openDb } from "./db.mjs";
@@ -40,14 +39,10 @@ const calls = () =>
   existsSync(callsLog) ? readFileSync(callsLog, "utf8").trim().split("\n") : [];
 
 beforeAll(() => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-factory-"));
+  const root = tmpDir("evrt-dispatch-factory-");
   fixtures.push(root);
-  repoDir = realpathSync(
-    mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-repo-")),
-  );
-  wtRoot = realpathSync(
-    mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-trees-")),
-  );
+  repoDir = realpathSync(tmpDir("evrt-dispatch-repo-"));
+  wtRoot = realpathSync(tmpDir("evrt-dispatch-trees-"));
   fixtures.push(repoDir, wtRoot);
   callsLog = path.join(repoDir, "calls.log");
 
@@ -104,9 +99,7 @@ beforeAll(() => {
   previousReposRoot = process.env.FACTORY_REPOS_ROOT;
   process.env.FACTORY_REPOS_ROOT = root;
   previousEventHome = process.env.FACTORY_EVENT_HOME;
-  process.env.FACTORY_EVENT_HOME = mkdtempSync(
-    path.join(os.tmpdir(), "evrt-dispatch-home-"),
-  );
+  process.env.FACTORY_EVENT_HOME = tmpDir("evrt-dispatch-home-");
   fixtures.push(process.env.FACTORY_EVENT_HOME);
 });
 
@@ -192,9 +185,7 @@ describe("dispatch planner refusals (WM-108, dispatch doc §§2–5)", () => {
   });
 
   test("the cap counts the dispatcher's own live lease ledger (shared budget, §3)", () => {
-    const leaseDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-dispatch-leases-"),
-    );
+    const leaseDir = tmpDir("evrt-dispatch-leases-");
     fixtures.push(leaseDir);
     writeWorkerLease({
       repo: "wt29",
@@ -471,13 +462,8 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
   };
 
   test("an approved dispatch run builds the worktree by delegation, completes, and tears it down", async () => {
-    const db = openDb(
-      path.join(
-        mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-db-")),
-        "runtime.db",
-      ),
-    );
-    const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-ws-"));
+    const db = openDb(path.join(tmpDir("evrt-dispatch-db-"), "runtime.db"));
+    const workspaces = tmpDir("evrt-dispatch-ws-");
     fixtures.push(path.dirname(db.filename ?? workspaces), workspaces);
 
     admitEvent(
@@ -539,7 +525,7 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
 
   test("execution rechecks stale security eligibility before worktree and adapter", async () => {
     const db = openDb(":memory:");
-    const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-ws-"));
+    const workspaces = tmpDir("evrt-dispatch-ws-");
     fixtures.push(workspaces);
     let labels = [{ name: "ai:agent-ready" }];
     let adapterCalls = 0;
@@ -591,7 +577,7 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
 
   test("a failing run without retain still tears the worktree down (down-on-failure)", async () => {
     const db = openDb(":memory:");
-    const workspaces = mkdtempSync(path.join(os.tmpdir(), "evrt-dispatch-ws-"));
+    const workspaces = tmpDir("evrt-dispatch-ws-");
     fixtures.push(workspaces);
 
     admitEvent(

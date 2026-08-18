@@ -1,3 +1,4 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -5,14 +6,12 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   buildClaudeArgv,
@@ -154,7 +153,7 @@ function linkEvent(
 }
 
 function freshRoot() {
-  return mkdtempSync(path.join(os.tmpdir(), "evrt-worker-"));
+  return tmpDir("evrt-worker-");
 }
 
 function opts(extra = {}) {
@@ -169,7 +168,7 @@ function opts(extra = {}) {
 
 describe("worker", () => {
   test("repository integrity gate rejects any checkout dirt before output acceptance", () => {
-    const repo = mkdtempSync(path.join(os.tmpdir(), "evrt-clean-repo-"));
+    const repo = tmpDir("evrt-clean-repo-");
     const git = (args) =>
       spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
     expect(git(["init", "--quiet"]).status).toBe(0);
@@ -197,7 +196,7 @@ describe("worker", () => {
   });
 
   test("repository integrity baseline permits pre-existing ignored state but detects later writes", () => {
-    const repo = mkdtempSync(path.join(os.tmpdir(), "evrt-baseline-repo-"));
+    const repo = tmpDir("evrt-baseline-repo-");
     const git = (args) =>
       spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
     expect(git(["init", "--quiet"]).status).toBe(0);
@@ -225,7 +224,7 @@ describe("worker", () => {
   });
 
   test("repository status returns null when git exceeds its timeout", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-hanging-git-"));
+    const dir = tmpDir("evrt-hanging-git-");
     const hangingGit = path.join(dir, "git");
     writeFileSync(hangingGit, "#!/bin/bash\nwhile :; do :; done\n", "utf8");
     execFileSync("chmod", ["+x", hangingGit]);
@@ -238,7 +237,7 @@ describe("worker", () => {
   });
 
   test("Linear helper subprocesses honor the configured timeout", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-hanging-linear-"));
+    const dir = tmpDir("evrt-hanging-linear-");
     const hangingCommand = path.join(dir, "bun");
     writeFileSync(hangingCommand, "#!/bin/bash\nwhile :; do :; done\n", "utf8");
     execFileSync("chmod", ["+x", hangingCommand]);
@@ -1454,7 +1453,7 @@ describe("worker", () => {
   });
 
   test("restart survival: results, receipt, and journal readable from a reopened file db", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-db-"));
+    const dir = tmpDir("evrt-db-");
     const file = path.join(dir, "runtime.db");
     const db = openDb(file);
     const spec = queueRun(db, makeSpec());
@@ -2573,11 +2572,9 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   let previousReposRoot;
 
   beforeAll(() => {
-    factoryRoot = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-worker-hard-factory-"),
-    );
-    repoDir = mkdtempSync(path.join(os.tmpdir(), "evrt-worker-hard-repo-"));
-    wtRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-worker-hard-trees-"));
+    factoryRoot = tmpDir("evrt-worker-hard-factory-");
+    repoDir = tmpDir("evrt-worker-hard-repo-");
+    wtRoot = tmpDir("evrt-worker-hard-trees-");
     callsLog = path.join(repoDir, "calls.log");
 
     mkdirSync(path.join(repoDir, "bin"), { recursive: true });
@@ -2829,7 +2826,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   };
 
   test("resolves Linear credentials from env first, then the shared env file", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-linear-key-"));
+    const dir = tmpDir("evrt-linear-key-");
     const envFile = path.join(dir, ".env");
     writeFileSync(envFile, "OTHER=value\nLINEAR_API_KEY='file-key'\n", "utf8");
 
@@ -2845,9 +2842,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const previousHome = process.env.FACTORY_EVENT_HOME;
     const previousKey = process.env.LINEAR_API_KEY;
     const previousStub = process.env.FACTORY_DISPATCH_STUB;
-    process.env.FACTORY_EVENT_HOME = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-linear-unconfigured-"),
-    );
+    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-linear-unconfigured-");
     delete process.env.LINEAR_API_KEY;
     delete process.env.FACTORY_DISPATCH_STUB;
 
@@ -2945,7 +2940,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   });
 
   test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-"));
+    const lockDir = tmpDir("evrt-lock-");
     const lockFile = dispatchLockPath("wt-worker", lockDir);
     expect(acquireClaimLock(lockFile, { pid: process.pid, now: 1000 })).toBe(
       true,
@@ -2963,7 +2958,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   });
 
   test("acquireClaimLock preserves old locks from live owners and reclaims dead owners", () => {
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-stale-"));
+    const lockDir = tmpDir("evrt-lock-stale-");
     const lockFile = dispatchLockPath("wt-worker", lockDir);
     // Age alone cannot make a live owner's lock safe to steal.
     writeFileSync(lockFile, `${process.pid} 1000\n`, "utf8");
@@ -2990,7 +2985,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("contended claim lock requeues with jittered backoff without consuming an attempt, then runs", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-busy-"));
+    const lockDir = tmpDir("evrt-lock-busy-");
     const lockFile = dispatchLockPath("wt-worker", lockDir);
     acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
 
@@ -3053,7 +3048,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("claim lock starvation refuses with a distinct reason after the requeue ceiling", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-starved-"));
+    const lockDir = tmpDir("evrt-lock-starved-");
     const lockFile = dispatchLockPath("wt-worker", lockDir);
     acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
 
@@ -3095,7 +3090,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("concurrent disjoint dispatches drain through the claim lock with mutually exclusive claims", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-burst-"));
+    const lockDir = tmpDir("evrt-lock-burst-");
     const specs = ["WM-710", "WM-711", "WM-712"].map((ticket, index) =>
       queueRun(
         db,
@@ -3182,7 +3177,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("merge-fix gate accepts an assigned In Review ticket without invoking the dispatch claim", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-merge-fix-gate-"));
+    const lockDir = tmpDir("evrt-merge-fix-gate-");
     const spec = queueRun(db, makeMergeFixSpec());
     let claimCalled = false;
 
@@ -3246,9 +3241,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         { "merge-fake": mergeFixFakeAdapter },
         opts({
           dispatch: {
-            locksDir: mkdtempSync(
-              path.join(os.tmpdir(), `evrt-merge-fix-${suffix}-`),
-            ),
+            locksDir: tmpDir(`evrt-merge-fix-${suffix}-`),
             fetchTicket: () => ({
               identifier: spec.input.ticket,
               state: { name: "In Review" },
@@ -3270,7 +3263,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-rechecks-"));
+    const lockDir = tmpDir("evrt-rechecks-");
 
     // 1. ticket_not_todo
     const spec1 = queueRun(
@@ -3397,7 +3390,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // every other test here, which is why they still see strict.
   test("advisory owned-paths mode dispatches across overlap and refuses only hard conflicts (WM-677)", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-advisory-"));
+    const lockDir = tmpDir("evrt-advisory-");
     const policyPath = path.join(factoryRoot, "config", "policy.yaml");
     const priorPolicy = readFileSync(policyPath, "utf8");
     writeFileSync(policyPath, "dispatch:\n  owned_paths_collision: advisory\n");
@@ -3494,12 +3487,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-claim-retry-locks-"),
-    );
-    const leaseDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-claim-retry-leases-"),
-    );
+    const lockDir = tmpDir("evrt-claim-retry-locks-");
+    const leaseDir = tmpDir("evrt-claim-retry-leases-");
     const spec = queueRun(
       db,
       makeDispatchSpec({
@@ -3627,9 +3616,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("claim-time Linear read failure contradicting plan evidence requeues with backoff", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-transient-linear-"),
-    );
+    const lockDir = tmpDir("evrt-transient-linear-");
     const description = "## Owned Paths\n- src/feature/**\n";
     const spec = queueRun(
       db,
@@ -3690,9 +3677,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("empty claim-time description retries only when its hash contradicts plan evidence, then explains recovery", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-transient-owned-paths-"),
-    );
+    const lockDir = tmpDir("evrt-transient-owned-paths-");
     const spec = queueRun(
       db,
       makeDispatchSpec({
@@ -3751,8 +3736,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("worker lease is acquired during execution and released on completion", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lease-locks-"));
-    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-lease-dir-"));
+    const lockDir = tmpDir("evrt-lease-locks-");
+    const leaseDir = tmpDir("evrt-lease-dir-");
 
     let sawActiveLease = false;
     const leaseCheckAdapter = {
@@ -3796,8 +3781,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("mutating worktree is exempt from read-only clean check and runs repo verify command", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-verify-locks-"));
-    const leaseDir = mkdtempSync(path.join(os.tmpdir(), "evrt-verify-leases-"));
+    const lockDir = tmpDir("evrt-verify-locks-");
+    const leaseDir = tmpDir("evrt-verify-leases-");
 
     const spec = queueRun(
       db,
@@ -3833,10 +3818,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // Todo + ai:agent-ready and the PR is held; still FAILED, still no result row.
   test("failing repo verify command at handoff fails handoff_verification_failed", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-fverify-locks-"));
-    const leaseDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-fverify-leases-"),
-    );
+    const lockDir = tmpDir("evrt-fverify-locks-");
+    const leaseDir = tmpDir("evrt-fverify-leases-");
 
     const spec = queueRun(
       db,
@@ -3868,10 +3851,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("a deliberately red baseline still reaches the agent with failure context, then terminates baseline_red", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-baseline-locks-"));
-    const leaseDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-baseline-leases-"),
-    );
+    const lockDir = tmpDir("evrt-baseline-locks-");
+    const leaseDir = tmpDir("evrt-baseline-leases-");
     let executionInput = null;
     const unclaimCalls = [];
     const blockCalls = [];
@@ -3943,7 +3924,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       const ticket = `WM-${732000000 + Math.floor(Math.random() * 1_000_000)}`;
       const apiPort = "7408";
       const apiPortNumber = Number(apiPort);
-      const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "wm334-real-"));
+      const tmpRoot = tmpDir("wm334-real-");
       const stubDir = path.join(tmpRoot, "stub");
       const linearStateDir = path.join(tmpRoot, "linear-state");
       const worktreeRoot = path.join(tmpRoot, "worktrees");
@@ -4189,12 +4170,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         process.env.FACTORY_TEST_TRACKED_PROCESS = testProcessMarker;
 
         const db = openDb(":memory:");
-        const lockDir = mkdtempSync(
-          path.join(os.tmpdir(), "wm334-real-locks-"),
-        );
-        const leaseDir = mkdtempSync(
-          path.join(os.tmpdir(), "wm334-real-leases-"),
-        );
+        const lockDir = tmpDir("wm334-real-locks-");
+        const leaseDir = tmpDir("wm334-real-leases-");
         const executionInputs = [];
         const blockCalls = [];
         const observedAdapter = {
@@ -4274,9 +4251,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
               registry,
               { fake: observedAdapter },
               opts({
-                workspacesRoot: mkdtempSync(
-                  path.join(os.tmpdir(), `${repoName}-run-`),
-                ),
+                workspacesRoot: tmpDir(`${repoName}-run-`),
                 dispatch: {
                   locksDir: lockDir,
                   leasesDir: leaseDir,
@@ -4376,9 +4351,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("worktree provisioning failure is not misclassified as adapter_error and never reaches execution", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-provision-locks-"),
-    );
+    const lockDir = tmpDir("evrt-provision-locks-");
     let executed = false;
     const observingAdapter = {
       async execute() {
@@ -4419,9 +4392,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("sandboxed execution against a worktree workspace is refused typed before the adapter runs", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-sandbox-wt-locks-"),
-    );
+    const lockDir = tmpDir("evrt-sandbox-wt-locks-");
     let executed = false;
     const observingAdapter = {
       async execute() {
@@ -4475,9 +4446,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("filesystem failures after worktree_up remain typed workspace provisioning errors", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-link-collision-locks-"),
-    );
+    const lockDir = tmpDir("evrt-link-collision-locks-");
     let executed = false;
     const observingAdapter = {
       async execute() {
@@ -4523,7 +4492,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("worktree_up daemon startup failure surfaces serve.log in provisioning error message", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-crash-locks-"));
+    const lockDir = tmpDir("evrt-crash-locks-");
     const observingAdapter = {
       async execute() {
         return { exitCode: 0, timedOut: false };
@@ -4563,10 +4532,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test("rollback Linear ticket state to Todo on crash, timeout, and contract violation", async () => {
     const db = openDb(":memory:");
-    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-rollback-locks-"));
-    const leaseDir = mkdtempSync(
-      path.join(os.tmpdir(), "evrt-rollback-leases-"),
-    );
+    const lockDir = tmpDir("evrt-rollback-locks-");
+    const leaseDir = tmpDir("evrt-rollback-leases-");
 
     const rollbacks = [];
     const mockUnclaim = ({ repo, ticket, why }) => {
@@ -4643,7 +4610,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 // ---------------------------------------------------------------------------
 
 function stampRepo() {
-  const root = mkdtempSync(path.join(os.tmpdir(), "evrt-stamp-"));
+  const root = tmpDir("evrt-stamp-");
   mkdirSync(path.join(root, "event-runtime", "lib", "adapters"), {
     recursive: true,
   });
