@@ -82,9 +82,7 @@ function SettingsRow({
           {value}
         </pre>
         {entry.note && (
-          <div className="mt-1 text-xs text-(--text-faint)">
-            {entry.note}
-          </div>
+          <div className="mt-1 text-xs text-(--text-faint)">{entry.note}</div>
         )}
       </div>
       <div className="flex items-start gap-1.5 md:justify-end">

@@ -397,7 +397,7 @@ export function Chains({
                     {chain.origin.type}
                   </div>
                   <div
-                    className="mono truncate text-[10px] text-(--text-faint)"
+                    className="mono truncate text-xs text-(--text-faint)"
                     title={chain.origin.source}
                   >
                     {chain.origin.source}

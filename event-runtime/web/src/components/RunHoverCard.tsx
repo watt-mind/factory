@@ -164,7 +164,7 @@ export function RunHoverCard({
               >
                 {shortId(run.runId)}
               </div>
-              <div className="mt-0.5 truncate text-[10px] text-(--text-faint)">
+              <div className="mt-0.5 truncate text-xs text-(--text-faint)">
                 <span className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-(--text-dim)">
                   {run.agent}
                 </span>{" "}

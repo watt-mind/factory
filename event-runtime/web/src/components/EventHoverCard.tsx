@@ -146,7 +146,7 @@ export function CausationGlyphs({
     </>
   );
   const className =
-    "inline-flex shrink-0 items-center gap-1 text-[10px] text-(--text-faint)";
+    "inline-flex shrink-0 items-center gap-1 text-xs text-(--text-faint)";
 
   if (!href) {
     return (
@@ -304,7 +304,7 @@ export function EventHoverCard({
               >
                 {event.type}
               </div>
-              <div className="mono mt-0.5 truncate text-[10px] text-(--text-faint)">
+              <div className="mono mt-0.5 truncate text-xs text-(--text-faint)">
                 {event.source} · {event.eventId}
               </div>
             </div>
@@ -363,7 +363,7 @@ export function EventHoverCard({
 
             {summary.entries.length > 0 && (
               <div className="mt-2 border-t border-(--border) pt-2">
-                <div className="mb-1 text-[10px] uppercase tracking-wide text-(--text-faint)">
+                <div className="mb-1 text-xs uppercase tracking-wide text-(--text-faint)">
                   Payload
                 </div>
                 <div className="space-y-1">
@@ -378,7 +378,7 @@ export function EventHoverCard({
                     </div>
                   ))}
                   {hidden > 0 && (
-                    <div className="text-[10px] text-(--text-faint)">
+                    <div className="text-xs text-(--text-faint)">
                       +{hidden} more
                     </div>
                   )}

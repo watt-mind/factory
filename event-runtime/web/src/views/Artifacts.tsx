@@ -557,7 +557,6 @@ export function Artifacts({
         >
           <thead role="rowgroup">
             <tr role="row" className="text-left">
-
               {columns.map((column) => {
                 const sort = ARTIFACTS_DISPLAY.sorts.find(
                   (field) => field.column === column.key,
