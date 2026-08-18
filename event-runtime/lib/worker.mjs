@@ -1956,6 +1956,8 @@ export async function executeClaimed(
       workspace: spec.workspace,
       artifactStore,
       adapter: adapterKey,
+      ticketLeaseOwner,
+      workerLeasesDir: leasesDir,
     });
     workspaceDir = created.dir;
     checkoutPath = created.checkout?.path ?? null;

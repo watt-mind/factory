@@ -3514,6 +3514,12 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       retryExecution = runOnce(db, registry, { fake: retryAdapter }, o);
       await secondStarted;
       expect(claimCalls).toBe(1);
+      expect(
+        readFileSync(callsLog, "utf8")
+          .trim()
+          .split("\n")
+          .filter((call) => call === "up WM-621"),
+      ).toHaveLength(2);
       expect(lifecycleOf(db, spec.runId)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ to_state: "RUNNING", attempt: 2 }),

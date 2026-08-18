@@ -50,7 +50,7 @@ describe("safeJoin", () => {
   });
 });
 
-test("detectWorktreeOwnershipConflict excludes self but reports competing runs and leases", () => {
+test("detectWorktreeOwnershipConflict identifies the current run's compound lease", () => {
   const root = tmpRoot();
   const databasePath = path.join(root, "runtime.db");
   const db = new Database(databasePath);
@@ -65,11 +65,10 @@ test("detectWorktreeOwnershipConflict excludes self but reports competing runs a
     spec,
   );
   db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run(
-    "run_other",
-    "VERIFYING",
+    "run_done",
+    "COMPLETED",
     spec,
   );
-  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run("run_done", "FAILED", spec);
   db.query(`INSERT INTO attempts VALUES (?, ?, ?)`).run(
     "run_self",
     1,
@@ -77,43 +76,74 @@ test("detectWorktreeOwnershipConflict excludes self but reports competing runs a
   );
   db.close();
 
-  const conflict = detectWorktreeOwnershipConflict({
+  const ownLease = {
     repo: "factory",
     ticket: "WM-627",
-    runId: "run_self",
-    attempt: 1,
-    databasePath,
-    leases: [
-      {
-        repo: "factory",
-        ticket: "WM-627",
-        owner: "worker_self",
-        pid: process.pid,
-      },
-      { repo: "factory", ticket: "WM-627", owner: "worker_other", pid: 42 },
-    ],
-  });
-  expect(conflict).toMatchObject({
-    runs: [{ runId: "run_other", state: "VERIFYING" }],
-    leases: [{ owner: "worker_other", pid: 42 }],
-  });
+    owner: "worker_self:run_self:7",
+    pid: process.pid,
+  };
   expect(
     detectWorktreeOwnershipConflict({
       repo: "factory",
       ticket: "WM-627",
       runId: "run_self",
-      attempt: 1,
+      leaseOwner: ownLease.owner,
       databasePath,
-      leases: [
-        {
-          repo: "factory",
-          ticket: "WM-627",
-          owner: "worker_self",
-          pid: process.pid,
-        },
-      ],
-    })?.runs,
-  ).toEqual([{ runId: "run_other", state: "VERIFYING" }]);
+      leases: [ownLease],
+    }),
+  ).toBeNull();
+
+  // The base attempts owner remains supported, but the encoded run id must
+  // match. A later run on the same worker is competing ownership.
+  expect(
+    detectWorktreeOwnershipConflict({
+      repo: "factory",
+      ticket: "WM-627",
+      runId: "run_self",
+      leaseOwner: "worker_self",
+      databasePath,
+      leases: [ownLease],
+    }),
+  ).toBeNull();
+  expect(
+    detectWorktreeOwnershipConflict({
+      repo: "factory",
+      ticket: "WM-627",
+      runId: "run_self",
+      leaseOwner: "worker_self",
+      databasePath,
+      leases: [{ ...ownLease, owner: "worker_self:run_other:8" }],
+    })?.leases,
+  ).toEqual([{ owner: "worker_self:run_other:8", pid: process.pid }]);
+
+  expect(
+    detectWorktreeOwnershipConflict({
+      repo: "factory",
+      ticket: "WM-627",
+      runId: "run_self",
+      leaseOwner: ownLease.owner,
+      databasePath,
+      leases: [{ ...ownLease, pid: process.pid + 1 }],
+    })?.leases,
+  ).toEqual([{ owner: ownLease.owner, pid: process.pid + 1 }]);
+
+  const competingDb = new Database(databasePath);
+  competingDb
+    .query(`INSERT INTO runs VALUES (?, ?, ?)`)
+    .run("run_other", "FAILED", spec);
+  competingDb.close();
+  const conflict = detectWorktreeOwnershipConflict({
+    repo: "factory",
+    ticket: "WM-627",
+    runId: "run_self",
+    leaseOwner: ownLease.owner,
+    databasePath,
+    leases: [ownLease],
+  });
+  expect(conflict).toMatchObject({
+    runs: [{ runId: "run_other", state: "FAILED" }],
+    leases: [],
+  });
 });
 
 describe("createWorkspace / destroyWorkspace", () => {

@@ -23,6 +23,7 @@ import { leaseDir, liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { canonicalJson } from "./canonical.mjs";
 import { materializeArtifact } from "./artifacts.mjs";
 import { artifactsRoot, dbPath, FACTORY_ROOT } from "./config.mjs";
+import { TERMINAL_STATES } from "./lifecycle.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 import { findPriorResumeContext } from "./transcripts.mjs";
@@ -138,15 +139,6 @@ export function resolveInputRef(input, expr) {
  * worker that dies and restarts must still know what to tear down.
  */
 const WORKTREE_MARKER = ".worktree.json";
-const ACTIVE_RUN_STATES = new Set([
-  "PROPOSED",
-  "APPROVED",
-  "QUEUED",
-  "LEASED",
-  "RUNNING",
-  "VERIFYING",
-]);
-
 /**
  * Return competing runtime ownership for a ticket, excluding the run currently
  * provisioning its own workspace. The shared worker lease is the fast local
@@ -157,26 +149,20 @@ export function detectWorktreeOwnershipConflict({
   repo,
   ticket,
   runId,
-  attempt,
+  leaseOwner = null,
   databasePath = dbPath(),
-  leases = liveWorkerLeases(repo),
+  leasesDir,
+  leases = liveWorkerLeases(repo, { dir: leasesDir }),
 } = {}) {
-  let currentLeaseOwner = null;
   const runs = [];
   if (existsSync(databasePath)) {
     let db;
     try {
       db = new Database(databasePath, { readonly: true });
-      currentLeaseOwner =
-        db
-          .query(
-            `SELECT lease_owner FROM attempts WHERE run_id = ? AND attempt = ?`,
-          )
-          .get(runId, attempt)?.lease_owner ?? null;
       for (const row of db
         .query(`SELECT run_id, state, spec_json FROM runs`)
         .all()) {
-        if (row.run_id === runId || !ACTIVE_RUN_STATES.has(row.state)) continue;
+        if (row.run_id === runId || TERMINAL_STATES.has(row.state)) continue;
         let input;
         try {
           input = JSON.parse(row.spec_json)?.input;
@@ -200,11 +186,24 @@ export function detectWorktreeOwnershipConflict({
 
   const competingLeases = leases
     .filter((lease) => lease?.repo === repo && lease?.ticket === ticket)
-    .filter((lease) =>
-      currentLeaseOwner
-        ? lease.owner !== currentLeaseOwner
-        : lease.pid !== process.pid,
-    )
+    .filter((lease) => {
+      // A lease identity is only local to this worker process. Even an exact
+      // owner match from another pid is competing ownership, while pid alone
+      // remains the compatibility fallback when no explicit owner is known.
+      if (lease.pid !== process.pid) return true;
+      if (!leaseOwner) return false;
+      if (lease.owner === leaseOwner) return false;
+
+      // Legacy callers may provide the base attempts.lease_owner while the
+      // durable lease stores owner:runId:fencingToken. Match both the base and
+      // run identity so a newer attempt on the same worker still conflicts.
+      const prefix = `${leaseOwner}:`;
+      if (typeof lease.owner !== "string" || !lease.owner.startsWith(prefix))
+        return true;
+      const identity = lease.owner.slice(prefix.length);
+      const tokenSeparator = identity.lastIndexOf(":");
+      return tokenSeparator <= 0 || identity.slice(0, tokenSeparator) !== runId;
+    })
     .map((lease) => ({ owner: lease.owner, pid: lease.pid }));
   if (runs.length === 0 && competingLeases.length === 0) return null;
   return {
@@ -274,6 +273,8 @@ function materializeWorktree({
   timeoutMs,
   runId,
   attempt,
+  ticketLeaseOwner,
+  workerLeasesDir,
   ownershipConflict,
   preservationComment,
 }) {
@@ -297,6 +298,8 @@ function materializeWorktree({
       ticket,
       runId,
       attempt,
+      leaseOwner: ticketLeaseOwner,
+      leasesDir: workerLeasesDir,
     });
     if (conflict) {
       throw new WorktreeError(
@@ -469,6 +472,8 @@ export function createWorkspace({
   artifactStore = artifactsRoot(),
   worktreeTimeoutMs = worktreeScriptTimeoutMs(),
   adapter = null,
+  ticketLeaseOwner = null,
+  workerLeasesDir,
   worktreeOwnershipConflict = detectWorktreeOwnershipConflict,
   worktreePreservationComment = commentOnPreservedWorktree,
 }) {
@@ -529,6 +534,8 @@ export function createWorkspace({
         timeoutMs: worktreeTimeoutMs,
         runId,
         attempt,
+        ticketLeaseOwner,
+        workerLeasesDir,
         ownershipConflict: worktreeOwnershipConflict,
         preservationComment: worktreePreservationComment,
       });
