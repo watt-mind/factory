@@ -22,6 +22,7 @@ import {
 } from "../displayOptions";
 import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
+import { TicketText } from "../components/TicketHoverCard";
 import { setContextActions } from "../palette";
 import type { RunListItem, Worker, WorkerCapacity } from "../types";
 import type { OperatorContext } from "../context";
@@ -986,7 +987,9 @@ export function Workers({
                       }
                     >
                       {w.activeTarget !== EMPTY ? (
-                        <span>{w.activeTarget}</span>
+                        <span>
+                          <TicketText text={w.activeTarget} />
+                        </span>
                       ) : (
                         <span className="text-(--text-faint)">{EMPTY}</span>
                       )}
@@ -1222,7 +1225,7 @@ export function Workers({
                 />
               )}
               {sel.activeTarget !== EMPTY && (
-                <KV k="target" v={sel.activeTarget} />
+                <KV k="target" v={<TicketText text={sel.activeTarget} />} />
               )}
               {sel.runItem && (
                 <KV

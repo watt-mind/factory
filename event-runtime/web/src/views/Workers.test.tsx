@@ -1,5 +1,5 @@
 import "../test-dom";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   act,
   cleanup,
@@ -60,12 +60,13 @@ function renderWithClient(ui: React.ReactElement) {
 
 const noop = () => {};
 
-function renderWorkers() {
+function renderWorkers(props: Partial<Parameters<typeof Workers>[0]> = {}) {
   return renderWithClient(
     <Workers
       context={{ kind: "all" }}
       focusWorkerId={null}
       onSelectWorker={noop}
+      {...props}
     />,
   );
 }
@@ -655,7 +656,7 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
     const workerIdle: Worker = stubWorker("w_idle_free", "idle");
 
     await withRunsAndWorkers([workerBusy, workerIdle], [stubRun], async () => {
-      const { getByText, getByRole, getAllByText } = renderWorkers();
+      const { getByText, getByRole, getAllByText, container } = renderWorkers();
 
       await waitFor(() => {
         expect(getByText("w_busy_active")).toBeTruthy();
@@ -668,7 +669,10 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
 
       // Verify busy worker displays agent once, plus target and active model.
       expect(getAllByText("dispatch@1")).toHaveLength(1);
-      expect(getByText("factory · WM-253")).toBeTruthy();
+      expect(container.textContent).toContain("factory · WM-253");
+      expect(getByRole("link", { name: "WM-253" }).getAttribute("href")).toBe(
+        "#/tickets/WM-253",
+      );
       expect(getByText("openai-codex/gpt-5.6-sol")).toBeTruthy();
 
       // Verify idle worker displays dashes for active columns
@@ -763,7 +767,7 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
     };
 
     await withRunsAndWorkers([workerBusy], [stubRun], async () => {
-      const { findByText, getAllByText } = renderWithClient(
+      const view = renderWithClient(
         <Workers
           context={{ kind: "all" }}
           focusWorkerId="w_busy_active"
@@ -771,12 +775,36 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
         />,
       );
 
-      await findByText("Active Run");
-      expect(getAllByText("dispatch@1").length).toBeGreaterThanOrEqual(2);
-      expect(getAllByText("factory · WM-253").length).toBeGreaterThanOrEqual(1);
+      await view.findByText("Active Run");
+      expect(view.getAllByText("dispatch@1").length).toBeGreaterThanOrEqual(2);
+      expect(view.container.textContent).toContain("factory · WM-253");
+      const ticketLinks = await waitFor(() => {
+        const links = view.getAllByRole("link", { name: "WM-253" });
+        if (links.length === 0) throw new Error("no WM-253 links yet");
+        return links;
+      });
+      for (const link of ticketLinks) {
+        expect(link.getAttribute("href")).toBe("#/tickets/WM-253");
+      }
       expect(
-        getAllByText("openai-codex/gpt-5.6-sol").length,
+        view.getAllByText("openai-codex/gpt-5.6-sol").length,
       ).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  test("a Target ticket id links to the ticket journey and does not select the row", async () => {
+    const workerBusy: Worker = {
+      ...stubWorker("w_busy_active", "busy"),
+      currentRun: "run_active_463",
+    };
+    const onSelectWorker = mock(() => {});
+
+    await withRunsAndWorkers([workerBusy], [stubRun], async () => {
+      const { findByRole } = renderWorkers({ onSelectWorker });
+      const link = await findByRole("link", { name: "WM-253" });
+      expect(link.getAttribute("href")).toBe("#/tickets/WM-253");
+      fireEvent.click(link);
+      expect(onSelectWorker).not.toHaveBeenCalled();
     });
   });
 });
