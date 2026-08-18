@@ -102,7 +102,8 @@ export function ticketTeamsFrom(
 /**
  * `\b(?:CLNT|OPS|WM)-\d{1,6}\b` for the configured teams. Longest key first so
  * a shorter prefix cannot win a partial match, and global so one pattern can
- * walk a whole string.
+ * walk a whole string. Matching is case-insensitive because ticket ids are
+ * canonicalised only after a free-text match is found.
  */
 export function buildTicketPattern(teams: readonly string[]): RegExp {
   const keys = [
@@ -115,7 +116,7 @@ export function buildTicketPattern(teams: readonly string[]): RegExp {
   const body = keys.length
     ? `\\b(?:${keys.join("|")})-\\d{1,${TICKET_REF_MAX_DIGITS}}\\b`
     : NEVER_MATCHES;
-  return new RegExp(body, "g");
+  return new RegExp(body, "gi");
 }
 
 /**
@@ -154,7 +155,10 @@ export function splitTicketRefs(
   text: string,
   pattern: RegExp,
 ): TicketSegment[] {
-  const scanner = new RegExp(pattern.source, "g");
+  const scanner = new RegExp(
+    pattern.source,
+    pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`,
+  );
   const segments: TicketSegment[] = [];
   let cursor = 0;
   for (

@@ -181,21 +181,21 @@ describe("CustomCell", () => {
     });
   });
 
-  test("free-text cells linkify embedded ids and leave the rest of the text intact", async () => {
+  test("free-text cells linkify lowercase ids and leave the rest of the text intact", async () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
         <CustomCell
-          row={{ summary: "merged WM-642 after a UTF-8 fix" }}
+          row={{ summary: "merged wm-642 after a UTF-8 fix" }}
           path="summary"
         />,
       );
       await waitFor(() =>
         expect(
-          r.getByRole("link", { name: "WM-642" }).getAttribute("href"),
+          r.getByRole("link", { name: "wm-642" }).getAttribute("href"),
         ).toBe("#/tickets/WM-642"),
       );
       expect(r.container.textContent).toContain(
-        "merged WM-642 after a UTF-8 fix",
+        "merged wm-642 after a UTF-8 fix",
       );
       expect(r.queryByRole("link", { name: /UTF-8/ })).toBeNull();
     });

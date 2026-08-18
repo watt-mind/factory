@@ -155,6 +155,15 @@ describe("splitTicketRefs", () => {
     ]);
   });
 
+  test("preserves lowercase display text while canonicalising the ticket id", () => {
+    expect(splitTicketRefs("fixes wm-701", buildTicketPattern(["WM"]))).toEqual(
+      [
+        { text: "fixes ", ticket: null },
+        { text: "wm-701", ticket: "WM-701" },
+      ],
+    );
+  });
+
   test("text with no ticket stays one plain segment", () => {
     expect(
       splitTicketRefs("UTF-8 payload", buildTicketPattern(["WM"])),
