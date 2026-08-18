@@ -433,6 +433,15 @@ export function HoverCard({
         e.stopPropagation();
         return;
       }
+      // Single-character keys (j/k/o, view verbs like a, Space) bind on
+      // window via useListKeys. Stop them here so they do not fire under an
+      // open card. Do not preventDefault: Space still activates the focused
+      // control, and arrows stay scrollable. Tab, Escape, and Enter are not
+      // length 1 — Tab is handled below, Escape by the window capture listener.
+      if (e.key.length === 1) {
+        e.stopPropagation();
+        return;
+      }
       if (e.key !== "Tab") return;
       const root = panelRef.current;
       if (!root) return;
