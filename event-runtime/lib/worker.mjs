@@ -1214,7 +1214,13 @@ export async function executeClaimed(db, registry, adapters, claim, {
         return { runId, attempt, terminalState: "REFUSED", reasonCode, receipt: res?.receipt };
       };
 
-      const gate = def?.gate ?? "dispatch";
+      // WM-469 de-hardcoded the merge-fix role from the kernel: the definition
+      // declares `dispatchGateExempt: true` (validated by the registry) instead
+      // of a `gate: "merge-fix"` literal the worker string-matched. Keep the
+      // planner and worker keyed off the SAME declarative field — a legacy
+      // `gate` value is still honoured so an older pinned spec cannot silently
+      // fall through to the dispatch claim gate and refuse with ticket_assigned.
+      const gate = def?.dispatchGateExempt === true ? "merge-fix" : (def?.gate ?? "dispatch");
       if (!["dispatch", "merge-fix"].includes(gate)) {
         releaseClaimLock(lockFile);
         const reasonCode = "worktree_gate_unknown";
