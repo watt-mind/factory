@@ -197,6 +197,17 @@ evidence required above.
   "round": 1, "mechanical": true, "withinOwnedPaths": true, "ownedPaths": ["event-runtime/lib/worker.mjs"] }
 ```
 
+`fix.ownedPaths` is the **ticket's Owned Paths list, verbatim** (or a subset of
+it) — never the list of files the PR touched. The planner refuses a fix whose
+`ownedPaths` contains anything outside the ticket's Owned Paths
+(`merge_fix_owned_paths_moved`), so listing PR-touched files parks the fix. If
+the PR itself changed files outside its ticket's Owned Paths, that is a review
+finding for `fix` (deviation) with `ownedPaths` still equal to the ticket's
+list, or an `escalate` item — not a wider `ownedPaths`. Emit **one** `fix`
+item per PR per scan (merge the findings into one `finding` string, keep the
+most severe first); several fix items for the same PR only race each other
+(`merge_fix_run_active`).
+
 `escalate` item — exactly `pr`, `headSha`, `ticket`, `reason` (no `title`/`headRefName`/`headRef`):
 <!-- prettier-ignore -->
 ```json
