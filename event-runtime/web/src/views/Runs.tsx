@@ -179,9 +179,7 @@ const rowModel = (r: RunListItem) => pinnedModelText(r.adapter, r.model);
 const remainingDeadline = (r: RunListItem): string => {
   if (r.deadlineAt) return r.deadlineAt;
   if (!r.startedAt || !r.timeoutSeconds || r.timeoutSeconds <= 0) return "";
-  const deadline = new Date(
-    Date.parse(r.startedAt) + r.timeoutSeconds * 1000,
-  );
+  const deadline = new Date(Date.parse(r.startedAt) + r.timeoutSeconds * 1000);
   return Number.isNaN(deadline.getTime()) ? "" : deadline.toISOString();
 };
 
