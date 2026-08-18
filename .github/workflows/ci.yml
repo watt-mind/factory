@@ -134,12 +134,15 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     needs: [shadow-runner-health, fast-unit-tests]
     # Self-hosted per project-conventions PC-03 / PC-22 — cloud runners are
-    # forbidden, and shadow is the dedicated host runner label.
-    runs-on: [self-hosted, shadow]
-    # Includes time queued on the host-local flock. This is a runaway guard,
-    # not a performance budget: serialized PR runs must be allowed to wait for
-    # the shared host without turning healthy tests red (WM-300, WM-600).
-    timeout-minutes: 90
+    # forbidden. `verify-lane` is carried by a small, fixed number of shadow
+    # runner services (WM-773): GitHub queues these jobs FIFO for a free lane
+    # runner instead of parking every shadow runner in a host flock, so the
+    # rest of the fleet stays free for lint, security and other repos. Lanes
+    # = number of runners with the label; change capacity by relabelling
+    # runners, not by editing this file.
+    runs-on: [self-hosted, verify-lane]
+    # Runaway guard only — queue time is now spent in GitHub's queue, not here.
+    timeout-minutes: 45
     steps:
       # No `uses:` steps in this job on purpose (WM-573). Every marketplace
       # action is fetched from codeload.github.com at "Set up job", and the
@@ -181,42 +184,6 @@ jobs:
           else
             bun --version
           fi
-
-      - name: Acquire host verify lock
-        id: verify-lock
-        shell: bash
-        run: |
-          set -euo pipefail
-          lock="/tmp/factory-verify-host.lock"
-          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-verify-lock.XXXXXX")"
-          ready="$state_dir/ready"
-          mkfifo "$ready"
-
-          # --no-fork keeps one PID from the queued flock through the guardian
-          # tail, so cancellation can terminate the actual lock waiter at once.
-          flock --no-fork "$lock" bash -c '
-            printf "acquired\n" > "$1"
-            exec tail -f /dev/null >/dev/null 2>&1
-          ' _ "$ready" &
-          guardian=$!
-
-          # A pull_request synchronize event can cancel this job while it is
-          # blocked on flock. --no-fork makes guardian the waiter itself, so the
-          # shell's EXIT trap releases the lock without process-tree cleanup.
-          cleanup_waiter() {
-            kill "$guardian" 2>/dev/null || true
-            rm -rf "$state_dir"
-          }
-          trap cleanup_waiter EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          read -r _ < "$ready"
-          trap - EXIT INT TERM
-          rm -f "$ready"
-
-          echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
-          echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
-          echo "Acquired the shared-host Verify lock on $RUNNER_NAME (guardian $guardian)."
 
       - name: Install root dependencies
         run: bun install --frozen-lockfile
@@ -333,16 +300,6 @@ jobs:
 
           bun event-runtime/demo/seed.mjs --port "$PORT" --prefix "ci-demo"
           bun event-runtime/demo/verify.mjs --port "$PORT"
-
-      - name: Release host verify lock
-        if: always() && steps.verify-lock.outputs.guardian != ''
-        shell: bash
-        env:
-          GUARDIAN_PID: ${{ steps.verify-lock.outputs.guardian }}
-          LOCK_STATE_DIR: ${{ steps.verify-lock.outputs.state_dir }}
-        run: |
-          kill "$GUARDIAN_PID" 2>/dev/null || true
-          rm -rf "$LOCK_STATE_DIR"
 
   required-verify:
     name: Verify

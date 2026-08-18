@@ -31,7 +31,8 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'run-e2e')
         )
       }}
-    runs-on: [self-hosted, shadow]
+    # Same dedicated lane as CI's Verify (WM-773): queue in GitHub, not flock.
+    runs-on: [self-hosted, verify-lane]
     timeout-minutes: 45
     steps:
       - name: Checkout (no action download)
@@ -63,41 +64,6 @@ jobs:
           else
             bun --version
           fi
-
-      - name: Acquire host verify lock
-        id: e2e-lock
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The shadow runners share one host with CI's unit/integration jobs.
-          # Reuse their lock: a second lock lane would allow CPU-heavy suites
-          # to overlap on the same machine and recreate the flake this protects.
-          lock="/tmp/factory-verify-host.lock"
-          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-e2e-lock.XXXXXX")"
-          ready="$state_dir/ready"
-          mkfifo "$ready"
-          # --no-fork preserves one PID while flock waits and after it execs the
-          # guardian, so killing that PID cannot leave a child waiter behind.
-          flock --no-fork "$lock" bash -c '
-            printf "acquired\n" > "$1"
-            exec tail -f /dev/null >/dev/null 2>&1
-          ' _ "$ready" &
-          guardian=$!
-
-          # Cancelled PR runs must not leave a queued flock waiter behind until
-          # runner cleanup. The EXIT trap owns the waiter until lock handoff.
-          cleanup_waiter() {
-            kill "$guardian" 2>/dev/null || true
-            rm -rf "$state_dir"
-          }
-          trap cleanup_waiter EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          read -r _ < "$ready"
-          trap - EXIT INT TERM
-          rm -f "$ready"
-          echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
-          echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: |
@@ -155,13 +121,3 @@ jobs:
         env:
           PLAYWRIGHT_CHANNEL: chromium
         run: cd event-runtime/web && bun run test:e2e
-
-      - name: Release host verify lock
-        if: always() && steps.e2e-lock.outputs.guardian != ''
-        shell: bash
-        env:
-          GUARDIAN_PID: ${{ steps.e2e-lock.outputs.guardian }}
-          LOCK_STATE_DIR: ${{ steps.e2e-lock.outputs.state_dir }}
-        run: |
-          kill "$GUARDIAN_PID" 2>/dev/null || true
-          rm -rf "$LOCK_STATE_DIR"

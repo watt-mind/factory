@@ -6,3 +6,4 @@ self-hosted-runner:
   labels:
     - shadow
     - smoke-test
+    - verify-lane
