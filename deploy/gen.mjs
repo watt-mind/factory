@@ -182,8 +182,8 @@ export function installPlists(enabled, defaults, {
 } = {}) {
   mkdirSync(agentsDir, { recursive: true });
   for (const job of enabled) {
-    const label = `${defaults.label_prefix}.${job.name}`;
-    const src = path.join(outDir, `${label}.plist`);
+    const label = job.label ?? `${defaults.label_prefix}.${job.name}`;
+    const src = job.file ?? path.join(outDir, `${label}.plist`);
     const dst = path.join(agentsDir, `${label}.plist`);
     writeFileSync(dst, readFileSync(src));
     try { run("launchctl", ["bootout", `gui/${uid}/${label}`], { stdio: "ignore" }); } catch {}
@@ -195,6 +195,7 @@ export function installPlists(enabled, defaults, {
 export function main({
   install = process.argv.includes("--install"),
   workers = optionValue("--workers") ?? DEFAULT_EVENT_WORKERS,
+  installer = installPlists,
 } = {}) {
   const { defaults, jobs } = loadSchedule();
   mkdirSync(OUT, { recursive: true });
@@ -219,11 +220,16 @@ export function main({
 
   if (!install) {
     console.log(`\n${enabled.length} scheduled job(s) and 2 event daemon(s) rendered to deploy/launchd/ (workers ${range}).`);
-    console.log("Re-run with --install to copy and bootstrap them.");
+    console.log("Re-run with --install to copy and bootstrap the scheduled jobs.");
+    console.log("Event daemons are installed manually — see SETUP.md §3a.");
     return;
   }
 
-  installPlists([...enabled, ...eventDaemons], defaults);
+  // --install stays scheduled-jobs-only. The event daemons are always-on and
+  // order-sensitive (worker must drain before serve bounces), so their
+  // bootstrap is a manual, documented step (SETUP.md §3a), never a side effect
+  // of regenerating plists.
+  installer(enabled, defaults);
 }
 
 if (import.meta.main) main();

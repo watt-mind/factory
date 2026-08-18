@@ -11,6 +11,13 @@ case "$mode" in
   *) echo "usage: event-runtime-daemon serve | work [min:max]" >&2; exit 64 ;;
 esac
 
+# Redirect before any preflight check so failures reach the log files instead
+# of the stderr launchd drops (the plists set no StandardErrorPath).
+log_dir="${FACTORY_EVENT_LOG_DIR:-$HOME/Library/Logs}"
+mkdir -p "$log_dir"
+umask 077
+exec >>"$log_dir/factory-event-$mode.out.log" 2>>"$log_dir/factory-event-$mode.err.log"
+
 FACTORY_ROOT="${FACTORY_ROOT:-$HOME/Develop/factory}"
 FACTORY_EVENT_SECRETS_FILE="${FACTORY_EVENT_SECRETS_FILE:-$HOME/.factory/secrets.env}"
 export FACTORY_ROOT FACTORY_EVENT_SECRETS_FILE
@@ -30,10 +37,6 @@ fi
 }
 command -v bun >/dev/null || { echo "bun is not available on PATH" >&2; exit 69; }
 
-log_dir="${FACTORY_EVENT_LOG_DIR:-$HOME/Library/Logs}"
-mkdir -p "$log_dir"
-umask 077
-exec >>"$log_dir/factory-event-$mode.out.log" 2>>"$log_dir/factory-event-$mode.err.log"
 cd "$FACTORY_ROOT"
 
 if [[ "$mode" == "serve" ]]; then

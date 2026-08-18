@@ -15,6 +15,7 @@ import {
   eventWorkerRange,
   installPlists,
   launchdPath,
+  main,
   plist,
   renderEventRuntimePlists,
 } from "./gen.mjs";
@@ -95,6 +96,50 @@ test("installPlists creates a missing LaunchAgents directory before copying", ()
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("installPlists prefers rendered label/file over the prefix concatenation", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-launchd-"));
+  const outDir = path.join(root, "rendered");
+  const agentsDir = path.join(root, "home", "Library", "LaunchAgents");
+  const label = "com.other.custom-label";
+  const source = path.join(outDir, `${label}.plist`);
+  const calls = [];
+
+  try {
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(source, "<plist>custom</plist>\n");
+
+    installPlists([{ name: "whatever", label, file: source }], defaults, {
+      outDir: path.join(root, "unused"),
+      agentsDir,
+      uid: 501,
+      run(command, args) {
+        calls.push([command, args]);
+      },
+    });
+
+    expect(readFileSync(path.join(agentsDir, `${label}.plist`), "utf8")).toBe("<plist>custom</plist>\n");
+    expect(calls).toEqual([
+      ["launchctl", ["bootout", `gui/501/${label}`]],
+      ["launchctl", ["bootstrap", "gui/501", path.join(agentsDir, `${label}.plist`)]],
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--install never bootstraps the event daemons (scheduled jobs only)", () => {
+  const installed = [];
+  const log = console.log;
+  console.log = () => {};
+  try {
+    main({ install: true, installer(jobs) { installed.push(...jobs); } });
+  } finally {
+    console.log = log;
+  }
+  expect(installed.some((j) => String(j.name).startsWith("factory.event-"))).toBe(false);
+  expect(installed.some((j) => String(j.label ?? "").includes(".factory.event-"))).toBe(false);
 });
 
 test("event-runtime plists are portable, secret-free, persistent user agents", () => {
@@ -181,6 +226,23 @@ function daemonEnv(fixture, port) {
     CALLS_FILE: fixture.calls,
   };
 }
+
+test("daemon preflight failures land in the err log, not launchd's dropped stderr", async () => {
+  const fixture = daemonFixture();
+  try {
+    rmSync(path.join(fixture.checkout, "event-runtime"), { recursive: true, force: true });
+    const child = Bun.spawn([path.join(ROOT, "bin", "event-runtime-daemon"), "serve"], {
+      env: daemonEnv(fixture, 1),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await child.exited).toBe(66);
+    expect(readFileSync(path.join(fixture.root, "logs", "factory-event-serve.err.log"), "utf8"))
+      .toContain("event-runtime checkout not found");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
 test("daemon worker never invokes supervise when health is unavailable", async () => {
   const fixture = daemonFixture();
