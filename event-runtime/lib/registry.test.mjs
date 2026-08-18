@@ -143,8 +143,9 @@ describe("registry", () => {
     // Regenerated (merge on agy): merge-scan/merge-fix adapter claude→agy; event-types.json is a registry input.
     // Regenerated (triage on agy): triage-scan adapter pi→agy; event-types.json is a registry input.
     // Regenerated (work-scan advisory overlap, WM-677): agent def is a registry input.
+    // Regenerated (merge-scan fix.ownedPaths rule): agent def is a registry input.
     const expected =
-      "sha256:402564c111373e2afb9bbfae78cd59e36c709fe34a31f85f6c48309dee5f1c03";
+      "sha256:56652ec7a003bb02b21408f71e7449403ffcefc90cf4145d81cb364d89a30be6";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
