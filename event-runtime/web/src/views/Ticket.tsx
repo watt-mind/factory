@@ -276,7 +276,8 @@ export function Ticket({
     queryKey: ["ticket-journey", normalized],
     queryFn: () => fetchTicketJourney(normalized!),
     enabled: valid,
-    ...refetchIntervals.primary,
+    // fetchTicketJourney uses raw fetch() and bypasses the ETag wrapper in api.ts, so it stays at 5s.
+    refetchInterval: 5000,
   });
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules, enabled: valid, ...refetchIntervals.secondary });
 

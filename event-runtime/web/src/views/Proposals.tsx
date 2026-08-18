@@ -192,7 +192,7 @@ export function Proposals({
   const history = useQuery({
     queryKey: ["proposals", "history"],
     queryFn: () => api.proposalHistory("all"),
-    ...refetchIntervals.secondary,
+    ...refetchIntervals.primary,
   });
   const [expiredOnly, setExpiredOnly] = useState(false);
   const rows = useMemo(() => {

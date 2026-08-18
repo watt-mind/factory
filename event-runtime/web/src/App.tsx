@@ -253,7 +253,7 @@ export function App() {
   const health = useQuery({
     queryKey: ["health"],
     queryFn: api.health,
-    ...refetchIntervals.fast,
+    ...refetchIntervals.primary,
     retry: false,
   });
   const connected = health.isSuccess;
