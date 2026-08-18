@@ -627,6 +627,72 @@ describe("Inbox view", () => {
     expect(view.getByText(/Handled after operator follow-up/)).toBeTruthy();
   });
 
+  test("clicking an Open-tab title opens the item and does not bulk-select it", async () => {
+    const onSelectItem = mock(() => {});
+    const { view } = renderInbox({ onSelectItem });
+    await waitFor(() => view.getByText("decide X"));
+
+    fireEvent.click(view.getByText("decide X"));
+
+    expect(onSelectItem).toHaveBeenCalledWith("inbox_open_1");
+    expect(
+      (
+        view.getByLabelText(
+          "Select inbox item inbox_open_1",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+    expect(view.queryByRole("toolbar", { name: "Bulk actions" })).toBeNull();
+  });
+
+  test("clicking the row checkbox bulk-selects and does not open the item", async () => {
+    const onSelectItem = mock(() => {});
+    const { view } = renderInbox({ onSelectItem });
+    await waitFor(() => view.getByLabelText("Select inbox item inbox_open_1"));
+
+    fireEvent.click(view.getByLabelText("Select inbox item inbox_open_1"));
+
+    expect(onSelectItem).not.toHaveBeenCalled();
+    expect(
+      (
+        view.getByLabelText(
+          "Select inbox item inbox_open_1",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(
+      view.getByRole("toolbar", { name: "Bulk actions" }).textContent,
+    ).toContain("1 selected");
+  });
+
+  test("Space and Shift+Space toggle the highlighted inbox checkbox", async () => {
+    const { view } = renderInbox({ focusItemId: "inbox_open_1" });
+    const checkbox = await waitFor(
+      () =>
+        view.getByLabelText(
+          "Select inbox item inbox_open_1",
+        ) as HTMLInputElement,
+    );
+
+    act(() => {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: " ", bubbles: true }),
+      );
+    });
+    expect(checkbox.checked).toBe(true);
+
+    act(() => {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(checkbox.checked).toBe(false);
+  });
+
   test("select-all selects every visible actionable inbox item", async () => {
     const { view } = renderInbox();
     await waitFor(() => view.getByLabelText("Select all inbox items"));
