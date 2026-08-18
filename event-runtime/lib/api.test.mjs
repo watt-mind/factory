@@ -36,6 +36,7 @@ import {
 } from "./api-test-helpers.mjs";
 import { cpSync } from "node:fs";
 import { emitDueTicks } from "./schedules.mjs";
+import { spawnTracked } from "./test-helpers-process.mjs";
 
 describe("schedule trigger metadata (WM-259)", () => {
   test("run and trigger return the unchanged next scheduled tick", async () => {
@@ -250,13 +251,12 @@ describe("serve PID lock (OPS-458)", () => {
   });
 
   test("concurrent duplicate serve on same home fails second instance and releasing first allows next", async () => {
-    const { spawn } = await import("node:child_process");
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-lock-cli-"));
     const port1 = String(59500 + (process.pid % 200));
     const port2 = String(59700 + (process.pid % 200));
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
 
-    const serve1 = spawn("bun", [CLI, "serve", "--port", port1], {
+    const serve1 = spawnTracked("bun", [CLI, "serve", "--port", port1], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -276,7 +276,7 @@ describe("serve PID lock (OPS-458)", () => {
     expect(out1).toContain("control API on");
 
     // Second serve targeting same home should fail immediately
-    const serve2 = spawn("bun", [CLI, "serve", "--port", port2], {
+    const serve2 = spawnTracked("bun", [CLI, "serve", "--port", port2], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -298,7 +298,7 @@ describe("serve PID lock (OPS-458)", () => {
     await new Promise((resolve) => serve1.on("exit", resolve));
 
     // Now a third serve should succeed
-    const serve3 = spawn("bun", [CLI, "serve", "--port", port2], {
+    const serve3 = spawnTracked("bun", [CLI, "serve", "--port", port2], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });

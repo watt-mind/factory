@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validate } from "../lib/schema.mjs";
+import { spawnTracked } from "../lib/test-helpers-process.mjs";
 
 const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
 const SEED = fileURLToPath(new URL("./seed.mjs", import.meta.url));
@@ -118,10 +119,10 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     port = String(probe.port);
     probe.stop(true);
 
-    serveChild = spawn("bun", [CLI, "serve", "--adapter-override", "fake", "--port", port], {
+    serveChild = spawnTracked("bun", [CLI, "serve", "--adapter-override", "fake", "--port", port], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    }, { scope: "suite" });
 
     // Wait for health
     let up = false;
@@ -138,10 +139,10 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     }
     expect(up).toBe(true);
 
-    workerChild = spawn("bun", [CLI, "work", "--adapter-override", "fake", "--port", port, "--poll-ms", "40"], {
+    workerChild = spawnTracked("bun", [CLI, "work", "--adapter-override", "fake", "--port", port, "--poll-ms", "40"], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    }, { scope: "suite" });
 
     // Health only proves the control API is listening. Seed drives approvals
     // immediately, so wait for the separate worker process to register first.

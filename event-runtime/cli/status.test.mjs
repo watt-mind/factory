@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -23,6 +23,7 @@ import {
   runCli,
   runNotifierDeliveryCase,
   seedRun,
+  spawnTracked,
   spawnSupervisor,
   spawnWorker,
   throwawayRunDir,
@@ -116,7 +117,7 @@ describe("status and doctor commands", () => {
   test("doctor against a healthy live serve outputs anomalies none and exits 0", async () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-doc-healthy-"));
     const port = String(59700 + (process.pid % 100));
-    const child = spawn("bun", [CLI, "serve", "--port", port], {
+    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
       env: {
         ...process.env,
         FACTORY_EVENT_HOME: home,
@@ -178,7 +179,7 @@ describe("status and doctor commands", () => {
     );
     db.close();
 
-    const child = spawn("bun", [CLI, "serve", "--port", port], {
+    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });

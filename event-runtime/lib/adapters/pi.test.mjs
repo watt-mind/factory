@@ -23,6 +23,7 @@ import {
 } from "./pi.mjs";
 import { preflight, SandboxUnavailableError } from "../sandbox/gondolin.mjs";
 import { SANDBOX_CONSOLE_FILE } from "./sandboxed.mjs";
+import { processOwnerWatchdogSource, trackProcessGroupForPid } from "../test-helpers-process.mjs";
 
 describe("isHarnessDenial (WM-127, no confirmed pi refusal shapes yet)", () => {
   test("nothing matches — pi enforces read-only by tool non-exposure, not runtime denial", () => {
@@ -372,6 +373,8 @@ describe("execute conformance (OPS-296, docs/event-runtime.md §6)", () => {
   const stubScript = `#!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
 
+${processOwnerWatchdogSource()}
+
 let stdin = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { stdin += chunk; });
@@ -492,7 +495,11 @@ process.stdin.on("end", () => {
 
   async function waitForGrandchildPid(pidFile) {
     for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (existsSync(pidFile)) return Number(readFileSync(pidFile, "utf8"));
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        trackProcessGroupForPid(pid);
+        return pid;
+      }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error("stub did not report its grandchild PID");

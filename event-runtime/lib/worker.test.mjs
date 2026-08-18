@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildClaudeArgv, execute as executeClaude } from "./adapters/claude.mjs";
@@ -24,6 +24,7 @@ import {
   repositoryStatus, resolveLinearApiKey, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
+import { cleanupTrackedProcesses, processOwnerWatchdogSource, trackMarkedFakeRuntimeGroups, trackProcess, trackProcessGroupsMatching } from "./test-helpers-process.mjs";
 
 const registry = loadRegistry();
 const adapters = { fake };
@@ -2550,12 +2551,14 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     );
 
     const testPortBase = 18400 + Math.floor(Math.random() * 1000) * 2;
+    const testProcessMarker = `wm334-${process.pid}-${ticket}`;
 
     const bunStubLines = [
       "#!/usr/bin/env node",
       "const fs = require(\"fs\");",
       "const path = require(\"path\");",
       "const { spawn } = require(\"child_process\");",
+      ...processOwnerWatchdogSource().split("\n"),
       `const stateDir = process.env.WM334_LINEAR_STATE_DIR || ${JSON.stringify(linearStateDir)}`,
       `const realBun = process.env.WM334_REAL_BUN || ${JSON.stringify(realBun)}`,
       "const args = process.argv.slice(2);",
@@ -2615,7 +2618,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       "}",
       "const child = spawn(realBun, args, {",
       "  stdio: \"inherit\",",
-      "  env: process.env,",
+      `  argv0: ${JSON.stringify(`factory-test-${testProcessMarker}`)},`,
+      `  env: { ...process.env, FACTORY_TEST_TRACKED_PROCESS: ${JSON.stringify(testProcessMarker)} },`,
       "});",
       "process.on(\"SIGTERM\", () => child.kill(\"SIGTERM\"));",
       "process.on(\"SIGINT\", () => child.kill(\"SIGINT\"));",
@@ -2666,6 +2670,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       WM334_LINEAR_STATE_DIR: process.env.WM334_LINEAR_STATE_DIR,
       WM334_REAL_BUN: process.env.WM334_REAL_BUN,
       WM334_BUN_LOG: process.env.WM334_BUN_LOG,
+      FACTORY_TEST_TRACKED_PROCESS: process.env.FACTORY_TEST_TRACKED_PROCESS,
     };
     try {
       process.env.FACTORY_REPOS_ROOT = tmpRoot;
@@ -2678,6 +2683,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       process.env.WM334_LINEAR_STATE_DIR = linearStateDir;
       process.env.WM334_REAL_BUN = realBun;
       process.env.WM334_BUN_LOG = path.join(tmpRoot, 'bun-calls.log');
+      process.env.FACTORY_TEST_TRACKED_PROCESS = testProcessMarker;
 
       const db = openDb(":memory:");
       const lockDir = mkdtempSync(path.join(os.tmpdir(), "wm334-real-locks-"));
@@ -2728,18 +2734,30 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           input: { repo: repoName, ticket },
           workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: false },
         }));
-        return runOnce(db, registry, { fake: observedAdapter }, opts({
-          workspacesRoot: mkdtempSync(path.join(os.tmpdir(), `${repoName}-run-`)),
-          dispatch: {
-            locksDir: lockDir,
-            leasesDir: leaseDir,
-            fetchTicket: () => readyDispatchTicket(ticket),
-            fetchInFlight: () => [],
-            countLeases: () => 0,
-            claimTicket: () => ({ ok: true }),
-            blockBaselineTicket: blockTicket,
-          },
-        }));
+        try {
+          return await runOnce(db, registry, { fake: observedAdapter }, opts({
+            workspacesRoot: mkdtempSync(path.join(os.tmpdir(), `${repoName}-run-`)),
+            dispatch: {
+              locksDir: lockDir,
+              leasesDir: leaseDir,
+              fetchTicket: () => readyDispatchTicket(ticket),
+              fetchInFlight: () => [],
+              countLeases: () => 0,
+              claimTicket: () => ({ ok: true }),
+              blockBaselineTicket: blockTicket,
+            },
+          }));
+        } finally {
+          trackProcessGroupsMatching(tmpRoot);
+          trackMarkedFakeRuntimeGroups(testProcessMarker);
+          const runDir = path.join(worktreeRoot, ticket, ".factory", "run");
+          if (existsSync(runDir)) {
+            for (const name of readdirSync(runDir).filter((entry) => entry.endsWith(".pid"))) {
+              const pid = Number(readFileSync(path.join(runDir, name), "utf8").trim());
+              if (Number.isInteger(pid) && pid > 0) trackProcess(pid);
+            }
+          }
+        }
       };
 
       const first = await run();
@@ -2771,6 +2789,9 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       });
       expect(comments[0].body).toContain(`<!-- ${marker} -->`);
     } finally {
+      trackProcessGroupsMatching(tmpRoot);
+      trackMarkedFakeRuntimeGroups(testProcessMarker);
+      await cleanupTrackedProcesses();
       if (detachedBaseBranch) {
         spawnSync("git", ["-C", repoRoot, "update-ref", "-d", `refs/remotes/origin/${detachedBaseBranch}`]);
       }

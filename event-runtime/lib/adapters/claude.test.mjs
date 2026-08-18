@@ -20,6 +20,7 @@ import {
   WRITE_TOOLS,
 } from "./claude.mjs";
 import { SandboxUnsupportedError } from "./sandboxed.mjs";
+import { processOwnerWatchdogSource, trackProcessGroupForPid } from "../test-helpers-process.mjs";
 
 describe("sandbox decision (WM-313): deferred, so refused — never ignored", () => {
   const sandboxedDef = (promptPath) => ({
@@ -383,6 +384,8 @@ describe("execute conformance (OPS-427, docs/event-runtime.md §6)", () => {
   const stubScript = `#!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
 
+${processOwnerWatchdogSource()}
+
 if (process.env.FACTORY_TEST_RECORD_FILE) {
   writeFileSync(
     process.env.FACTORY_TEST_RECORD_FILE,
@@ -554,7 +557,11 @@ if (behavior === "emit_denial_then_recovery") {
 
   async function waitForGrandchildPid(pidFile) {
     for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (existsSync(pidFile)) return Number(readFileSync(pidFile, "utf8"));
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        trackProcessGroupForPid(pid);
+        return pid;
+      }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error("stub did not report its grandchild PID");

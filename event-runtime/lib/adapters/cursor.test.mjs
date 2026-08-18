@@ -18,6 +18,7 @@ import {
   safeChildEnvironment,
   toolNameFromKey,
 } from "./cursor.mjs";
+import { processOwnerWatchdogSource, trackProcessGroupForPid } from "../test-helpers-process.mjs";
 
 describe("isHarnessDenial (WM-127, no confirmed Cursor refusal shapes yet)", () => {
   test("nothing matches — empty until a Cursor-authored shape is observed", () => {
@@ -256,6 +257,8 @@ describe("execute conformance (WM-440, docs/event-runtime.md §6)", () => {
   const stubScript = `#!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
 
+${processOwnerWatchdogSource()}
+
 if (process.env.FACTORY_TEST_RECORD_FILE) {
   writeFileSync(
     process.env.FACTORY_TEST_RECORD_FILE,
@@ -362,7 +365,11 @@ if (behavior === "emit_error_tool_result") {
 
   async function waitForGrandchildPid(pidFile) {
     for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (existsSync(pidFile)) return Number(readFileSync(pidFile, "utf8"));
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        trackProcessGroupForPid(pid);
+        return pid;
+      }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error("stub did not report its grandchild PID");
