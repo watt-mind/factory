@@ -9,7 +9,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { api, ApiError, type RunListFilters } from "../api";
-import { hashSearch } from "../hash";
+import { hashPath, hashProject, hashSearch, withProject } from "../hash";
 import {
   keyGuard,
   refetchIntervals,
@@ -529,7 +529,7 @@ export function handleRunArtifactClick(event: ReactMouseEvent<HTMLElement>) {
   if (!match) return;
   event.preventDefault();
   event.stopPropagation();
-  window.location.hash = `#/artifacts/${match[1]}`;
+  window.location.hash = `#/${withProject(hashPath("artifacts", match[1]), hashProject(window.location.hash))}`;
 }
 
 /** Runs (webui spec §4.3): state tabs, lifecycle timeline, guarded verbs. */

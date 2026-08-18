@@ -319,6 +319,18 @@ describe("Artifacts inventory (WM-207)", () => {
     expect(window.location.hash).toBe(`#/${`artifacts/${"b".repeat(64)}`}`);
   });
 
+  test("run artifact click keeps ?project= on the inspector hash (WM-761)", () => {
+    const sha = "b".repeat(64);
+    window.location.hash = `#/runs/${LONG_RUN_ID}?project=factory`;
+    const runLink = render(
+      <div onClickCapture={handleRunArtifactClick}>
+        <a href={`/api/artifacts/${sha}?name=transcript`}>Open</a>
+      </div>,
+    );
+    fireEvent.click(runLink.getByRole("link", { name: "Open" }));
+    expect(window.location.hash).toBe(`#/artifacts/${sha}?project=factory`);
+  });
+
   test("preserves URL-backed facets when opening and closing the inspector", async () => {
     globalThis.fetch = mock(
       async () => new Response("artifact report", { status: 200 }),
