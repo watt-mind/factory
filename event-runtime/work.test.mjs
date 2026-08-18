@@ -517,9 +517,13 @@ describe("work-scan registration (WM-110)", () => {
     ]);
   });
 
-  test("DISPATCH remains multi-emit and LOW_SUPPLY chains to triage", () => {
+  test("DISPATCH remains multi-emit; LOW_SUPPLY no longer chains to triage", () => {
     // chain.mjs derives eventId chain-<runId>-<ticket> — multi-emit fan-out
     // edge feeds every planned ticket into factory.dispatch.requested.
+    // LOW_SUPPLY no longer has a chain edge (WM: operator decision
+    // 2026-08-18, to stop burning the pi/codex adapter's quota on
+    // ~30-minute chain loops). The triage floor is now the 8h
+    // triage-factory schedule plus manual operator injection.
     expect(registry.edges["work-scan@1"]).toEqual({
       recommendationField: "recommendation",
       edges: {
@@ -527,10 +531,6 @@ describe("work-scan registration (WM-110)", () => {
           eventType: "factory.dispatch.requested",
           itemsField: "plan",
           itemKey: "ticket",
-          input: { repo: "$.artifact.repo" },
-        },
-        LOW_SUPPLY: {
-          eventType: "factory.triage.requested",
           input: { repo: "$.artifact.repo" },
         },
       },
@@ -612,7 +612,12 @@ describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () =
     });
   });
 
-  test("a LOW_SUPPLY scan chains to one triage scan", async () => {
+  test("a LOW_SUPPLY scan no longer chains to a triage scan", async () => {
+    // LOW_SUPPLY is still computed as advisory evidence, but it no longer
+    // fires a chained triage-scan run (WM: operator decision 2026-08-18,
+    // to stop burning the pi/codex adapter's quota on ~30-minute chain
+    // loops). The triage floor is now the 8h triage-factory schedule plus
+    // manual operator injection of factory.triage.requested.
     const { db, planAll, approveNext } = harness();
     admitEvent(db, registry, workEnvelope("low", "work-low-1"));
     const scan = await approveNext("work-scan@1");
@@ -626,20 +631,17 @@ describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () =
     expect(scanResult.artifact.triageBacklog).toBe(3);
 
     const chain = resolveChains(db, registry);
-    expect(chain).toEqual({ emitted: 1, skipped: 0, errors: [] });
+    expect(chain).toEqual({ emitted: 0, skipped: 1, errors: [] });
 
     const chainEvent = db
       .query(`SELECT * FROM events WHERE source = 'chain' AND causation_id = ?`)
       .get(scan.runId);
-    expect(chainEvent.type).toBe("factory.triage.requested");
-    expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({
-      repo: "low",
-    });
+    expect(chainEvent).toBeNull();
 
     planAll();
     expect(
       openProposals(db, {}).find((p) => p.spec?.agent === "triage-scan@1"),
-    ).toBeTruthy();
+    ).toBeUndefined();
   });
 
   test("cap-overlap NOOP outcomes still do not fallback to triage", async () => {

@@ -589,15 +589,16 @@ describe("multi-emit chain resolution (WM-119)", () => {
         applied: [{ issueId: "WM-2", action: "write-detail" }],
       },
     });
+    // DETAIL_CHANGED no longer chains into factory.triage.requested (WM:
+    // operator decision 2026-08-18, to stop burning the pi/codex adapter's
+    // quota on ~30-minute chain loops). The triage floor is now the 8h
+    // triage-factory schedule plus manual operator injection.
     const detailOutcome = resolveChains(db2, registry);
-    expect(detailOutcome).toEqual({ emitted: 1, skipped: 0, errors: [] });
+    expect(detailOutcome).toEqual({ emitted: 0, skipped: 1, errors: [] });
     const detailEvent = db2
       .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
       .get("chain-run-triage-detail");
-    expect(detailEvent.type).toBe("factory.triage.requested");
-    expect(JSON.parse(detailEvent.envelope_json).payload).toEqual({
-      repo: "wm/triage",
-    });
+    expect(detailEvent).toBeNull();
 
     const dir3 = mkdtempSync(
       path.join(os.tmpdir(), "evrt-chain-triage-apply-3"),

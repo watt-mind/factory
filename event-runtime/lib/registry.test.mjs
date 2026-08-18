@@ -141,8 +141,13 @@ describe("registry", () => {
     // Regenerated (WM-722): merge-scan/merge-fix adapter pi→claude; event-types.json is a registry input.
     // Regenerated (WM-391): dispatch admits and documents bounded humanDecision authorisations.
     // Regenerated (WM-694): dispatch input admits a pinned per-ticket modelTier override.
+    // Regenerated 2026-08-18 (ops/triage-8h-clock): dropped work-scan@1 LOW_SUPPLY
+    // and triage-apply@1 DETAIL_CHANGED chain edges to factory.triage.requested,
+    // added the triage-factory 8h schedule. Operator decision 2026-08-18: stop
+    // burning the pi/codex adapter's quota on ~30-minute chain-triggered triage
+    // scans; triage now runs on a fixed 8h clock plus manual operator injection.
     const expected =
-      "sha256:8d3f8ca1951587fcbd646c3e97590c2daa631be129b867e17e0e8787d66da1cd";
+      "sha256:1e6e9eb418c087aaf0bfcdc74b55c79a3a0a22bf84f81b7e1eab5fc4fb9a17f4";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

@@ -17,10 +17,14 @@ Registered actions — each resolves to one fixed, non-shell-interpolated argv:
 
 `write-detail` is intentionally separate from `label-agent-ready`. It calls
 `tools/linear.mjs detail`, which preserves the description read immediately
-before the mutation and appends only the approved Markdown suffix. A later
-triage scan must make and justify
-the promotion decision independently; writing detail never changes state or
-labels.
+before the mutation and appends only the approved Markdown suffix. Its
+`DETAIL_CHANGED` outcome no longer chains into an immediate re-scan (WM:
+operator decision 2026-08-18, to stop burning the pi/codex adapter's quota on
+~30-minute chain loops); the next triage scan that sees the appended detail
+and makes and justifies the promotion decision independently runs on the 8h
+`triage-factory` clock (`event-runtime/schedules.json`), or sooner if the
+operator manually injects `factory.triage.requested`. Writing detail never
+changes state or labels.
 
 Every action is additive or a forward state move; nothing here closes,
 deletes, or reassigns an issue. An action ID outside this table refuses

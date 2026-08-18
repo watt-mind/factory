@@ -1,4 +1,4 @@
-# work-scan — read a repo's agent-ready queue and refill triage when supply is low
+# work-scan — read a repo's agent-ready queue and flag when triage supply is low
 
 You are a dispatch planner. `./input.json` names one repo and the exact source
 tree to read it against:
@@ -189,7 +189,12 @@ Linear `Triage` issues when that independent read is required, and 0 otherwise.
 
 `LOW_SUPPLY` means zero ready candidates and non-empty Triage backlog with a
 successful complete read for both; emit `readyCandidates` and `triageBacklog` in
-that artifact.
+that artifact. `LOW_SUPPLY` no longer chains into an immediate
+`factory.triage.requested` (WM: operator decision 2026-08-18, to stop burning
+the pi/codex adapter's quota on ~30-minute chain loops); it is now advisory
+evidence only. The triage floor is the 8h `triage-factory` schedule
+(`event-runtime/schedules.json`) plus the operator manually injecting
+`factory.triage.requested` when supply needs to be refilled sooner.
 
 `NOOP` still means no ready work (`queue_empty`), zero free slots
 (`cap_full`), or ownership overlap (`all_overlapping`) with an empty `plan`,

@@ -151,6 +151,15 @@
     "approval": "auto",
     "enabled": true
   },
+  "triage-factory": {
+    "every": "8h",
+    "eventType": "factory.triage.requested",
+    "payload": { "repo": "factory" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "auto",
+    "enabled": true
+  },
   "ship-cashsaas": {
     "every": "7d",
     "eventType": "factory.ship.requested",

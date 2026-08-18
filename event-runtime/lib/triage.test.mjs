@@ -301,7 +301,12 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
     expect(JSON.parse(event.envelope_json).payload).toEqual({ repo: "bj29" });
   });
 
-  test("apply outcome DETAIL_CHANGED chains to triage.requested", async () => {
+  test("apply outcome DETAIL_CHANGED no longer chains to triage.requested", async () => {
+    // DETAIL_CHANGED no longer fires a chained triage-scan run (WM:
+    // operator decision 2026-08-18, to stop burning the pi/codex adapter's
+    // quota on ~30-minute chain loops). The triage floor is now the 8h
+    // triage-factory schedule plus manual operator injection of
+    // factory.triage.requested.
     const { db, approveNext } = harness({
       adapters: {
         pi: triagePlanScan({
@@ -322,12 +327,11 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
     expect(applied.summary.terminalState).toBe("COMPLETED");
 
     const chain = resolveChains(db, registry);
-    expect(chain).toEqual({ emitted: 1, skipped: 0, errors: [] });
+    expect(chain).toEqual({ emitted: 0, skipped: 1, errors: [] });
     const event = db
       .query(`SELECT * FROM events WHERE source = 'chain' AND causation_id = ?`)
       .get(applied.runId);
-    expect(event.type).toBe("factory.triage.requested");
-    expect(JSON.parse(event.envelope_json).payload).toEqual({ repo: "bj29" });
+    expect(event).toBeNull();
   });
 
   test("apply outcome NO_CHANGE terminates with no follow-up", async () => {

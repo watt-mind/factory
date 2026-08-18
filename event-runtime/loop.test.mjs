@@ -363,9 +363,19 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
         enabled: true,
       }),
     );
+    // Operator decision 2026-08-18 (WM): triage now runs on a fixed 8h
+    // clock instead of chain-triggered ~30-minute re-scans, to stop
+    // burning the pi/codex adapter's quota. The operator injects
+    // factory.triage.requested manually when triage is needed sooner.
+    expect(registry.schedules["triage-factory"]).toEqual(
+      loopEntry("factory.triage.requested", "factory", "8h", {
+        approval: "auto",
+        enabled: true,
+      }),
+    );
   });
 
-  test("the exact enabled autonomous merge set is merge-factory", () => {
+  test("the exact enabled autonomous set is merge-factory and triage-factory", () => {
     for (const repo of [
       "coach-wattz",
       "watts-mobile",
@@ -385,10 +395,12 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
         ([, schedule]) => schedule.enabled && schedule.approval === "auto",
       )
       .map(([loop]) => loop);
-    expect(enabledAutonomous).toEqual(["merge-factory"]);
+    expect(enabledAutonomous.sort()).toEqual(
+      ["merge-factory", "triage-factory"].sort(),
+    );
 
     for (const [loop, schedule] of Object.entries(registry.schedules)) {
-      if (loop !== "merge-factory") {
+      if (loop !== "merge-factory" && loop !== "triage-factory") {
         expect({
           approval: schedule.approval,
           enabled: schedule.enabled,
@@ -429,11 +441,16 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     // below proves each tick now plans a real run.
   });
 
-  test("the shipped clock fires only Factory merge discovery", () => {
+  test("the shipped clock fires only Factory merge discovery and triage discovery", () => {
+    // triage-factory's 8h cadence and merge-factory's 15m cadence both have
+    // a due slot at their first tick (no prior admitted slot yet), so a
+    // clock started fresh fires both once.
     const db = openDb(":memory:");
     const emitted = emitDueTicks(db, registry, { now: Date.now() }).emitted;
-    expect(emitted.map((row) => row.loop)).toEqual(["merge-factory"]);
-    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(1);
+    expect(emitted.map((row) => row.loop).sort()).toEqual(
+      ["merge-factory", "triage-factory"].sort(),
+    );
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(2);
     db.close();
   });
 });
