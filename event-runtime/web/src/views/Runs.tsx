@@ -36,8 +36,8 @@ import { matchesInFlight, matchesRepo } from "../context";
 import { RUN_FACETS, matchesFilterQuery, parseFilterQuery } from "../filterQuery";
 import { decideRevealFilters, formatRevealNotification } from "../reveal";
 import type { Proposal, RunListItem, RunState } from "../types";
+import { EMPTY, formatRelative } from "../format";
 import {
-  Ago,
   Button,
   CopyActions,
   Dialog,
@@ -827,7 +827,7 @@ export function Runs({
                       className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : undefined}
                     >
-                      {r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : ""}
+                      {r.reasonCode && r.reasonCode.toLowerCase() !== "ok" ? r.reasonCode : EMPTY}
                     </td>
                   )}
                   {show.has("origin") && (
@@ -843,13 +843,13 @@ export function Runs({
                           {shortId(r.eventId)}
                         </JumpLink>
                       ) : (
-                        (r.eventId ? shortId(r.eventId) : "-")
+                        (r.eventId ? shortId(r.eventId) : EMPTY)
                       )}
                     </td>
                   )}
                   {show.has("updated") && (
                     <td className="max-w-24 whitespace-nowrap border-b border-(--border) px-3 py-1.5 text-(--text-faint)">
-                      <Ago iso={r.updated_at} now={now} />
+                      <span title={r.updated_at}>{formatRelative(r.updated_at, now)}</span>
                     </td>
                   )}
                   {listCols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (

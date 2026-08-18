@@ -6,21 +6,19 @@ import { keyGuard, refetchIntervals, useNow, useRequeuePoll } from "../hooks";
 import type { JournalEntry, EventFocus, Proposal, RunState, StatusView } from "../types";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
+import { EMPTY, formatBytes, formatRelative } from "../format";
 import type { WorkerHealthFilter } from "./Workers";
 import {
-  Ago,
   Button,
   Disclosure,
   Dialog,
   EVENT_STATUS_HUES,
   STATE_HUES,
-  humanSize,
   JsonBlock,
   JumpLink,
   StateBadge,
   StateIcon,
   VerbError,
-  ago,
   copyText,
   notify,
   shortId,
@@ -491,7 +489,7 @@ export function buildAnomalyRows(
   for (const w of anomalies.stalledWorkers) {
     rows.push({
       kind: "worker",
-      text: `stalled worker ${w.workerId} still holds run ${w.runId} (host ${w.host}, last seen ${now ? ago(w.lastSeen, now) : "recently"})`,
+      text: `stalled worker ${w.workerId} still holds run ${w.runId} (host ${w.host}, last seen ${now ? formatRelative(w.lastSeen, now) : "recently"})`,
       links: [
         { label: "View worker", go: () => callbacks.onNavigate("workers") },
         { label: "View run", go: () => callbacks.onJumpRun(w.runId) },
@@ -602,7 +600,7 @@ function RecentOutcomesStrip({
                   : o.to === "TIMED_OUT"
                     ? "var(--hue-warn)"
                     : "var(--text-faint)";
-            const label = `${o.runId} · ${o.to} · ${ago(o.at, now)}`;
+            const label = `${o.runId} · ${o.to} · ${formatRelative(o.at, now)}`;
             return (
               <button
                 key={o.seq}
@@ -1118,28 +1116,30 @@ export function Overview({
                               {shortId(a.proposalId)}
                             </button>
                             <span className="text-(--text-faint)">·</span>
-                            <span>agent: {a.proposal?.agent ?? "—"}</span>
+                            <span>agent: {a.proposal?.agent ?? EMPTY}</span>
                             <span className="text-(--text-faint)">·</span>
                             <span>
-                              {a.proposal?.decision ?? "—"}
+                              {a.proposal?.decision ?? EMPTY}
                               {a.proposal?.reason ? ` — ${a.proposal.reason}` : ""}
                             </span>
                             <span className="text-(--text-faint)">·</span>
                             <span className="text-(--text-faint)">
-                              origin {a.proposal?.eventSource ?? "—"}/
+                              origin {a.proposal?.eventSource ?? EMPTY}/
                               {a.proposal?.eventId ? (
                                 <span className="mono" title={a.proposal.eventId}>
                                   {shortId(a.proposal.eventId)}
                                 </span>
                               ) : (
-                                "—"
+                                EMPTY
                               )}
                             </span>
                             <span className="text-(--text-faint)">·</span>
                             {a.proposal?.created_at ? (
-                              <Ago iso={a.proposal.created_at} now={now} className="mono text-(--text-faint)" />
+                              <span className="mono text-(--text-faint)" title={a.proposal.created_at}>
+                                {formatRelative(a.proposal.created_at, now)}
+                              </span>
                             ) : (
-                              <span className="text-(--text-faint)">age —</span>
+                              <span className="text-(--text-faint)">age {EMPTY}</span>
                             )}
                           </div>
                         ) : primaryLink ? (
@@ -1264,7 +1264,7 @@ export function Overview({
           </div>
           <div className="flex items-center gap-2 text-[11px] text-(--text-faint)">
             <span>
-              as of <Ago iso={new Date(status.dataUpdatedAt || now).toISOString()} now={now} />
+              as of {formatRelative(new Date(status.dataUpdatedAt || now), now)}
             </span>
             <span>·</span>
             <span>{feedsUnscoped ? "scope: factory-wide" : "scope: all repos"}</span>
@@ -1564,7 +1564,7 @@ export function Overview({
               className="mb-0"
               meta={
                 <span className="mono">
-                  {s.artifacts.files} files · {humanSize(s.artifacts.bytes)}
+                  {s.artifacts.files} files · {formatBytes(s.artifacts.bytes)}
                   {s.artifacts.orphans > 0 ? ` · ${s.artifacts.orphans} orphans` : ""}
                   {factoryWide ? " · factory-wide" : ""}
                 </span>
@@ -1597,7 +1597,9 @@ export function Overview({
                 const row = formatActivityGroup(group);
                 return (
                   <div key={group.seq} className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-(--border) py-1.5 last:border-0">
-                    <Ago iso={group.at} now={now} className="mono shrink-0 text-(--text-faint)" />
+                    <span className="mono shrink-0 text-(--text-faint)" title={group.at}>
+                      {formatRelative(group.at, now)}
+                    </span>
                     <span className="text-(--text-faint)">·</span>
                     <JumpLink onClick={() => onJumpRun(group.runId)} title={group.runId} className="shrink-0">
                       {shortId(group.runId)}
@@ -1677,7 +1679,9 @@ export function Overview({
                           )}
                         </div>
                         {o.published_at ? (
-                          <Ago iso={o.published_at} now={now} className="mono shrink-0 text-(--text-faint)" />
+                          <span className="mono shrink-0 text-(--text-faint)" title={o.published_at}>
+                            {formatRelative(o.published_at, now)}
+                          </span>
                         ) : (
                           <span className="shrink-0 text-[11px] text-(--hue-warn)">
                             unpublished

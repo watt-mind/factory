@@ -12,6 +12,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, type ReactNode } from "react";
 import { api } from "../api";
+import { EMPTY, formatDuration } from "../format";
 import type { AgentDef, Proposal } from "../types";
 import { Countdown, Disclosure, JsonBlock, KV } from "./ui";
 
@@ -46,7 +47,7 @@ export function computeApprovalRisk(p: Proposal, ag?: AgentDef): ApprovalRisk | 
   const inp = (typeof spec.input === "object" && spec.input ? spec.input : {}) as Record<string, unknown>;
   const repo = p.repos.length ? p.repos.join(", ") : String(inp.repo || inp.repository || "unscoped");
   const branch = String(inp.branch || inp.targetBranch || inp.base || "default");
-  const issue = String(inp.issueId || inp.issue || inp.ticket || p.eventId || "—");
+  const issue = String(inp.issueId || inp.issue || inp.ticket || p.eventId || EMPTY);
   const host = spec.placement
     ? Object.entries(spec.placement).map(([k, v]) => `${k}=${v}`).join(", ")
     : ag?.hosts?.length
@@ -158,7 +159,7 @@ export function ApprovalSafetyCard({
         <div>
           <div className="text-[11px] uppercase text-(--text-faint)">Budget</div>
           <div className="mono text-(--text-dim)">
-            {risk.timeoutSeconds}s · max {risk.maxAttempts} att
+            {formatDuration(risk.timeoutSeconds)} · max {risk.maxAttempts} att
           </div>
         </div>
         <div>
@@ -208,7 +209,7 @@ export function ApprovalRiskDetails({ proposal, agent }: { proposal: Proposal; a
         <KV k="agent" v={proposal.spec.agent} />
         <KV k="adapter" v={proposal.spec.adapter} />
         <KV k="capabilities" v={proposal.spec.capabilities.join(", ") || "none"} />
-        <KV k="timeout" v={`${proposal.spec.timeoutSeconds}s`} />
+        <KV k="timeout" v={formatDuration(proposal.spec.timeoutSeconds)} />
         <KV k="attempts" v={String(proposal.spec.maxAttempts)} />
         <KV k="ttl" v={<Countdown createdAt={proposal.created_at} ttlSeconds={proposal.ttl_seconds} />} />
       </div>

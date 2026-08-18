@@ -2,13 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useState, type ReactNode } from "react";
 import { api, artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
-import { dur } from "../heartbeat";
+import { NOT_APPLICABLE, formatBytes, formatDuration, formatRelative } from "../format";
 import { humanizeReason } from "../reasons";
 import type { AdmittedEvent, ArtifactRef, Attempt, LifecycleEvent, RunDetail, RunSpec, RunState } from "../types";
 import {
-  Ago,
   Disclosure,
-  humanSize,
   JsonBlock,
   JumpLink,
   KV,
@@ -101,7 +99,7 @@ const budgetHue = (c: Clock, timeoutSeconds: number): string | undefined => {
  * claiming the run is TIMED_OUT, which is the state badge's call on the next poll.
  */
 export function BudgetClock({ c, timeoutSeconds }: { c: Clock; timeoutSeconds: number }) {
-  const budget = `${timeoutSeconds}s budget`;
+  const budget = `${formatDuration(timeoutSeconds)} budget`;
   if (c.kind === "off")
     return (
       <span className="text-(--text-faint)" title={`${budget}, not started`}>
@@ -116,8 +114,8 @@ export function BudgetClock({ c, timeoutSeconds }: { c: Clock; timeoutSeconds: n
       </span>
     );
   return (
-    <span style={{ color: hue }} title={`timeout in ${dur(c.leftMs)}`}>
-      timeout in {dur(c.leftMs)}
+    <span style={{ color: hue }} title={`timeout in ${formatDuration(c.leftMs / 1000)}`}>
+      timeout in {formatDuration(c.leftMs / 1000)}
     </span>
   );
 }
@@ -131,8 +129,8 @@ export function LeaseClock({ c, urgent }: { c: Clock; urgent: boolean }) {
       </span>
     );
   return (
-    <span style={urgent ? { color: "var(--hue-warn)" } : undefined} title={`reaped in ${dur(c.leftMs)}`}>
-      reaped in {dur(c.leftMs)}
+    <span style={urgent ? { color: "var(--hue-warn)" } : undefined} title={`reaped in ${formatDuration(c.leftMs / 1000)}`}>
+      reaped in {formatDuration(c.leftMs / 1000)}
     </span>
   );
 }
@@ -277,7 +275,7 @@ export function ArtifactRow({ a }: { a: ArtifactRef }) {
           </span>
         </span>
         <span className="flex shrink-0 items-baseline gap-3">
-          <span className="tabular-nums text-(--text-faint)">{humanSize(a.sizeBytes)}</span>
+          <span className="tabular-nums text-(--text-faint)">{formatBytes(a.sizeBytes)}</span>
           {textFriendly && (
             <button
               type="button"
@@ -342,7 +340,7 @@ const DEFAULT_MODEL_TEXT = "default (CLI)";
  *   the CLI chose → `default (CLI)`; `model (observed)` is what it chose
  */
 export const pinnedModelText = (adapter: string, model: string | null | undefined): string => {
-  if (!MODEL_ADAPTERS.has(adapter)) return "n/a";
+  if (!MODEL_ADAPTERS.has(adapter)) return NOT_APPLICABLE;
   return model == null || model === DEFAULT_MODEL ? DEFAULT_MODEL_TEXT : model;
 };
 
@@ -352,7 +350,7 @@ export const pinnedModelText = (adapter: string, model: string | null | undefine
  */
 export const modelTierText = (spec: Pick<RunSpec, "adapter" | "modelTier" | "model">): string => {
   if (spec.modelTier) return spec.modelTier;
-  if (!MODEL_ADAPTERS.has(spec.adapter)) return "n/a";
+  if (!MODEL_ADAPTERS.has(spec.adapter)) return NOT_APPLICABLE;
   return spec.model ? "override" : "not declared";
 };
 
@@ -385,14 +383,14 @@ function ModelRows({ spec, observed }: { spec: RunSpec; observed: string | null 
         k="model"
         v={
           <span
-            className="text-(--text-dim)"
+            className="text-(--text-faint)"
             title={
               spec.modelTier
                 ? `Declared model_tier "${spec.modelTier}", but the ${spec.adapter} adapter runs a fixed argv, not a model.`
                 : `The ${spec.adapter} adapter runs a fixed argv, not a model.`
             }
           >
-            n/a
+            {NOT_APPLICABLE}
           </span>
         }
       />
@@ -439,8 +437,8 @@ function ModelRows({ spec, observed }: { spec: RunSpec; observed: string | null 
           observed ? (
             <ModelCell model={observed} className="text-(--text-dim)" />
           ) : (
-            <span className="text-(--text-faint)" title="No model id in this run's transcript — it may predate the capture, or none was stored.">
-              not recorded
+            <span className="text-(--text-faint)" title="observed model not recorded">
+              {NOT_APPLICABLE}
             </span>
           )
         }
@@ -681,8 +679,8 @@ export function RunDetailBlocks({
             }
           />
         )}
-        <KV k="created" v={<Ago iso={d.run.created_at} now={now} />} />
-        <KV k="updated" v={<Ago iso={d.run.updated_at} now={now} />} />
+        <KV k="created" v={<span title={d.run.created_at}>{formatRelative(d.run.created_at, now)}</span>} />
+        <KV k="updated" v={<span title={d.run.updated_at}>{formatRelative(d.run.updated_at, now)}</span>} />
         <KV k="placement" v={d.run.spec.placement ? JSON.stringify(d.run.spec.placement) : "any worker"} />
         <Disclosure label="internals — ids, hashes, paths">
           <KV k="run" v={d.run.runId} />
@@ -720,7 +718,7 @@ export function RunDetailBlocks({
                 attempt #{current.attempt}{" "}
                 {current.started_at ? (
                   <>
-                    started <Ago iso={current.started_at} now={now} className="text-(--text-dim)" />
+                    started <span className="text-(--text-dim)" title={current.started_at}>{formatRelative(current.started_at, now)}</span>
                   </>
                 ) : (
                   "not started"
@@ -845,7 +843,7 @@ export function RunDetailBlocks({
                   <>
                     <span>started</span>
                     <span className="min-w-0 truncate">
-                      <Ago iso={a.started_at} now={now} />
+                      <span title={a.started_at}>{formatRelative(a.started_at, now)}</span>
                     </span>
                   </>
                 )}
@@ -853,7 +851,7 @@ export function RunDetailBlocks({
                   <>
                     <span>finished</span>
                     <span className="min-w-0 truncate">
-                      <Ago iso={a.finished_at} now={now} />
+                      <span title={a.finished_at}>{formatRelative(a.finished_at, now)}</span>
                     </span>
                   </>
                 )}

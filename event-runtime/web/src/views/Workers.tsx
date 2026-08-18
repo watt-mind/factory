@@ -20,16 +20,15 @@ import type { RunListItem, Worker, WorkerCapacity } from "../types";
 import type { OperatorContext } from "../context";
 import { pinnedModelText } from "../components/RunDetailBlocks";
 import {
-  dur,
   heartbeatHue,
   heartbeatOf,
   HEARTBEAT_STALE_MS,
   isOverdue,
   type Heartbeat,
 } from "../heartbeat";
+import { EMPTY, formatDuration, formatRelative } from "../format";
 import { ScopeCaption } from "../components/ContextTabs";
 import {
-  Ago,
   Button,
   CopyActions,
   DetailPane,
@@ -159,14 +158,14 @@ export interface EnrichedWorker extends Worker {
 
 export function enrichWorker(w: Worker, runMap: Map<string, RunListItem>): EnrichedWorker {
   const r = w.currentRun ? (runMap.get(w.currentRun) ?? null) : null;
-  const activeAgent = r?.agent ?? "-";
+  const activeAgent = r?.agent ?? EMPTY;
   const repos = r?.repos?.length ? r.repos.join(", ") : "";
   const ticketMatch = r?.eventId?.match(/\b([A-Z]{2,10}-\d+|PR-\d+)\b/)?.[0] ?? "";
   const activeTarget =
     repos && ticketMatch && !repos.includes(ticketMatch)
       ? `${repos} · ${ticketMatch}`
-      : repos || ticketMatch || (r?.eventId ? shortId(r.eventId) : "-");
-  const activeModel = r ? pinnedModelText(r.adapter, r.model) : "-";
+      : repos || ticketMatch || (r?.eventId ? shortId(r.eventId) : EMPTY);
+  const activeModel = r ? pinnedModelText(r.adapter, r.model) : EMPTY;
   return {
     ...w,
     activeAgent,
@@ -230,7 +229,7 @@ const WORKERS_DISPLAY: DisplayConfig<EnrichedWorker> = {
  * a second before the runtime does.
  */
 function StaleClock({ hb, className }: { hb: Heartbeat; className?: string }) {
-  const windowLabel = `${HEARTBEAT_STALE_MS / 1000}s`;
+  const windowLabel = formatDuration(HEARTBEAT_STALE_MS / 1000);
   if (hb.kind === "none")
     return (
       <span
@@ -246,9 +245,9 @@ function StaleClock({ hb, className }: { hb: Heartbeat; className?: string }) {
       <span
         className={className}
         style={{ color: hue }}
-        title={`No check-in for ${dur(hb.overdueMs)} longer than the ${windowLabel} window allows.`}
+        title={`No check-in for ${formatDuration(hb.overdueMs / 1000)} longer than the ${windowLabel} window allows.`}
       >
-        stale for {dur(hb.overdueMs)}
+        stale for {formatDuration(hb.overdueMs / 1000)}
       </span>
     );
   if (isOverdue(hb))
@@ -265,9 +264,9 @@ function StaleClock({ hb, className }: { hb: Heartbeat; className?: string }) {
     <span
       className={className}
       style={{ color: hue }}
-      title={`Goes stale unless this worker checks in within ${dur(hb.remainingMs)} (${windowLabel} window).`}
+      title={`Goes stale unless this worker checks in within ${formatDuration(hb.remainingMs / 1000)} (${windowLabel} window).`}
     >
-      stale in {dur(hb.remainingMs)}
+      stale in {formatDuration(hb.remainingMs / 1000)}
     </span>
   );
 }
@@ -278,7 +277,7 @@ function HeartbeatCell({ w, now }: { w: Worker; now: number }) {
   return (
     <>
       <span style={{ color: heartbeatHue(hb) }}>
-        <Ago iso={w.lastSeen} now={now} />
+        <span title={w.lastSeen}>{formatRelative(w.lastSeen, now)}</span>
       </span>
       <span className="px-1.5">·</span>
       <StaleClock hb={hb} className="text-[11px]" />
@@ -303,7 +302,7 @@ function HeartbeatMeter({ hb }: { hb: Heartbeat }) {
 const labelText = (labels: Record<string, string>) =>
   Object.entries(labels)
     .map(([k, v]) => `${k}=${v}`)
-    .join(", ") || "-";
+    .join(", ") || EMPTY;
 
 /** Runs already own `#/runs/:id`; the fleet is a way in, not a second router. */
 const openRun = (runId: string) => {
@@ -740,24 +739,24 @@ export function Workers({
                   {show.has("agent") && (
                     <td
                       className="max-w-36 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
-                      title={w.activeAgent !== "-" ? w.activeAgent : undefined}
+                      title={w.activeAgent !== EMPTY ? w.activeAgent : undefined}
                     >
-                      {w.activeAgent !== "-" ? (
+                      {w.activeAgent !== EMPTY ? (
                         <span className="mono font-medium text-(--text)">{w.activeAgent}</span>
                       ) : (
-                        <span className="text-(--text-faint)">-</span>
+                        <span className="text-(--text-faint)">{EMPTY}</span>
                       )}
                     </td>
                   )}
                   {show.has("target") && (
                     <td
                       className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
-                      title={w.activeTarget !== "-" ? w.activeTarget : undefined}
+                      title={w.activeTarget !== EMPTY ? w.activeTarget : undefined}
                     >
-                      {w.activeTarget !== "-" ? (
+                      {w.activeTarget !== EMPTY ? (
                         <span>{w.activeTarget}</span>
                       ) : (
-                        <span className="text-(--text-faint)">-</span>
+                        <span className="text-(--text-faint)">{EMPTY}</span>
                       )}
                     </td>
                   )}
@@ -773,7 +772,7 @@ export function Workers({
                           {shortId(w.currentRun)}
                         </JumpLink>
                       ) : (
-                        "-"
+                        EMPTY
                       )}
                     </td>
                   )}
@@ -784,7 +783,7 @@ export function Workers({
                     >
                       {w.adapters.length > 0
                         ? `${w.adapters.length} adapter${w.adapters.length === 1 ? "" : "s"}`
-                        : "-"}
+                        : EMPTY}
                     </td>
                   )}
                   {show.has("labels") && (
@@ -797,7 +796,7 @@ export function Workers({
                       className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap tabular-nums text-(--text-faint)"
                       title={`Started ${w.startedAt}`}
                     >
-                      <Ago iso={w.startedAt} now={now} />
+                      <span title={w.startedAt}>{formatRelative(w.startedAt, now)}</span>
                     </td>
                   )}
                   {show.has("heartbeat") && (
@@ -899,7 +898,7 @@ export function Workers({
                 background: "color-mix(in oklch, var(--hue-err) 10%, transparent)",
               }}
             >
-              Heartbeat went stale {dur(selHeartbeat.overdueMs)} ago — this process is gone, whatever it last reported
+              Heartbeat went stale {formatDuration(selHeartbeat.overdueMs / 1000)} ago — this process is gone, whatever it last reported
               {sel.currentRun ? ` (it still holds ${sel.currentRun}; the run is reclaimed when its lease expires)` : ""}.
             </div>
           )}
@@ -917,7 +916,7 @@ export function Workers({
               {sel.runItem?.agent && (
                 <KV k="agent" v={<span className="mono font-medium">{sel.runItem.agent}</span>} />
               )}
-              {sel.activeTarget !== "-" && <KV k="target" v={sel.activeTarget} />}
+              {sel.activeTarget !== EMPTY && <KV k="target" v={sel.activeTarget} />}
               {sel.runItem && (
                 <KV
                   k="model"
@@ -933,14 +932,14 @@ export function Workers({
             <div className="rounded-md border border-(--border) px-3 py-2 tabular-nums">
               <div className="flex items-baseline justify-between gap-4">
                 <span className="text-(--text-faint)">
-                  last check-in <Ago iso={sel.lastSeen} now={now} className="text-(--text-dim)" />
+                  last check-in <span className="text-(--text-dim)" title={sel.lastSeen}>{formatRelative(sel.lastSeen, now)}</span>
                 </span>
                 <StaleClock hb={selHeartbeat} />
               </div>
               <HeartbeatMeter hb={selHeartbeat} />
               {selHeartbeat.kind !== "none" && (
                 <div className="mt-2 text-[11px] text-(--text-faint)">
-                  A worker that has not checked in for {HEARTBEAT_STALE_MS / 1000}s is treated as gone, whatever its
+                  A worker that has not checked in for {formatDuration(HEARTBEAT_STALE_MS / 1000)} is treated as gone, whatever its
                   last reported state was.
                 </div>
               )}
@@ -968,12 +967,12 @@ export function Workers({
                     {shortId(sel.currentRun)}
                   </JumpLink>
                 ) : (
-                  "-"
+                  EMPTY
                 )
               }
             />
-            <KV k="startedAt" v={<Ago iso={sel.startedAt} now={now} />} />
-            {sel.stoppedAt && <KV k="stoppedAt" v={<Ago iso={sel.stoppedAt} now={now} />} />}
+            <KV k="startedAt" v={<span title={sel.startedAt}>{formatRelative(sel.startedAt, now)}</span>} />
+            {sel.stoppedAt && <KV k="stoppedAt" v={<span title={sel.stoppedAt}>{formatRelative(sel.stoppedAt, now)}</span>} />}
           </Section>
 
           <Section title="Adapters" card={false}>

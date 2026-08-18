@@ -5,7 +5,6 @@ import { ArtifactPanel, loadArtifactRaw } from "../components/ArtifactView";
 import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import {
-  Ago,
   Button,
   DetailPane,
   FilterInput,
@@ -24,8 +23,9 @@ import {
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
+import { EMPTY, formatBytes, formatRelative } from "../format";
 import { refetchIntervals, useDisplayOptions, useNow } from "../hooks";
-import { formatBytes, viewApplies } from "../lib/artifactView";
+import { viewApplies } from "../lib/artifactView";
 import type { AdmittedEvent, AgentDef, ArtifactInventoryItem, StatusView } from "../types";
 
 export { formatBytes };
@@ -329,7 +329,7 @@ export function Artifacts({
             </div>
             {summary.at && (
               <span className="text-[11px] text-(--text-faint)" title={summary.at}>
-                measured <Ago iso={summary.at} now={now} />
+                measured {formatRelative(summary.at, now)}
               </span>
             )}
           </div>
@@ -462,7 +462,7 @@ export function Artifacts({
                         {artifactKinds.map((kind) => <KindBadge key={kind} kind={kind} />)}
                       </div>
                     ) : (
-                      <span className="text-(--text-faint)">—</span>
+                      <span className="text-(--text-faint)">{EMPTY}</span>
                     )}
                   </td>
                 )}
@@ -473,7 +473,7 @@ export function Artifacts({
                 )}
                 {shown.has("age") && (
                   <td className="whitespace-nowrap border-b border-(--border) px-3 py-1.5" title={new Date(artifact.mtime).toLocaleString()}>
-                    <Ago iso={artifact.mtime} now={now} />
+                    <span title={artifact.mtime}>{formatRelative(artifact.mtime, now)}</span>
                   </td>
                 )}
                 {shown.has("references") && (
@@ -491,7 +491,7 @@ export function Artifacts({
                         ))}
                       </div>
                     ) : (
-                      <span className="text-(--text-faint)">—</span>
+                      <span className="text-(--text-faint)">{EMPTY}</span>
                     )}
                   </td>
                 )}

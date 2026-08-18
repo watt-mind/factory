@@ -12,9 +12,9 @@ import {
 import { setContextActions } from "../palette";
 import type { AdmittedEvent, AgentDef } from "../types";
 import type { OperatorContext } from "../context";
+import { EMPTY, formatDuration, formatRelative } from "../format";
 import { ScopeCaption } from "../components/ContextTabs";
 import {
-  Ago,
   Button,
   CopyActions,
   Countdown,
@@ -63,7 +63,7 @@ const SCHEDULE_TABS: readonly ScheduleTab[] = ["all", "enabled", "disabled"];
 export function compareSchedules(a: ScheduleItem, b: ScheduleItem): number {
   if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
   // Disabled schedules are not due, even if the API retains a historical
-  // nextDue value; the table renders "-" for them, so name is their tie-break.
+  // nextDue value; the table renders the shared empty value for them, so name is their tie-break.
   const parsedADue = a.enabled && a.nextDue ? Date.parse(a.nextDue) : Number.POSITIVE_INFINITY;
   const parsedBDue = b.enabled && b.nextDue ? Date.parse(b.nextDue) : Number.POSITIVE_INFINITY;
   const aDue = Number.isNaN(parsedADue) ? Number.POSITIVE_INFINITY : parsedADue;
@@ -483,13 +483,13 @@ export function Schedules({
                     {s.catchUp}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
-                    {s.lastSlot ? <Ago iso={s.lastSlot} now={now} /> : <span className="text-(--text-faint)">never</span>}
+                    {s.lastSlot ? <span title={s.lastSlot}>{formatRelative(s.lastSlot, now)}</span> : <span className="text-(--text-faint)">never</span>}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
                     {!s.enabled ? (
-                      <span className="text-(--text-faint)">-</span>
+                      <span className="text-(--text-faint)">{EMPTY}</span>
                     ) : s.error ? (
-                      <span className="text-(--hue-err)">-</span>
+                      <span className="text-(--hue-err)">{EMPTY}</span>
                     ) : s.nextDue && s.cadenceSeconds ? (
                       <Countdown
                         createdAt={
@@ -498,7 +498,7 @@ export function Schedules({
                         ttlSeconds={s.cadenceSeconds}
                       />
                     ) : (
-                      "-"
+                      EMPTY
                     )}
                   </td>
                   <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
@@ -632,7 +632,9 @@ export function Schedules({
                   <span>
                     <span className="mono">{sel.every}</span>
                     {sel.cadenceSeconds && (
-                      <span className="ml-2 text-(--text-faint)">({sel.cadenceSeconds}s)</span>
+                      <span className="ml-2 text-(--text-faint)" title={`${sel.cadenceSeconds}s`}>
+                        ({formatDuration(sel.cadenceSeconds)})
+                      </span>
                     )}
                   </span>
                 }
@@ -696,7 +698,7 @@ export function Schedules({
                 v={
                   sel.lastSlot ? (
                     <span>
-                      <Ago iso={sel.lastSlot} now={now} />{" "}
+                      <span title={sel.lastSlot}>{formatRelative(sel.lastSlot, now)}</span>{" "}
                       <span className="mono text-[11px] text-(--text-faint)">({sel.lastSlot})</span>
                     </span>
                   ) : (
@@ -709,7 +711,7 @@ export function Schedules({
                 v={
                   sel.lastCompletedSlot ? (
                     <span>
-                      <Ago iso={sel.lastCompletedSlot} now={now} />{" "}
+                      <span title={sel.lastCompletedSlot}>{formatRelative(sel.lastCompletedSlot, now)}</span>{" "}
                       <span className="mono text-[11px] text-(--text-faint)">
                         ({sel.lastCompletedSlot})
                       </span>
@@ -736,7 +738,7 @@ export function Schedules({
                       <span className="mono text-[11px] text-(--text-faint)">({sel.nextDue})</span>
                     </span>
                   ) : (
-                    "-"
+                    EMPTY
                   )
                 }
               />
@@ -773,7 +775,7 @@ export function Schedules({
                             )}
                           </div>
                           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-(--text-dim)">
-                            <Ago iso={e.occurredAt} now={now} />
+                            <span title={e.occurredAt}>{formatRelative(e.occurredAt, now)}</span>
                             <span>·</span>
                             <span>source: {e.source}</span>
                             {typeof payload.skippedSlots === "number" && payload.skippedSlots > 0 && (

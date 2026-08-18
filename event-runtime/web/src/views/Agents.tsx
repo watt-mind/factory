@@ -35,11 +35,8 @@ import {
   copyLink,
 } from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
-import {
-  AgentMutationBadge,
-  EMPTY_VALUE,
-  formatDurationSeconds,
-} from "../components/AgentHoverCard";
+import { AgentMutationBadge } from "../components/AgentHoverCard";
+import { EMPTY, NOT_APPLICABLE, formatDuration } from "../format";
 import { eventsHash } from "../hash";
 import { setContextActions } from "../palette";
 
@@ -62,7 +59,7 @@ const MODEL_ADAPTERS = new Set(["claude", "pi"]);
  * so "sort by tier" and "group by tier" cannot disagree. `override` is not a
  * tier but reads as one here: it is what a definition says instead of a tier.
  */
-const TIER_ORDER = ["strong", "standard", "light", "override", EMPTY_VALUE] as const;
+const TIER_ORDER = ["strong", "standard", "light", "override", EMPTY] as const;
 
 const AGENT_TABS = ["ALL", "MUTATING", "READ_ONLY"] as const;
 type AgentTab = (typeof AGENT_TABS)[number];
@@ -89,7 +86,7 @@ const uniq = (values: string[]) => [...new Set(values)];
  * to an empty cell.
  */
 export const routeModel = (r: AgentEventRoute): string =>
-  r.resolvedModel ?? (MODEL_ADAPTERS.has(r.adapter) ? "default" : "n/a");
+  r.resolvedModel ?? (MODEL_ADAPTERS.has(r.adapter) ? "default" : NOT_APPLICABLE);
 
 /**
  * Row-level roll-ups. An agent is one row but can be routed by several event
@@ -98,11 +95,11 @@ export const routeModel = (r: AgentEventRoute): string =>
  * truth; picking one adapter to show would be a lie the table cannot flag.
  */
 export const adapterText = (a: AgentDef): string =>
-  uniq(a.eventTypes.map((r) => r.adapter)).join(", ") || EMPTY_VALUE;
+  uniq(a.eventTypes.map((r) => r.adapter)).join(", ") || EMPTY;
 
 /** Declared intent. An exact-id override answers for a definition that names no tier. */
 export const tierText = (a: AgentDef): string =>
-  a.modelTier ?? (a.model ? "override" : EMPTY_VALUE);
+  a.modelTier ?? (a.model ? "override" : EMPTY);
 
 /** Sort key for the Tier column: TIER_ORDER's position, unknowns last. */
 const tierRank = (a: AgentDef): number => {
@@ -116,7 +113,7 @@ const tierRank = (a: AgentDef): number => {
  * declaration, so the fact is not lost.
  */
 export const modelText = (a: AgentDef): string =>
-  uniq(a.eventTypes.map(routeModel)).join(", ") || EMPTY_VALUE;
+  uniq(a.eventTypes.map(routeModel)).join(", ") || EMPTY;
 
 /** Grouping/ordering/columns for the registry table (OPS-493/OPS-492). */
 const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
@@ -402,7 +399,10 @@ export function Agents({
                   )}
                   {show.has("model") && (
                     <td className="max-w-56 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                      <ModelCell model={modelText(a)} className="text-(--text-dim)" />
+                      <ModelCell
+                        model={modelText(a)}
+                        className={modelText(a) === NOT_APPLICABLE ? "text-(--text-faint)" : "text-(--text-dim)"}
+                      />
                     </td>
                   )}
                   {show.has("mutating") && (
@@ -418,13 +418,13 @@ export function Agents({
                   {show.has("timeout") && (
                     <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
                       <span title={a.limits.timeout_seconds != null ? `${a.limits.timeout_seconds}s` : undefined}>
-                        {formatDurationSeconds(a.limits.timeout_seconds)}
+                        {formatDuration(a.limits.timeout_seconds)}
                       </span>
                     </td>
                   )}
                   {show.has("attempts") && (
                     <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
-                      {a.limits.attempts ?? EMPTY_VALUE}
+                      {a.limits.attempts ?? EMPTY}
                     </td>
                   )}
                   {cols.filter((c) => c.isCustom || c.key.startsWith("custom:")).map((c) => (
@@ -528,14 +528,14 @@ export function Agents({
               />
               <KV k="capabilities" v={caps(sel)} />
               <KV k="adapter" v={adapterText(sel)} />
-              <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : EMPTY_VALUE} />
-              <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : EMPTY_VALUE} />
+              <KV k="hosts" v={sel.hosts && sel.hosts.length > 0 ? sel.hosts.join(", ") : EMPTY} />
+              <KV k="command" v={sel.command && sel.command.length > 0 ? sel.command.join(" ") : EMPTY} />
               <KV
                 k="action registry"
                 v={
                   sel.actionRegistry && Object.keys(sel.actionRegistry).length > 0
                     ? Object.keys(sel.actionRegistry).join(", ")
-                    : EMPTY_VALUE
+                    : EMPTY
                 }
               />
             </KVGroup>
@@ -543,14 +543,14 @@ export function Agents({
                 route actually resolves to is per adapter, and lives on the
                 Event routing lines below — the same split `cli.mjs agents` prints. */}
             <KVGroup title="Model">
-              <KV k="model tier" v={sel.modelTier ?? EMPTY_VALUE} />
+              <KV k="model tier" v={sel.modelTier ?? EMPTY} />
               <KV
                 k="model override"
                 v={
                   sel.model ? (
                     <span title="Exact model id — resolved verbatim, whatever the tier says.">{sel.model}</span>
                   ) : (
-                    EMPTY_VALUE
+                    EMPTY
                   )
                 }
               />
@@ -560,11 +560,11 @@ export function Agents({
                 k="timeout"
                 v={
                   <span title={sel.limits.timeout_seconds != null ? `${sel.limits.timeout_seconds}s` : undefined}>
-                    {formatDurationSeconds(sel.limits.timeout_seconds)}
+                    {formatDuration(sel.limits.timeout_seconds)}
                   </span>
                 }
               />
-              <KV k="attempts" v={String(sel.limits.attempts ?? EMPTY_VALUE)} />
+              <KV k="attempts" v={String(sel.limits.attempts ?? EMPTY)} />
             </KVGroup>
           </Section>
 
