@@ -362,6 +362,14 @@ export function RunFull({
                   },
             ]
           : []),
+        ...(["RUNNING", "VERIFYING"].includes(d.run.state)
+          ? [
+              {
+                label: `Extend ${d.run.runId}…`,
+                run: () => setCustomExtend(true),
+              },
+            ]
+          : []),
         ...copy,
       ]);
     }
@@ -376,52 +384,104 @@ export function RunFull({
     selProposal,
   ]);
 
+  const inflight = Boolean(d && ["RUNNING", "VERIFYING"].includes(d.run.state));
+  const showVerbRow =
+    Boolean(canApprove && selProposal) ||
+    Boolean(d && isCancellable(d.run.state)) ||
+    inflight ||
+    Boolean(d && d.run.state === "FAILED");
+
   return (
     <div className="fixed inset-0 z-20 flex h-full min-w-0 flex-col overflow-hidden bg-(--surface-0) sm:static sm:z-auto">
       <header className="sticky top-0 z-10 flex shrink-0 flex-col items-stretch gap-2 border-b border-(--border) bg-(--surface-1) px-6 py-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-3">
-          <nav aria-label="Breadcrumb" className="flex items-center gap-2">
-            <ol className="flex min-w-0 flex-wrap items-center gap-2 list-none p-0 m-0 text-[13px]">
-              <li className="shrink-0">
-                <Button onClick={onBack}>
-                  <span>← Runs</span>
-                  <span
-                    aria-hidden="true"
-                    className="mono ml-1 text-(--text-faint) text-xs"
-                  >
-                    Esc
-                  </span>
-                </Button>
-              </li>
-              <li aria-hidden="true" className="text-(--text-faint) shrink-0">
-                /
-              </li>
-              <li
-                className="flex min-w-0 items-center gap-2"
-                aria-current="page"
-              >
-                {(d?.run.state || listRow?.state) && (
-                  <StateBadge state={d?.run.state ?? listRow!.state} />
-                )}
-                <span
-                  className="display min-w-0 truncate text-[15px] font-semibold text-(--text)"
-                  title={d?.subject ? `${d.subject} · ${runId}` : runId}
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <nav
+              aria-label="Breadcrumb"
+              className="flex min-w-0 items-center gap-2"
+            >
+              <ol className="m-0 flex min-w-0 list-none flex-wrap items-center gap-2 p-0 text-[13px]">
+                <li className="shrink-0">
+                  <Button onClick={onBack}>
+                    <span>← Runs</span>
+                    <span
+                      aria-hidden="true"
+                      className="mono ml-1 text-xs text-(--text-faint)"
+                    >
+                      Esc
+                    </span>
+                  </Button>
+                </li>
+                <li aria-hidden="true" className="shrink-0 text-(--text-faint)">
+                  /
+                </li>
+                <li
+                  className="flex min-w-0 items-center gap-2"
+                  aria-current="page"
                 >
-                  {d?.subject ? (
-                    <TicketText text={d.subject} />
-                  ) : (
-                    <span className="mono">{runId}</span>
+                  {(d?.run.state || listRow?.state) && (
+                    <StateBadge state={d?.run.state ?? listRow!.state} />
                   )}
+                  <span
+                    className="display min-w-0 truncate text-[15px] font-semibold text-(--text)"
+                    title={d?.subject ? `${d.subject} · ${runId}` : runId}
+                  >
+                    {d?.subject ? (
+                      <TicketText text={d.subject} />
+                    ) : (
+                      <span className="mono">{shortId(runId)}</span>
+                    )}
+                  </span>
+                </li>
+              </ol>
+            </nav>
+            <div className="shrink-0 text-(--text-faint)">
+              <CopyActions
+                id={runId}
+                idLabel="run id"
+                cli={`bun event-runtime/cli.mjs inspect ${runId}`}
+                cliLabel="CLI inspect command"
+              />
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {selProposal && onJumpProposal && (
+              <Button onClick={() => onJumpProposal(selProposal.id)}>
+                <span>Open proposal</span>
+                <span
+                  aria-hidden="true"
+                  className="mono ml-1 text-xs text-(--text-faint)"
+                >
+                  p
                 </span>
-              </li>
-            </ol>
-          </nav>
+              </Button>
+            )}
+            {onJumpChain && chainKey && (
+              <Button onClick={() => onJumpChain(chainKey, `run:${runId}`)}>
+                <span>View chain</span>
+                <span
+                  aria-hidden="true"
+                  className="mono ml-1 text-xs text-(--text-faint)"
+                >
+                  c
+                </span>
+              </Button>
+            )}
+            <Button onClick={() => toggleRunPin(runId)}>
+              <span>Open in tab</span>
+              {(!selProposal || !onJumpProposal) && (
+                <span
+                  aria-hidden="true"
+                  className="mono ml-1 text-xs text-(--text-faint)"
+                >
+                  p
+                </span>
+              )}
+            </Button>
+          </div>
         </div>
-        {/* Lifecycle verbs stay left; navigation stays right. This keeps the
-            destructive action visually distinct and limits the row to the
-            actions that change or leave the current run. */}
-        <div className="flex min-h-7 flex-wrap items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1.5">
+        {showVerbRow && (
+          <div className="flex min-h-7 flex-wrap items-center gap-1.5">
             {canApprove && selProposal && (
               <Button
                 disabled={!connected || approve.isPending}
@@ -451,10 +511,10 @@ export function RunFull({
                 </span>
               </Button>
             )}
-            {d && ["RUNNING", "VERIFYING"].includes(d.run.state) && (
-              <div className="flex flex-wrap items-center gap-1.5 text-[12px] text-(--text-dim)">
+            {inflight && d && (
+              <>
                 <span
-                  className="mr-1 tabular-nums"
+                  className="mr-1 text-[12px] text-(--text-dim) tabular-nums"
                   title="Current execution deadline. The sidebar budget meter preserves the original approved RunSpec; its lease clock reflects extensions."
                 >
                   Remaining{" "}
@@ -472,28 +532,12 @@ export function RunFull({
                     : "—"}
                 </span>
                 <Button
-                  disabled={!connected || extend.isPending}
-                  onClick={() =>
-                    extend.mutate({ id: d.run.runId, seconds: 15 * 60 })
-                  }
-                >
-                  +15m
-                </Button>
-                <Button
-                  disabled={!connected || extend.isPending}
-                  onClick={() =>
-                    extend.mutate({ id: d.run.runId, seconds: 30 * 60 })
-                  }
-                >
-                  +30m
-                </Button>
-                <Button
                   disabled={extend.isPending}
                   onClick={() => setCustomExtend(true)}
                 >
-                  Custom…
+                  Extend…
                 </Button>
-              </div>
+              </>
             )}
             {d &&
               d.run.state === "FAILED" &&
@@ -515,42 +559,7 @@ export function RunFull({
                 </Button>
               ))}
           </div>
-          <div className="flex items-center gap-1.5">
-            {selProposal && onJumpProposal && (
-              <Button onClick={() => onJumpProposal(selProposal.id)}>
-                <span>Open proposal</span>
-                <span
-                  aria-hidden="true"
-                  className="mono ml-1 text-(--text-faint) text-xs"
-                >
-                  p
-                </span>
-              </Button>
-            )}
-            {onJumpChain && chainKey && (
-              <Button onClick={() => onJumpChain(chainKey, `run:${runId}`)}>
-                <span>View chain</span>
-                <span
-                  aria-hidden="true"
-                  className="mono ml-1 text-(--text-faint) text-xs"
-                >
-                  c
-                </span>
-              </Button>
-            )}
-            <Button onClick={() => toggleRunPin(runId)}>
-              <span>Open in tab</span>
-              {(!selProposal || !onJumpProposal) && (
-                <span
-                  aria-hidden="true"
-                  className="mono ml-1 text-(--text-faint) text-xs"
-                >
-                  p
-                </span>
-              )}
-            </Button>
-          </div>
-        </div>
+        )}
         {extend.error && !customExtend && <VerbError error={extend.error} />}
         {extendNotice && (
           <div className="mt-1 text-[12px] text-(--hue-ok)" role="status">
@@ -559,15 +568,6 @@ export function RunFull({
             RunSpec.
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
-          <CopyActions
-            id={runId}
-            idLabel="run id"
-            cli={`bun event-runtime/cli.mjs inspect ${runId}`}
-            cliLabel="CLI inspect command"
-            variant="quiet"
-          />
-        </div>
       </header>
 
       {unknownRun ? (
@@ -836,6 +836,24 @@ export function RunFull({
             applies.
           </div>
           <VerbError error={extend.error} />
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            <Button
+              disabled={!connected || extend.isPending}
+              onClick={() =>
+                extend.mutate({ id: d.run.runId, seconds: 15 * 60 })
+              }
+            >
+              +15m
+            </Button>
+            <Button
+              disabled={!connected || extend.isPending}
+              onClick={() =>
+                extend.mutate({ id: d.run.runId, seconds: 30 * 60 })
+              }
+            >
+              +30m
+            </Button>
+          </div>
           <label className="mb-3 block text-[12px] text-(--text-dim)">
             Minutes
             <input

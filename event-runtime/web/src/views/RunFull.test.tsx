@@ -12,6 +12,7 @@ import {
   restoreApi,
   withApi,
 } from "../test-render";
+import { shortId } from "../components/ui";
 import type { RunDetail } from "../types";
 
 afterEach(() => {
@@ -112,10 +113,15 @@ describe("RunFull header (WM-193)", () => {
 
         const header = container.querySelector("header");
         expect(header?.textContent).toContain("← Runs");
-        expect(header?.textContent).toContain(runId);
+        expect(header?.textContent).toContain(shortId(runId));
         expect(header?.textContent).toContain("RUNNING");
+        expect(header?.textContent).not.toContain("copy:");
+        expect(header?.querySelector(`[title="${runId}"]`)?.textContent).toBe(
+          shortId(runId),
+        );
         expect(getByRole("button", { name: /Open in tab/ })).toBeTruthy();
         expect(getByRole("button", { name: /Cancel/ })).toBeTruthy();
+        expect(getByRole("button", { name: "Copy run id (c)" })).toBeTruthy();
         expect(header?.textContent).not.toContain("header-agent@1");
         expect(header?.textContent).not.toContain("header-adapter");
         expect(header?.textContent).not.toContain("2/5 attempts");
@@ -124,6 +130,31 @@ describe("RunFull header (WM-193)", () => {
         expect(sidebar?.textContent).toContain("header-agent@1");
         expect(sidebar?.textContent).toContain("header-adapter");
         expect(sidebar?.textContent).toContain("2/5");
+      },
+    );
+  });
+
+  test("completed runs keep copy icons on the title row and omit the verb row (WM-848)", async () => {
+    const runId = "run_completed_header";
+    const detail = createRunDetailFixture({
+      run: { runId, state: "COMPLETED" } as RunDetail["run"],
+    });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "COMPLETED" })],
+        }),
+      },
+      async () => {
+        const { container, getByRole, queryByRole } = renderRunFull(runId);
+        await waitFor(() => getByRole("button", { name: /Open in tab/ }));
+        const header = container.querySelector("header");
+        expect(header?.textContent).toContain(shortId(runId));
+        expect(header?.textContent).not.toContain("copy:");
+        expect(queryByRole("button", { name: /^Cancel$/ })).toBeNull();
+        expect(queryByRole("button", { name: "Extend…" })).toBeNull();
+        expect(getByRole("button", { name: "Copy run id (c)" })).toBeTruthy();
       },
     );
   });
@@ -205,11 +236,14 @@ describe("RunFull deadline extension (WM-566)", () => {
           await waitFor(() => getByText(/Remaining/));
           expect(getByText(/Remaining/).textContent).toContain("30m");
 
-          fireEvent.click(getByRole("button", { name: "+15m" }));
+          fireEvent.click(getByRole("button", { name: "Extend…" }));
+          fireEvent.click(
+            within(getByRole("dialog")).getByRole("button", { name: "+15m" }),
+          );
           await waitFor(() => expect(calls).toEqual([900]));
           expect(getByText(/Run extended by 15 minutes/)).toBeTruthy();
 
-          fireEvent.click(getByRole("button", { name: "Custom…" }));
+          fireEvent.click(getByRole("button", { name: "Extend…" }));
           const input = getByLabelText("Extension minutes");
           changeInput(input as HTMLInputElement, "0");
           expect(input.getAttribute("aria-invalid")).toBe("true");
@@ -234,7 +268,7 @@ describe("RunFull deadline extension (WM-566)", () => {
     }
   });
 
-  test("preset refusal is visible without opening the custom dialog", async () => {
+  test("preset refusal stays visible in the extend dialog", async () => {
     const runId = "run_extend_refused";
     const detail = createRunDetailFixture({
       run: { runId, state: "RUNNING" } as RunDetail["run"],
@@ -265,11 +299,14 @@ describe("RunFull deadline extension (WM-566)", () => {
           }),
         },
         async () => {
-          const { getByRole, getByText, queryByRole } = renderRunFull(runId);
-          await waitFor(() => getByRole("button", { name: "+30m" }));
-          fireEvent.click(getByRole("button", { name: "+30m" }));
+          const { getByRole, getByText } = renderRunFull(runId);
+          await waitFor(() => getByRole("button", { name: "Extend…" }));
+          fireEvent.click(getByRole("button", { name: "Extend…" }));
+          fireEvent.click(
+            within(getByRole("dialog")).getByRole("button", { name: "+30m" }),
+          );
           await waitFor(() => getByText("deadline_already_expired"));
-          expect(queryByRole("dialog")).toBeNull();
+          expect(getByRole("dialog")).toBeTruthy();
         },
       );
     } finally {
@@ -298,11 +335,11 @@ describe("RunFull deadline extension (WM-566)", () => {
       },
       async () => {
         const { getByRole } = renderRunFull(runId, false);
-        const custom = await waitFor(() =>
-          getByRole("button", { name: "Custom…" }),
+        const extend = await waitFor(() =>
+          getByRole("button", { name: "Extend…" }),
         );
-        expect(custom.hasAttribute("disabled")).toBe(false);
-        fireEvent.click(custom);
+        expect(extend.hasAttribute("disabled")).toBe(false);
+        fireEvent.click(extend);
         expect(
           within(getByRole("dialog"))
             .getByRole("button", { name: "Extend run" })
@@ -402,27 +439,26 @@ describe("RunFull header copy verbs and hints (WM-218)", () => {
         }),
       },
       async () => {
-        const { getByRole } = renderRunFull(runId);
+        const { getByRole, getAllByRole } = renderRunFull(runId);
         await waitFor(() => getByRole("button", { name: /← Runs/ }));
 
         expect(getByRole("button", { name: /← Runs/ }).textContent).toContain(
           "Esc",
         );
+        expect(getByRole("button", { name: "Copy run id (c)" })).toBeTruthy();
         expect(
-          getByRole("button", { name: "Copy run id (c)" }).getAttribute(
-            "title",
-          ),
-        ).toBe("Copy run id · c");
+          getByRole("button", { name: "Copy CLI inspect command (c i)" }),
+        ).toBeTruthy();
+        expect(getByRole("button", { name: "Copy link (c l)" })).toBeTruthy();
         expect(
-          getByRole("button", {
-            name: "Copy CLI inspect command (c i)",
-          }).getAttribute("title"),
-        ).toBe("Copy CLI inspect command · c i");
-        expect(
-          getByRole("button", { name: "Copy link (c l)" }).getAttribute(
-            "title",
-          ),
-        ).toBe("Copy link · c l");
+          getAllByRole("tooltip").map((tooltip) => tooltip.textContent),
+        ).toEqual(
+          expect.arrayContaining([
+            "Copy run id · c",
+            "Copy CLI inspect command · c i",
+            "Copy link · c l",
+          ]),
+        );
       },
     );
   });

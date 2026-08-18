@@ -227,8 +227,8 @@ export function CopyActions({
   idChord?: string;
   cli?: string;
   cliLabel?: string;
-  /** Quiet text links suit the utility row below a detail header; icons remain
-   *  the compact default for inline use on other surfaces. */
+  /** Quiet text links are a denser label style for metadata rows (e.g. artifact
+   *  headers). Detail-pane and run headers use the icon default (WM-848). */
   variant?: "icons" | "quiet";
 }) {
   if (variant === "quiet") {
@@ -797,7 +797,7 @@ export function ListPane({
 }
 
 /**
- * Shared detail-pane chrome: identity and Close, then verbs, then copy/share.
+ * Shared detail-pane chrome: identity + copy/share + Close, then verbs.
  * Keeping these rows here prevents each view from inventing its own spacing or
  * moving a primary action above the selected record's identity (WM-552).
  */
@@ -817,10 +817,18 @@ export function PaneHeader({
 }) {
   return (
     <div className="shrink-0 border-b border-(--border) px-4 py-3">
-      {/* Row 1: Title & Close */}
+      {/* Row 1: Title, copy/share, Close. Utility sits here so an otherwise
+          empty third row does not stack under the verbs (WM-848). */}
       <div className="flex items-center justify-between gap-2">
-        <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">
-          {title}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">
+            {title}
+          </div>
+          {utility != null && (
+            <div className="shrink-0 text-xs text-(--text-faint)">
+              {utility}
+            </div>
+          )}
         </div>
         {close != null && <div className="shrink-0">{close}</div>}
       </div>
@@ -828,12 +836,6 @@ export function PaneHeader({
       {actions != null && (
         <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">
           {actions}
-        </div>
-      )}
-      {/* Row 3: Utility Row (copy/share quiet text line) */}
-      {utility != null && (
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 text-xs text-(--text-faint)">
-          {utility}
         </div>
       )}
     </div>

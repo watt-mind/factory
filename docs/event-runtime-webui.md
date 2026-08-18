@@ -722,30 +722,29 @@ standard `Esc` close exception remains unbadged. A verb reachable only through
 
 #### DetailPane header actions (WM-209)
 
-The pane header is three rows, and each row holds one kind of thing:
+The pane header is two rows; copy lives with the id so it is not a third
+toolbar:
 
 ```
-Runs / [● STATE]  run_xxxx                          [Close]
+Runs / [● STATE]  run_xxxx  [id] [CLI] [link]          [Close]
 [Cancel x]                            [Expand o]  [Open in tab]
-CopyActions: [id icon] · [CLI icon] · [link icon]
 ```
 
-1. **Title row** — breadcrumb (`view / StateBadge id`) and the single
-   `close` slot (WM-97). `Close` is not badged with `Esc`; dismissal is the
-   standard global exception in the keyboard-hint table above.
+1. **Title row** — breadcrumb (`view / StateBadge shortId`) and the single
+   `close` slot (WM-97). `CopyActions` (WM-302) sits after the id, still a
+   utility control (`title` + `aria-label` for `c` / `c i` / `c l`). `Close`
+   is not badged with `Esc`; dismissal is the standard global exception in
+   the keyboard-hint table above. The full-page run view (`RunFull`) puts
+   navigation verbs (`View chain`, `Open in tab`) on this row’s right and
+   omits the verb row when the run has no lifecycle action.
 2. **Verb row** — bordered `Button`s, **≤ 3**: lifecycle verbs on the left
    (`danger` leftmost, hidden — not disabled — when the state does not admit
-   it), navigation verbs (Expand, Open in tab) on the right. This is where a
-   lifecycle verb lives; it never floats between content sections.
-3. **Utility row** — copy/share controls use the compact icon-only
-   `<CopyActions />` component (WM-302), not text links or bordered buttons.
-   Each icon button conveys its label and chord through `title` and
-   `aria-label` (`c`, `c i`, or `c l`) rather than a visible hint. Anything
-   here is also registered in ⌘K. Do not add a copy action for a value that
-   `KV` already copies on click. A read-only pane may co-locate `CopyActions`
-   with the identifier in the title row instead of rendering an otherwise
-   empty utility row; it remains a utility control and follows the same
-   tooltip/accessibility rule (as in Agents, §10.6).
+   it), navigation verbs (Expand, Open in tab) on the right in the list pane.
+   This is where a lifecycle verb lives; it never floats between content
+   sections. RUNNING deadline changes are one `Extend…` (dialog holds +15m /
+   +30m presets and the custom minutes field), not three header buttons.
+3. **Utility** — not its own row. Do not add a copy action for a value that
+   `KV` already copies on click. Anything here is also registered in ⌘K.
 
 Bordered buttons all carry equal visual weight, so five in a row is five
 things claiming priority; the row split is what expresses hierarchy without

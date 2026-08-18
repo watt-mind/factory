@@ -691,6 +691,29 @@ describe("DetailPane", () => {
     );
     expect(r.queryByText("Close")).toBeNull();
   });
+
+  test("places utility on the title row with Close, not a third row (WM-848)", () => {
+    const r = render(
+      <DetailPane
+        widthClass="w-[460px]"
+        title={<span>run_0000</span>}
+        utility={<span>utility-slot</span>}
+        actions={<Button onClick={() => {}}>Expand</Button>}
+        close={<Button onClick={() => {}}>Close</Button>}
+      >
+        <div>body</div>
+      </DetailPane>,
+    );
+    const chrome = r.getByText("run_0000").closest(".border-b");
+    expect(chrome).toBeTruthy();
+    const rows = [...(chrome?.children ?? [])];
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain("run_0000");
+    expect(rows[0]?.textContent).toContain("utility-slot");
+    expect(rows[0]?.textContent).toContain("Close");
+    expect(rows[1]?.textContent).toContain("Expand");
+    expect(rows[1]?.textContent).not.toContain("utility-slot");
+  });
 });
 
 describe("getValueHue", () => {
