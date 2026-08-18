@@ -304,10 +304,15 @@ export async function waitFor(box, needle, timeoutMs = 15_000) {
 }
 
 export function exitOf(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  // Resolve immediately if the child already exited (a drain-signalled
+  // worker can finish before the test awaits it — WM-689). Use loose
+  // null checks: Bun's ChildProcess reports `signalCode` as undefined (not
+  // null) while the process is still running, and a strict `!== null` test
+  // made this fire on live children, which broke demo/seed.test.mjs.
+  if (child.exitCode != null || child.signalCode != null) {
     return Promise.resolve({
       code: child.exitCode,
-      signal: child.signalCode,
+      signal: child.signalCode ?? null,
     });
   }
   return new Promise((resolve) => {
