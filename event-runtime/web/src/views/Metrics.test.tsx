@@ -113,6 +113,25 @@ describe("Metrics", () => {
     ).toBe(true);
   });
 
+  test("Retry rate and Token volume share Outcome mix card geometry", async () => {
+    const view = renderMetrics();
+    const outcome = await view.findByRole("img", { name: /Outcome mix:/ });
+    const retry = view.getByRole("img", { name: /Retry rate by/ });
+    const tokens = view.getByRole("img", { name: /recorded tokens/ });
+    for (const chart of [outcome, retry, tokens]) {
+      expect(chart.getAttribute("viewBox")).toBe("0 0 600 180");
+      expect(chart.getAttribute("preserveAspectRatio")).toBe("none");
+    }
+    const retryLine = retry.querySelector("polyline");
+    expect(retryLine).toBeTruthy();
+    const xs = retryLine!
+      .getAttribute("points")!
+      .split(" ")
+      .map((point) => Number(point.split(",")[0]));
+    expect(xs[0]).toBe(4);
+    expect(xs.at(-1)).toBe(596);
+  });
+
   test("switches and persists the selected window", async () => {
     const view = renderMetrics();
     await view.findByRole("heading", { name: "Reliability" });

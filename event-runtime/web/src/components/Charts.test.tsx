@@ -30,6 +30,28 @@ describe("Sparkline", () => {
     ).toContain("population=retried");
     expect(one.container.querySelector("polyline")).toBeNull();
   });
+
+  test("fills a Metrics card like StackedBars instead of a 120×32 tile", () => {
+    const values = Array.from({ length: 24 }, (_, index) =>
+      index === 12 ? 8 : 0,
+    );
+    const view = render(
+      <Sparkline values={values} label="Retry rate by 1h bucket" />,
+    );
+    const svg = view.getByRole("img", { name: "Retry rate by 1h bucket" });
+    expect(svg.getAttribute("viewBox")).toBe("0 0 600 180");
+    expect(svg.getAttribute("preserveAspectRatio")).toBe("none");
+    expect(svg.getAttribute("class")).toContain("h-44");
+    expect(svg.getAttribute("class")).not.toContain("h-8");
+    const polyline = view.container.querySelector("polyline");
+    expect(polyline).toBeTruthy();
+    const xs = polyline!
+      .getAttribute("points")!
+      .split(" ")
+      .map((point) => Number(point.split(",")[0]));
+    expect(xs[0]).toBe(4);
+    expect(xs.at(-1)).toBe(596);
+  });
 });
 
 describe("StackedBars", () => {

@@ -43,8 +43,8 @@ export function Sparkline({
   values,
   label,
   hue = "var(--hue-info)",
-  width = 120,
-  height = 32,
+  width = 600,
+  height = 180,
   linkForPoint,
 }: {
   values: number[];
@@ -69,7 +69,8 @@ export function Sparkline({
       role="img"
       aria-label={label}
       viewBox={`0 0 ${width} ${height}`}
-      className="h-8 w-full overflow-visible"
+      preserveAspectRatio="none"
+      className="h-44 w-full overflow-visible"
       data-empty={values.length === 0 ? "true" : undefined}
     >
       {values.length > 1 && (
