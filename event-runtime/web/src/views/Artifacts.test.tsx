@@ -218,9 +218,9 @@ describe("Artifacts inventory (WM-207)", () => {
       },
     );
     await waitFor(() => expect(view.getByText("bbbbbbbbbbbb")).toBeTruthy());
-    const table = view.getByRole("table");
-    expect(within(table).queryByText("aaaaaaaaaaaa")).toBeNull();
-    expect(within(table).queryByText("cccccccccccc")).toBeNull();
+    const grid = view.getByRole("grid");
+    expect(within(grid).queryByText("aaaaaaaaaaaa")).toBeNull();
+    expect(within(grid).queryByText("cccccccccccc")).toBeNull();
   });
 
   test("opens a deep-linked inspector with formatted preview, actions, search, and bidirectional references", async () => {
@@ -371,18 +371,28 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
     ).toBeNull();
   });
 
-  test("rows take Tab focus and select on Enter and Space", async () => {
+  test("grid rows take Tab focus and select on Enter and Space", async () => {
     globalThis.fetch = mock(
       async () => new Response("line one", { status: 200 }),
     ) as unknown as typeof fetch;
     const view = renderArtifacts();
     await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
 
+    const grid = view.getByRole("grid");
+    expect(within(grid).getAllByRole("rowgroup")).toHaveLength(2);
+    expect(within(grid).getAllByRole("columnheader")).toHaveLength(5);
+
     const row = view.getByText("1.0 KB").closest("tr");
+    expect(row?.getAttribute("role")).toBe("row");
+    expect(within(row!).getAllByRole("gridcell")).toHaveLength(5);
     expect(row?.getAttribute("tabindex")).toBe("0");
+    expect(row?.getAttribute("aria-selected")).toBe("false");
 
     fireEvent.keyDown(row!, { key: "Enter" });
     expect(window.location.hash).toBe(`#/artifacts/${SHA_A}`);
+    await waitFor(() =>
+      expect(row?.getAttribute("aria-selected")).toBe("true"),
+    );
     expect(
       await view.findByRole("region", { name: "Artifact content" }),
     ).toBeTruthy();

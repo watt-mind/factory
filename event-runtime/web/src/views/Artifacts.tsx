@@ -544,9 +544,16 @@ export function Artifacts({
           </>
         }
       >
-        <table className="w-full border-separate border-spacing-0 text-[12px]">
-          <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+        <table
+          role="grid"
+          aria-label="Artifacts inventory"
+          className="w-full border-separate border-spacing-0 text-[12px]"
+        >
+          <thead role="rowgroup">
+            <tr
+              role="row"
+              className="text-left text-[11px] text-(--text-faint)"
+            >
               {columns.map((column) => {
                 const sort = ARTIFACTS_DISPLAY.sorts.find(
                   (field) => field.column === column.key,
@@ -588,13 +595,14 @@ export function Artifacts({
               })}
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {ordered.map((artifact) => {
               const artifactKinds = kindsOf(artifact);
               const name = downloadName(artifact.sha256, artifactKinds);
               return (
                 <tr
                   key={artifact.sha256}
+                  role="row"
                   tabIndex={0}
                   // Link clicks are the browser's to handle. Assigning the
                   // hash here as well as through the SHA anchor's default
@@ -619,6 +627,7 @@ export function Artifacts({
                   className={`cursor-pointer hover:bg-(--surface-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent) ${artifact.sha256 === selectedSha ? "row-selected" : ""}`}
                 >
                   <td
+                    role="gridcell"
                     className="mono max-w-48 border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
                     title={artifact.sha256}
                   >
@@ -655,7 +664,10 @@ export function Artifacts({
                     </span>
                   </td>
                   {shown.has("kind") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                    <td
+                      role="gridcell"
+                      className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                    >
                       {artifactKinds.length > 0 ? (
                         <div className="flex flex-nowrap gap-1">
                           {artifactKinds.map((kind) => (
@@ -668,12 +680,16 @@ export function Artifacts({
                     </td>
                   )}
                   {shown.has("size") && (
-                    <td className="mono whitespace-nowrap border-b border-(--border) px-3 py-1.5 text-(--text-dim)">
+                    <td
+                      role="gridcell"
+                      className="mono whitespace-nowrap border-b border-(--border) px-3 py-1.5 text-(--text-dim)"
+                    >
                       {formatBytes(artifact.sizeBytes)}
                     </td>
                   )}
                   {shown.has("age") && (
                     <td
+                      role="gridcell"
                       className="whitespace-nowrap border-b border-(--border) px-3 py-1.5"
                       title={new Date(artifact.mtime).toLocaleString()}
                     >
@@ -683,7 +699,10 @@ export function Artifacts({
                     </td>
                   )}
                   {shown.has("references") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                    <td
+                      role="gridcell"
+                      className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                    >
                       {(artifact.references?.length ?? 0) > 0 ? (
                         <div className="flex flex-nowrap gap-2">
                           {(artifact.references ?? []).map((reference) => (
