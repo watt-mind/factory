@@ -40,7 +40,6 @@ import {
   shortId,
 } from "../components/ui";
 
-
 const ACTIVE_STATES = new Set<RunState>([
   "QUEUED",
   "LEASED",
@@ -479,7 +478,6 @@ export function Chains({
                   {cols
                     .filter(
                       (column) =>
-
                         column.isCustom || column.key.startsWith("custom:"),
                     )
                     .map((column) => (

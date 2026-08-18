@@ -398,7 +398,6 @@ no shared set. Every rule below is checkable in review.
      | `GitHubLogoIcon`    | GitHub                                                                                                                                 |
      | `GitBranchIcon`     | base branch, deploy branch, deployment branch, branch                                                                                  |
 
-
      Add to this table in the same PR that adds the registry row.
 
    - Identity rows (`id`, `run`, `version`, hashes, keys, contract) and

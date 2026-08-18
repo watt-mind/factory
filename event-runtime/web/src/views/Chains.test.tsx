@@ -227,4 +227,3 @@ describe("Chains list (WM-537)", () => {
     });
   });
 });
-

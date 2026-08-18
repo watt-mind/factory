@@ -54,4 +54,3 @@ describe("attribute icon registry (§5.2 tier 4, WM-483)", () => {
     }
   });
 });
-

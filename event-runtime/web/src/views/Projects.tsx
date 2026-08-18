@@ -46,7 +46,6 @@ import {
   notify,
 } from "../components/ui";
 
-
 const projectTarget = (repo: RepoItem) =>
   repo.project || repo.github || repo.path;
 const worktreeScripts = (repo: RepoItem) =>
@@ -1197,9 +1196,7 @@ export function Projects({
                                     ({h.state})
                                   </span>
                                 )}
-                                {h.branch && (
-                                  <BranchBadge branch={h.branch} />
-                                )}
+                                {h.branch && <BranchBadge branch={h.branch} />}
                               </div>
                               <div className="mt-0.5 text-[11px] text-(--text-dim)">
                                 {h.reason}
@@ -1288,9 +1285,7 @@ export function Projects({
                                     ({h.state})
                                   </span>
                                 )}
-                                {h.branch && (
-                                  <BranchBadge branch={h.branch} />
-                                )}
+                                {h.branch && <BranchBadge branch={h.branch} />}
                               </div>
                               <div className="mt-0.5 text-[11px] text-(--text-dim)">
                                 {h.reason}

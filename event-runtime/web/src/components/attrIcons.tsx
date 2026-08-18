@@ -7,7 +7,6 @@ import {
   CodeIcon,
   Component1Icon,
   Crosshair2Icon,
-
   CubeIcon,
   DesktopIcon,
   EnterIcon,
@@ -161,7 +160,9 @@ export function SourceIcon({
 }) {
   const norm = source.toLowerCase();
   if (norm === "operator" || norm === "human") {
-    return <PersonIcon className={className} aria-label={`Source: ${source}`} />;
+    return (
+      <PersonIcon className={className} aria-label={`Source: ${source}`} />
+    );
   }
   if (
     norm.startsWith("schedule") ||
@@ -171,13 +172,22 @@ export function SourceIcon({
     return <ClockIcon className={className} aria-label={`Source: ${source}`} />;
   }
   if (norm === "github" || norm.startsWith("gh")) {
-    return <GitHubLogoIcon className={className} aria-label={`Source: ${source}`} />;
+    return (
+      <GitHubLogoIcon className={className} aria-label={`Source: ${source}`} />
+    );
   }
   if (norm === "chain") {
-    return <PaperPlaneIcon className={className} aria-label={`Source: ${source}`} />;
+    return (
+      <PaperPlaneIcon className={className} aria-label={`Source: ${source}`} />
+    );
   }
   if (norm === "linear") {
-    return <CheckCircledIcon className={className} aria-label={`Source: ${source}`} />;
+    return (
+      <CheckCircledIcon
+        className={className}
+        aria-label={`Source: ${source}`}
+      />
+    );
   }
   return <EnterIcon className={className} aria-label={`Source: ${source}`} />;
 }
@@ -241,4 +251,3 @@ export function attrIcon(label: string): ReactNode {
 
 /** For tests and the doc table: the normalised keys this registry knows. */
 export const ATTR_ICON_KEYS: readonly string[] = Object.keys(REGISTRY);
-

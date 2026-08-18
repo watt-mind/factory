@@ -801,7 +801,11 @@ describe("Projects mobile layout (WM-169)", () => {
 
   test("renders Base / Deploy column with branch icons", async () => {
     await withApi(
-      { repos: async () => ({ repos: [repo({ base: "develop", deployBranch: "master" })] }) },
+      {
+        repos: async () => ({
+          repos: [repo({ base: "develop", deployBranch: "master" })],
+        }),
+      },
       async () => {
         const r = renderProjects();
         await r.findByText("factory");
@@ -810,10 +814,10 @@ describe("Projects mobile layout (WM-169)", () => {
         const branchCell = row.querySelectorAll("td")[4];
         expect(branchCell.textContent).toContain("develop");
         expect(branchCell.textContent).toContain("master");
-        expect(branchCell.querySelectorAll("svg").length).toBeGreaterThanOrEqual(2);
+        expect(
+          branchCell.querySelectorAll("svg").length,
+        ).toBeGreaterThanOrEqual(2);
       },
     );
   });
 });
-
-
