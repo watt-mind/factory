@@ -140,8 +140,9 @@ describe("registry", () => {
     // scans; triage now runs on a fixed 8h clock plus manual operator injection.
     // Regenerated (WM-769): merge-scan/merge-fix format_and_lint routing changed agent defs (registry inputs).
     // Regenerated (merge-scan output-shape fix): agent def is a registry input.
+    // Regenerated (merge on agy): merge-scan/merge-fix adapter claude→agy; event-types.json is a registry input.
     const expected =
-      "sha256:65f3c11cb87b8173b47701c814b5192258f174d8064de8a60d4f57b9525b359a";
+      "sha256:3f92016f63e7fdb97f36c8383a4b7ba5b0e7760d15e72ca06e981b31ed3ef774";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

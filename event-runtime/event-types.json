@@ -115,7 +115,7 @@
   },
   "factory.merge.requested": {
     "agent": "merge-scan@2",
-    "adapter": "claude",
+    "adapter": "agy",
     "idempotencyScope": ["correlationId", "inputHash"],
     "proposalTtlSeconds": 1800
   },
@@ -133,7 +133,7 @@
   },
   "factory.merge-fix.requested": {
     "agent": "merge-fix@1",
-    "adapter": "claude",
+    "adapter": "agy",
     "idempotencyScope": ["inputHash"],
     "proposalTtlSeconds": 1800
   },
