@@ -125,7 +125,7 @@ function triagePlanScan({ action, detail }) {
   };
 }
 
-function harness({ adapters = { pi: fake, actions: fake } } = {}) {
+function harness({ adapters = { agy: fake, actions: fake } } = {}) {
   const dir = tmpDir("evrt-triage-");
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = tmpDir("evrt-triage-ws-");
@@ -248,7 +248,7 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
     ).toBe(true);
 
     const { db, approveNext } = harness({
-      adapters: { pi: fakeCanonicalScan, actions: fake },
+      adapters: { agy: fakeCanonicalScan, actions: fake },
     });
     admitEvent(db, registry, triageEnvelope("bj29", "triage-5"));
 
@@ -274,7 +274,7 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
 
   test("apply outcome SUPPLY_CHANGED chains to work.requested", async () => {
     const { db, approveNext } = harness({
-      adapters: { pi: fake, actions: fake },
+      adapters: { agy: fake, actions: fake },
     });
     admitEvent(db, registry, triageEnvelope("bj29", "triage-6"));
 
@@ -303,7 +303,7 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
     // factory.triage.requested.
     const { db, approveNext } = harness({
       adapters: {
-        pi: triagePlanScan({
+        agy: triagePlanScan({
           action: "write-detail",
           detail: canonicalWriteDetail,
         }),
@@ -331,7 +331,7 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
   test("apply outcome NO_CHANGE terminates with no follow-up", async () => {
     const { db, approveNext } = harness({
       adapters: {
-        pi: triagePlanScan({ action: "move-to-todo" }),
+        agy: triagePlanScan({ action: "move-to-todo" }),
         actions: fake,
       },
     });

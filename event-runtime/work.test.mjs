@@ -465,7 +465,8 @@ describe("work-scan registration (WM-110)", () => {
     // The default harness is pi. The only committed non-pi LLM routes are the
     // merge-scan/merge-fix exceptions (WM-722 put them on claude/sonnet;
     // operator decision 2026-08-18 moved them to agy, gemini-3.7-flash, which
-    // is fast and on a separate subscription). agy-smoke rides agy by
+    // is fast and on a separate subscription; triage-scan followed on 2026-08-18
+    // evening to spare codex quota). agy-smoke rides agy by
     // definition. Any other route leaving pi must be an explicit, reviewed
     // decision. No route rides claude any more.
     expect(byAdapter.claude).toBeUndefined();
@@ -473,8 +474,9 @@ describe("work-scan registration (WM-110)", () => {
       "agy-smoke@1",
       "merge-fix@1",
       "merge-scan@2",
+      "triage-scan@1",
     ]);
-    for (const ref of ["merge-fix@1", "merge-scan@2"]) {
+    for (const ref of ["merge-fix@1", "merge-scan@2", "triage-scan@1"]) {
       const resolved = resolveModel(
         registry.agents.get(ref),
         "agy",
