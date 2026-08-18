@@ -322,6 +322,32 @@ describe("HoverCard", () => {
     });
   });
 
+  test("ArrowDown on an already-open trigger re-enters the first tabbable stop", async () => {
+    const r = render(<Fixture secondAction />);
+    const trigger = triggerOf(r.container);
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(r.getByRole("dialog")).toBeTruthy();
+      expect(document.activeElement).toBe(
+        r.getByRole("button", { name: /Open in Agents/ }),
+      );
+    });
+
+    const last = r.getByRole("button", { name: "Copy id" });
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+
+    expect(document.activeElement).toBe(
+      r.getByRole("button", { name: /Open in Agents/ }),
+    );
+  });
+
   test("ArrowDown on an inner trigger button does not reach a window list-keys listener", async () => {
     const listKeys = mock((_e: KeyboardEvent) => {});
     window.addEventListener("keydown", listKeys);
