@@ -101,7 +101,10 @@ describe("registry", () => {
     // The serializer omits only WM-470's new pack provenance and normalizes
     // the absolute prompt path. Changing this digest requires an explicit
     // reason in the PR body: it is the mechanical zero-pack compatibility gate.
-    const expected = "sha256:65fd52598a910dc92f9657eeddce3cd1af10695b8f24fceece24ed1f4b33f580";
+    // Regenerated 2026-08-18: #559 (WM-662, merge agents cursor→pi/terra) landed
+    // between #479's review and its merge, changing event-types.json and two
+    // agent defs — registry inputs. Reason in PR body per the rule above.
+    const expected = "sha256:b2a2887bf5869f236339199447c91acd8dd617fcb5c85c095c1f85e1d6b1ea9b";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
