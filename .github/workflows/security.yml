@@ -9,9 +9,12 @@ on:
 permissions:
   contents: read
 
+# One live run per PR, and one per pushed branch: a newer push to develop
+# supersedes the older develop run (WM-773 item 6) — a stale develop SHA green
+# proves nothing and used to cost a full lane hold per merge.
 concurrency:
-  group: security-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: security-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   gitleaks:
