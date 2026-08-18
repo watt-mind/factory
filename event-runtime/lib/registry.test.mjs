@@ -107,7 +107,9 @@ describe("registry", () => {
     // WM-469 intentionally adds the three declarative kernel-control fields
     // to the affected definitions while preserving their refs and pins
     // (digest regenerated on top of the #559 baseline).
-    const expected = "sha256:0fbb908dd2dbac1184da17106eef92da42f9530c30dac05e205c55ead1312e28";
+    // Regenerated after rebase over #567 (WM-679) + #563 (WM-469): both change
+    // agent definitions, which are registry inputs. Reason in PR body.
+    const expected = "sha256:55929d285a47a1abfadca8df9a0b8dab3ff421bd55ec4b939e77c25ecca92536";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
