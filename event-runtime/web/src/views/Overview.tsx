@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { goPrefixActive } from "../goSequence";
-import { keyGuard, useNow, useRequeuePoll } from "../hooks";
+import { keyGuard, refetchIntervals, useNow, useRequeuePoll } from "../hooks";
 import type { JournalEntry, EventFocus, Proposal, RunState, StatusView } from "../types";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
@@ -655,7 +655,7 @@ function useJournalFeed(): { entries: JournalEntry[]; isPending: boolean; isErro
       }
       return res;
     },
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
   return {
     entries,
@@ -708,27 +708,27 @@ export function Overview({
     action: "archive" | "requeue";
     group: DeadLetterGroup;
   } | null>(null);
-  const status = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const status = useQuery({ queryKey: ["status"], queryFn: api.status, ...refetchIntervals.primary });
   const outbox = useQuery({
     queryKey: ["outbox"],
     queryFn: () => api.outbox(15),
-    refetchInterval: 2000,
+    ...refetchIntervals.fast,
   });
   const proposalsForDeck = useQuery({
     queryKey: ["proposals"],
     queryFn: api.proposals,
-    refetchInterval: 2000,
+    ...refetchIntervals.fast,
   });
   const eventsQ = useQuery({
     queryKey: ["events", "all"],
     queryFn: () => api.events(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
     enabled: context.kind === "repo",
   });
   const runsQ = useQuery({
     queryKey: ["runs", "ALL"],
     queryFn: () => api.runs(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
     enabled: context.kind !== "all",
   });
   const feed = useJournalFeed();

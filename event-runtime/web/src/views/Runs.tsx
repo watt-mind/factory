@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { api, ApiError } from "../api";
-import { keyGuard, tableTokens, useDisplayOptions, useListKeys, useNow, useTabKeys, useTableWindow } from "../hooks";
+import { keyGuard, refetchIntervals, tableTokens, useDisplayOptions, useListKeys, useNow, useTabKeys, useTableWindow } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -272,7 +272,7 @@ export function Runs({
   const proposalsQ = useQuery({
     queryKey: ["proposals", "open"],
     queryFn: () => api.proposals(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
 
   const proposalByRunId = useMemo(() => {
@@ -289,9 +289,9 @@ export function Runs({
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab],
     queryFn: () => api.runs(),
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, ...refetchIntervals.fast });
   const rows = list.data?.runs ?? [];
   const scoped = useMemo(
     () =>
@@ -458,7 +458,7 @@ export function Runs({
     queryKey: ["run", selectedId],
     queryFn: () => api.run(selectedId as string),
     enabled: sel !== null,
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
 
   const invalidate = () => queryClient.invalidateQueries();

@@ -11,7 +11,7 @@ import {
   type OperatorContext,
 } from "./context";
 import { artifactsHash, eventsHash, hashPath, hashProject, hashSearch, withProject } from "./hash";
-import { keyGuard, THEMES, useHashRoute, useTheme, type Theme } from "./hooks";
+import { keyGuard, refetchIntervals, THEMES, useHashRoute, useTheme, type Theme } from "./hooks";
 import { goPrefixActive } from "./goSequence";
 import type { EventFocus } from "./types";
 import { CommandPalette, useGoSequences, type PaletteAction } from "./components/CommandPalette";
@@ -110,7 +110,7 @@ export function App() {
     }
   };
 
-  const reposQ = useQuery({ queryKey: ["repos"], queryFn: api.repos, refetchInterval: 30_000 });
+  const reposQ = useQuery({ queryKey: ["repos"], queryFn: api.repos, ...refetchIntervals.secondary });
 
   useEffect(() => {
     if (!project || project === "all" || project === "inflight") return;
@@ -253,7 +253,7 @@ export function App() {
   const health = useQuery({
     queryKey: ["health"],
     queryFn: api.health,
-    refetchInterval: 2000,
+    ...refetchIntervals.fast,
     retry: false,
   });
   const connected = health.isSuccess;
@@ -261,7 +261,7 @@ export function App() {
   // "unreachable" over an empty factory.
   const healthFailed = !connected && !health.isPending;
 
-  const status = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const status = useQuery({ queryKey: ["status"], queryFn: api.status, ...refetchIntervals.primary });
   const openProposals = status.data?.proposals.open ?? 0;
   const activeRuns = Object.entries(status.data?.runs.byState ?? {})
     .filter(([s]) => ["QUEUED", "LEASED", "RUNNING", "VERIFYING"].includes(s))
@@ -965,4 +965,3 @@ function ThemeIcon({ theme }: { theme: Theme }) {
     </svg>
   );
 }
-

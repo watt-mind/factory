@@ -12,7 +12,7 @@ import "@xyflow/react/dist/style.css";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { keyGuard, useNow } from "../hooks";
+import { keyGuard, refetchIntervals, useNow } from "../hooks";
 import { buildCapabilityGraph, type GraphNode } from "../graph/model";
 import { nodeTypes } from "../graph/nodes";
 import { matchNodes, missingFocusNode, searchEnter } from "../graph/search";
@@ -145,11 +145,11 @@ export function Graph({
   onJumpAgent: (ref: string) => void;
   onJumpEvents: (focus: EventFocus) => void;
 }) {
-  const registry = useQuery({ queryKey: ["agents"], queryFn: api.agents, refetchInterval: 10_000 });
-  const runsQ = useQuery({ queryKey: ["runs"], queryFn: () => api.runs(), refetchInterval: 5_000 });
-  const eventsQ = useQuery({ queryKey: ["events"], queryFn: () => api.events(), refetchInterval: 5_000 });
-  const proposalsQ = useQuery({ queryKey: ["proposals"], queryFn: api.proposals, refetchInterval: 5_000 });
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 5_000 });
+  const registry = useQuery({ queryKey: ["agents"], queryFn: api.agents, ...refetchIntervals.secondary });
+  const runsQ = useQuery({ queryKey: ["runs"], queryFn: () => api.runs(), ...refetchIntervals.fast });
+  const eventsQ = useQuery({ queryKey: ["events"], queryFn: () => api.events(), ...refetchIntervals.fast });
+  const proposalsQ = useQuery({ queryKey: ["proposals"], queryFn: api.proposals, ...refetchIntervals.fast });
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, ...refetchIntervals.secondary });
   const now = useNow();
 
   const [positioned, setPositioned] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);

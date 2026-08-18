@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ScheduleItem, type TriggerOutcome } from "../api";
-import { useListKeys, useNow, useTabKeys } from "../hooks";
+import { refetchIntervals, useListKeys, useNow, useTabKeys } from "../hooks";
 import {
   DEFAULT_ORDER,
   cycleColumnSort,
@@ -165,21 +165,21 @@ export function Schedules({
   const schedulesQ = useQuery({
     queryKey: ["schedules"],
     queryFn: api.schedules,
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
   const rows = schedulesQ.data?.schedules ?? [];
 
   const agentsQ = useQuery({
     queryKey: ["agents"],
     queryFn: api.agents,
-    refetchInterval: 10_000,
+    ...refetchIntervals.secondary,
   });
   const agents = agentsQ.data?.agents ?? [];
 
   const eventsQ = useQuery({
     queryKey: ["events", "all"],
     queryFn: () => api.events(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
   const allEvents = eventsQ.data?.events ?? [];
 

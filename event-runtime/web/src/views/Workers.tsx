@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, refetchIntervals, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -421,8 +421,8 @@ export function Workers({
   onFocusHealthChange?: (health: WorkerHealthFilter | null) => void;
 }) {
   const now = useNow();
-  const query = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 2000 });
-  const runsQuery = useQuery({ queryKey: ["runs"], queryFn: () => api.runs(), refetchInterval: 2000 });
+  const query = useQuery({ queryKey: ["workers"], queryFn: api.workers, ...refetchIntervals.primary });
+  const runsQuery = useQuery({ queryKey: ["runs"], queryFn: () => api.runs(), ...refetchIntervals.secondary });
   const runs = runsQuery.data?.runs ?? [];
   const runMap = useMemo(() => new Map<string, RunListItem>(runs.map((r) => [r.runId, r])), [runs]);
 

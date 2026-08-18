@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { keyGuard, tableTokens, useDisplayOptions, useListKeys, useNow, useTabKeys, useTableWindow } from "../hooks";
+import { keyGuard, refetchIntervals, tableTokens, useDisplayOptions, useListKeys, useNow, useTabKeys, useTableWindow } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -187,12 +187,12 @@ export function Proposals({
   const query = useQuery({
     queryKey: ["proposals"],
     queryFn: () => api.proposals(),
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
   const history = useQuery({
     queryKey: ["proposals", "history"],
     queryFn: () => api.proposalHistory("all"),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
   const [expiredOnly, setExpiredOnly] = useState(false);
   const rows = useMemo(() => {
@@ -224,7 +224,7 @@ export function Proposals({
   const eventsQuery = useQuery({
     queryKey: ["events", "all"],
     queryFn: () => api.events(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
   const eventTypes = useMemo(
     () => new Map((eventsQuery.data?.events ?? []).map((e) => [`${e.source}:${e.eventId}`, e.type])),
@@ -235,7 +235,7 @@ export function Proposals({
 
   // An open proposal's run should still be PROPOSED; anything else means it
   // was raced (e.g. cancelled from the Runs view) and can never be approved.
-  const runsQuery = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), refetchInterval: 2000 });
+  const runsQuery = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), ...refetchIntervals.fast });
   const runStates = useMemo(
     () => new Map((runsQuery.data?.runs ?? []).map((r) => [r.runId, r.state])),
     [runsQuery.data],
@@ -254,7 +254,7 @@ export function Proposals({
   const agentsQuery = useQuery({
     queryKey: ["agents"],
     queryFn: () => api.agents(),
-    refetchInterval: 5000,
+    ...refetchIntervals.secondary,
   });
 
   const [filter, setFilter] = useState("");

@@ -31,12 +31,27 @@ export class ApiError extends Error {
   }
 }
 
+type CachedResponse = { etag: string; body: unknown };
+const responseCache = new Map<string, CachedResponse>();
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const url = `/api${path}`;
+  const cacheKey = method === "GET" ? url : null;
+  const cached = cacheKey ? responseCache.get(cacheKey) : undefined;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (cached) headers["if-none-match"] = cached.etag;
+  const res = await fetch(url, {
     method,
-    headers: { "content-type": "application/json" },
+    headers,
+    // The application cache owns validators and response identity. Bypass the
+    // browser's opaque HTTP cache so a wire 304 reaches this wrapper.
+    cache: "no-store",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (res.status === 304) {
+    if (cached) return cached.body as T;
+    throw new ApiError("HTTP 304 without a cached response", 304);
+  }
   const text = await res.text();
   let json: any = null;
   try {
@@ -48,6 +63,11 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     const message =
       json?.error ?? (Array.isArray(json?.errors) ? json.errors.join("; ") : `HTTP ${res.status}`);
     throw new ApiError(message, res.status);
+  }
+  if (cacheKey) {
+    const etag = res.headers.get("etag");
+    if (etag) responseCache.set(cacheKey, { etag, body: json });
+    else responseCache.delete(cacheKey);
   }
   return json as T;
 }

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { contextFromProject, type OperatorContext } from "../context";
 import { hashProject } from "../hash";
-import { keyGuard, useListKeys, useTabKeys } from "../hooks";
+import { keyGuard, refetchIntervals, useListKeys, useTabKeys } from "../hooks";
 import {
   cycleColumnSort,
   defaultDisplayState,
@@ -131,7 +131,7 @@ export function Projects({
   const query = useQuery({
     queryKey: ["repos"],
     queryFn: api.repos,
-    refetchInterval: 5000,
+    ...refetchIntervals.primary,
   });
 
   const repos = query.data?.repos ?? [];

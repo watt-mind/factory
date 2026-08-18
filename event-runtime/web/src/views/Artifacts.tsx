@@ -24,7 +24,7 @@ import {
   visibleColumns,
   type DisplayConfig,
 } from "../displayOptions";
-import { useDisplayOptions, useNow } from "../hooks";
+import { refetchIntervals, useDisplayOptions, useNow } from "../hooks";
 import { formatBytes, viewApplies } from "../lib/artifactView";
 import type { AdmittedEvent, AgentDef, ArtifactInventoryItem, StatusView } from "../types";
 
@@ -181,7 +181,7 @@ export function Artifacts({
   const artifactsQ = useQuery({
     queryKey: ["artifacts"],
     queryFn: () => fetchArtifacts(),
-    refetchInterval: 10_000,
+    ...refetchIntervals.primary,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
   const [selectedSha, setSelectedSha] = useState(() => artifactShaFromHash());
@@ -210,7 +210,7 @@ export function Artifacts({
     queryKey: ["events", "all-for-artifacts"],
     queryFn: () => api.events(),
     enabled: selectedSha !== null,
-    refetchInterval: 10_000,
+    ...refetchIntervals.secondary,
   });
   // The producing run's agent may ship a view sidecar (WM-454); when the
   // stored bytes are that agent's artifact, the inspector draws it (WM-455).

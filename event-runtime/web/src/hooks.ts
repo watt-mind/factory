@@ -21,6 +21,31 @@ import {
 /** Open-modal depth: global list-navigation keys stand down while a dialog is up. */
 export const modal = { depth: 0 };
 
+const HIDDEN_REFETCH_INTERVAL = 15_000;
+
+function pollingOptions(visibleInterval: number) {
+  return {
+    refetchInterval: () =>
+      typeof document !== "undefined" && document.hidden
+        ? HIDDEN_REFETCH_INTERVAL
+        : visibleInterval,
+    // The interval callback backs hidden tabs off explicitly. Keeping the
+    // observer active lets it recompute that cadence after the next tick;
+    // TanStack Query's visibility listener refetches active queries as soon
+    // as the tab becomes visible again, even if a hidden poll just refreshed
+    // one and left it temporarily fresh.
+    refetchIntervalInBackground: true as const,
+    refetchOnWindowFocus: "always" as const,
+  };
+}
+
+/** Shared collection polling policy: one live primary plus slower joins. */
+export const refetchIntervals = {
+  primary: pollingOptions(2_000),
+  fast: pollingOptions(5_000),
+  secondary: pollingOptions(10_000),
+} as const;
+
 /** True when a global shortcut should be ignored (typing, or a modal is open). */
 export function keyGuard(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;

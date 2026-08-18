@@ -1,8 +1,12 @@
 import "./test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, cleanup, render } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { createElement as h, useState } from "react";
-import { modal, useHashRoute, useListKeys, useTheme } from "./hooks";
+import { api } from "./api";
+import { modal, refetchIntervals, useHashRoute, useListKeys, useTheme } from "./hooks";
+
+const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   cleanup();
@@ -10,6 +14,100 @@ afterEach(() => {
   window.location.hash = "";
   localStorage.removeItem("evrt-theme");
   delete document.documentElement.dataset.theme;
+  globalThis.fetch = originalFetch;
+});
+
+describe("API ETag cache", () => {
+  test("sends If-None-Match and returns the same cached body on 304", async () => {
+    const body = { events: [{ eventId: "evt-etag" }] };
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      if (requests.length === 1) {
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json", etag: '"etag-events"' },
+        });
+      }
+      return new Response(null, { status: 304, headers: { etag: '"etag-events"' } });
+    }) as typeof fetch;
+
+    const first = await api.events("etag-cache-test");
+    const second = await api.events("etag-cache-test");
+
+    expect(second).toBe(first);
+    expect(requests).toHaveLength(2);
+    expect(requests[0].url).toBe("/api/events?status=etag-cache-test");
+    expect(requests[0].init).toMatchObject({
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+    });
+    expect(requests[1].init?.headers).toEqual({
+      "content-type": "application/json",
+      "if-none-match": '"etag-events"',
+    });
+  });
+});
+
+describe("collection refetch intervals", () => {
+  test("use a 15 second hidden-tab cadence and keep background polling active", () => {
+    const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+    try {
+      Object.defineProperty(document, "hidden", { configurable: true, value: false });
+      expect(refetchIntervals.primary.refetchInterval()).toBe(2_000);
+      expect(refetchIntervals.fast.refetchInterval()).toBe(5_000);
+      expect(refetchIntervals.secondary.refetchInterval()).toBe(10_000);
+
+      Object.defineProperty(document, "hidden", { configurable: true, value: true });
+      expect(refetchIntervals.primary.refetchInterval()).toBe(15_000);
+      expect(refetchIntervals.fast.refetchInterval()).toBe(15_000);
+      expect(refetchIntervals.secondary.refetchInterval()).toBe(15_000);
+      expect(refetchIntervals.primary.refetchIntervalInBackground).toBe(true);
+    } finally {
+      if (originalHidden) Object.defineProperty(document, "hidden", originalHidden);
+      else Reflect.deleteProperty(document, "hidden");
+    }
+  });
+
+  test("refetches an active fresh query immediately when the tab becomes visible", async () => {
+    const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let calls = 0;
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    function Probe() {
+      useQuery({
+        queryKey: ["visibility-resume-test"],
+        queryFn: async () => ++calls,
+        ...refetchIntervals.primary,
+      });
+      return null;
+    }
+
+    try {
+      Object.defineProperty(document, "hidden", { configurable: true, value: false });
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      render(h(QueryClientProvider, { client }, h(Probe)));
+      await waitFor(() => expect(calls).toBe(1));
+
+      Object.defineProperty(document, "hidden", { configurable: true, value: true });
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      act(() => window.dispatchEvent(new Event("visibilitychange")));
+      expect(calls).toBe(1);
+
+      Object.defineProperty(document, "hidden", { configurable: true, value: false });
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      act(() => window.dispatchEvent(new Event("visibilitychange")));
+      await waitFor(() => expect(calls).toBe(2));
+    } finally {
+      client.clear();
+      if (originalHidden) Object.defineProperty(document, "hidden", originalHidden);
+      else Reflect.deleteProperty(document, "hidden");
+      if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
+      else Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
 });
 
 function ThemeProbe() {

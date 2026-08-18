@@ -1,6 +1,7 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { api } from "../api";
+import { refetchIntervals } from "../hooks";
 import {
   buildTicketJourney,
   formatDuration,
@@ -275,9 +276,9 @@ export function Ticket({
     queryKey: ["ticket-journey", normalized],
     queryFn: () => fetchTicketJourney(normalized!),
     enabled: valid,
-    refetchInterval: 5000,
+    ...refetchIntervals.primary,
   });
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules, enabled: valid, refetchInterval: 30_000 });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules, enabled: valid, ...refetchIntervals.secondary });
 
   if (!ticketId) return <TicketPicker onNavigate={onNavigate} onNavigatePr={onNavigatePr} />;
   if (!valid) {
@@ -361,11 +362,11 @@ export function PullRequest({
 }) {
   const pr = number != null && /^\d{1,7}$/.test(number.trim()) ? Number(number.trim()) : null;
   const enabled = pr != null;
-  const events = useQuery({ queryKey: ["events", "all"], queryFn: () => api.events(), enabled, refetchInterval: 15_000 });
-  const proposals = useQuery({ queryKey: ["proposals", "history"], queryFn: () => api.proposalHistory("all"), enabled, refetchInterval: 15_000 });
-  const runs = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), enabled, refetchInterval: 15_000 });
-  const inbox = useQuery({ queryKey: ["inbox", "all"], queryFn: () => api.inbox("all"), enabled, refetchInterval: 30_000 });
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules, enabled, refetchInterval: 30_000 });
+  const events = useQuery({ queryKey: ["events", "all"], queryFn: () => api.events(), enabled, ...refetchIntervals.fast });
+  const proposals = useQuery({ queryKey: ["proposals", "history"], queryFn: () => api.proposalHistory("all"), enabled, ...refetchIntervals.fast });
+  const runs = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), enabled, ...refetchIntervals.fast });
+  const inbox = useQuery({ queryKey: ["inbox", "all"], queryFn: () => api.inbox("all"), enabled, ...refetchIntervals.secondary });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules, enabled, ...refetchIntervals.secondary });
 
   const eventList = events.data?.events ?? [];
   const proposalList = proposals.data?.proposals ?? [];
@@ -380,7 +381,10 @@ export function PullRequest({
       queryKey: ["run", id],
       queryFn: () => api.run(id),
       staleTime: TERMINAL_STATES.has(stateById.get(id) ?? "") ? Infinity : 5_000,
-      refetchInterval: TERMINAL_STATES.has(stateById.get(id) ?? "") ? false : 5_000,
+      ...refetchIntervals.primary,
+      refetchInterval: TERMINAL_STATES.has(stateById.get(id) ?? "")
+        ? false
+        : refetchIntervals.primary.refetchInterval,
     })),
   });
   const detailsReady = details.every((query) => query.data || query.isError);

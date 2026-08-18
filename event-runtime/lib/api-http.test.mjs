@@ -67,7 +67,7 @@ describe("Host and Origin header security confinement (OPS-408)", () => {
             try {
               json = JSON.parse(text);
             } catch {}
-            resolve({ status: res.statusCode, json, text });
+            resolve({ status: res.statusCode, headers: res.headers, json, text });
           });
         },
       );
@@ -192,5 +192,38 @@ describe("Host and Origin header security confinement (OPS-408)", () => {
     });
     expect(res.status).toBe(200);
     expect(res.json?.admitted).toBe(true);
+  });
+
+  test("collection endpoints return ETags and 304 for matching If-None-Match", async () => {
+    for (const path of [
+      "/runs",
+      "/events",
+      "/proposals",
+      "/workers",
+      "/agents",
+      "/status",
+      "/repos",
+      "/artifacts",
+    ]) {
+      const first = await rawRequest({ path });
+      expect(first.status).toBe(200);
+      expect(first.headers.etag).toMatch(/^"[0-9a-f]{64}"$/);
+
+      const cached = await rawRequest({
+        path,
+        headers: { "if-none-match": first.headers.etag },
+      });
+      expect(cached.status).toBe(304);
+      expect(cached.headers.etag).toBe(first.headers.etag);
+      expect(cached.text).toBe("");
+
+      const stale = await rawRequest({
+        path,
+        headers: { "if-none-match": '"stale"' },
+      });
+      expect(stale.status).toBe(200);
+      expect(stale.headers.etag).toBe(first.headers.etag);
+      expect(stale.text).toBe(first.text);
+    }
   });
 });

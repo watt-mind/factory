@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError, extendRun } from "../api";
-import { keyGuard, useNow } from "../hooks";
+import { keyGuard, refetchIntervals, useNow } from "../hooks";
 import { hashPath, hashProject, withProject } from "../hash";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
@@ -65,24 +65,24 @@ export function RunFull({
   const detail = useQuery({
     queryKey: ["run", runId],
     queryFn: () => api.run(runId),
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
   const proposalsQ = useQuery({
     queryKey: ["proposals", "open"],
     queryFn: () => api.proposals(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
   // Origin event comes from the list view's join, not GET /runs/:id — the
   // cache key is shared with the Runs list, so this is usually a cache hit.
   const listQ = useQuery({
     queryKey: ["runs", "ALL"],
     queryFn: () => api.runs(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
   const eventsQ = useQuery({
     queryKey: ["events", "ALL"],
     queryFn: () => api.events(),
-    refetchInterval: 2000,
+    ...refetchIntervals.secondary,
   });
   const listRow = useMemo(
     () => (listQ.data?.runs ?? []).find((r) => r.runId === runId) ?? null,

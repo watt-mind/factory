@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
-import { keyGuard, tableTokens, useDisplayOptions, useListKeys, useNow, useRequeuePoll, useTabKeys, useTableWindow } from "../hooks";
+import { keyGuard, refetchIntervals, tableTokens, useDisplayOptions, useListKeys, useNow, useRequeuePoll, useTabKeys, useTableWindow } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -321,17 +321,17 @@ export function Events({
   const list = useQuery({
     queryKey: ["events", fetchAll ? "all" : tab],
     queryFn: () => api.events(fetchAll || tab === "all" ? undefined : tab),
-    refetchInterval: 2000,
+    ...refetchIntervals.primary,
   });
-  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 2000 });
+  const statusQ = useQuery({ queryKey: ["status"], queryFn: api.status, ...refetchIntervals.fast });
   // The reason behind a noop / refused row lives on the proposal and the run,
   // not the event (WM-594); both lists are already cached by other views.
   const proposalsQ = useQuery({
     queryKey: ["proposals", "history"],
     queryFn: () => api.proposalHistory("all"),
-    refetchInterval: 10_000,
+    ...refetchIntervals.secondary,
   });
-  const runsQ = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), refetchInterval: 10_000 });
+  const runsQ = useQuery({ queryKey: ["runs", "ALL"], queryFn: () => api.runs(), ...refetchIntervals.secondary });
   const decisions = useMemo(() => {
     const byId = new Map<string, Proposal>();
     const byEvent = new Map<string, Proposal>();

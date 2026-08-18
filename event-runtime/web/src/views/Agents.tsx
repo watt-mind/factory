@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useDisplayOptions, useListKeys, useTabKeys } from "../hooks";
+import { refetchIntervals, useDisplayOptions, useListKeys, useTabKeys } from "../hooks";
 import {
   buildSections,
   cycleColumnSort,
@@ -184,7 +184,7 @@ export function Agents({
   focusAgentRef: string | null;
   onSelectAgent: (ref: string | null) => void;
 }) {
-  const query = useQuery({ queryKey: ["agents"], queryFn: api.agents, refetchInterval: 2000 });
+  const query = useQuery({ queryKey: ["agents"], queryFn: api.agents, ...refetchIntervals.primary });
   const rows = query.data?.agents ?? [];
   const contracts = query.data?.contracts ?? {};
 

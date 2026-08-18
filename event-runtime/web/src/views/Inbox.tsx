@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { keyGuard, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
+import { keyGuard, refetchIntervals, useDisplayOptions, useListKeys, useNow, useTabKeys } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
   buildSections,
@@ -303,7 +303,7 @@ export function Inbox({
   const queryClient = useQueryClient();
   // One fetch of the whole ledger: it is small, every tab is a client-side
   // filter, and a deep link to a resolved item still resolves from the Open tab.
-  const query = useQuery({ queryKey: ["inbox", "all"], queryFn: () => api.inbox("all"), refetchInterval: 2000 });
+  const query = useQuery({ queryKey: ["inbox", "all"], queryFn: () => api.inbox("all"), ...refetchIntervals.primary });
   const items = query.data?.items ?? [];
 
   const [tab, setTab] = useState<InboxTab>("open");

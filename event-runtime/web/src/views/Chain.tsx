@@ -12,7 +12,7 @@ import "@xyflow/react/dist/style.css";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { keyGuard, useNow } from "../hooks";
+import { keyGuard, refetchIntervals, useNow } from "../hooks";
 import { hashSearch } from "../hash";
 import {
   buildChainGraph,
@@ -120,7 +120,7 @@ export function Chain({
   const chainQ = useQuery({
     queryKey: ["chain", correlationId],
     queryFn: () => api.chain(correlationId),
-    refetchInterval: 3000,
+    ...refetchIntervals.primary,
     retry: (count, err) => !(err instanceof ApiError && err.status === 404) && count < 2,
   });
   const now = useNow();
@@ -155,7 +155,7 @@ export function Chain({
       queryKey: ["run", id],
       queryFn: () => api.run(id),
       enabled: timelineOn,
-      refetchInterval: 3000,
+      ...refetchIntervals.fast,
       retry: 1,
     })),
   });
@@ -163,19 +163,19 @@ export function Chain({
     queryKey: ["proposals", "history"],
     queryFn: () => api.proposalHistory("all"),
     enabled: timelineOn,
-    refetchInterval: 5000,
+    ...refetchIntervals.secondary,
   });
   const schedulesQ = useQuery({
     queryKey: ["schedules"],
     queryFn: api.schedules,
     enabled: timelineOn,
-    refetchInterval: 10000,
+    ...refetchIntervals.secondary,
   });
   const inboxQ = useQuery({
     queryKey: ["inbox", "open"],
     queryFn: () => api.inbox("open"),
     enabled: timelineOn,
-    refetchInterval: 5000,
+    ...refetchIntervals.secondary,
   });
   // One stable key per fetch generation so the memo below has a fixed-size dep
   // list whatever the chain's run count is.
