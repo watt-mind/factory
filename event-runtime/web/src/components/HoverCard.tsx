@@ -8,7 +8,9 @@
  * viewport coordinates would otherwise float away from the row it describes.
  *
  * Callers supply the trigger and the panel body; the panel is portalled to
- * `document.body` so a row's `overflow: hidden` cannot clip it.
+ * `document.body` so a row's `overflow: hidden` cannot clip it — which is also
+ * why Tab at the card's edges has to be steered back to the trigger, since the
+ * portal puts the panel's tab stops after everything else in the document.
  */
 import {
   type FocusEvent as ReactFocusEvent,
@@ -347,13 +349,36 @@ export function HoverCard({
    * landing in the card silently moves the selected row underneath it. Only
    * propagation is stopped: the default is the panel's own scroll, which a card
    * taller than its `maxHeight` needs.
+   *
+   * Tab at either edge is a different leak: the portal sits at the end of
+   * `document.body`, so the browser would step out of the document instead of
+   * continuing from the trigger. Hand focus back there; Tab between two
+   * in-card controls is the browser's to handle.
    */
   const onPanelKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-      e.stopPropagation();
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.stopPropagation();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const root = panelRef.current;
+      if (!root) return;
+      const stops = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE));
+      const active = document.activeElement;
+      // A card with nothing focusable holds focus on the panel itself, so
+      // either direction is an edge. Otherwise only the far end is: forward
+      // from the panel root still walks into the card, as the DOM order says.
+      const atEdge =
+        stops.length === 0 ||
+        (e.shiftKey
+          ? active === stops[0] || active === root
+          : active === stops[stops.length - 1]);
+      if (!atEdge) return;
+      e.preventDefault();
+      restoreFocus();
     },
-    [],
+    [restoreFocus],
   );
 
   const api: HoverCardApi = { close };

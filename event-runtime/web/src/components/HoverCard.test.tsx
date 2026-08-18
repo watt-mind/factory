@@ -3,6 +3,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   act,
   cleanup,
+  createEvent,
   fireEvent,
   render,
   waitFor,
@@ -45,6 +46,8 @@ function Fixture(props: {
   closeDelayMs?: number;
   onOpenChange?: (open: boolean) => void;
   interactiveTrigger?: boolean;
+  /** Two in-card controls, so the first and last tab stops are distinct. */
+  secondAction?: boolean;
 }) {
   return (
     <HoverCard
@@ -67,6 +70,7 @@ function Fixture(props: {
           <button type="button" onClick={close}>
             Open in Agents
           </button>
+          {props.secondAction ? <button type="button">Copy id</button> : null}
         </>
       )}
     </HoverCard>
@@ -441,6 +445,79 @@ describe("HoverCard", () => {
     fireEvent.click(r.getByRole("button", { name: /Open in Agents/ }));
 
     await waitFor(() => expect(r.queryByRole("dialog")).toBeNull());
+  });
+
+  test("Tab from the last in-card control returns focus to the trigger", async () => {
+    const r = render(<Fixture secondAction />);
+    const trigger = triggerOf(r.container);
+    trigger.focus();
+    fireEvent.focus(trigger);
+    await waitFor(() => expect(r.getByRole("dialog")).toBeTruthy());
+
+    const last = r.getByRole("button", { name: "Copy id" });
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+
+    expect(document.activeElement).toBe(trigger);
+    // Focus landing on the trigger is not focus leaving the card, so the
+    // deferred close must not fire behind it; the next Tab is what dismisses it.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(r.queryByRole("dialog")).toBeTruthy();
+  });
+
+  test("Shift+Tab from the first in-card control returns focus to the trigger", async () => {
+    const r = render(<Fixture secondAction />);
+    const trigger = triggerOf(r.container);
+    trigger.focus();
+    fireEvent.focus(trigger);
+    await waitFor(() => expect(r.getByRole("dialog")).toBeTruthy());
+
+    const first = r.getByRole("button", { name: /Open in Agents/ });
+    first.focus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  test("Tab between two in-card controls is left to the browser", async () => {
+    const r = render(<Fixture secondAction />);
+    const trigger = triggerOf(r.container);
+    trigger.focus();
+    fireEvent.focus(trigger);
+    await waitFor(() => expect(r.getByRole("dialog")).toBeTruthy());
+
+    const first = r.getByRole("button", { name: /Open in Agents/ });
+    first.focus();
+    const event = createEvent.keyDown(first, { key: "Tab" });
+    fireEvent(first, event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(first);
+  });
+
+  test("Tab from a card with no controls returns focus to the trigger", async () => {
+    const r = render(
+      <HoverCard
+        label="Agent triage-scan"
+        openDelayMs={0}
+        closeDelayMs={0}
+        trigger="triage-scan"
+      >
+        <span>card body</span>
+      </HoverCard>,
+    );
+    const trigger = triggerOf(r.container);
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+
+    const panel = await waitFor(() => r.getByRole("dialog"));
+    expect(document.activeElement).toBe(panel);
+
+    fireEvent.keyDown(panel, { key: "Tab" });
+
+    expect(document.activeElement).toBe(trigger);
   });
 
   test("drops the entry animation when reduced motion is preferred", async () => {
