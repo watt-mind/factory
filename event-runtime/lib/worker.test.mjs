@@ -344,6 +344,16 @@ describe("worker", () => {
     expect(parsedResult.artifacts[0].kind).toBe("transcript");
     expect(parsedResult.artifacts[0].sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(parsedResult.artifacts[0].uri).toMatch(/^file:\/\//);
+    const inbox = db.query(`SELECT * FROM inbox_items WHERE refs_json LIKE ?`).get(
+      `%${spec.runId}%`,
+    );
+    expect(inbox).toBeTruthy();
+    expect(inbox.kind).toBe("ESCALATED");
+    expect(inbox.source).toBe(`agent:${spec.runId}`);
+    expect(inbox.dedupe_key).toBe(`ESCALATED:${spec.runId}`);
+    expect(JSON.parse(inbox.decision_json).schemaVersion).toBe(
+      "factory.decision-request/v1",
+    );
     const storePath = path.join(o.artifactStore ?? artifactsRoot(), parsedResult.artifacts[0].sha256);
     expect(existsSync(storePath)).toBe(true);
     expect(pinRunArtifact(db, spec.runId)).toEqual({

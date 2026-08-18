@@ -40,6 +40,12 @@ import {
   webhookSecret,
 } from "./config.mjs";
 import { githubWebhookSecret } from "./intake.mjs";
+import {
+  decideInboxItem,
+  getInboxItem,
+  retryInboxDecision,
+} from "./inbox.mjs";
+import { applyDecisionEffect } from "./decision-effects.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { notifyCommand, sendNotification } from "./notify.mjs";
 import { loadRepos } from "./repos.mjs";
@@ -77,6 +83,7 @@ export function createApi({
   inboxSend = sendNotification,
   inboxCommand = notifyCommand(),
   inboxWebUrl = process.env.FACTORY_WEB_URL,
+  inboxApplyEffect = applyDecisionEffect,
 } = {}) {
   const actor = "operator";
   const storeStatsTtlMs = 10_000;
@@ -143,6 +150,51 @@ export function createApi({
         return handleIntakeApiRoute(common);
       }
       if (url.pathname === "/inbox" || url.pathname.startsWith("/inbox/")) {
+        const detailMatch = url.pathname.match(/^\/inbox\/([^/]+)$/);
+        if (req.method === "GET" && detailMatch) {
+          const item = getInboxItem(db, decodeURIComponent(detailMatch[1]));
+          return item
+            ? send(200, { item })
+            : send(404, { error: "not_found" });
+        }
+
+        const decisionMatch = url.pathname.match(
+          /^\/inbox\/([^/]+)\/decide(?:\/(retry))?$/,
+        );
+        if (req.method === "POST" && decisionMatch) {
+          const id = decodeURIComponent(decisionMatch[1]);
+          try {
+            let result;
+            if (decisionMatch[2] === "retry") {
+              const raw = await readBody(req);
+              if (raw.length > 0) {
+                const parsed = parseJson(raw);
+                if (parsed.error) return send(400, { error: "invalid_json", message: parsed.error });
+              }
+              result = retryInboxDecision(db, id, {
+                now: nowMs,
+                applyEffect: inboxApplyEffect,
+              });
+            } else {
+              const parsed = parseJson(await readBody(req));
+              if (parsed.error) return send(400, { error: "invalid_json", message: parsed.error });
+              result = decideInboxItem(db, id, parsed.value, {
+                now: nowMs,
+                decidedBy: actor,
+                applyEffect: inboxApplyEffect,
+              });
+            }
+            return send(200, result);
+          } catch (err) {
+            const status = Number(err?.status) || 400;
+            return send(status, {
+              error: err?.code ?? "invalid_response",
+              message: err?.message ?? String(err),
+              ...(err?.errors ? { errors: err.errors } : {}),
+            });
+          }
+        }
+
         const result = await handleInboxApiRoute({
           ...common,
           inboxCommand,

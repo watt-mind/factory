@@ -170,7 +170,34 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     expect(columns).toEqual([
       "id", "kind", "severity", "title", "body", "refs_json", "source",
       "created_at", "acked_at", "resolved_at", "resolved_by", "delivery_json",
+      "decision_json", "response_json", "decided_at", "decided_by", "dedupe_key",
     ]);
+    upgraded.close();
+  });
+
+  test("the decision ledger migration upgrades a populated v5 inbox database", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    migrateDb(db, { targetVersion: 5 });
+    db.query(
+      `INSERT INTO inbox_items
+         (id, kind, title, source, created_at)
+       VALUES ('legacy', 'BLOCKED', 'legacy item', 'cli', '2026-08-16T00:00:00.000Z')`,
+    ).run();
+    expect(getSchemaVersion(db)).toBe(5);
+    db.close();
+
+    const upgraded = openDb(file);
+    expect(getSchemaVersion(upgraded)).toBe(CURRENT_SCHEMA_VERSION);
+    const columns = upgraded.query("PRAGMA table_info(inbox_items)").all().map((row) => row.name);
+    expect(columns.slice(-5)).toEqual([
+      "decision_json", "response_json", "decided_at", "decided_by", "dedupe_key",
+    ]);
+    expect(upgraded.query("SELECT title FROM inbox_items WHERE id = 'legacy'").get().title).toBe("legacy item");
+    const index = upgraded.query(
+      `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'inbox_items_open_dedupe'`,
+    ).get();
+    expect(index.sql).toContain("WHERE resolved_at IS NULL AND dedupe_key IS NOT NULL");
     upgraded.close();
   });
 

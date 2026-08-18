@@ -65,9 +65,14 @@ describe("notify (WM-65)", () => {
     const out = notifyPending(db, { enabled: false, send: (cmd, msg) => (spawned.push(msg), Promise.resolve({ ok: true, exitCode: 0, error: null })) });
     expect(out.sent).toEqual([]);
     expect(spawned).toEqual([]);
-    const item = db.query("SELECT kind, delivery_json FROM inbox_items").get();
-    expect(item.kind).toBe("human_needed");
+    const item = db.query("SELECT kind, delivery_json, decision_json, dedupe_key FROM inbox_items").get();
+    expect(item.kind).toBe("BLOCKED");
     expect(JSON.parse(item.delivery_json)).toEqual({});
+    expect(JSON.parse(item.decision_json).options.map((option) => option.effect)).toEqual([
+      "requeue",
+      "dismiss",
+    ]);
+    expect(item.dedupe_key).toBe("BLOCKED:test/evt-1");
     expect(db.query("SELECT COUNT(*) AS n FROM notify_log").get().n).toBe(1);
     // The next tick dedups the ledger item even though no projection ran.
     expect(notifyPending(db, { enabled: false }).sent).toEqual([]);
@@ -93,10 +98,13 @@ describe("notify (WM-65)", () => {
     await first.deliveries;
     expect(stub.pushes()).toEqual([
       "BLOCKED linear.ticket.agent_ready evt-park: repo_report_only",
+      "Should this parked event be requeued?",
+      "1. Requeue the event",
+      "2. Not now",
       `http://127.0.0.1:7382/#/inbox/${first.sent[0].inboxItemId}`,
     ]);
     const item = db.query("SELECT kind, refs_json, source, delivery_json FROM inbox_items").get();
-    expect(item.kind).toBe("human_needed");
+    expect(item.kind).toBe("BLOCKED");
     expect(JSON.parse(item.refs_json)).toEqual({ eventSource: "test", eventId: "evt-park" });
     expect(item.source).toBe("serve:notify");
     expect(JSON.parse(item.delivery_json).telegram.error).toBeNull();
@@ -112,7 +120,7 @@ describe("notify (WM-65)", () => {
     const afterRestart = notifyPending(db, { enabled: true, command: stub.bin });
     expect(afterRestart.sent).toEqual([]);
     await afterRestart.deliveries;
-    expect(stub.pushes()).toHaveLength(2);
+    expect(stub.pushes()).toHaveLength(5);
     db.close();
   });
 
@@ -137,6 +145,15 @@ describe("notify (WM-65)", () => {
     const first = sent(now);
     expect(first).toHaveLength(1);
     expect(first[0].message).toBe("DECISION NEEDED proposal prop-aging (ci-doctor@2): expires in 14m");
+    const proposalItem = db.query(
+      "SELECT decision_json, dedupe_key FROM inbox_items WHERE kind = 'decision_needed'",
+    ).get();
+    expect(JSON.parse(proposalItem.decision_json).options.map((option) => option.effect)).toEqual([
+      "approve_proposal",
+      "reject_proposal",
+      "dismiss",
+    ]);
+    expect(proposalItem.dedupe_key).toBe("decision_needed:prop-aging");
 
     // Later ticks before expiry: silent.
     expect(sent(now + 60_000)).toEqual([]);
@@ -178,7 +195,7 @@ describe("notify (WM-65)", () => {
     expect(row.error).toContain("exited 3");
     const inbox = db.query("SELECT delivery_json FROM inbox_items WHERE id = ?").get(row.inbox_item_id);
     expect(JSON.parse(inbox.delivery_json).telegram.error).toContain("exited 3");
-    expect(logs.some((l) => l.includes("notify human_needed test/evt-f failed: notifier exited 3"))).toBe(true);
+    expect(logs.some((l) => l.includes("notify BLOCKED test/evt-f failed: notifier exited 3"))).toBe(true);
 
     // Failed delivery does NOT retry: once means once.
     expect(notifyPending(db, { enabled: true, command: stub.bin }).sent).toEqual([]);

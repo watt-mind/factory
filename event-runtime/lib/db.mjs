@@ -233,6 +233,31 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 6,
+    name: "inbox_decisions",
+    up(db) {
+      const columns = new Set(
+        db.query(`PRAGMA table_info(inbox_items)`).all().map((row) => row.name),
+      );
+      for (const [name, type] of [
+        ["decision_json", "TEXT"],
+        ["response_json", "TEXT"],
+        ["decided_at", "TEXT"],
+        ["decided_by", "TEXT"],
+        ["dedupe_key", "TEXT"],
+      ]) {
+        if (!columns.has(name)) {
+          db.exec(`ALTER TABLE inbox_items ADD COLUMN ${name} ${type};`);
+        }
+      }
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS inbox_items_open_dedupe
+          ON inbox_items (dedupe_key)
+          WHERE resolved_at IS NULL AND dedupe_key IS NOT NULL;
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

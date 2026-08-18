@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
 import { txImmediate } from "./db.mjs";
+import { templateFor } from "./decision-templates.mjs";
 
 export const DEFAULT_NOTIFY_CMD = `python3 ${path.join(homedir(), "Develop", "hdkiller", "scripts", "notify.py")}`;
 
@@ -110,11 +111,17 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
     const target = `${e.source}/${e.eventId}`;
     if (alreadyNotified(db, KIND_HUMAN_NEEDED, target)) continue;
     pending.push({
-      kind: KIND_HUMAN_NEEDED,
+      kind: "BLOCKED",
+      dedupKind: KIND_HUMAN_NEEDED,
       target,
       title: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
       refs: { eventSource: e.source, eventId: e.eventId },
       source: "serve:notify",
+      decision: templateFor("BLOCKED", {
+        producer: "parked",
+        refs: { eventSource: e.source, eventId: e.eventId },
+      }),
+      dedupeKey: `BLOCKED:${target}`,
     });
   }
 
@@ -135,6 +142,11 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
           title: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
           refs: { proposalId: p.id, eventSource: p.event_source, eventId: p.event_id },
           source: "serve:notify",
+          decision: templateFor(KIND_PROPOSAL_EXPIRED, {
+            producer: "proposal",
+            refs: { proposalId: p.id, eventSource: p.event_source, eventId: p.event_id },
+          }),
+          dedupeKey: `${KIND_PROPOSAL_EXPIRED}:${p.id}`,
         });
       }
     } else if (!alreadyNotified(db, DEDUP_PROPOSAL_TTL, p.id)) {
@@ -146,6 +158,11 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
         title: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
         refs: { proposalId: p.id, eventSource: p.event_source, eventId: p.event_id },
         source: "serve:notify",
+        decision: templateFor(KIND_DECISION_NEEDED, {
+          producer: "proposal",
+          refs: { proposalId: p.id, eventSource: p.event_source, eventId: p.event_id },
+        }),
+        dedupeKey: `${KIND_DECISION_NEEDED}:${p.id}`,
       });
     }
   }

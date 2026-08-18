@@ -881,6 +881,9 @@ inbox ledger (WM-285) carries typed decision requests and responses for that —
 agent-authored within a closed vocabulary, rendered generically, applied
 through runtime-owned effects. Design of record:
 [event-runtime-inbox.md](event-runtime-inbox.md).
+The control API exposes `GET /inbox/:id` plus `POST /inbox/:id/decide` and
+`POST /inbox/:id/decide/retry` for reading, answering, and retrying those
+requests.
 
 **What the operator sees.** The full `RunSpec`, plus the planner's evidence:
 the admitted event, the authoritative-state read that produced the proposal and
@@ -931,6 +934,9 @@ lifecycle transitions with the operator as actor:
   same admitted event, a fresh planning pass against current state. Replay is
   for a fixed _event body_; requeue is for a fixed _world_ — after a registry
   or planner fix, the stored event is fine and only the decision was wrong.
+- **decide** — answer an inbox item's hash-bound request through `POST
+  /inbox/:id/decide`; retry a stored response's failed effect through `POST
+  /inbox/:id/decide/retry` without asking for the fields again.
 
 **Dead-lettering.** An event that fails planning repeatedly (default: 3
 attempts) parks as dead-lettered with its last error, visible in status and
