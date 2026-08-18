@@ -314,9 +314,7 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
     );
 
     fireEvent.click(view.getByText("1.0 KB").closest("tr")!);
-    expect(window.location.hash).toBe(
-      `#/artifacts/${SHA_A}?project=factory`,
-    );
+    expect(window.location.hash).toBe(`#/artifacts/${SHA_A}?project=factory`);
     fireEvent.click(await view.findByRole("button", { name: "Close" }));
     expect(window.location.hash).toBe("#/artifacts?project=factory");
   });
