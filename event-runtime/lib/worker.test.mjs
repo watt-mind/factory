@@ -2135,6 +2135,63 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(sum5.reasonCode).toBe("ticket_claim_lost");
   });
 
+  // WM-677: under `dispatch.owned_paths_collision: advisory` a textual overlap
+  // is evidence, not a refusal — the run is claimed and executes. Only the
+  // narrow hard-conflict set (identical concrete file, or `**`) still refuses.
+  // The worker consumes the same gate as the planner, so this is the
+  // execute-time half of the contract; the fixture policy.yaml is `{}` for
+  // every other test here, which is why they still see strict.
+  test("advisory owned-paths mode dispatches across overlap and refuses only hard conflicts (WM-677)", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-advisory-"));
+    const policyPath = path.join(factoryRoot, "config", "policy.yaml");
+    const priorPolicy = readFileSync(policyPath, "utf8");
+    writeFileSync(policyPath, "dispatch:\n  owned_paths_collision: advisory\n");
+    try {
+      // Containment overlap (src/api/** vs src/api/routes.ts): strict refuses this
+      // exact pair in the test above; advisory lets it run.
+      const specA = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-707" } }));
+      const sumA = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+        dispatch: {
+          locksDir: lockDir,
+          fetchTicket: () => readyDispatchTicket("WM-707", { description: "## Owned Paths\n- src/api/**\n" }),
+          fetchInFlight: () => [{ identifier: "WM-800", description: "## Owned Paths\n- src/api/routes.ts\n" }],
+          countLeases: () => 0,
+        },
+      }));
+      expect(sumA.terminalState).not.toBe("REFUSED");
+      expect(sumA.reasonCode).not.toBe("owned_paths_overlap");
+
+      // Identical concrete file on both sides: still a hard conflict.
+      queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-708" } }));
+      const sumB = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+        dispatch: {
+          locksDir: lockDir,
+          fetchTicket: () => readyDispatchTicket("WM-708", { description: "## Owned Paths\n- src/api/routes.ts\n" }),
+          fetchInFlight: () => [{ identifier: "WM-801", description: "## Owned Paths\n- src/api/routes.ts\n" }],
+          countLeases: () => 0,
+        },
+      }));
+      expect(sumB.terminalState).toBe("REFUSED");
+      expect(sumB.reasonCode).toBe("owned_paths_conflict_hard");
+
+      // A `**` claim on the in-flight side: still a hard conflict.
+      queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-709" } }));
+      const sumC = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+        dispatch: {
+          locksDir: lockDir,
+          fetchTicket: () => readyDispatchTicket("WM-709", { description: "## Owned Paths\n- docs/readme.md\n" }),
+          fetchInFlight: () => [{ identifier: "WM-802", description: "## Owned Paths\n- **\n" }],
+          countLeases: () => 0,
+        },
+      }));
+      expect(sumC.terminalState).toBe("REFUSED");
+      expect(sumC.reasonCode).toBe("owned_paths_conflict_hard");
+    } finally {
+      writeFileSync(policyPath, priorPolicy);
+    }
+  });
+
   test("lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)", async () => {
     const db = openDb(":memory:");
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-claim-retry-locks-"));

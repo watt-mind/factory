@@ -15,6 +15,8 @@ import path from "node:path";
 import {
   effectiveOwnedPaths,
   globToRegExp,
+  hardPathConflicts,
+  pathOverlaps,
   pathsCollide,
   parseOwnedPaths,
   readPinManifestRequirements,
@@ -219,6 +221,27 @@ function policyMaxInFlight(root = reposRoot()) {
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_IN_FLIGHT;
   } catch {
     return DEFAULT_MAX_IN_FLIGHT;
+  }
+}
+
+/**
+ * Owned Paths collision mode (WM-677). `strict` refuses dispatch on any overlap
+ * with an in-flight ticket — the historical behavior, and the fail-closed
+ * default when the key is absent or malformed. `advisory` records the overlap
+ * on the proposal as evidence and dispatches anyway, refusing only the narrow
+ * hard-conflict set (identical concrete file, or `**`): textual overlap is what
+ * rebase and merge-fix already resolve, and refusing it at dispatch was
+ * starving the pool for conflicts that mostly never materialized.
+ */
+export const DEFAULT_OWNED_PATHS_COLLISION = "strict";
+export function policyOwnedPathsCollision(root = reposRoot()) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return DEFAULT_OWNED_PATHS_COLLISION;
+  try {
+    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.dispatch?.owned_paths_collision;
+    return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
+  } catch {
+    return DEFAULT_OWNED_PATHS_COLLISION;
   }
 }
 
@@ -487,11 +510,32 @@ export function worktreeDispatchAutoEligibility(payload, {
 
   const inFlight = fetchInFlight(repo);
   evidence.inFlight = inFlight.filter((issue) => String(issue.identifier) !== String(payload?.ticket)).map(evidenceInFlight);
-  if (pathsCollide(evidence.ticket.ownedPaths, evidence.inFlight.flatMap((issue) => issue.ownedPaths))) {
+  const collisionMode = policyOwnedPathsCollision();
+  evidence.checks.owned_paths_collision_mode = collisionMode;
+  const inFlightPaths = evidence.inFlight.flatMap((issue) => issue.ownedPaths);
+  if (pathsCollide(evidence.ticket.ownedPaths, inFlightPaths)) {
     evidence.checks.owned_paths_disjoint = false;
-    return refusal("owned_paths_overlap", evidence);
+    if (collisionMode !== "advisory") return refusal("owned_paths_overlap", evidence);
+    // Advisory: name every overlapping claim and who holds it, so the proposal
+    // and `inspect` show what this run may have to rebase across, then only
+    // refuse the pairs that cannot be reconciled by a rebase.
+    evidence.ownedPathsOverlap = evidence.inFlight.flatMap((issue) =>
+      pathOverlaps(evidence.ticket.ownedPaths, issue.ownedPaths).map(({ a, b }) => ({
+        ticket: issue.id, path: a, inFlightPath: b,
+      })),
+    );
+    const hard = evidence.inFlight.flatMap((issue) =>
+      hardPathConflicts(evidence.ticket.ownedPaths, issue.ownedPaths).map(({ a, b }) => ({
+        ticket: issue.id, path: a, inFlightPath: b,
+      })),
+    );
+    if (hard.length) {
+      evidence.ownedPathsHardConflicts = hard;
+      return refusal("owned_paths_conflict_hard", evidence);
+    }
+  } else {
+    evidence.checks.owned_paths_disjoint = true;
   }
-  evidence.checks.owned_paths_disjoint = true;
   try {
     evidence.repo.escalatePaths = loadRepoEscalatePaths(repo.name);
   } catch (err) {

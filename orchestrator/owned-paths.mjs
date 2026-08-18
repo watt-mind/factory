@@ -178,6 +178,36 @@ export function pathsCollide(setA = [], setB = []) {
   return setA.some((a) => setB.some((b) => globsOverlap(a, b)));
 }
 
+/**
+ * Every overlapping pair between two Owned Paths sets, for advisory evidence.
+ * Same predicate as pathsCollide, but returns the pairs instead of a boolean so
+ * a proposal can name what it overlaps with rather than just refusing.
+ */
+export function pathOverlaps(setA = [], setB = []) {
+  const out = [];
+  for (const a of setA) for (const b of setB) if (globsOverlap(a, b)) out.push({ a, b });
+  return out;
+}
+
+/**
+ * The narrow set of overlaps that still refuse dispatch under advisory mode
+ * (WM-677): two claims that are the SAME concrete file, or a `**` claim on
+ * either side. Everything else — shared directory prefixes, qualified globs,
+ * wildcards that merely could reach the same file — is textual overlap that
+ * git resolves at rebase far more often than not, so it is recorded on the
+ * proposal and dispatch proceeds.
+ */
+export function hardPathConflicts(setA = [], setB = []) {
+  const isConcrete = (g) => !/[*?{]/.test(g);
+  const norm = (g) => String(g ?? "").trim().replace(/^\.\//, "").replace(/\/$/, "");
+  return pathOverlaps(setA, setB).filter(({ a, b }) => {
+    const na = norm(a);
+    const nb = norm(b);
+    if (na === "**" || nb === "**") return true;
+    return isConcrete(na) && isConcrete(nb) && na === nb;
+  });
+}
+
 function walkFiles(rootDir, baseDir = rootDir, out = []) {
   for (const dirent of readdirSync(rootDir, { withFileTypes: true })) {
     const nextPath = path.join(rootDir, dirent.name);

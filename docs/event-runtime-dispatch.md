@@ -149,6 +149,28 @@ parseable `Owned Paths` owns everything (dispatchable, but alone), and
 ambiguous glob overlap errs toward collision — a false positive serializes
 two tickets, a false negative puts two agents in one file.
 
+**Collision mode (WM-677).** `config/policy.yaml` `dispatch.owned_paths_collision`
+selects what a collision *does*:
+
+| mode | on overlap | still refuses |
+| --- | --- | --- |
+| `strict` (default when absent) | refuse, `owned_paths_overlap` | — |
+| `advisory` | record on the proposal as `evidence.ownedPathsOverlap` (`{ticket, path, inFlightPath}` per pair) and dispatch | identical concrete file on both sides, or `**` on either side → `owned_paths_conflict_hard` |
+
+Advisory exists because the strict oracle refuses far more than it protects:
+tickets scope themselves with qualified claims (`views/*.tsx (formatter
+call-sites only)`) that the glob algebra cannot see, and shared-prefix
+wildcards collide by construction. On 2026-08-18 nine dispatch attempts
+became two running workers under strict, while six textually-overlapping PRs
+rebased onto develop clean the same day. Textual overlap is a rebase job and
+`merge-fix` already does it; the pool should not idle waiting for it. What
+advisory keeps hard is the case a rebase genuinely cannot fix — two agents
+handed the *same file* — and the `**` sentinel, whose whole meaning is
+"alone". Merging remains serialized (`concurrency.max_concurrent_merges`),
+which is where real conflicts are caught. Both the planner and the worker's
+execute-time re-check read the same setting, so operator approval and worker
+claim cannot disagree.
+
 **Rejected: a second overlap implementation inside the runtime.** The
 existing parser has already bitten once — architecture.md §2.3's CLNT-616,
 where a correctly specced ticket parsed as empty and dispatch refused it —
