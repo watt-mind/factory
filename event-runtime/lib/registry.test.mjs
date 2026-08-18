@@ -139,8 +139,9 @@ describe("registry", () => {
     // burning the pi/codex adapter's quota on ~30-minute chain-triggered triage
     // scans; triage now runs on a fixed 8h clock plus manual operator injection.
     // Regenerated (WM-769): merge-scan/merge-fix format_and_lint routing changed agent defs (registry inputs).
+    // Regenerated (merge-scan output-shape fix): agent def is a registry input.
     const expected =
-      "sha256:27ff1f911aa62264bb1d689b2e8dc179022928e96c3738398da76de3ee07cda8";
+      "sha256:65f3c11cb87b8173b47701c814b5192258f174d8064de8a60d4f57b9525b359a";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

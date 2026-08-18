@@ -174,5 +174,44 @@ For any refusal, use the fail-closed wrapper shown above rather than writing a
 partial merge plan. A selected-target refusal must additionally include the
 evidence required above.
 
+## Output shape (exact)
+
+`plan`, `fix`, `escalate` items use exactly these property names — never
+`title`, `headRefName`, or other GitHub API names.
+
+`plan` item (≤1, lowest eligible PR):
+<!-- prettier-ignore -->
+```json
+{ "pr": 512, "headSha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "baseSha": "1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b",
+  "headRef": "fix/wm-512-thing", "ticket": "WM-512", "action": "merge_pr", "reason": "Green CI, in Owned Paths, falsifiable tests.",
+  "checksGreen": true, "mergeable": true, "ownedPathsValid": true, "handoffValid": true, "testsFalsifiable": true,
+  "policySafe": true, "sensitive": false, "ambiguous": false }
+```
+
+`fix` item:
+<!-- prettier-ignore -->
+```json
+{ "pr": 513, "headSha": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3", "baseSha": "2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c",
+  "headRef": "fix/wm-513-thing", "ticket": "WM-513", "finding": "rebase_onto_base",
+  "findingHash": "6e27a6319dc7dcc61478b9b5214e7390843aa7210328f7299f0768394922ae62",
+  "round": 1, "mechanical": true, "withinOwnedPaths": true, "ownedPaths": ["event-runtime/lib/worker.mjs"] }
+```
+
+`escalate` item — exactly `pr`, `headSha`, `ticket`, `reason` (no `title`/`headRefName`/`headRef`):
+<!-- prettier-ignore -->
+```json
+{ "pr": 514, "headSha": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "ticket": "WM-514", "reason": "Touches credentials handling; needs human." }
+```
+
+`noopReason` (only when `recommendation` is `NOOP`): `no_open_prs` — no open
+PR targets the configured base branch; `all_prs_held` — open PRs exist but
+all are already held/escalated.
+
+Checklist before writing `./result.json`: `additionalProperties` are
+rejected everywhere; every `plan`/`fix`/`escalate` item needs its own
+40-char hex `headSha`; write the result file even on refusal — the
+fail-closed wrapper above, never an unwritten `./result.json`.
+
 After producing the artifact, do nothing else. In particular, never approve,
 merge, push, mark Done, or delete a branch.
