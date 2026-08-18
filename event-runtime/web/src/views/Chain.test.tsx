@@ -465,3 +465,74 @@ describe("Chain view — Timeline mode (WM-639)", () => {
     expect(view.selected).toEqual([`event:chain:${FIX_EVENT}`]);
   });
 });
+
+describe("Chain header state bar (WM-832)", () => {
+  test("mixed-state chain shows ChainStateBar, not header StateBadges", async () => {
+    const view: ChainView = {
+      correlationId: "operator:dispatch:WM-518",
+      events: [chainEvent("chain-run_5b20cfd4")],
+      runs: [
+        {
+          runId: "run_completed_a",
+          state: "COMPLETED",
+          attempts: 1,
+          agent: "agent-a",
+          adapter: "pi",
+          reasonCode: null,
+          eventId: "chain-run_5b20cfd4",
+          eventSource: "factory",
+          created_at: NOW,
+          updated_at: NOW,
+          startedAt: NOW,
+          finishedAt: NOW,
+          repos: [],
+        },
+        {
+          runId: "run_completed_b",
+          state: "COMPLETED",
+          attempts: 1,
+          agent: "agent-b",
+          adapter: "pi",
+          reasonCode: null,
+          eventId: "chain-run_5b20cfd4",
+          eventSource: "factory",
+          created_at: NOW,
+          updated_at: NOW,
+          startedAt: NOW,
+          finishedAt: NOW,
+          repos: [],
+        },
+        {
+          runId: "run_failed_a",
+          state: "FAILED",
+          attempts: 1,
+          agent: "agent-c",
+          adapter: "pi",
+          reasonCode: null,
+          eventId: "chain-run_5b20cfd4",
+          eventSource: "factory",
+          created_at: NOW,
+          updated_at: NOW,
+          startedAt: NOW,
+          finishedAt: NOW,
+          repos: [],
+        },
+      ],
+    };
+
+    await withApi({ chain: async () => view }, async () => {
+      const rendered = renderChainGraph();
+      await waitFor(() =>
+        expect(rendered.getByText(/1 event · 3 runs/)).toBeTruthy(),
+      );
+
+      const bar = rendered.getByRole("img", {
+        name: /COMPLETED 2.*FAILED 1/,
+      });
+      expect(bar.getAttribute("aria-label")).toContain("COMPLETED");
+      expect(bar.getAttribute("aria-label")).toContain("FAILED");
+      expect(rendered.queryByText("FAILED ×1")).toBeNull();
+      expect(rendered.queryByText("COMPLETED ×2")).toBeNull();
+    });
+  });
+});

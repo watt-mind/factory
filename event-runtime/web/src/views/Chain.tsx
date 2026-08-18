@@ -41,6 +41,7 @@ import {
   type ChainViewMode,
   type TimelineRef,
 } from "../chainTimeline";
+import { ChainStateBar } from "../components/ChainStateBar";
 import {
   Ago,
   Button,
@@ -613,13 +614,13 @@ export function Chain({
     graph?.nodes.filter((n) => n.kind === "chainEvent").length ?? 0;
   const runCount =
     graph?.nodes.filter((n) => n.kind === "chainRun").length ?? 0;
-  const runStates = useMemo(() => {
-    const counts = new Map<string, number>();
+  const runStateCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
     for (const n of graph?.nodes ?? []) {
       if (n.kind === "chainRun")
-        counts.set(n.run.state, (counts.get(n.run.state) ?? 0) + 1);
+        counts[n.run.state] = (counts[n.run.state] ?? 0) + 1;
     }
-    return [...counts.entries()];
+    return counts;
   }, [graph]);
 
   const emptyCopy = notFound
@@ -665,18 +666,7 @@ export function Chain({
                   run{runCount === 1 ? "" : "s"} · {graph.maxDepth} hop
                   {graph.maxDepth === 1 ? "" : "s"}
                 </span>
-                {runStates.length > 0 && (
-                  <span className="flex shrink-0 items-center gap-1">
-                    {runStates.map(([state, count]) => (
-                      <StateBadge
-                        key={state}
-                        state={count > 1 ? `${state} ×${count}` : state}
-                        hues={badgeHues(state, count)}
-                        dot={false}
-                      />
-                    ))}
-                  </span>
-                )}
+                <ChainStateBar states={runStateCounts} runCount={runCount} />
               </div>
             )}
           </div>
@@ -1076,11 +1066,6 @@ export function Chain({
       )}
     </div>
   );
-}
-
-function badgeHues(state: string, count: number): Record<string, string> {
-  const hue = STATE_HUES[state] ?? "var(--hue-idle)";
-  return { ...STATE_HUES, [`${state} ×${count}`]: hue };
 }
 
 /**
