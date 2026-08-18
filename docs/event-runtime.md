@@ -595,7 +595,12 @@ artifact file (including the adapter-captured transcript) into
 `<home>/artifacts/<sha256>`, and the control API serves them from there —
 result rows never reference files that died with a workspace. Passing work
 between agents means materializing an accepted artifact into a new workspace,
-not letting two agents share a live directory.
+not letting two agents share a live directory. The same rule covers memory:
+agents get no board or shared scratch to read at will — cross-run knowledge is
+a **memo** (`factory.memo/v1`), an artifact of an accepted run or of an inbox
+decision, declared by the consumer, folded by the planner into the spec input
+(`memoPin`), and materialized as `memos.json`
+([event-runtime-memos.md](event-runtime-memos.md), WM-807; designed, unbuilt).
 
 A requeued attempt still gets its own `${runId}-a${attempt}` directory. Before
 starting attempt 2 or later, the workspace provider checks retained earlier
