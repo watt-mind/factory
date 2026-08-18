@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   push:
     branches: ["develop", "main"]
   workflow_dispatch:
@@ -83,14 +84,12 @@ jobs:
 
   fast-unit-tests:
     name: Fast unit tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     needs: shadow-runner-health
-    # All shadow runners are services on the same physical host. The flock
-    # below serializes this job with every integration Verify job across every
-    # workflow run without GitHub concurrency's "replace pending run" behavior.
+    # Measurements recorded in docs/ci.md show this bounded suite can run
+    # safely without joining the integration/E2E host-lock queue.
     runs-on: [self-hosted, shadow]
-    # Includes time queued on the host-local flock. Keep this comfortably above
-    # the measured multi-PR backlog so serialization cannot create false reds.
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - name: Checkout (no action download)
         shell: bash
@@ -122,32 +121,6 @@ jobs:
             bun --version
           fi
 
-      - name: Acquire host verify lock
-        id: verify-lock
-        shell: bash
-        run: |
-          set -euo pipefail
-          lock="/tmp/factory-verify-host.lock"
-          state_dir="$(mktemp -d "$RUNNER_TEMP/factory-verify-lock.XXXXXX")"
-          ready="$state_dir/ready"
-          mkfifo "$ready"
-
-          # Keep flock alive across subsequent Actions steps. Reading the FIFO
-          # waits on the real lock acquisition rather than sleep-polling. The
-          # final always() step and runner cleanup both release the lock.
-          (
-            flock 9
-            printf 'acquired\n' > "$ready"
-            exec tail -f /dev/null >/dev/null 2>&1
-          ) 9>"$lock" &
-          guardian=$!
-          read -r _ < "$ready"
-          rm -f "$ready"
-
-          echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
-          echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
-          echo "Acquired the shared-host Verify lock on $RUNNER_NAME (guardian $guardian)."
-
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -156,18 +129,9 @@ jobs:
         # Explicit liveness bounds declared by individual tests still win.
         run: bun test --timeout 20000 --max-concurrency=4 event-runtime/lib
 
-      - name: Release host verify lock
-        if: always() && steps.verify-lock.outputs.guardian != ''
-        shell: bash
-        env:
-          GUARDIAN_PID: ${{ steps.verify-lock.outputs.guardian }}
-          LOCK_STATE_DIR: ${{ steps.verify-lock.outputs.state_dir }}
-        run: |
-          kill "$GUARDIAN_PID" 2>/dev/null || true
-          rm -rf "$LOCK_STATE_DIR"
-
   verify:
-    name: Verify
+    name: Full verification
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     needs: [shadow-runner-health, fast-unit-tests]
     # Self-hosted per project-conventions PC-03 / PC-22 — cloud runners are
     # forbidden, and shadow is the dedicated host runner label.
@@ -228,16 +192,26 @@ jobs:
           ready="$state_dir/ready"
           mkfifo "$ready"
 
-          # Eight shadow runner services share one physical host. A single flock
-          # serializes test jobs across workflow runs so CPU-heavy spawn suites
-          # cannot starve one another. FIFO readiness avoids sleep-polling.
-          (
-            flock 9
-            printf 'acquired\n' > "$ready"
+          # --no-fork keeps one PID from the queued flock through the guardian
+          # tail, so cancellation can terminate the actual lock waiter at once.
+          flock --no-fork "$lock" bash -c '
+            printf "acquired\n" > "$1"
             exec tail -f /dev/null >/dev/null 2>&1
-          ) 9>"$lock" &
+          ' _ "$ready" &
           guardian=$!
+
+          # A pull_request synchronize event can cancel this job while it is
+          # blocked on flock. --no-fork makes guardian the waiter itself, so the
+          # shell's EXIT trap releases the lock without process-tree cleanup.
+          cleanup_waiter() {
+            kill "$guardian" 2>/dev/null || true
+            rm -rf "$state_dir"
+          }
+          trap cleanup_waiter EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           read -r _ < "$ready"
+          trap - EXIT INT TERM
           rm -f "$ready"
 
           echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
@@ -369,3 +343,45 @@ jobs:
         run: |
           kill "$GUARDIAN_PID" 2>/dev/null || true
           rm -rf "$LOCK_STATE_DIR"
+
+  required-verify:
+    name: Verify
+    if: always()
+    needs: [shadow-runner-health, fast-unit-tests, verify]
+    # Keep the required check responsive even when the shadow pool is busy or
+    # unhealthy. It aggregates the expensive jobs without running test code.
+    runs-on: [self-hosted, smoke-test]
+    timeout-minutes: 2
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      IS_DRAFT: ${{ github.event.pull_request.draft }}
+      HEALTH_RESULT: ${{ needs.shadow-runner-health.result }}
+      FAST_RESULT: ${{ needs.fast-unit-tests.result }}
+      FULL_RESULT: ${{ needs.verify.result }}
+    steps:
+      - name: Report required verification result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$IS_DRAFT" = "true" ]; then
+            echo "Draft pull request: expensive test jobs intentionally skipped."
+            exit 0
+          fi
+
+          failed=0
+          for result in \
+            "Shadow runner fleet available=$HEALTH_RESULT" \
+            "Fast unit tests=$FAST_RESULT" \
+            "Full verification=$FULL_RESULT"
+          do
+            echo "$result"
+            if [ "${result##*=}" != "success" ]; then
+              failed=1
+            fi
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more required verification jobs did not succeed."
+          fi
+          exit "$failed"

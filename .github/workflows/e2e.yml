@@ -3,7 +3,15 @@ name: Browser E2E
 on:
   workflow_dispatch:
   pull_request:
-    types: [opened, reopened, synchronize, labeled]
+    types:
+      [
+        opened,
+        reopened,
+        synchronize,
+        labeled,
+        ready_for_review,
+        converted_to_draft,
+      ]
 
 permissions:
   contents: read
@@ -15,7 +23,14 @@ concurrency:
 jobs:
   browser-e2e:
     name: Playwright smoke journeys
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-e2e')
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.pull_request.draft == false &&
+          contains(github.event.pull_request.labels.*.name, 'run-e2e')
+        )
+      }}
     runs-on: [self-hosted, shadow]
     timeout-minutes: 45
     steps:
@@ -61,13 +76,25 @@ jobs:
           state_dir="$(mktemp -d "$RUNNER_TEMP/factory-e2e-lock.XXXXXX")"
           ready="$state_dir/ready"
           mkfifo "$ready"
-          (
-            flock 9
-            printf 'acquired\n' > "$ready"
+          # --no-fork preserves one PID while flock waits and after it execs the
+          # guardian, so killing that PID cannot leave a child waiter behind.
+          flock --no-fork "$lock" bash -c '
+            printf "acquired\n" > "$1"
             exec tail -f /dev/null >/dev/null 2>&1
-          ) 9>"$lock" &
+          ' _ "$ready" &
           guardian=$!
+
+          # Cancelled PR runs must not leave a queued flock waiter behind until
+          # runner cleanup. The EXIT trap owns the waiter until lock handoff.
+          cleanup_waiter() {
+            kill "$guardian" 2>/dev/null || true
+            rm -rf "$state_dir"
+          }
+          trap cleanup_waiter EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           read -r _ < "$ready"
+          trap - EXIT INT TERM
           rm -f "$ready"
           echo "guardian=$guardian" >> "$GITHUB_OUTPUT"
           echo "state_dir=$state_dir" >> "$GITHUB_OUTPUT"
