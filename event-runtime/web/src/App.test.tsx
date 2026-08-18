@@ -12,7 +12,8 @@ import {
 import { App } from "./App";
 import { goPrefix } from "./goSequence";
 import { NAV } from "./nav";
-import type { StatusView } from "./types";
+import { createProposalFixture } from "./test-render";
+import type { Proposal, StatusView } from "./types";
 
 const ENV = { name: "dev", home: "/tmp/factory", adapter: null };
 
@@ -43,6 +44,7 @@ let currentStatus = STATUS;
 // /api/health answers; "error" is a runtime that answered with a failure.
 let healthMode: "ok" | "pending" | "error" = "ok";
 let healthCalls = 0;
+let currentProposals: Proposal[] = [];
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -72,6 +74,7 @@ beforeEach(() => {
   currentStatus = STATUS;
   healthMode = "ok";
   healthCalls = 0;
+  currentProposals = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/api/health")) {
@@ -96,6 +99,8 @@ beforeEach(() => {
       });
     }
     if (url.includes("/api/repos")) return jsonResponse({ repos: [] });
+    if (url.includes("/api/proposals"))
+      return jsonResponse({ proposals: currentProposals });
     if (url.includes("/api/runs?ticket=")) {
       const ticket =
         new URL(url, "http://localhost").searchParams.get("ticket") ?? "WM-0";
@@ -189,6 +194,29 @@ describe("sidebar navigation accessibility", () => {
         n.key === "events" ? "page" : null,
       );
     }
+  });
+});
+
+describe("Graph proposal navigation (WM-165)", () => {
+  test("Open in Proposals routes through App to the selected proposal", async () => {
+    currentProposals = [
+      createProposalFixture({
+        id: "prop_graph",
+        agent: "doctor@1",
+        spec: null,
+        repos: [],
+      }),
+    ];
+    window.location.hash = "#/graph/proposal:prop_graph";
+    const utils = renderApp();
+
+    const open = await utils.findByRole("button", {
+      name: "Open in Proposals",
+    });
+    fireEvent.click(open);
+
+    expect(window.location.hash).toBe("#/proposals/prop_graph");
+    await utils.findByRole("heading", { name: "Proposals" });
   });
 });
 

@@ -17,7 +17,6 @@ import { buildCapabilityGraph, type GraphNode } from "../graph/model";
 import { nodeTypes } from "../graph/nodes";
 import { matchNodes, missingFocusNode, searchEnter } from "../graph/search";
 import { EDGE_STYLES, legendEntries } from "../graph/style";
-import { hashPath, hashProject, withProject } from "../hash";
 import type { EventFocus } from "../types";
 import type { OperatorContext } from "../context";
 import {
@@ -137,10 +136,6 @@ function applyGraphOverlay(
   };
 }
 
-function jumpHash(path: string) {
-  window.location.hash = `#/${withProject(path, hashProject(window.location.hash))}`;
-}
-
 /**
  * Graph (webui roadmap / OPS-224 phase 1, chrome OPS-230, phase 2 overlays OPS-227):
  * the capability map overlaid with live run states, admitted/planned event counts,
@@ -152,12 +147,14 @@ export function Graph({
   onSelectNode,
   onJumpAgent,
   onJumpEvents,
+  onJumpProposal,
 }: {
   context: OperatorContext;
   focusNodeId: string | null;
   onSelectNode: (id: string | null) => void;
   onJumpAgent: (ref: string) => void;
   onJumpEvents: (focus: EventFocus) => void;
+  onJumpProposal: (id: string) => void;
 }) {
   const registry = useQuery({
     queryKey: ["agents"],
@@ -416,7 +413,6 @@ export function Graph({
       minZoom: zoom,
       maxZoom: zoom,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentMatch, flowReady]);
 
   const emptyCopy = registry.isPending
@@ -736,11 +732,7 @@ export function Graph({
                   Open in Agents
                 </Button>
               )}
-              <Button
-                onClick={() =>
-                  jumpHash(hashPath("proposals", selected.proposalId))
-                }
-              >
+              <Button onClick={() => onJumpProposal(selected.proposalId)}>
                 Open in Proposals
               </Button>
             </>

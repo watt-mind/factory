@@ -384,6 +384,7 @@ function renderGraph(props: Partial<Parameters<typeof Graph>[0]> = {}) {
       onSelectNode={() => {}}
       onJumpAgent={() => {}}
       onJumpEvents={() => {}}
+      onJumpProposal={() => {}}
       {...props}
     />,
   );
@@ -541,11 +542,12 @@ describe("Graph view inspect loop", () => {
     expect(fitView).toHaveBeenCalledTimes(1);
   });
 
-  test("selected proposal node shows Open in Proposals jumping via hashPath", async () => {
+  test("selected proposal node delegates Open in Proposals to onJumpProposal", async () => {
     const proposal = createProposalFixture({
       id: "prop_abc",
       agent: "doctor@1",
     });
+    const onJumpProposal = mock((_id: string) => {});
     await withApi(
       {
         agents: async () => graphAgents(),
@@ -553,13 +555,15 @@ describe("Graph view inspect loop", () => {
         status: async () => createStatusFixture(),
       },
       async () => {
-        const { getByRole } = renderGraph({ focusNodeId: "proposal:prop_abc" });
+        const { getByRole } = renderGraph({
+          focusNodeId: "proposal:prop_abc",
+          onJumpProposal,
+        });
         const btn = await waitFor(() =>
           getByRole("button", { name: "Open in Proposals" }),
         );
-        window.location.hash = "#/graph/proposal:prop_abc";
         fireEvent.click(btn);
-        expect(window.location.hash).toBe("#/proposals/prop_abc");
+        expect(onJumpProposal).toHaveBeenCalledWith("prop_abc");
       },
     );
   });
