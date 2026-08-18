@@ -220,3 +220,122 @@ describe("GET /chain/:correlationId (WM-527)", () => {
     expect((await fetch(s.url("/chain/"))).status).not.toBe(200);
   });
 });
+
+describe("GET /chains (WM-537)", () => {
+  let s;
+  const now = Date.UTC(2026, 7, 17, 14, 0);
+  const t = (hour, minute = 0) => new Date(Date.UTC(2026, 7, 17, hour, minute)).toISOString();
+
+  function insertRun(db, runId, state, at, eventId, repo) {
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+    ).run(
+      runId,
+      `${runId}-key`,
+      JSON.stringify({ agent: "test@1", adapter: "fake", input: { repo } }),
+      `sha256:${runId}`,
+      state,
+      at,
+      at,
+    );
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, run_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, ?, 'run', 'approved', ?, 600)`,
+    ).run(`prop-${runId}`, eventId, runId, at);
+  }
+
+  beforeAll(async () => {
+    s = await makeServer({ now: () => now });
+    await s.client.replay(envelope({
+      eventId: "origin-alpha",
+      correlationId: "corr-alpha",
+      occurredAt: t(12),
+      payload: { repo: "factory" },
+    }));
+    insertRun(s.db, "run-alpha", "COMPLETED", t(12, 5), "origin-alpha", "factory");
+    expect(admitChainEvent(s.db, registry, envelope({
+      eventId: "alpha-child",
+      source: "chain",
+      type: "factory.child.requested",
+      correlationId: "corr-alpha",
+      causationId: "run-alpha",
+      occurredAt: t(12, 10),
+      payload: { repo: "factory" },
+    })).admitted).toBe(true);
+
+    await s.client.replay(envelope({
+      eventId: "origin-bravo",
+      correlationId: null,
+      type: "factory.bravo.requested",
+      occurredAt: t(12, 20),
+      payload: { repo: "bravo" },
+    }));
+    insertRun(s.db, "run-bravo", "RUNNING", t(12, 25), "origin-bravo", "bravo");
+
+    await s.client.replay(envelope({
+      eventId: "single-charlie",
+      correlationId: null,
+      type: "factory.charlie.requested",
+      occurredAt: t(12, 30),
+      payload: { repo: "charlie" },
+    }));
+    await s.client.replay(envelope({
+      eventId: "outside-window",
+      correlationId: null,
+      occurredAt: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+    }));
+    // Intake stamps admitted_at from the injected clock; make this fixture's
+    // chronology explicit so the endpoint's window/order assertions are real.
+    s.db.query(`UPDATE events SET admitted_at = occurred_at`).run();
+  });
+  afterAll(() => s.close());
+
+  test("lists recent chains newest first with origins, depth, tallies, singles, and cutoff", async () => {
+    const res = await fetch(s.url("/chains?window=2h&limit=100"));
+    expect(res.status).toBe(200);
+    const { chains } = await res.json();
+    expect(chains.map((chain) => chain.correlationId)).toEqual([
+      "single-charlie",
+      "origin-bravo",
+      "corr-alpha",
+    ]);
+    expect(chains.find((chain) => chain.correlationId === "outside-window")).toBeUndefined();
+    expect(chains[0]).toMatchObject({
+      correlationId: "single-charlie",
+      origin: {
+        source: "test",
+        eventId: "single-charlie",
+        type: "factory.charlie.requested",
+      },
+      eventCount: 1,
+      runCount: 0,
+      maxDepth: 0,
+      states: {},
+      repos: ["charlie"],
+      single: true,
+    });
+    expect(chains[1]).toMatchObject({
+      correlationId: "origin-bravo",
+      runCount: 1,
+      states: { RUNNING: 1 },
+      repos: ["bravo"],
+      single: false,
+    });
+    expect(chains[2]).toMatchObject({
+      correlationId: "corr-alpha",
+      eventCount: 2,
+      runCount: 1,
+      maxDepth: 1,
+      states: { COMPLETED: 1 },
+      repos: ["factory"],
+    });
+  });
+
+  test("validates window and limit and applies the limit", async () => {
+    expect((await fetch(s.url("/chains?window=soon"))).status).toBe(400);
+    expect((await fetch(s.url("/chains?limit=0"))).status).toBe(400);
+    const body = await (await fetch(s.url("/chains?window=2h&limit=2"))).json();
+    expect(body.chains).toHaveLength(2);
+  });
+});

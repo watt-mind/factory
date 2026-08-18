@@ -11,6 +11,10 @@
  */
 import { repoNamesFromInput } from "./api-runs.mjs";
 
+const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
+
 /** The id that names an event's chain: its correlation id, else its own id. */
 export function chainKeyOf(event) {
   return (
@@ -120,7 +124,139 @@ export function chainView(db, correlationId) {
   return { correlationId, events, runs };
 }
 
-export function handleChainApiRoute({ route, url, send, db }) {
+/** Number of derived-event hops from the origin to the deepest event. */
+function maxChainDepth(events, runs) {
+  const eventKey = (source, eventId) => `${source}\0${eventId}`;
+  const parentEventByRun = new Map();
+  for (const run of runs) {
+    if (run.eventSource && run.eventId) {
+      parentEventByRun.set(run.runId, eventKey(run.eventSource, run.eventId));
+    }
+  }
+  const byId = new Map(events.map((event) => [eventKey(event.source, event.eventId), event]));
+  const memo = new Map();
+
+  function depth(key, visiting = new Set()) {
+    if (memo.has(key)) return memo.get(key);
+    const event = byId.get(key);
+    if (!event?.causationId) return 0;
+    if (visiting.has(key)) return 0;
+    const parentEventKey = parentEventByRun.get(event.causationId);
+    if (!parentEventKey || !byId.has(parentEventKey)) return 1;
+    visiting.add(key);
+    const value = depth(parentEventKey, visiting) + 1;
+    visiting.delete(key);
+    memo.set(key, value);
+    return value;
+  }
+
+  return events.reduce(
+    (max, event) => Math.max(max, depth(eventKey(event.source, event.eventId))),
+    0,
+  );
+}
+
+function chainSummary(view) {
+  const origin = view.events.find((event) => !event.causationId) ?? view.events[0];
+  const states = {};
+  const repos = new Set();
+  let lastActivityAt = origin.admittedAt;
+  for (const event of view.events) {
+    if (event.admittedAt > lastActivityAt) lastActivityAt = event.admittedAt;
+    for (const repo of event.repos) repos.add(repo);
+  }
+  for (const run of view.runs) {
+    states[run.state] = (states[run.state] ?? 0) + 1;
+    if (run.updated_at > lastActivityAt) lastActivityAt = run.updated_at;
+    for (const repo of run.repos) repos.add(repo);
+  }
+  return {
+    correlationId: view.correlationId,
+    origin: {
+      source: origin.source,
+      eventId: origin.eventId,
+      type: origin.type,
+      subject: origin.subject,
+      admittedAt: origin.admittedAt,
+    },
+    eventCount: view.events.length,
+    runCount: view.runs.length,
+    maxDepth: maxChainDepth(view.events, view.runs),
+    states,
+    lastActivityAt,
+    repos: [...repos].sort(),
+    single: view.events.length === 1 && view.runs.length === 0,
+  };
+}
+
+/** Recent chain instances, newest activity first. */
+export function chainsView(db, { windowMs = DEFAULT_WINDOW_MS, limit = DEFAULT_LIMIT, nowMs = Date.now() } = {}) {
+  const cutoff = new Date(nowMs - windowMs).toISOString();
+  // Find recent keys in SQL before expanding each complete trace. Run activity
+  // counts even when the last event is old, including a causation parent run.
+  const candidates = db
+    .query(
+      `WITH event_activity AS (
+         SELECT COALESCE(correlation_id, event_id) AS chain_key,
+                MAX(admitted_at) AS event_last
+         FROM events
+         GROUP BY COALESCE(correlation_id, event_id)
+       ), proposal_activity AS (
+         SELECT COALESCE(e.correlation_id, e.event_id) AS chain_key,
+                MAX(r.updated_at) AS run_last
+         FROM events e
+         JOIN proposals p ON p.event_source = e.source AND p.event_id = e.event_id
+         JOIN runs r ON r.run_id = p.run_id
+         GROUP BY COALESCE(e.correlation_id, e.event_id)
+       ), causation_activity AS (
+         SELECT COALESCE(e.correlation_id, e.event_id) AS chain_key,
+                MAX(r.updated_at) AS cause_last
+         FROM events e
+         JOIN runs r ON r.run_id = e.causation_id
+         GROUP BY COALESCE(e.correlation_id, e.event_id)
+       )
+       SELECT ea.chain_key,
+              MAX(ea.event_last, COALESCE(pa.run_last, ''), COALESCE(ca.cause_last, '')) AS last_activity
+       FROM event_activity ea
+       LEFT JOIN proposal_activity pa ON pa.chain_key = ea.chain_key
+       LEFT JOIN causation_activity ca ON ca.chain_key = ea.chain_key
+       WHERE MAX(ea.event_last, COALESCE(pa.run_last, ''), COALESCE(ca.cause_last, '')) >= ?
+       ORDER BY last_activity DESC, ea.chain_key ASC
+       LIMIT ?`,
+    )
+    .all(cutoff, limit);
+
+  return candidates
+    .map(({ chain_key }) => chainView(db, chain_key))
+    .filter(Boolean)
+    .map(chainSummary)
+    .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt) || a.correlationId.localeCompare(b.correlationId));
+}
+
+function windowMs(value) {
+  if (value == null || value === "") return DEFAULT_WINDOW_MS;
+  const match = /^(\d+)(m|h|d)$/.exec(value);
+  if (!match) return null;
+  const unit = { m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]];
+  const result = Number(match[1]) * unit;
+  return Number.isSafeInteger(result) && result > 0 ? result : null;
+}
+
+function rowLimit(value) {
+  if (value == null || value === "") return DEFAULT_LIMIT;
+  if (!/^\d+$/.test(value)) return null;
+  const result = Number(value);
+  return Number.isSafeInteger(result) && result >= 1 && result <= MAX_LIMIT ? result : null;
+}
+
+export function handleChainApiRoute({ route, url, send, db, nowMs }) {
+  if (route === "GET /chains") {
+    const parsedWindow = windowMs(url.searchParams.get("window"));
+    const parsedLimit = rowLimit(url.searchParams.get("limit"));
+    if (parsedWindow == null) return send(400, { error: "window must be a positive duration such as 24h" });
+    if (parsedLimit == null) return send(400, { error: `limit must be an integer from 1 to ${MAX_LIMIT}` });
+    return send(200, { chains: chainsView(db, { windowMs: parsedWindow, limit: parsedLimit, nowMs }) });
+  }
   const match = url.pathname.match(/^\/chain\/([^/]+)$/);
   if (!match || route !== `GET ${url.pathname}`) return false;
   const correlationId = decodeURIComponent(match[1]);

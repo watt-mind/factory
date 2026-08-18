@@ -1363,10 +1363,42 @@ layer spacing because chains are long and thin.
   the chain. Positions are reused across the 3 s poll while node/edge
   identity is unchanged (§10.13's identity rule).
 
-It is a drill-in like `#/run/:id`, not a nav item: you arrive from an event
-or a run, never cold.
+The trace remains a drill-in like `#/run/:id`, but the Chains inventory below
+also makes it discoverable without first knowing an event or run id.
 
-### 10.16 Settings (read-only) (`#/settings`, `g c`) — WM-704
+### 10.16 Chains list (`#/chains`, `g l`) — WM-537
+
+The Chains inventory answers “what chains ran recently, what is still active,
+and where did one fail?” before the operator knows an instance id. The control
+API exposes `GET /chains?window=24h&limit=100`, one summary per correlation
+key, newest activity first. A summary names the origin event (the event without
+a `causationId`, falling back to the earliest admitted event), event/run counts,
+derived-event hop depth, run-state tally, last activity, and the union of repos
+named by its events and runs. The trace's fallback key rule still applies:
+events without `correlationId` use their own `eventId`.
+
+- **Useful journeys by default.** A root with one event and no run is returned
+  as `single: true`; the list hides those rows initially and exposes a counted
+  **Single-event roots** toggle. This keeps intake noise available without
+  letting it bury multi-step work.
+- **Operator slicing.** The token filter understands `type:`, `repo:`, and
+  `state:`, plus `is:active` (queued/executing runs) and `is:failed`
+  (failed/timed-out/refused runs). Display options group and sort by chain
+  status, origin type, or repo. Repo context tabs apply the same `repos` union
+  as Events and Runs.
+- **Trace is one click away.** Rows show origin type/source, short root id, hop
+  depth, event/run counts, state badges, last activity, and repos; selecting a
+  row opens `#/chain/:correlationId`. `/` focuses the filter and `j`/`k` +
+  Enter provide the standard list keyboard path.
+
+No Overview tile was added in this slice: the existing status payload has no
+chain tally, so a tile would add a second 3-second dashboard poll rather than
+reuse a cheap slot. The dedicated nav entry and list avoid that cost.
+
+Chains takes `g l` ("chain link") rather than its natural `g c`: Settings
+(WM-704) claimed `g c` for its config allow-list first.
+
+### 10.17 Settings (read-only) (`#/settings`, `g c`) — WM-704
 
 `GET /config` gathers the factory's file-backed configuration into one
 allow-listed inventory. Settings renders it as a VS Code-shaped section tree

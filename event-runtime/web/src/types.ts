@@ -123,6 +123,25 @@ export interface ChainView {
   runs: ChainRun[];
 }
 
+/** One recent chain summary (`GET /chains`, WM-537). */
+export interface ChainListItem {
+  correlationId: string;
+  origin: {
+    source: string;
+    eventId: string;
+    type: string;
+    subject: string | null;
+    admittedAt: string;
+  };
+  eventCount: number;
+  runCount: number;
+  maxDepth: number;
+  states: Partial<Record<RunState, number>>;
+  lastActivityAt: string;
+  repos: string[];
+  single: boolean;
+}
+
 export interface RunListItem {
   runId: string;
   state: RunState;

@@ -85,6 +85,9 @@ const Artifacts = lazy(() =>
 const Graph = lazy(() =>
   import("./views/Graph").then((m) => ({ default: m.Graph })),
 );
+const Chains = lazy(() =>
+  import("./views/Chains").then((m) => ({ default: m.Chains })),
+);
 const Chain = lazy(() =>
   import("./views/Chain").then((m) => ({ default: m.Chain })),
 );
@@ -243,6 +246,8 @@ export function App() {
     : null;
   const focusGraphNode = view === "graph" ? (route[1] ?? null) : null;
   const focusSettingsSection = view === "settings" ? (route[1] ?? null) : null;
+  const chainsStateFilter =
+    view === "chains" ? hashSearch(window.location.hash).get("state") : null;
   // `#/chain/:correlationId[/:nodeId]` — the chain trace (WM-527); node
   // selection rides the hash so a pasted link lands on the same node.
   const chainId = view === "chain" ? (route[1] ?? null) : null;
@@ -386,6 +391,7 @@ export function App() {
       title: `${inboxOpen} inbox item${inboxOpen === 1 ? "" : "s"} waiting on you`,
     },
     events: { count: scopedNav ? 0 : eventAttention, hue: "var(--accent)" },
+    chains: { count: 0, hue: "var(--accent)" },
     proposals: { count: scopedNav ? 0 : openProposals, hue: "var(--accent)" },
     runs: { count: scopedRunsNav ? 0 : activeRuns, hue: "var(--accent)" },
     tickets: { count: 0, hue: "var(--accent)" },
@@ -817,6 +823,20 @@ export function App() {
                   connected={connected}
                   focusRepoName={focusRepoName}
                   onSelectRepo={(name) => navigate(hashPath("projects", name))}
+                />
+              </Suspense>
+            ) : view === "chains" ? (
+              <Suspense
+                fallback={
+                  <div className="p-5 text-(--text-faint)">
+                    Loading chains…
+                  </div>
+                }
+              >
+                <Chains
+                  context={context}
+                  initialStateFilter={chainsStateFilter}
+                  onOpenChain={(correlationId) => jumpToChain(correlationId)}
                 />
               </Suspense>
             ) : view === "chain" && chainId ? (

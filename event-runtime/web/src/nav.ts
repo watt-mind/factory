@@ -6,11 +6,13 @@
 // In-flight context chord (WM-235). Number keys 1–6 belong to an undecided
 // DecisionCard whenever one is on screen (capture-phase window listener, so
 // Inbox's 1–4 status tabs never see them); with no open card the tabs keep
-// their existing binding.
+// their existing binding. Chains rides `g l` ("chain link"): its natural `c`
+// went to Settings (WM-704, config) first (WM-537).
 export const NAV = [
   { key: "overview", label: "Overview", go: "o" },
   { key: "inbox", label: "Inbox", go: "n" },
   { key: "events", label: "Events", go: "e" },
+  { key: "chains", label: "Chains", go: "l" },
   { key: "proposals", label: "Proposals", go: "p" },
   { key: "runs", label: "Runs", go: "r" },
   { key: "tickets", label: "Tickets", go: "k" },

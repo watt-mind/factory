@@ -2,6 +2,7 @@ import type {
   AdmittedEvent,
   AgentsView,
   ArtifactInventoryItem,
+  ChainListItem,
   ChainView,
   ApproveOutcome,
   CancelOutcome,
@@ -236,6 +237,12 @@ export const api = {
   // Every event + run under one correlation id (WM-527); 404 when unknown.
   chain: (correlationId: string) =>
     call<ChainView>("GET", `/chain/${encodeURIComponent(correlationId)}`),
+  // Recent chain summaries, newest activity first (WM-537).
+  chains: (window = "24h", limit = 100) =>
+    call<{ chains: ChainListItem[] }>(
+      "GET",
+      `/chains?window=${encodeURIComponent(window)}&limit=${limit}`,
+    ),
   // Configured factory repositories (config/repos.yaml) — context tabs open from this list.
   repos: () => call<{ repos: RepoItem[] }>("GET", "/repos"),
   // Janitor worktree scan and cleanup (apply: false for dry run, apply: true for teardown)

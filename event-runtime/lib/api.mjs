@@ -244,7 +244,7 @@ export function createApi({
         const result = handleMetricsApiRoute(common);
         if (result !== false) return result;
       }
-      if (url.pathname.startsWith("/chain/")) {
+      if (url.pathname === "/chains" || url.pathname.startsWith("/chain/")) {
         const result = handleChainApiRoute(common);
         if (result !== false) return result;
       }

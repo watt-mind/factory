@@ -300,6 +300,7 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
       events: [],
       runs: [],
     })),
+    chains: mock(async (_window = "24h", _limit = 100) => ({ chains: [] })),
     proposals: mock(async () => ({ proposals: [] as Proposal[] })),
     proposalHistory: mock(async (_status = "all") => ({
       proposals: [] as Proposal[],
