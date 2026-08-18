@@ -2,6 +2,7 @@ import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -131,6 +132,26 @@ function renderArtifacts(
     );
   }
   return { ...render(<Harness />), onJumpRun };
+}
+
+// happy-dom mutates this controlled input without reaching React's onChange;
+// call the mounted handler so assertions exercise component state, not stale DOM.
+function changeControlledInput(input: HTMLInputElement, value: string) {
+  const propsKey = Object.keys(input).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) throw new Error("React input props were not mounted");
+  const props = (
+    input as unknown as Record<
+      string,
+      { onChange: (event: { target: HTMLInputElement }) => void }
+    >
+  )[propsKey];
+  act(() =>
+    props.onChange({
+      target: { value, selectionStart: value.length } as HTMLInputElement,
+    }),
+  );
 }
 
 describe("Artifacts inventory (WM-207)", () => {
@@ -390,6 +411,39 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
     window.location.hash = "#/artifacts";
     fireEvent.keyDown(view.getByText("512 B").closest("tr")!, { key: " " });
     expect(window.location.hash).toBe(`#/artifacts/${"c".repeat(64)}`);
+  });
+
+  test("hash-driven selection clears the previous artifact content search", async () => {
+    globalThis.fetch = mock(
+      async () => new Response("line one\nline two", { status: 200 }),
+    ) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts();
+    await view.findByRole("region", { name: "Artifact content" });
+
+    const search = view.getByRole("combobox", {
+      name: "Search artifact content",
+    }) as HTMLInputElement;
+    changeControlledInput(search, "line one");
+    expect(search.value).toBe("line one");
+    await waitFor(() =>
+      expect(
+        view.getByRole("region", { name: "Artifact preview" }).textContent,
+      ).toContain("1 matching lines"),
+    );
+
+    window.location.hash = `#/artifacts/${"b".repeat(64)}`;
+    fireEvent(window, new Event("hashchange"));
+
+    await waitFor(() =>
+      expect(
+        (
+          view.getByRole("combobox", {
+            name: "Search artifact content",
+          }) as HTMLInputElement
+        ).value,
+      ).toBe(""),
+    );
   });
 
   test("a modified click leaves the current view for the browser to handle", async () => {

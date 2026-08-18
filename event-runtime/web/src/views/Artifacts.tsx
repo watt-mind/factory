@@ -270,7 +270,10 @@ export function Artifacts({
   const [contentSearch, setContentSearch] = useState("");
 
   useEffect(() => {
-    const syncSelection = () => setSelectedSha(artifactShaFromHash());
+    const syncSelection = () => {
+      setContentSearch("");
+      setSelectedSha(artifactShaFromHash());
+    };
     window.addEventListener("hashchange", syncSelection);
     return () => window.removeEventListener("hashchange", syncSelection);
   }, []);
