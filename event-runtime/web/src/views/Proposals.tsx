@@ -1490,7 +1490,7 @@ export function Proposals({
 
       {sel && (
         <DetailPane
-          widthClass="w-full sm:w-[460px]"
+          widthClass="w-full sm:w-[440px]"
           title={
             <nav
               aria-label="Breadcrumb"

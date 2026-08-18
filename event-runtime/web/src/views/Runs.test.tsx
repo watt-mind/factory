@@ -1592,6 +1592,30 @@ describe("Runs in-flight row height (WM-725)", () => {
   });
 });
 
+describe("Runs detail pane width (WM-685)", () => {
+  test("detail pane uses the canonical 440px width", async () => {
+    const run = stubListItem("run_pane_width", "RUNNING");
+    const detail = stubDetail("run_pane_width", "RUNNING", [
+      transition(1, "run_pane_width", null, "RUNNING", null),
+    ]);
+    await withApi(
+      {
+        runs: async () => ({ runs: [run] }),
+        run: async () => detail,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const view = renderRuns({ focusRunId: "run_pane_width" });
+        await waitFor(() => view.getByText("idempotencyKey"));
+        const className =
+          view.container.querySelector("aside")?.className ?? "";
+        expect(className).toContain("w-[440px]");
+        expect(className).not.toContain("w-[460px]");
+      },
+    );
+  });
+});
+
 // One-hop causation on the row (WM-702): `↳` when the run's own origin event
 // was emitted by another run, `→ N` for the events it emitted, both landing on
 // the chain trace with this run already selected. The chain key lives on the

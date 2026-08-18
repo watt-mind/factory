@@ -1777,3 +1777,27 @@ describe("Proposals navigation shortcuts (WM-875)", () => {
     );
   });
 });
+
+describe("Proposals detail pane width (WM-685)", () => {
+  test("detail pane uses the canonical 440px width", async () => {
+    const proposal = stubProposal("prop_pane_width", "open", {
+      reason: "Needs width review",
+    });
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [proposal] }),
+        status: async () => createStatusFixture(),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const view = renderProposals({ focusProposalId: "prop_pane_width" });
+        await waitFor(() => view.getAllByText("prop_pane_width").length > 0);
+        const className =
+          view.container.querySelector("aside")?.className ?? "";
+        expect(className).toContain("w-[440px]");
+        expect(className).not.toContain("w-[460px]");
+      },
+    );
+  });
+});

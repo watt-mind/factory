@@ -357,10 +357,7 @@ function budgetPart(
       : undefined;
   return {
     text: leftLabel(c.leftMs),
-    title: remainingTitle(
-      `timeout in ${formatDuration(c.leftMs / 1000)}`,
-      iso,
-    ),
+    title: remainingTitle(`timeout in ${formatDuration(c.leftMs / 1000)}`, iso),
     hue,
   };
 }
@@ -385,10 +382,7 @@ function leasePart(
   if (budget?.kind === "live" && c.leftMs >= budget.leftMs) return null;
   return {
     text: `lease ${leftLabel(c.leftMs)}`,
-    title: remainingTitle(
-      `reaped in ${formatDuration(c.leftMs / 1000)}`,
-      iso,
-    ),
+    title: remainingTitle(`reaped in ${formatDuration(c.leftMs / 1000)}`, iso),
     hue: budget?.kind === "spent" ? "var(--hue-warn)" : undefined,
   };
 }
@@ -405,7 +399,8 @@ function RemainingCell({ r, now }: { r: RunListItem; now: number }) {
   const budgetClock = deadline ? clockTo(deadline, 0, now) : null;
   const leaseClock = leaseExpiresAt ? clockTo(leaseExpiresAt, 0, now) : null;
   const budget =
-    budgetClock && budgetPart(budgetClock, timeoutSeconds, r.deadlineAt || deadline);
+    budgetClock &&
+    budgetPart(budgetClock, timeoutSeconds, r.deadlineAt || deadline);
   const lease =
     leaseClock && leasePart(leaseClock, budgetClock, leaseExpiresAt);
   if (!budget && !lease) return <span>{EMPTY}</span>;
@@ -1507,7 +1502,7 @@ export function Runs({
 
       {sel && (
         <DetailPane
-          widthClass="fixed inset-0 z-20 w-full sm:static sm:z-auto sm:w-[460px]"
+          widthClass="fixed inset-0 z-20 w-full sm:static sm:z-auto sm:w-[440px]"
           title={
             <nav
               aria-label="Breadcrumb"
