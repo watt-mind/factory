@@ -537,12 +537,21 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
 
 function durableFixRoundReason(db, candidate, input, policy) {
   const cap = policy.maxFixRounds ?? 0;
+  // Count only rounds that were actually admitted to run (a proposal decided
+  // "run" that produced a run). Every merge-scan tick re-emits the current
+  // round's fix request for a PR that is still red; counting those refused or
+  // superseded emissions exhausted max_fix_rounds before any fix executed and
+  // parked every PR as fix-round-exhausted (2026-08-18).
   const rows = db
     .query(
-      `SELECT event_id, envelope_json FROM events
-       WHERE source = 'chain'
-         AND type = 'factory.merge-fix.requested'
-         AND event_id != ?`,
+      `SELECT e.event_id, e.envelope_json FROM events e
+       JOIN proposals p ON p.event_id = e.event_id AND p.event_source = e.source
+       JOIN runs r ON r.run_id = p.run_id
+       WHERE e.source = 'chain'
+         AND e.type = 'factory.merge-fix.requested'
+         AND p.decision = 'run'
+         AND r.state IN ('QUEUED','LEASED','RUNNING','VERIFYING','COMPLETED','FAILED')
+         AND e.event_id != ?`,
     )
     .all(candidate.event_id);
   const priorRounds = [];

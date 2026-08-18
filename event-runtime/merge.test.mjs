@@ -1603,6 +1603,61 @@ describe("policy approval and global merge barrier", () => {
     ).toBe(2);
   });
 
+  test("fix rounds that were emitted but never admitted to run do not consume max_fix_rounds", () => {
+    const db = openDb(":memory:");
+    const payload = (round, base = "develop") => ({
+      repo: "factory",
+      github: "watt-mind/factory",
+      base,
+      pr: 89,
+      headSha: SHA,
+      baseSha: BASE_SHA,
+      headRef: "feat/WM-589",
+      ticket: "WM-589",
+      finding: `mechanical round ${round}`,
+      findingHash: FINDING_HASH,
+      round,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["event-runtime/merge.test.mjs"],
+    });
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-fix.requested", payload(1), "fix89-1"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    // A round-2 emission that is refused (base not auto-mergeable) leaves an
+    // open proposal with no run — every merge-scan tick re-emits these.
+    admitEvent(
+      db,
+      registry,
+      envelope(
+        "factory.merge-fix.requested",
+        payload(2, "main"),
+        "fix89-2-refused",
+      ),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-fix.requested", payload(2), "fix89-2"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    const second = openProposals(db, {}).find(
+      (proposal) => proposal.event_id === "fix89-2",
+    );
+    expect(second).toBeUndefined();
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM runs WHERE state='QUEUED' AND json_extract(spec_json,'$.agent')='merge-fix@1' AND json_extract(spec_json,'$.input.pr')=89`,
+        )
+        .get().n,
+    ).toBe(2);
+  });
+
   test("mechanical fix rounds are bounded and exhausted rounds fail schema/policy closed", () => {
     const schema = registry.agents.get("merge-fix@1").inputSchema;
     expect(schema.properties.round.maximum).toBe(2);
