@@ -365,6 +365,97 @@ describe("worker", () => {
     });
   });
 
+  test("needs_human preserves a valid authored ask, while an invalid ask falls back with its errors", async () => {
+    const authored = {
+      schemaVersion: "factory.decision-request/v1",
+      question: "Which answer should unblock WM-390?",
+      options: [
+        { id: "answer", label: "Answer the agent", effect: "answer" },
+        { id: "dismiss", label: "Not now", effect: "dismiss" },
+      ],
+    };
+    const invalid = { ...authored, recommended: "missing" };
+    const refusingAdapter = (decision) => ({
+      async execute({ workspaceDir }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "refused",
+          reasonCode: "needs_human",
+          decision,
+        }));
+        return { exitCode: 0, timedOut: false };
+      },
+    });
+
+    for (const [suffix, decision, valid] of [
+      ["valid", authored, true],
+      ["invalid", invalid, false],
+    ]) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({
+        adapter: `refuse-${suffix}`,
+        input: {
+          repos: [suffix],
+          ticket: "WM-390",
+          repo: "factory",
+          pr: 42,
+        },
+      }));
+      const summary = await runOnce(
+        db,
+        registry,
+        { [`refuse-${suffix}`]: refusingAdapter(decision) },
+        opts(),
+      );
+      expect(summary).toMatchObject({
+        terminalState: "REFUSED",
+        reasonCode: "needs_human",
+      });
+      const item = db.query("SELECT * FROM inbox_items").get();
+      expect(JSON.parse(item.refs_json)).toEqual({
+        runId: spec.runId,
+        issue: "WM-390",
+        repo: "factory",
+        pr: "42",
+      });
+      expect(item.dedupe_key).toBe("ESCALATED:WM-390");
+      if (valid) {
+        expect(item.title).toBe(authored.question);
+        expect(JSON.parse(item.decision_json)).toEqual(authored);
+        expect(item.body).toBeNull();
+      } else {
+        expect(JSON.parse(item.decision_json)).not.toEqual(invalid);
+        expect(item.body).toContain("recommended");
+      }
+    }
+  });
+
+  test("refusal reasons other than needs_human do not create inbox items", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec({
+      adapter: "refuse-missing-input",
+      input: { repos: ["missing"] },
+    }));
+    const adapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+          schemaVersion: "factory.agent-result/v1",
+          terminalState: "refused",
+          reasonCode: "missing_input",
+        }));
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const summary = await runOnce(
+      db,
+      registry,
+      { "refuse-missing-input": adapter },
+      opts(),
+    );
+    expect(summary.reasonCode).toBe("missing_input");
+    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(0);
+  });
+
   test("invalid-artifact: FAILED/contract_violation, no outbox row, workspace retained", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["invalid-artifact"] } }));

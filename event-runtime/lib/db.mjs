@@ -234,6 +234,9 @@ export const MIGRATIONS = [
     },
   },
   {
+    // The inbox design originally reserved v5. The dead-letter archive
+    // migration landed while WM-390 was blocked, so this additive upgrade is
+    // v6 and its regression fixture starts from the now-real v5 schema.
     version: 6,
     name: "inbox_decisions",
     up(db) {

@@ -102,6 +102,45 @@ describe("human inbox ledger (WM-285)", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(3);
   });
 
+  test("dedupe supersession clears a stored response to avoid binding it to a new request", () => {
+    const db = openDb(":memory:");
+    const original = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(db, {
+      kind: "ESCALATED",
+      title: "first",
+      refs: { issue: "WM-1", runId: "run_1" },
+      decision: original,
+      dedupeKey: "ESCALATED:WM-1",
+    }, { id: "first" });
+    const answered = decideInboxItem(db, "first", {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(original),
+      optionId: "triage",
+      fields: {},
+    });
+    expect(answered.effect.outcome).toBe("unsupported");
+    expect(answered.item.response).not.toBeNull();
+
+    const replacement = decision();
+    const superseded = createInboxItem(db, {
+      kind: "ESCALATED",
+      title: "second",
+      refs: { issue: "WM-1", runId: "run_2" },
+      decision: replacement,
+      dedupeKey: "ESCALATED:WM-1",
+    });
+    expect(superseded).toMatchObject({
+      id: "first",
+      decision: replacement,
+      response: null,
+      decidedAt: null,
+      decidedBy: null,
+    });
+    expect(superseded.delivery.supersededDecisions).toBe(1);
+  });
+
   test("deciding validates freshness, records the effect, and resolves only applied effects", () => {
     const db = openDb(":memory:");
     const request = decision([
@@ -121,6 +160,11 @@ describe("human inbox ledger (WM-285)", () => {
       optionId: "dismiss",
       fields: {},
     })).toThrow("has changed");
+    expect(() => decideInboxItem(db, item.id, {
+      requestHash: decisionRequestHash(request),
+      optionId: "go",
+      fields: {},
+    })).toThrow("schemaVersion");
 
     const unsupported = decideInboxItem(db, item.id, {
       schemaVersion: "factory.decision-response/v1",
@@ -145,6 +189,29 @@ describe("human inbox ledger (WM-285)", () => {
     });
     expect(retried.item.resolvedBy).toBe("operator:send_to_triage");
     expect(retried.item.resolvedAt).toBe(new Date(3000).toISOString());
+    expect(retried.item.response.effect.retryAttempt).toBe(1);
+    expect(() => retryInboxDecision(db, item.id)).toThrow("already applied");
+  });
+
+  test("each failed retry advances a durable attempt token", () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(db, {
+      kind: "ESCALATED",
+      title: "retry",
+      refs: { issue: "WM-1" },
+      decision: request,
+    }, { id: "retry_attempts" });
+    decideInboxItem(db, "retry_attempts", {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "triage",
+      fields: {},
+    });
+    expect(retryInboxDecision(db, "retry_attempts").item.response.effect.retryAttempt).toBe(1);
+    expect(retryInboxDecision(db, "retry_attempts").item.response.effect.retryAttempt).toBe(2);
   });
 
   test("kind is closed and rows expose parsed refs/delivery", () => {
@@ -214,7 +281,7 @@ describe("human inbox ledger (WM-285)", () => {
       source: "serve:notify",
     }, { id: "decision" });
     createInboxItem(db, {
-      kind: "human_needed",
+      kind: "BLOCKED",
       title: "human",
       refs: { eventSource: "test", eventId: "evt-1" },
       source: "serve:notify",

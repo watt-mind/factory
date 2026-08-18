@@ -74,6 +74,18 @@ describe("inbox decision API (WM-390)", () => {
       expect(stale.status).toBe(409);
       expect((await stale.json()).error).toBe("stale_request");
 
+      const malformed = await fetch(s.url("/inbox/api_decision/decide"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          requestHash: decisionRequestHash(request),
+          optionId: "dismiss",
+          fields: {},
+        }),
+      });
+      expect(malformed.status).toBe(400);
+      expect((await malformed.json()).error).toBe("invalid_response");
+
       const decided = await fetch(s.url("/inbox/api_decision/decide"), {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -89,6 +101,13 @@ describe("inbox decision API (WM-390)", () => {
         item: { resolvedBy: "operator:dismiss", decidedBy: "operator" },
         effect: { kind: "dismiss", outcome: "applied" },
       });
+
+      const appliedRetry = await fetch(
+        s.url("/inbox/api_decision/decide/retry"),
+        { method: "POST" },
+      );
+      expect(appliedRetry.status).toBe(409);
+      expect((await appliedRetry.json()).error).toBe("already_applied");
 
       const again = await fetch(s.url("/inbox/api_decision/decide"), {
         method: "POST",
