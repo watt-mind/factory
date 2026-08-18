@@ -198,6 +198,14 @@ export function safeChildEnvironment(env = {}, defOrOpts = {}) {
     ),
   );
   Object.assign(childEnv, env);
+  // Read-only repository workspaces contain the selected target checkout, not
+  // Factory's runtime support code. Expose the running Factory checkout the
+  // same way the pi adapter does (WM-433) so pinned procedures such as
+  // merge-scan's `bun "$FACTORY_ROOT/event-runtime/lib/merge-ci-proof.mjs"`
+  // resolve regardless of adapter. Without it merge-scan on claude/agy
+  // escalated every PR ("FACTORY_ROOT is unset") and, trying to compensate,
+  // dirtied its read-only checkout (workspace_integrity_violation).
+  childEnv.FACTORY_ROOT = FACTORY_ROOT;
   delete childEnv.ANTHROPIC_API_KEY;
   delete childEnv.CLAUDECODE;
   delete childEnv.CLAUDE_CODE_ENTRYPOINT;

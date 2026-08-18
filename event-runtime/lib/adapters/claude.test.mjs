@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { FACTORY_ROOT } from "../config.mjs";
 import {
   BASE_INHERITED_ENV,
   buildClaudeArgv,
@@ -1186,5 +1187,15 @@ if (behavior === "emit_denial_then_recovery") {
         env: { PATH: "/nonexistent-bin-dir" },
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("FACTORY_ROOT injection (WM-433 parity with pi)", () => {
+  test("injects the stable Factory runtime path and refuses caller overrides", () => {
+    expect(safeChildEnvironment({}).FACTORY_ROOT).toBe(FACTORY_ROOT);
+    expect(
+      safeChildEnvironment({ FACTORY_ROOT: "/tmp/untrusted-target" })
+        .FACTORY_ROOT,
+    ).toBe(FACTORY_ROOT);
   });
 });

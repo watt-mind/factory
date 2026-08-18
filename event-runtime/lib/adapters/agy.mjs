@@ -16,6 +16,7 @@ import { createWriteStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import { FACTORY_ROOT } from "../config.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
@@ -149,6 +150,9 @@ export function safeChildEnvironment(env = {}, defOrOpts = {}) {
     ),
   );
   Object.assign(childEnv, env);
+  // Same contract as pi/claude (WM-433): pinned procedures call Factory
+  // helpers through $FACTORY_ROOT even when the workspace is a target repo.
+  childEnv.FACTORY_ROOT = FACTORY_ROOT;
 
   for (const key of [
     "ANTHROPIC_API_KEY",

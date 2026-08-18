@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { FACTORY_ROOT } from "../config.mjs";
 import {
   PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV as CLAUDE_PUSH_CREDENTIAL_ENV,
@@ -559,5 +560,15 @@ describe("execute with fake binary", () => {
     // Each event is guarded on its own: throwing on the tool_use must not
     // swallow the terminal result's events too.
     expect(attempted).toEqual(["tool_use", "assistant_text", "usage"]);
+  });
+});
+
+describe("FACTORY_ROOT injection (WM-433 parity with pi)", () => {
+  test("injects the stable Factory runtime path and refuses caller overrides", () => {
+    expect(safeChildEnvironment({}).FACTORY_ROOT).toBe(FACTORY_ROOT);
+    expect(
+      safeChildEnvironment({ FACTORY_ROOT: "/tmp/untrusted-target" })
+        .FACTORY_ROOT,
+    ).toBe(FACTORY_ROOT);
   });
 });
