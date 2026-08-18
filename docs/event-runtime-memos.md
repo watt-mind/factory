@@ -1,8 +1,8 @@
 # Event runtime: agent memos — verified cross-run memory
 
 Status: **design — operator-ratified, nothing built**.
-Tracking: WM-807 (epic); WM-808 (this document); implementation lands through
-WM-809..WM-814. Companion to [event-runtime.md](event-runtime.md) §7
+Tracking: WM-807 (epic); WM-808 and WM-816 (this document); implementation
+lands through WM-809..WM-814 and WM-817..WM-818. Companion to [event-runtime.md](event-runtime.md) §7
 (workspace model — declared inputs, no shared live directories), the artifact
 input machinery of OPS-372/OPS-373 (`event-runtime/README.md` "Artifact
 inputs"), and [event-runtime-inbox.md](event-runtime-inbox.md), whose
@@ -17,11 +17,12 @@ or self-managed artifact spaces so agents can communicate — including reading
 the human decision inbox to see what other agents are escalating. The need
 behind the question is real and shows up in three ways today:
 
-| Symptom                                                          | Where it bites                                                                                                                                                        |
-| :--------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| An agent repeats a mistake a previous run already diagnosed.     | `run-postmortem@1` explains why a dispatch failed; the next dispatch of the same ticket never sees it. The postmortem is a leaf.                                      |
-| An agent stops for a question the operator already answered.     | Inbox design §1: three tickets stuck, two approved in chat with nowhere for the approval to live. A `decision-response` now lives on one item; a re-run can't see it. |
-| Several runs escalate the same question, each with its own push. | `createInboxItem` is one row per producer call; the operator gets N Telegram messages for one decision.                                                               |
+| Symptom                                                          | Where it bites                                                                                                                                                                                             |
+| :--------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An agent re-discovers the same repo facts every run.             | Every dispatch works out again how the tests are scoped, that lint is a ratchet, that `bin/worktree-up.sh` is mandatory. The only fix today is the slow loop: someone reads traces and improves the brief. |
+| An agent repeats a mistake a previous run already diagnosed.     | `run-postmortem@1` explains why a dispatch failed; the next dispatch of the same ticket never sees it. The postmortem is a leaf.                                                                           |
+| An agent stops for a question the operator already answered.     | Inbox design §1: three tickets stuck, two approved in chat with nowhere for the approval to live. A `decision-response` now lives on one item; a re-run can't see it.                                      |
+| Several runs escalate the same question, each with its own push. | `createInboxItem` is one row per producer call; the operator gets N Telegram messages for one decision.                                                                                                    |
 
 The obvious answer — a board agents read and write freely — is the one thing
 the runtime is built to refuse. `event-runtime/README.md` says it outright:
@@ -42,6 +43,12 @@ It would break, in order of cost:
 - **The human's attention.** Linear is the source of truth by decree and the
   inbox is the human↔agent question surface. A second board is one nobody
   reads.
+
+There are two loops here, and only the slow one exists today: **prompt
+improvement** (days; a human or an editorial agent reads traces and changes a
+brief or `AGENTS.md`) and **run-to-run memory** (the next run; "here is what I
+learned about _this_ repo or ticket"). Memos are the fast loop, and §5.4 is
+how the fast loop feeds the slow one instead of replacing it.
 
 **This design gives agents shared, verified, planner-resolved memory —
 memos — without a channel.** Four rules carry it:
@@ -113,7 +120,9 @@ plus a ledger row that indexes it by subject and tracks its liveness.
 | :-------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `subject.type`  | Closed: `repo` · `ticket` · `pr` · `workflow` · `run`. Extending it is a schema version bump.                                                                                                                                                                                                                                               |
 | `subject.id`    | The natural key: repo slug, `WM-313`, `factory#612`, `owner/repo:workflow-name`, `run_…`. Normalized by the runtime (§3.1).                                                                                                                                                                                                                 |
-| `kind`          | Closed list per version: `postmortem` · `decision` · `flake` · `repo-note` · `handoff`. `flake`, `repo-note`, `handoff` are reserved for named future producers (ci-doctor, triage-scan, dispatch) and rejected until a definition declares them — same "no machinery before a named need" rule as event-runtime.md §2.                     |
+| `kind`          | Closed list per version: `repo-note` · `postmortem` · `decision` · `flake` · `handoff`. `flake` and `handoff` are reserved for named future producers (ci-doctor; dispatch's note-to-reviewer) and rejected until a definition declares them — same "no machinery before a named need" rule as event-runtime.md §2.                         |
+| `claim`         | Required on `repo-note`: `{ "kind": "howto" \| "pitfall" \| "fact", "text": "…" }` — one sentence the next agent can act on. `howto`: how something is done here; `pitfall`: what looks right and isn't; `fact`: a stable property of the repo.                                                                                             |
+| `evidence`      | Required on `repo-note`: ≤ 1 KB — what was tried and what happened (`ran X → got Y`). A learning without evidence is an opinion and is rejected at verification.                                                                                                                                                                            |
 | `body`          | ≤ 4 KB of plain text or Markdown. Long evidence belongs in an ordinary artifact the memo may name by hash in `refs`.                                                                                                                                                                                                                        |
 | `bindings`      | Optional, all-of: `descriptionHash` (Linear description at write time — the memo dies when the ticket is re-scoped, the same trick inbox §3.1 uses for authorisations), `headSha` (repo tip — dies when the branch moves past it), `expiresAt` (ISO time). A memo with no bindings lives until superseded or pruned by kind default (§6.2). |
 | `supersedes`    | Optional sha256 of an earlier memo on the same subject+kind this one replaces. Superseded memos leave the live fold but stay in the store while referenced.                                                                                                                                                                                 |
@@ -154,6 +163,27 @@ against the closed list and the operator can see who writes memory:
 A definition without `emits.memos` whose result carries a memo artifact fails
 verification. Nothing is admitted by omission.
 
+**Learnings — the shorthand.** Writing a memo file per note is the wrong
+amount of ceremony for the common case, an agent that finished a ticket and
+wants to leave three sentences behind. So a result may instead carry
+`learnings` inline:
+
+```json
+"learnings": [
+  { "claim": { "kind": "howto", "text": "Verification is `bun test --timeout 20000 event-runtime/lib`, not the root suite; the root suite spawns daemons and takes 6+ min." },
+    "evidence": "Ran the root suite first: 6m40s, two port-collision failures. Scoped run: 41s clean." },
+  { "claim": { "kind": "pitfall", "text": "`bun run lint` fails with 0 errors when warnings exceed the ratchet in docs/ci.md — read the last line, not the exit code." },
+    "evidence": "Exit 1 with '0 errors, 619 warnings' on an untouched tree." }
+]
+```
+
+The verifier turns each entry into a `repo-note` memo on the run's **repo**
+subject (and, when the definition says so, on its **ticket**), fills
+`provenance` and `bindings.headSha`, stores it, and registers it — the agent
+never names a subject and never touches the store. `learnings` is capped at 5
+per result and is validated with the same strictness as a memo file: no
+evidence, no memory.
+
 ---
 
 ## 3. The ledger — the runtime owns liveness
@@ -182,6 +212,23 @@ CREATE TABLE memos (
 CREATE INDEX memos_subject ON memos (subject_type, subject_id, kind, created_at DESC);
 ```
 
+A second, smaller table records what happened to a memo once it was read:
+
+```sql
+CREATE TABLE memo_uses (
+  sha256      TEXT NOT NULL,                -- the memo
+  run_id      TEXT NOT NULL,                -- the consumer run
+  verdict     TEXT,                         -- useful | wrong | stale | NULL (read, no verdict)
+  run_state   TEXT NOT NULL,                -- consumer's terminal state at publish
+  at          INTEGER NOT NULL,
+  PRIMARY KEY (sha256, run_id)
+);
+```
+
+A row is written for every memo in a run's `memoPin` when that run publishes
+(verdict `NULL`), and updated with the agent's verdict when its result carries
+one (§5.4). This is the data the fold, the Notes panel, and promotion read.
+
 Subject ids are normalized on write and on query so `WM-313`/`wm-313`, and
 `watt-mind/factory`/`factory` (through `config/repos.yaml`), collapse to one
 key. `db.mjs` gains one migration; `CURRENT_SCHEMA_VERSION` advances.
@@ -200,6 +247,12 @@ subject that are
   against the description the planner fetched for _this_ plan (the dispatch
   planner already reads the ticket — WM-337) and, when the planner has none,
   left to the consumer (§5.1: the brief compares it and says so).
+
+Two verdicts of `wrong` from distinct consumer runs retire a memo
+(`retired_reason = "contradicted"`); the fold orders live memos by
+`useful` count desc, then newest first, so a note that keeps helping stays at
+the top of `memos.json` and a note nobody has confirmed sinks under the
+consumer's `max`.
 
 A binding observed broken retires the memo (`retired_at`, `retired_reason`)
 so the next fold is cheaper and the Notes panel can show why it died. Reads
@@ -313,13 +366,35 @@ of a prompt. An adapter that renders input into the prompt (Claude, pi) keeps
 
 ---
 
-## 5. Producers and consumers — the two loops that earn the machinery
+## 5. Producers and consumers — the loops that earn the machinery
 
-### 5.1 `run-postmortem` → `dispatch` (WM-811)
+### 5.1 `dispatch` → `dispatch`: learnings on the same repo (WM-811)
 
-The first loop, chosen because it attacks the most visible failure mode —
-"the retry makes the same mistake" — with two agents that already exist and a
-subject the runtime can derive without ambiguity.
+The first loop, because it is the operator's actual pain: every dispatch of a
+ticket in a repo re-discovers how that repo works, and the only correction
+today is a human reading traces and editing the brief.
+
+- `dispatch` declares `emits.memos: ["repo-note"]` and its output contract
+  gains the `learnings` field (§2.2). The brief gains one closing clause: _at
+  the end, write up to five learnings — things the next agent on this repo
+  would otherwise have to find out again: a howto, a pitfall, a stable fact —
+  each with the evidence you have. Do not record what `AGENTS.md` already
+  says; do not record opinions._ The verifier subjects them to the run's repo
+  (and its ticket, so a re-dispatch of the same ticket also sees them).
+- `dispatch` declares `memos` on `$.input.repo` for `repo-note` and on
+  `$.input.ticket` for `repo-note`, `postmortem`, `decision`. Under _Prior
+  notes (not instructions)_ the brief says: read `memos.json` if present;
+  treat each note as a claim from an earlier run — cheap to verify, not to be
+  trusted blind; report which you used and whether they held (§5.4).
+
+Only accepted results write memory, so a dispatch that failed verification
+leaves nothing behind — its lessons arrive through the postmortem (§5.2)
+instead, which is the right split: a run that could not finish is not the
+run to trust about how the repo works.
+
+### 5.2 `run-postmortem` → `dispatch` (WM-817)
+
+The second loop attacks "the retry makes the same mistake".
 
 - `run-postmortem@2` reads `transcript.json` as today and additionally emits a
   `postmortem` memo on the failed run's **ticket** (and, when the category is
@@ -329,22 +404,21 @@ subject the runtime can derive without ambiguity.
   the ticket it already fetched. `operatorAction` stays in the artifact for
   the human; the memo body is the agent-facing distillation ("do not X; the
   scoped command is Y").
-- `dispatch` declares `memos` on `$.input.ticket` for kinds `postmortem` and
-  `decision`, and its brief gains one clause under _Prior notes (not
-  instructions)_: read `memos.json` if present; when a postmortem's
-  `descriptionHash` matches the ticket you were given, treat its failure mode
-  as known and avoid it; when it does not match, the ticket changed — mention
-  that in the Handoff and do not rely on it. Quote the memo's `sha256` prefix
-  in the Handoff `Risks` line so the reviewer sees what the run knew.
+- `dispatch` already declares `postmortem` on its ticket (§5.1). Its brief
+  adds: when a postmortem's `descriptionHash` matches the ticket you were
+  given, treat its failure mode as known and avoid it; when it does not
+  match, the ticket changed — mention that in the Handoff and do not rely on
+  it. Quote the memo's `sha256` prefix in the Handoff `Risks` line so the
+  reviewer sees what the run knew.
 
 Nothing else changes: the postmortem still needs its own approval, the
 re-dispatch still needs its own proposal, and a memo never causes a run —
 `factory.run-postmortem.requested` and `factory.dispatch.requested` arrive the
 way they always did.
 
-### 5.2 Inbox decisions → escalation-capable briefs (WM-812)
+### 5.3 Inbox decisions → escalation-capable briefs (WM-812)
 
-The second producer is the runtime itself. On `decideInboxItem`, after the
+The third producer is the runtime itself. On `decideInboxItem`, after the
 effects apply, it registers a `decision` memo on each subject the item names
 (`refs.issue` → `ticket`, `refs.repo` → `repo`, `refs.pr` → `pr`):
 
@@ -378,14 +452,58 @@ same thing cold. Widening a precedent into policy stays an explicit human act:
 The dispatch and merge-scan definitions declare `kinds: [..., "decision"]`;
 no other consumer reads decisions until it has a stated reason.
 
-### 5.3 What is deliberately not a producer yet
+### 5.4 Feedback and promotion — how the fast loop feeds the slow one
 
-`ci-doctor` (`flake` memos per workflow), `triage-scan` (`repo-note`), and
-`dispatch` itself (`handoff` — what the agent wishes the reviewer knew) are
-the obvious next three. Each is one ticket: declare `emits.memos`, extend the
-output schema, add the consumer's declaration, re-pin. They wait for the
-first loop to run for a week and for the Notes panel to show whether memos
-are read or merely written.
+A learning is a claim from one run. What makes it knowledge is other runs
+confirming it, and what makes it permanent is a human accepting it into a
+document. Both are explicit steps.
+
+**Feedback.** A consumer's result may carry
+
+```json
+"usedMemos": [
+  { "sha256": "…", "verdict": "useful" },
+  { "sha256": "…", "verdict": "wrong", "note": "lint ratchet is now enforced by CI, exit code is reliable" }
+]
+```
+
+for memos that were in its `memoPin` (any other sha256 is a contract
+violation). The runtime writes `memo_uses` rows for _every_ pinned memo at
+publish (verdict `NULL`, plus the consumer's terminal state) and overlays the
+agent's verdicts. Trust model, decided 2026-08-18: the agent's verdict is the
+signal, the runtime's record of "read by a run that then succeeded" is the
+sanity check — a memo marked `useful` only by runs that failed is not
+promoted, and a memo marked `wrong` twice by distinct runs retires (§3.2).
+The brief clause is one line: _for each prior note you relied on or found
+false, say so in `usedMemos`; leave the rest out._
+
+**Promotion.** Memory is meant to drain into documents, not to grow. A
+scheduled loop (`clock.tick.memo-promote`, weekly, `enabled: false` like every
+new loop) proposes a `memo-promote@1` run per repo that has `repo-note` memos
+with **≥ 3 `useful` verdicts from distinct successful runs and no `wrong`**.
+It is an ordinary watched agent: it reads the candidates (declared, pinned),
+drafts the change, and produces an artifact with a typed recommendation the
+planner turns into a proposal — never a direct write:
+
+| Claim kind          | Target                                                                           | Vehicle                                                                    |
+| :------------------ | :------------------------------------------------------------------------------- | :------------------------------------------------------------------------- |
+| `fact`, `howto`     | the **target repo's** `AGENTS.md` (or its `docs/`) — every harness benefits      | a PR on that repo, through the ordinary dispatch path with its Owned Paths |
+| `pitfall` (process) | the **agent brief** in `event-runtime/agents/<agent>.md` — factory-owned, faster | a PR on the factory repo; `update-pins` as usual                           |
+
+When the PR merges, the promoted memos are superseded by a `repo-note` whose
+body is a pointer ("promoted to AGENTS.md § … in PR #…") so the fold shrinks
+and the provenance survives. This is the existing prompt-improvement loop
+made cheaper: it reads confirmed learnings instead of raw traces, and it
+still ends in a human-reviewed diff.
+
+### 5.5 What is deliberately not a producer yet
+
+`ci-doctor` (`flake` memos per workflow), `triage-scan` (`repo-note` from the
+triage pass), and `dispatch`'s `handoff` note-to-reviewer are the obvious next
+three. Each is one ticket: declare `emits.memos`, extend the output schema, add
+the consumer's declaration, re-pin. They wait for the first loop to run for a
+week and for the Notes panel and `memo_uses` to show whether memos are read
+or merely written.
 
 ---
 
@@ -448,7 +566,7 @@ The human surface is one panel, not a view: **Notes** on the run detail pane
 project/ticket views (live memos for the subject, retired and superseded ones
 struck through behind a toggle). Each entry shows kind, subject, provenance
 (agent@version, run link, or "operator decision, inbox item …"), bindings and
-their state, and the body.
+their state, use counts and verdicts from `memo_uses`, and the body.
 
 `GET /memos?subjectType=&subjectId=&kind=&live=` backs it, loopback like the
 rest of the control API; `cli.mjs memos <type> <id>` prints the same fold.
@@ -472,6 +590,12 @@ enter the system: through something verified.
 - **Memory across the sandbox boundary.** Inside a Gondolin guest
   (event-runtime.md §14.1) `memos.json` arrives with the other materialized
   inputs; nothing here adds a channel out.
+- **Promotion without a PR.** A memo confirmed a hundred times is still a
+  claim until a human merges it into a document. The threshold (3) and cadence
+  (weekly) are starting values, tuned from `memo_uses`, not principles.
+- **Learnings from failed runs.** Only accepted results write memory; a failed
+  run's lessons arrive through the postmortem. Revisit if postmortems prove
+  too coarse.
 - **`persistent` workspaces.** Still "later". Memos cover shared knowledge;
   they do not cover shared mutable state, and nothing above needs it.
 
@@ -479,15 +603,19 @@ enter the system: through something verified.
 
 ## 10. Ticket map
 
-| Ticket | Section      | Owns                                                                                                                                                                                         |
-| :----- | :----------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WM-808 | all          | this document; the §7 cross-reference in `docs/event-runtime.md`                                                                                                                             |
-| WM-809 | §2, §3, §6.1 | `schemas/factory.memo.v1.json`, `lib/memos.mjs` (+ test), `lib/db.mjs` migration, `lib/verify.mjs` (memo collection, subject check, `emits.memos`), `lib/artifacts.mjs` (`referencedHashes`) |
-| WM-810 | §4           | registry `memos` block, `lib/planner.mjs` (`memoPin`), `lib/workspace.mjs` (`memos.json`), tests; the "memory re-admits work" note in `docs/event-runtime-dispatch.md`                       |
-| WM-811 | §5.1         | `agents/run-postmortem@2` (+ output schema), `agents/dispatch` declaration and brief clause, fixtures, `update-pins`                                                                         |
-| WM-812 | §5.2         | `lib/inbox.mjs` / `lib/decision-effects.mjs` decision-memo registration, `dispatch` and `merge-scan` brief clauses                                                                           |
-| WM-813 | §7           | `lib/inbox.mjs` dedup key + `waiters`, `lib/db.mjs` migration, fan-out in `decideInboxItem`, API/CLI/web "n waiting"                                                                         |
-| WM-814 | §8           | `GET /memos`, `cli.mjs memos`, web Notes panel                                                                                                                                               |
+| Ticket | Section        | Owns                                                                                                                                                                                                                                                                                           |
+| :----- | :------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WM-808 | all            | this document (first version); the §7 cross-reference in `docs/event-runtime.md`                                                                                                                                                                                                               |
+| WM-816 | §1, §2, §3, §5 | this document — learnings, feedback, promotion                                                                                                                                                                                                                                                 |
+| WM-809 | §2, §3, §6.1   | `schemas/factory.memo.v1.json` (incl. `claim`/`evidence`), `lib/memos.mjs` (+ test), `lib/db.mjs` migration (`memos`, `memo_uses`), `lib/verify.mjs` (memo collection, `learnings` → memos, subject check, `emits.memos`, `usedMemos` → `memo_uses`), `lib/artifacts.mjs` (`referencedHashes`) |
+| WM-810 | §4             | registry `memos` block, `lib/planner.mjs` (`memoPin`), `lib/workspace.mjs` (`memos.json`), tests; the "memory re-admits work" note in `docs/event-runtime-dispatch.md`                                                                                                                         |
+| WM-811 | §5.1, §5.4     | `agents/dispatch` — `emits.memos`, `learnings` + `usedMemos` in the output contract, `memos` declaration, brief clauses; fixtures; `update-pins`                                                                                                                                               |
+| WM-817 | §5.2           | `agents/run-postmortem@2` (+ output schema), the postmortem clause in the dispatch brief, fixtures, `update-pins`                                                                                                                                                                              |
+| WM-812 | §5.3           | `lib/inbox.mjs` / `lib/decision-effects.mjs` decision-memo registration, `dispatch` and `merge-scan` brief clauses                                                                                                                                                                             |
+| WM-818 | §5.4           | `agents/memo-promote@1` (+ schemas), `schedules.json` `memo-promote` (disabled), `edges.json` recommendation → dispatch PR, promoted-pointer supersede                                                                                                                                         |
+| WM-813 | §7             | `lib/inbox.mjs` dedup key + `waiters`, `lib/db.mjs` migration, fan-out in `decideInboxItem`, API/CLI/web "n waiting"                                                                                                                                                                           |
+| WM-814 | §8             | `GET /memos`, `cli.mjs memos`, web Notes panel (incl. `memo_uses` counts and verdicts)                                                                                                                                                                                                         |
 
-Order: WM-809 → WM-810 → WM-811 is the spine; WM-812 and WM-814 hang off
-WM-809; WM-813 is independent and can go first.
+Order: WM-809 → WM-810 → WM-811 is the spine; WM-817, WM-812 and WM-814 hang
+off WM-810/WM-809; WM-818 waits for a week of `memo_uses`; WM-813 is
+independent and can go first.
