@@ -320,12 +320,12 @@ export function getInboxItem(db, id) {
   return itemView(db.query("SELECT * FROM inbox_items WHERE id = ?").get(id));
 }
 
-function supersedeInboxDecision(db, row, { body, refs, decision }) {
+function supersedeInboxDecision(db, row, { title, body, refs, decision }) {
   const updated = db
     .query(
       `UPDATE inbox_items
      SET decision_json = ?, response_json = NULL, decided_at = NULL,
-         decided_by = NULL, body = ?,
+         decided_by = NULL, body = ?, title = ?,
          refs_json = CASE WHEN ? IS NULL THEN refs_json ELSE json_set(
            CASE WHEN json_valid(refs_json) THEN refs_json ELSE '{}' END,
            '$.runId', ?
@@ -343,6 +343,7 @@ function supersedeInboxDecision(db, row, { body, refs, decision }) {
     .run(
       decision === null ? null : JSON.stringify(decision),
       body,
+      title,
       refs.runId ?? null,
       refs.runId ?? null,
       row.id,
@@ -398,6 +399,7 @@ export function createInboxItem(
     }
     if (existing.dedupe_key && existing.dedupe_key === callerKey) {
       const superseded = supersedeInboxDecision(db, existing, {
+        title,
         body,
         refs,
         decision,
@@ -448,6 +450,7 @@ export function createInboxItem(
         return attachWaiter(db, winner, { refs, now });
       }
       const superseded = supersedeInboxDecision(db, winner, {
+        title,
         body,
         refs,
         decision,
@@ -498,10 +501,11 @@ function retargetedDedupeKey(db, row, previousProposalId, proposalId) {
 /**
  * Point a decided item at the proposal a re-plan opened, and re-open it.
  *
- * One statement moves refs, the fresh request, the dedupe key, and the
- * archived answer together while clearing `decided_at`/`decided_by`, so no
- * reader sees the item half-retargeted — pointing at the superseded proposal
- * with the new request installed, or decided against a question nobody asked.
+ * One statement moves refs, the fresh request, the dedupe key, the list
+ * title, and the archived answer together while clearing `decided_at`/
+ * `decided_by`, so no reader sees the item half-retargeted — pointing at the
+ * superseded proposal with the new request installed, or decided against a
+ * question nobody asked.
  */
 function retargetInboxDecision(db, id, answer, proposalId, { now }) {
   const row = decisionRow(db, id);
@@ -528,9 +532,14 @@ function retargetInboxDecision(db, id, answer, proposalId, { now }) {
 
   const { responseHistory, ...delivery } = parseObject(row.delivery_json);
   const history = Array.isArray(responseHistory) ? responseHistory : [];
+  const nextTitle =
+    previousProposalId && row.title.includes(previousProposalId)
+      ? row.title.split(previousProposalId).join(proposalId)
+      : row.title;
   db.query(
     `UPDATE inbox_items
      SET refs_json = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
+         title = ?,
          response_json = NULL, decided_at = NULL, decided_by = NULL
      WHERE id = ?`,
   ).run(
@@ -549,6 +558,7 @@ function retargetInboxDecision(db, id, answer, proposalId, { now }) {
         },
       ],
     }),
+    nextTitle,
     id,
   );
   return getInboxItem(db, id);
