@@ -598,6 +598,64 @@ exit 99
   }
 }, 15_000);
 
+// WM-680: a unique commit that is already on origin is preserved work (an
+// orphaned/blocked run's WIP the orchestrator pushed), not litter. worktree-up
+// resumes it without --resume so an unattended re-dispatch does not die on
+// worktree_branch_has_commits. The test above keeps the boundary: a unique
+// commit that exists ONLY locally still refuses.
+test("re-dispatch auto-resumes a branch whose unique commits are already on origin (WM-680)", () => {
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-pushed-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-pushed-bin-"));
+  const ticketId = makeTestTicket("PUSHED");
+  const branch = `feat/${ticketId}`;
+  const expectedPath = path.join(tempWtRoot, ticketId);
+  const repo = path.resolve(import.meta.dir, "..");
+
+  try {
+    const firstUp = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(firstUp.exitCode).toBe(0);
+    writeFileSync(path.join(expectedPath, "wip.txt"), "preserved work\n");
+    expect(Bun.spawnSync({ cmd: ["git", "add", "wip.txt"], cwd: expectedPath }).exitCode).toBe(0);
+    expect(Bun.spawnSync({
+      cmd: ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "wip: preserved before re-dispatch (WM-680)"],
+      cwd: expectedPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode).toBe(0);
+    const tip = Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: expectedPath, stdout: "pipe" }).stdout.toString().trim();
+    // Simulate "pushed": stand up the remote-tracking ref at the same SHA.
+    expect(Bun.spawnSync({ cmd: ["git", "update-ref", `refs/remotes/origin/${branch}`, tip], cwd: repo }).exitCode).toBe(0);
+    // Tear the worktree down (branch stays), as an orphaned run leaves it.
+    expect(Bun.spawnSync({ cmd: ["bash", DOWN, ticketId], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } }).exitCode).toBe(0);
+    expect(existsSync(expectedPath)).toBe(false);
+
+    writeFileSync(path.join(mockBin, "gh"), "#!/usr/bin/env bash\nprintf '0\\n'\n", { mode: 0o755 }); // no open PR
+    const secondUp = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, PATH: `${mockBin}${path.delimiter}${process.env.PATH}` },
+    });
+    expect(secondUp.stderr.toString()).not.toContain("worktree_branch_has_commits");
+    expect(secondUp.exitCode).toBe(0);
+    expect(existsSync(expectedPath)).toBe(true);
+    // The preserved commit is what the new worktree is on.
+    expect(readFileSync(path.join(expectedPath, "wip.txt"), "utf8")).toBe("preserved work\n");
+    expect(Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: expectedPath, stdout: "pipe" }).stdout.toString().trim()).toBe(tip);
+  } finally {
+    Bun.spawnSync({ cmd: ["bash", DOWN, ticketId, "--force"], env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot } });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "update-ref", "-d", `refs/remotes/origin/${branch}`], cwd: repo });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: repo });
+  }
+});
+
 test("re-dispatch keeps unique-commit refusal ahead of dirty-worktree preservation", () => {
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-unique-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-no-pr-bin-"));
