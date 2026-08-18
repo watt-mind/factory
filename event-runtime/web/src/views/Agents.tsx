@@ -651,7 +651,10 @@ export function Agents({
         <DetailPane
           widthClass="w-[440px]"
           title={
-            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+            <nav
+              aria-label="Breadcrumb"
+              className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
+            >
               <button
                 type="button"
                 onClick={() => onSelectAgent(null)}
@@ -663,7 +666,10 @@ export function Agents({
               <span className="text-(--text-faint)" aria-hidden="true">
                 /
               </span>
-              <span className="min-w-0 truncate font-semibold text-(--text)" aria-current="page">
+              <span
+                className="min-w-0 truncate font-semibold text-(--text)"
+                aria-current="page"
+              >
                 <span className="mono truncate" title={sel.ref}>
                   {shortId(sel.ref)}
                 </span>

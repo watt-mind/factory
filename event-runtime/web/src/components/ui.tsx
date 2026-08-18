@@ -687,12 +687,16 @@ export function PaneHeader({
     <div className="shrink-0 border-b border-(--border) px-4 py-3">
       {/* Row 1: Title & Close */}
       <div className="flex items-center justify-between gap-2">
-        <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">{title}</div>
+        <div className="display min-w-0 flex-1 truncate text-[14px] font-semibold">
+          {title}
+        </div>
         {close != null && <div className="shrink-0">{close}</div>}
       </div>
       {/* Row 2: Verb Row (≤ 3 bordered buttons) */}
       {actions != null && (
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">{actions}</div>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">
+          {actions}
+        </div>
       )}
       {/* Row 3: Utility Row (copy/share quiet text line) */}
       {utility != null && (

@@ -297,11 +297,15 @@ describe("Agents detail pane (WM-211)", () => {
     const agent = stubAgent("dispatch");
     await withAgents([agent], async () => {
       const view = renderAgents(agent.ref);
-      const breadcrumb = await view.findByRole("navigation", { name: "Breadcrumb" });
+      const breadcrumb = await view.findByRole("navigation", {
+        name: "Breadcrumb",
+      });
 
       expect(breadcrumb.textContent).toContain("Agents/");
       expect(breadcrumb.textContent).toContain("dispatch@1");
-      expect(view.container.querySelector("aside")?.className).toContain("w-[440px]");
+      expect(view.container.querySelector("aside")?.className).toContain(
+        "w-[440px]",
+      );
     });
   });
 

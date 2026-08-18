@@ -702,7 +702,10 @@ export function Schedules({
         <DetailPane
           widthClass="w-[440px]"
           title={
-            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal">
+            <nav
+              aria-label="Breadcrumb"
+              className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
+            >
               <button
                 type="button"
                 onClick={() => onSelectSchedule(null)}
