@@ -318,6 +318,19 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
     ).toBeTruthy();
   });
 
+  test("the SHA link leaves hash assignment to browser navigation", async () => {
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    const sha = view.getByRole("link", { name: "aaaaaaaaaaaa" });
+    // Suppress only the anchor's default navigation. The click still bubbles,
+    // so a row handler that also assigns the hash makes this assertion fail.
+    sha.addEventListener("click", (event) => event.preventDefault());
+
+    fireEvent.click(sha);
+    expect(window.location.hash).toBe("#/artifacts");
+  });
+
   test("the row download control does not select the row", async () => {
     const view = renderArtifacts();
     await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());

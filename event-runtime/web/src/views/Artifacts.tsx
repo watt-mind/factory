@@ -581,10 +581,15 @@ export function Artifacts({
                 <tr
                   key={artifact.sha256}
                   tabIndex={0}
-                  // A modified click on the SHA link is the browser's to handle
-                  // (new tab, copy link) — selecting here would navigate this
-                  // tab out from under it.
+                  // Link clicks are the browser's to handle. Assigning the
+                  // hash here as well as through the SHA anchor's default
+                  // navigation would add two history entries.
                   onClick={(event) => {
+                    if (
+                      event.target instanceof Element &&
+                      event.target.closest("a")
+                    )
+                      return;
                     if (event.metaKey || event.ctrlKey || event.shiftKey)
                       return;
                     selectArtifact(artifact.sha256);
