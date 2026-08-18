@@ -553,6 +553,11 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
 
     expect(await view.findByText(/cannot be previewed/i)).toBeTruthy();
     expect(view.queryByRole("region", { name: "Artifact content" })).toBeNull();
+    expect(
+      view
+        .getByRole("button", { name: "Copy Raw Content" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
   });
 });
 
