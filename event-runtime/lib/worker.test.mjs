@@ -2162,7 +2162,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       expect(sumA.terminalState).not.toBe("REFUSED");
       expect(sumA.reasonCode).not.toBe("owned_paths_overlap");
 
-      // Identical concrete file on both sides: still a hard conflict.
+      // Identical concrete file on both sides: same file is not same lines —
+      // advisory lets it run too (evidence carries the pair).
       queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-708" } }));
       const sumB = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
         dispatch: {
@@ -2172,8 +2173,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           countLeases: () => 0,
         },
       }));
-      expect(sumB.terminalState).toBe("REFUSED");
-      expect(sumB.reasonCode).toBe("owned_paths_conflict_hard");
+      expect(sumB.terminalState).not.toBe("REFUSED");
+      expect(sumB.reasonCode).not.toBe("owned_paths_conflict_hard");
 
       // A `**` claim on the in-flight side: still a hard conflict.
       queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-709" } }));

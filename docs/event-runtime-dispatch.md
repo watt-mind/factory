@@ -155,7 +155,7 @@ selects what a collision *does*:
 | mode | on overlap | still refuses |
 | --- | --- | --- |
 | `strict` (default when absent) | refuse, `owned_paths_overlap` | — |
-| `advisory` | record on the proposal as `evidence.ownedPathsOverlap` (`{ticket, path, inFlightPath}` per pair) and dispatch | identical concrete file on both sides, or `**` on either side → `owned_paths_conflict_hard` |
+| `advisory` | record on the proposal as `evidence.ownedPathsOverlap` (`{ticket, path, inFlightPath}` per pair) and dispatch | `**` on either side → `owned_paths_conflict_hard` |
 
 Advisory exists because the strict oracle refuses far more than it protects:
 tickets scope themselves with qualified claims (`views/*.tsx (formatter
@@ -164,9 +164,11 @@ wildcards collide by construction. On 2026-08-18 nine dispatch attempts
 became two running workers under strict, while six textually-overlapping PRs
 rebased onto develop clean the same day. Textual overlap is a rebase job and
 `merge-fix` already does it; the pool should not idle waiting for it. What
-advisory keeps hard is the case a rebase genuinely cannot fix — two agents
-handed the *same file* — and the `**` sentinel, whose whole meaning is
-"alone". Merging remains serialized (`concurrency.max_concurrent_merges`),
+advisory keeps hard is only the `**` sentinel, whose whole meaning is
+"alone". Two tickets naming the *same file* is not hard: same file is not
+same lines — tickets qualify claims (`App.tsx (interval constants only)`) for
+exactly this — and an identical-file rule tried first refused four tickets in
+one batch on `App.tsx`/`hooks.ts`/`api.mjs`. Merging remains serialized (`concurrency.max_concurrent_merges`),
 which is where real conflicts are caught. Both the planner and the worker's
 execute-time re-check read the same setting, so operator approval and worker
 claim cannot disagree.

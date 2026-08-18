@@ -288,13 +288,13 @@ test("pathOverlaps returns every overlapping pair, in order", () => {
   expectEqual(pathOverlaps(["a.md"], ["b.md"]), []);
 });
 
-test("hardPathConflicts: identical concrete file, or ** on either side — nothing else", () => {
-  // Containment and shared-prefix overlaps are NOT hard.
+test("hardPathConflicts: ** on either side — nothing else", () => {
+  // Containment, shared-prefix, same-glob, and even the SAME concrete file are
+  // NOT hard: same file is not same lines, and a rebase resolves it.
   expectEqual(hardPathConflicts(["src/api/**"], ["src/api/routes.ts"]), []);
   expectEqual(hardPathConflicts(["src/**/*.test.mjs"], ["src/lib/registry.test.mjs"]), []);
-  expectEqual(hardPathConflicts(["views/*.tsx"], ["views/*.tsx"]), []); // same glob, still a rebase job
-  // The same concrete file IS hard.
-  expectEqual(hardPathConflicts(["docs/a.md"], ["docs/a.md"]), [{ a: "docs/a.md", b: "docs/a.md" }]);
+  expectEqual(hardPathConflicts(["views/*.tsx"], ["views/*.tsx"]), []);
+  expectEqual(hardPathConflicts(["docs/a.md"], ["docs/a.md"]), []);
   // `**` on either side is hard against anything it reaches.
   expectTrue(hardPathConflicts(["**"], ["docs/a.md"]).length === 1);
   expectTrue(hardPathConflicts(["docs/a.md"], ["**"]).length === 1);

@@ -190,22 +190,21 @@ export function pathOverlaps(setA = [], setB = []) {
 }
 
 /**
- * The narrow set of overlaps that still refuse dispatch under advisory mode
- * (WM-677): two claims that are the SAME concrete file, or a `**` claim on
- * either side. Everything else — shared directory prefixes, qualified globs,
- * wildcards that merely could reach the same file — is textual overlap that
- * git resolves at rebase far more often than not, so it is recorded on the
- * proposal and dispatch proceeds.
+ * The set of overlaps that still refuse dispatch under advisory mode (WM-677):
+ * a `**` claim on either side, and nothing else. `**` is the fail-closed
+ * sentinel for "this ticket's scope is unknown, it must run alone" — the one
+ * claim a rebase cannot reason about. Everything else, including two tickets
+ * naming the SAME concrete file, is textual overlap: same file is not same
+ * lines (tickets qualify claims like `App.tsx (interval constants only)` for
+ * exactly this), and rebase/merge-fix resolve it far more often than not. So
+ * it is recorded on the proposal and dispatch proceeds. The identical-file
+ * rule was tried first and refused App.tsx/hooks.ts/api.mjs across four
+ * tickets in one batch on 2026-08-18 — precisely the starvation advisory mode
+ * exists to end.
  */
 export function hardPathConflicts(setA = [], setB = []) {
-  const isConcrete = (g) => !/[*?{]/.test(g);
   const norm = (g) => String(g ?? "").trim().replace(/^\.\//, "").replace(/\/$/, "");
-  return pathOverlaps(setA, setB).filter(({ a, b }) => {
-    const na = norm(a);
-    const nb = norm(b);
-    if (na === "**" || nb === "**") return true;
-    return isConcrete(na) && isConcrete(nb) && na === nb;
-  });
+  return pathOverlaps(setA, setB).filter(({ a, b }) => norm(a) === "**" || norm(b) === "**");
 }
 
 function walkFiles(rootDir, baseDir = rootDir, out = []) {
