@@ -104,10 +104,10 @@ describe("registry", () => {
     // Regenerated 2026-08-18: #559 (WM-662, merge agents cursor→pi/terra) landed
     // between #479's review and its merge, changing event-types.json and two
     // agent defs — registry inputs. Reason in PR body per the rule above.
-    // Regenerated 2026-08-18 (WM-679): merge-scan.md / merge-fix.md re-prompted so
-    // operational conditions route to FIX instead of ESCALATE; both are registry
-    // inputs. Reason in PR body per the rule above.
-    const expected = "sha256:677ed34e1e04aa29437594922a2fd9ebca419c68a8a4c794dac78b2435897aeb";
+    // WM-469 intentionally adds the three declarative kernel-control fields
+    // to the affected definitions while preserving their refs and pins
+    // (digest regenerated on top of the #559 baseline).
+    const expected = "sha256:0fbb908dd2dbac1184da17106eef92da42f9530c30dac05e205c55ead1312e28";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -364,6 +364,49 @@ describe("registry", () => {
     const raw = JSON.parse(readFileSync(defFile, "utf8"));
     writeFileSync(defFile, JSON.stringify({ ...raw, workspace: { type: "ephemeral" } }));
     expect(() => loadRegistry({ root })).toThrow(/mutating/);
+  });
+
+  test("agent-declared kernel control fields validate fail-closed (WM-469)", () => {
+    const badEdgeRoot = tempRegistry();
+    const applyFile = path.join(badEdgeRoot, "agents", "merge-apply.json");
+    const apply = JSON.parse(readFileSync(applyFile, "utf8"));
+    writeFileSync(
+      applyFile,
+      JSON.stringify({ ...apply, chainCommandEdges: ["factory.not-registered"] }),
+    );
+    expect(() => loadRegistry({ root: badEdgeRoot })).toThrow(
+      /chainCommandEdges targets unregistered event type factory\.not-registered/,
+    );
+
+    const badRepoMatchRoot = tempRegistry();
+    const verifyFile = path.join(badRepoMatchRoot, "agents", "merge-verify.json");
+    const verify = JSON.parse(readFileSync(verifyFile, "utf8"));
+    writeFileSync(
+      verifyFile,
+      JSON.stringify({ ...verify, chainRepoMustMatchInput: false }),
+    );
+    expect(() => loadRegistry({ root: badRepoMatchRoot })).toThrow(
+      /"chainRepoMustMatchInput" must be true when present/,
+    );
+
+    const badExemptionRoot = tempRegistry();
+    const exemptFile = path.join(badExemptionRoot, "agents", "merge-verify.json");
+    const exempt = JSON.parse(readFileSync(exemptFile, "utf8"));
+    writeFileSync(exemptFile, JSON.stringify({ ...exempt, dispatchGateExempt: true }));
+    expect(() => loadRegistry({ root: badExemptionRoot })).toThrow(
+      /"dispatchGateExempt" is admissible only for workspace\.type "worktree"/,
+    );
+  });
+
+  test("every declared chainCommandEdges entry names a merged registered event type", () => {
+    const loaded = loadRegistry();
+    const declared = [...loaded.agents.values()].flatMap((def) =>
+      (def.chainCommandEdges ?? []).map((eventType) => [def.ref, eventType]),
+    );
+    expect(declared.length).toBeGreaterThan(0);
+    for (const [agentRef, eventType] of declared) {
+      expect(loaded.eventTypes[eventType], `${agentRef} -> ${eventType}`).toBeDefined();
+    }
   });
 
   test("schedule payload must be a plain object without reserved tick fields (WM-72)", () => {

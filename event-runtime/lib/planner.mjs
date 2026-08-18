@@ -682,7 +682,7 @@ export function worktreeMergeFixEligibility(payload, {
 
 function worktreeGateFor(def) {
   if (def?.workspace?.type !== "worktree") return null;
-  return def.gate ?? "dispatch";
+  return def.dispatchGateExempt === true ? null : "dispatch";
 }
 
 function insertProposal(db, { id, event, runId = null, decision, specJson = null, specHash = null, idempotencyKey = null, status, reason = null, at, ttlSeconds }) {

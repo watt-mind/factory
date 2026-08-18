@@ -415,6 +415,29 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
   if (def.model !== undefined && (typeof def.model !== "string" || def.model.trim() === "")) {
     throw new RegistryError(`${source}: "model" must be a non-empty string model id — omit the field for tier/default routing (WM-135)`);
   }
+  if (
+    def.chainCommandEdges !== undefined &&
+    (!Array.isArray(def.chainCommandEdges) ||
+      def.chainCommandEdges.length === 0 ||
+      !def.chainCommandEdges.every((type) => typeof type === "string" && type.trim() !== ""))
+  ) {
+    throw new RegistryError(
+      `${source}: "chainCommandEdges" must be a non-empty array of non-empty event type strings`,
+    );
+  }
+  if (def.chainRepoMustMatchInput !== undefined && def.chainRepoMustMatchInput !== true) {
+    throw new RegistryError(`${source}: "chainRepoMustMatchInput" must be true when present`);
+  }
+  if (def.dispatchGateExempt !== undefined) {
+    if (def.dispatchGateExempt !== true) {
+      throw new RegistryError(`${source}: "dispatchGateExempt" must be true when present`);
+    }
+    if (def.workspace?.type !== "worktree") {
+      throw new RegistryError(
+        `${source}: "dispatchGateExempt" is admissible only for workspace.type "worktree"`,
+      );
+    }
+  }
 
   const resources = {};
   const pins = {};
@@ -562,6 +585,19 @@ export function loadRegistry({
       resolveModel(agents.get(agentRef), mapping.adapter, modelTiers);
     } catch (err) {
       throw new RegistryError(`event type ${type}: ${err.message}`);
+    }
+  }
+
+  // Command-emitted chain edges are definition data, but they still target
+  // the one merged event registry. Validate only after every pack's maps have
+  // been merged so namespaced packs can target another loaded pack safely.
+  for (const [agentRef, def] of agents) {
+    for (const eventType of def.chainCommandEdges ?? []) {
+      if (!Object.hasOwn(eventTypes, eventType)) {
+        throw new RegistryError(
+          `${agentSources.get(agentRef)} agent ${agentRef}: chainCommandEdges targets unregistered event type ${eventType}`,
+        );
+      }
     }
   }
 

@@ -225,6 +225,9 @@ through the runtime's existing `claude` adapter
 tier-2 workspace from §5. Same registry, same conformance bar, same
 lifecycle, same receipts as every other run — repository mutation is a
 capability and a workspace type, not a parallel execution path.
+Every worktree agent passes the dispatch gate unless its definition declares
+`dispatchGateExempt: true`, which registry validation permits only on a
+`workspace.type: worktree` definition.
 
 **Rejected: a closed command template shelling to `runners/run-agent.sh`.**
 It looks like less work — the runner already spawns ticket-shaped sessions —
@@ -300,6 +303,10 @@ The failure this prevents: earned-automation creep quietly consuming the one
 decision the whole factory routes through a human. Every other gate here may
 someday relax on evidence; this one may not, and the place that says so is a
 validator, not a paragraph.
+
+Command-emitted chain authority is definition data: `chainCommandEdges`
+declares its registered event types, and `chainRepoMustMatchInput: true`
+requires the emitted repository to match the predecessor input.
 
 ---
 

@@ -5,6 +5,10 @@
   "input_schema": "schemas/merge-verify.input.json",
   "output_schema": "schemas/command-result.output.json",
   "output_contract": "factory.command-result/v1",
+  "chainCommandEdges": [
+    "factory.merge.requested"
+  ],
+  "chainRepoMustMatchInput": true,
   "command": [
     "sh",
     "-c",

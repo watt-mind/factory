@@ -554,12 +554,12 @@ describe("planEvent worktree gate (WM-108)", () => {
     payload,
   });
 
-  test("a gate-declared merge-fix agent bypasses dispatch-only planning checks", () => {
+  test("a dispatch-exempt worktree agent bypasses dispatch-only planning checks", () => {
     withReposRoot(`repos:\n  - name: repairable\n    path: /tmp/nowhere\n    base: develop\n`, () => {
       const synthetic = syntheticRegistry();
       synthetic.agents.set("test-worktree@1", {
         ...synthetic.agents.get("test-worktree@1"),
-        gate: "merge-fix",
+        dispatchGateExempt: true,
       });
       const db = openDb(":memory:");
       const ref = admit(db, dispatchEnvelope({ repo: "repairable", ticket: "WM-500" }));
@@ -1231,4 +1231,3 @@ describe("planAdmittedEvents", () => {
     expect(replannedSpec.idempotencyKey).toBe(originalSpec.idempotencyKey);
   });
 });
-

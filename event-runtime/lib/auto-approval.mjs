@@ -296,16 +296,19 @@ function dispatchSafe(envelope, approvalPolicy, dispatchEligibility, dispatch) {
   return null;
 }
 
-function mergeBarrierReason(db, candidate, now) {
+function mergeBarrierReason(db, registry, candidate, now) {
+  const applyAgent = registry.eventTypes["factory.merge-apply.requested"]?.agent;
+  const verifyAgent = registry.eventTypes["factory.merge-landed"]?.agent;
+  if (!applyAgent || !verifyAgent) return "merge_barrier_registry_incomplete";
   const inFlight = db
     .query(
       `SELECT run_id, state, spec_json, created_at FROM runs
      WHERE run_id != ?
        AND state IN ('QUEUED','LEASED','RUNNING','VERIFYING')
-       AND json_extract(spec_json, '$.agent') IN ('merge-apply@2','merge-verify@1')
+       AND json_extract(spec_json, '$.agent') IN (?, ?)
      ORDER BY created_at, rowid`,
     )
-    .all(candidate.run_id);
+    .all(candidate.run_id, applyAgent, verifyAgent);
   for (const run of inFlight) {
     let timeoutSeconds;
     try {
@@ -336,22 +339,14 @@ function mergeBarrierReason(db, candidate, now) {
        AND NOT EXISTS (
          SELECT 1 FROM proposals p JOIN runs r ON r.run_id = p.run_id
          WHERE p.event_source = e.source AND p.event_id = e.event_id
-           AND json_extract(r.spec_json, '$.agent') = 'merge-verify@1'
+           AND json_extract(r.spec_json, '$.agent') = ?
            AND r.state = 'COMPLETED'
        )
      LIMIT 1`,
     )
-    .get();
+    .get(verifyAgent);
   return unverified ? `merge_barrier_unverified:${unverified.event_id}` : null;
 }
-
-const REGISTERED_COMMAND_EDGES = {
-  "merge-apply@2": new Set([
-    "factory.merge.requested",
-    "factory.merge-landed",
-  ]),
-  "merge-verify@1": new Set(["factory.merge.requested"]),
-};
 
 function chainContextValue(expr, context) {
   if (typeof expr !== "string" || !expr.startsWith("$.")) return expr;
@@ -488,7 +483,8 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
     result,
     envelope,
   );
-  const commandEdge = REGISTERED_COMMAND_EDGES[spec.agent]?.has(envelope.type);
+  const predecessorDef = registry.agents.get(spec.agent);
+  const commandEdge = predecessorDef?.chainCommandEdges?.includes(envelope.type);
   if (
     declaredEdge?.eventType !== envelope.type &&
     !independentEdge &&
@@ -497,32 +493,39 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
     return "chain_edge_not_registered";
 
   // Registered command edges carry immutable identity from their predecessor.
-  // Recheck those pins here instead of trusting event payload text.
-  if (spec.agent === "merge-apply@2") {
+  // Recheck target-required fields that originate in the source input (or its
+  // selected item) instead of trusting event payload text. This preserves the
+  // exact command-edge pins without keying the kernel on a pack agent id.
+  if (commandEdge) {
     const source = spec.input ?? {};
-    const item = source.plan?.[0];
-    if (envelope.type === "factory.merge-landed") {
-      const payload = envelope.payload ?? {};
-      if (
-        payload.repo !== source.repo ||
-        payload.github !== source.github ||
-        payload.base !== source.base ||
-        payload.pr !== item?.pr ||
-        payload.ticket !== item?.ticket ||
-        payload.headSha !== item?.headSha ||
-        payload.headRef !== item?.headRef
-      ) {
+    const sourceRequired = new Set(predecessorDef.inputSchema?.required ?? []);
+    const itemsField = predecessorDef.itemsField;
+    const item =
+      typeof itemsField === "string"
+        ? source[itemsField]?.[0]
+        : undefined;
+    const itemRequired = new Set(
+      typeof itemsField === "string"
+        ? predecessorDef.inputSchema?.properties?.[itemsField]?.items?.required ?? []
+        : [],
+    );
+    const targetAgent = registry.eventTypes[envelope.type]?.agent;
+    const required = registry.agents.get(targetAgent)?.inputSchema?.required ?? [];
+    const payload = envelope.payload ?? {};
+    for (const field of required) {
+      if (sourceRequired.has(field)) {
+        if (payload[field] !== source[field])
+          return "chain_command_edge_payload_mismatch";
+      } else if (itemRequired.has(field) && payload[field] !== item?.[field]) {
         return "chain_command_edge_payload_mismatch";
       }
-    } else if (envelope.payload?.repo !== source.repo) {
+    }
+    if (
+      predecessorDef.chainRepoMustMatchInput === true &&
+      payload.repo !== source.repo
+    ) {
       return "chain_command_edge_payload_mismatch";
     }
-  }
-  if (
-    spec.agent === "merge-verify@1" &&
-    envelope.payload?.repo !== spec.input?.repo
-  ) {
-    return "chain_command_edge_payload_mismatch";
   }
   return null;
 }
@@ -561,7 +564,7 @@ function durableFixRoundReason(db, candidate, input, policy) {
   return null;
 }
 
-function mergeEligibility(db, candidate, envelope, policy, now) {
+function mergeEligibility(db, registry, candidate, envelope, policy, now) {
   if (!MERGE_EVENT_TYPES.has(envelope.type)) return null;
   const input = envelope.payload ?? {};
 
@@ -615,12 +618,12 @@ function mergeEligibility(db, candidate, envelope, policy, now) {
       item.ambiguous !== false
     )
       return "merge_review_not_policy_safe";
-    return mergeBarrierReason(db, candidate, now);
+    return mergeBarrierReason(db, registry, candidate, now);
   }
 
   // merge-landed / merge-verify are allowed only for the exact immutable
   // landing identity; schema validation checks each 40-hex pin.
-  const barrierReason = mergeBarrierReason(db, candidate, now);
+  const barrierReason = mergeBarrierReason(db, registry, candidate, now);
   return barrierReason?.startsWith("merge_barrier_active:")
     ? barrierReason
     : null;
@@ -670,7 +673,7 @@ function eligible(
   );
   if (predecessorReason) return predecessorReason;
 
-  const mergeReason = mergeEligibility(db, candidate, envelope, policy, now);
+  const mergeReason = mergeEligibility(db, registry, candidate, envelope, policy, now);
   if (mergeReason) return mergeReason;
 
   const mapping = getEventType(registry, envelope.type);
