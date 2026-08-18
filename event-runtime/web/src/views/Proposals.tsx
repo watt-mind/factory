@@ -1815,7 +1815,7 @@ export function Proposals({
                 <KV k="adapter" v={p.spec?.adapter} />
                 <KV
                   k="capabilities"
-                  v={p.spec?.capabilities.join(", ") || "none"}
+                  v={p.spec?.capabilities?.join(", ") || "none"}
                 />
                 <KV k="timeout" v={`${p.spec?.timeoutSeconds}s`} />
                 <KV k="attempts" v={String(p.spec?.maxAttempts)} />

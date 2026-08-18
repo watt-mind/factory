@@ -143,6 +143,23 @@ describe("Projects unscoped caption (WM-157)", () => {
 });
 
 describe("Projects Clean Reclaimable Apply (WM-157)", () => {
+  test("normalizes a partial janitor result before rendering counts (WM-266)", async () => {
+    await withApi(
+      {
+        repos: async () => ({ repos: [repo()] }),
+        janitor: async (name: string) => ({ repo: name, apply: false, actor: "janitor" }) as JanitorResult,
+      },
+      async () => {
+        const r = await openJanitor();
+        fireEvent.click(r.getByRole("button", { name: "Run Dry Janitor" }));
+        await waitFor(() => {
+          expect(r.getByText("0 reclaimable")).toBeTruthy();
+        });
+        expect(r.getByText("Nothing to reclaim")).toBeTruthy();
+      },
+    );
+  });
+
   test("Apply stays disabled and confirm does not open when dry found nothing", async () => {
     await withApi(
       {

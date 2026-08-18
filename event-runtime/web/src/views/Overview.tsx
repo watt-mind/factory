@@ -588,10 +588,10 @@ export function buildAnomalyRows(
       ],
     });
   }
-  if (anomalies.noWorkers && (s?.runs.byState?.QUEUED ?? 0) > 0) {
+  if (anomalies.noWorkers && (s?.runs?.byState?.QUEUED ?? 0) > 0) {
     rows.push({
       kind: "capacity",
-      text: `${s?.runs.byState?.QUEUED ?? 0} queued runs and no live worker available to claim them`,
+      text: `${s?.runs?.byState?.QUEUED ?? 0} queued runs and no live worker available to claim them`,
       links: [
         { label: "View workers", go: () => callbacks.onNavigate("workers") },
       ],
@@ -758,6 +758,48 @@ const ATTENTION_KEYS = new Set([
   "expired",
   "stale",
 ]);
+
+/** Keep a resolved-but-partial status response on the same safe fallback path as an empty cache. */
+function normalizeStatus(status: StatusView | undefined): StatusView | undefined {
+  if (!status) return undefined;
+  return {
+    ...status,
+    env: status.env ?? { name: "unknown", home: "", adapter: null },
+    events: status.events ?? {},
+    proposals: status.proposals ?? { open: 0, expired: 0 },
+    runs: { ...(status.runs ?? {}), byState: status.runs?.byState ?? {} },
+    workers: {
+      ...(status.workers ?? {}),
+      live: status.workers?.live ?? 0,
+      busy: status.workers?.busy ?? 0,
+      stale: status.workers?.stale ?? 0,
+    },
+    artifacts: {
+      ...(status.artifacts ?? {}),
+      files: status.artifacts?.files ?? 0,
+      bytes: status.artifacts?.bytes ?? 0,
+      orphans: status.artifacts?.orphans ?? 0,
+      orphanBytes: status.artifacts?.orphanBytes ?? 0,
+    },
+    anomalies: {
+      ...(status.anomalies ?? {}),
+      expiredOpenProposals: status.anomalies?.expiredOpenProposals ?? [],
+      staleLeases: status.anomalies?.staleLeases ?? 0,
+      unpublishedOutbox: status.anomalies?.unpublishedOutbox ?? 0,
+      deadLettered: status.anomalies?.deadLettered ?? [],
+      stalledWorkers: status.anomalies?.stalledWorkers ?? [],
+      noWorkers: status.anomalies?.noWorkers ?? false,
+      ambiguousOpenProposals: status.anomalies?.ambiguousOpenProposals ?? [],
+    },
+    inbox: status.inbox
+      ? {
+          ...status.inbox,
+          open: status.inbox.open ?? 0,
+          acked: status.inbox.acked ?? 0,
+        }
+      : undefined,
+  };
+}
 
 /**
  * Overview (webui spec §4.1 + doc §10.4, pipeline OPS-360, WM-205) — the unified StageCard dashboard:
@@ -950,7 +992,7 @@ export function Overview({
     reject.mutate({ proposalId: rejectingProposalId, why: rejectReason });
   };
 
-  const s = status.data;
+  const s = normalizeStatus(status.data);
   const anomalies = s?.anomalies;
   const proposalsById = useMemo(() => {
     return new Map<string, Proposal>(
@@ -985,7 +1027,7 @@ export function Overview({
   ]);
 
   const hasAnomalies = anomalyRows.length > 0;
-  const deadLetterEventCount = anomalies?.deadLettered.length ?? 0;
+  const deadLetterEventCount = anomalies?.deadLettered?.length ?? 0;
   const anomalyRowRefs = useRef<Array<HTMLDivElement | null>>([]);
 
   const deadLetterGroupKey = (group: DeadLetterGroup) =>
@@ -1091,7 +1133,7 @@ export function Overview({
   const proposalOpen =
     context.kind === "repo"
       ? scopedCount(openProposals, context, { repos: (p) => p.repos })
-      : (s?.proposals.open ?? 0);
+      : (s?.proposals?.open ?? 0);
   const proposalExpired =
     context.kind === "repo"
       ? scopedCount(
@@ -1099,11 +1141,11 @@ export function Overview({
           context,
           { repos: (p) => p.repos },
         )
-      : (s?.proposals.expired ?? 0);
+      : (s?.proposals?.expired ?? 0);
   const eventValue = (k: string, factory: number) =>
     eventTally ? (eventTally[k] ?? 0) : factory;
   const runValue = (k: RunState) =>
-    runTally ? (runTally[k] ?? 0) : (s?.runs.byState[k] ?? 0);
+    runTally ? (runTally[k] ?? 0) : (s?.runs?.byState?.[k] ?? 0);
 
   const groupedFeed = useMemo(
     () => groupJournalEntries(feed.entries),
@@ -1126,7 +1168,7 @@ export function Overview({
   const eventSegs: Segment[] = activeEventKeys.map((k) => ({
     key: k,
     label: k,
-    value: eventValue(k, s?.events[k] ?? 0),
+    value: eventValue(k, s?.events?.[k] ?? 0),
     hue: EVENT_STATUS_HUES[k],
   }));
   const intakeTotal = eventSegs.reduce((a, x) => a + x.value, 0);
@@ -1161,10 +1203,10 @@ export function Overview({
   const okTotal = terminalSegs.find((x) => x.key === "COMPLETED")?.value ?? 0;
   const idleWorkers = Math.max(
     0,
-    (s?.workers.live ?? 0) - (s?.workers.busy ?? 0),
+    (s?.workers?.live ?? 0) - (s?.workers?.busy ?? 0),
   );
   const capacity = s
-    ? (s.capacity ?? {
+    ? ({
         running: s.workers.busy,
         capacity: s.workers.live,
         queued: s.runs.byState.QUEUED ?? 0,
@@ -1177,7 +1219,8 @@ export function Overview({
         supervisor: "absent" as const,
         source: "live-workers" as const,
         limitingFactor: null,
-        classes: [],
+        ...(s.capacity ?? {}),
+        classes: s.capacity?.classes ?? [],
       })
     : null;
   const jumpToWorkerHealth = (health: WorkerHealthFilter) => {

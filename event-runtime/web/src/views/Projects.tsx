@@ -59,6 +59,20 @@ const defaultProjectOrder = (a: RepoItem, b: RepoItem) =>
     sensitivity: "base",
   });
 
+/** API clients can briefly expose a partial mutation result while caches update. */
+function normalizeJanitorResult(result: JanitorResult): JanitorResult {
+  return {
+    ...result,
+    reclaimable: result.reclaimable ?? [],
+    kept: result.kept ?? [],
+    named: result.named ?? [],
+    unknown: result.unknown ?? [],
+    removed: result.removed ?? [],
+    refused: result.refused ?? [],
+    held: result.held ?? [],
+  };
+}
+
 const PROJECTS_SORT: DisplayConfig<RepoItem> = {
   view: "projects-table-sort",
   groups: [],
@@ -272,10 +286,11 @@ export function Projects({
   const dryMutation = useMutation({
     mutationFn: (name: string) => api.janitor(name, false),
     onSuccess: (res) => {
-      setDryResult(res);
+      const normalized = normalizeJanitorResult(res);
+      setDryResult(normalized);
       setApplyResult(null);
       notify(
-        `Dry run complete: ${res.reclaimable.length} reclaimable worktrees found`,
+        `Dry run complete: ${normalized.reclaimable.length} reclaimable worktrees found`,
       );
     },
     onError: (err: ApiError) => {
@@ -287,11 +302,12 @@ export function Projects({
   const applyMutation = useMutation({
     mutationFn: (name: string) => api.janitor(name, true),
     onSuccess: (res) => {
-      setApplyResult(res);
+      const normalized = normalizeJanitorResult(res);
+      setApplyResult(normalized);
       setConfirmOpen(false);
       setConfirmInput("");
       queryClient.invalidateQueries({ queryKey: ["repos"] });
-      notify(`Cleaned ${res.removed.length} worktrees for ${res.repo}`);
+      notify(`Cleaned ${normalized.removed.length} worktrees for ${normalized.repo}`);
     },
     onError: (err: ApiError) => {
       notify(`Janitor apply failed: ${err.message}`, "err");
@@ -887,7 +903,7 @@ export function Projects({
                       (sel.reportOnly && !sel.hasWorktreeDown)
                     }
                     onClick={() => {
-                      if (!dryResult?.reclaimable.length) return;
+                      if (!dryResult?.reclaimable?.length) return;
                       setConfirmInput("");
                       setConfirmOpen(true);
                     }}
@@ -1154,7 +1170,7 @@ export function Projects({
         </DetailPane>
       )}
 
-      {confirmOpen && sel && (dryResult?.reclaimable.length ?? 0) > 0 && (
+      {confirmOpen && sel && (dryResult?.reclaimable?.length ?? 0) > 0 && (
         <Dialog
           title={`Clean Worktrees for ${sel.name}`}
           onClose={() => {
@@ -1170,7 +1186,7 @@ export function Projects({
               </code>{" "}
               on{" "}
               <strong>
-                {dryResult?.reclaimable.length ?? 0} reclaimable worktrees
+                {dryResult?.reclaimable?.length ?? 0} reclaimable worktrees
               </strong>
               . Worktrees with uncommitted changes will be safely refused.
             </div>

@@ -353,20 +353,20 @@ export function App() {
     queryFn: api.status,
     ...refetchIntervals.primary,
   });
-  const openProposals = status.data?.proposals.open ?? 0;
-  const activeRuns = Object.entries(status.data?.runs.byState ?? {})
+  const openProposals = status.data?.proposals?.open ?? 0;
+  const activeRuns = Object.entries(status.data?.runs?.byState ?? {})
     .filter(([s]) => ["QUEUED", "LEASED", "RUNNING", "VERIFYING"].includes(s))
     .reduce((sum, [, n]) => sum + (n ?? 0), 0);
   const eventAttention =
-    (status.data?.events.human_needed ?? 0) +
-    (status.data?.events.dead_lettered ?? 0);
+    (status.data?.events?.human_needed ?? 0) +
+    (status.data?.events?.dead_lettered ?? 0);
   const scopedNav = context.kind === "repo";
   const scopedRunsNav = context.kind !== "all";
-  const busyWorkers = status.data?.workers.busy ?? 0;
-  const staleWorkers = status.data?.workers.stale ?? 0;
+  const busyWorkers = status.data?.workers?.busy ?? 0;
+  const staleWorkers = status.data?.workers?.stale ?? 0;
   // null until the first status lands: reading "no workers" off a pending
   // fetch is the same false alarm as flashing "unreachable" on first load.
-  const liveWorkers = status.data?.workers.live ?? null;
+  const liveWorkers = status.data?.workers?.live ?? null;
   const stoppedSchedulesCount = (
     (status.data?.anomalies as any)?.stoppedSchedules ?? []
   ).length;
@@ -392,9 +392,9 @@ export function App() {
     projects: { count: 0, hue: "var(--accent)" },
     agents: { count: 0, hue: "var(--accent)" },
     artifacts: {
-      count: status.data?.artifacts.orphans ?? 0,
+      count: status.data?.artifacts?.orphans ?? 0,
       hue: "var(--hue-warn)",
-      title: `${status.data?.artifacts.orphans ?? 0} orphan artifact${status.data?.artifacts.orphans === 1 ? "" : "s"} (unreferenced)`,
+      title: `${status.data?.artifacts?.orphans ?? 0} orphan artifact${status.data?.artifacts?.orphans === 1 ? "" : "s"} (unreferenced)`,
     },
     schedules:
       stoppedSchedulesCount > 0

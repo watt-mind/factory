@@ -316,7 +316,7 @@ export function Graph({
   const staleFocus = missingFocusNode(graph?.nodes, focusNodeId, graphLoaded);
   const agentDef =
     selected?.kind === "agent"
-      ? registry.data?.agents.find((a) => a.ref === selected.label)
+      ? registry.data?.agents?.find((a) => a.ref === selected.label)
       : undefined;
 
   const pendingC = useRef<number>(0);

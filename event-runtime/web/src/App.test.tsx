@@ -65,7 +65,7 @@ function renderApp() {
   // Scope queries to the sidebar landmark: views render their own controls
   // (Overview has a "Graph" button too) and must not satisfy nav assertions.
   const sidebar = within(utils.getByRole("navigation", { name: "Primary" }));
-  return { ...utils, sidebar };
+  return { ...utils, sidebar, queryClient };
 }
 
 beforeEach(() => {
@@ -124,6 +124,26 @@ afterEach(() => {
   goPrefix.armedAt = 0;
   cleanup();
   globalThis.fetch = realFetch;
+});
+
+describe("cold query rendering (WM-266)", () => {
+  test("keeps the shell available before the initial status query resolves", () => {
+    const { sidebar } = renderApp();
+    expect(sidebar.getByRole("button", { name: "Overview" })).toBeTruthy();
+  });
+
+  test("treats missing nested status sections as empty badge data", async () => {
+    currentStatus = {} as StatusView;
+    const { sidebar, queryClient } = renderApp();
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["status"])?.status).toBe("success");
+    });
+
+    expect(sidebar.getByRole("button", { name: "Proposals" })).toBeTruthy();
+    expect(sidebar.getByRole("button", { name: "Runs" })).toBeTruthy();
+    expect(sidebar.getByRole("button", { name: "Artifacts" })).toBeTruthy();
+  });
 });
 
 describe("sidebar navigation accessibility", () => {

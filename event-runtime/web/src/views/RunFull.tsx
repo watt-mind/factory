@@ -118,7 +118,10 @@ export function RunFull({
     return map;
   }, [listQ.data]);
 
-  const d = detail.data;
+  // A query can resolve with a partial payload while caches hydrate. Treat a
+  // detail without its root run as unpopulated so every guarded d.run access
+  // below stays on the loading/fallback path.
+  const d = detail.data?.run ? detail.data : undefined;
   const attemptsExhausted = d
     ? d.run.attempts >= d.run.spec.maxAttempts
     : false;
@@ -205,9 +208,9 @@ export function RunFull({
 
   const canApprove = Boolean(
     selProposal &&
-    selProposal.status === "open" &&
-    selProposal.decision === "run" &&
-    d?.run.state === "PROPOSED",
+      selProposal.status === "open" &&
+      selProposal.decision === "run" &&
+      d?.run?.state === "PROPOSED",
   );
 
   // Verbs: Esc back to list, x cancel, c copy id, c i / c c copy CLI inspect command, c l copy link.
@@ -334,8 +337,8 @@ export function RunFull({
     return () => setContextActions([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    d?.run.runId,
-    d?.run.state,
+    d?.run?.runId,
+    d?.run?.state,
     attemptsExhausted,
     connected,
     canApprove,

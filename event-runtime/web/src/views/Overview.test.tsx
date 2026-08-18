@@ -20,7 +20,7 @@ import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
-import { changeInput } from "../test-render";
+import { changeInput, withApi } from "../test-render";
 import type {
   AdmittedEvent,
   EventFocus,
@@ -1218,6 +1218,23 @@ describe("buildAnomalyRows (WM-205)", () => {
 });
 
 describe("Overview 4-Band layout & telemetry (WM-205)", () => {
+  test("renders empty stage fallbacks for a partial cold status response (WM-266)", async () => {
+    await withApi(
+      { status: async () => ({}) as StatusView },
+      async () => {
+        const r = renderOverview();
+
+        await waitFor(() => {
+          expect(r.getByText("Worker Fleet Capacity")).toBeTruthy();
+        });
+        expect(r.getByText("no events yet")).toBeTruthy();
+        expect(r.getByText("nothing in flight")).toBeTruthy();
+        expect(r.getAllByText("no terminal runs").length).toBeGreaterThan(0);
+        expect(r.container.textContent).toContain("0 files");
+      },
+    );
+  });
+
   test("renders nominal status banner when no anomalies are present", async () => {
     const origStatus = api.status;
     const origProposals = api.proposals;
