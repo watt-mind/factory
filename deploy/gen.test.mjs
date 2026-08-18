@@ -1,8 +1,23 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { installPlists, launchdPath, plist } from "./gen.mjs";
+import {
+  eventRuntimePlist,
+  eventWorkerRange,
+  installPlists,
+  launchdPath,
+  plist,
+  renderEventRuntimePlists,
+} from "./gen.mjs";
 import { ROOT } from "../lib/schedule.mjs";
 
 const defaults = {
@@ -79,5 +94,143 @@ test("installPlists creates a missing LaunchAgents directory before copying", ()
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("event-runtime plists are portable, secret-free, persistent user agents", () => {
+  const serve = eventRuntimePlist("serve");
+  const work = eventRuntimePlist("work", { workers: "2:4" });
+
+  for (const rendered of [serve, work]) {
+    expect(rendered).toContain("<key>RunAtLoad</key>\n    <true/>");
+    expect(rendered).toContain("<key>KeepAlive</key>\n    <true/>");
+    expect(rendered).toContain("<key>LimitLoadToSessionType</key>\n    <string>Aqua</string>");
+    expect(rendered).not.toContain(ROOT);
+    expect(rendered).not.toContain("FACTORY_EVENT_SECRET</key>");
+  }
+  expect(serve).toContain("<string>com.wattmind.factory.event-serve</string>");
+  expect(serve).toContain('bin/event-runtime-daemon" serve</string>');
+  expect(work).toContain("<string>com.wattmind.factory.event-work</string>");
+  expect(work).toContain('bin/event-runtime-daemon" work 2:4</string>');
+});
+
+test("event worker range accepts fixed and bounded pools and rejects unsafe values", () => {
+  expect(eventWorkerRange("2")).toBe("2:2");
+  expect(eventWorkerRange("1:2")).toBe("1:2");
+  expect(() => eventWorkerRange("0:2")).toThrow("1 <= min <= max <= 32");
+  expect(() => eventWorkerRange("3:2")).toThrow("1 <= min <= max <= 32");
+  expect(() => eventWorkerRange("1:33")).toThrow("1 <= min <= max <= 32");
+  expect(() => eventWorkerRange("many")).toThrow("must be N or min:max");
+});
+
+test("event-runtime renderer writes the two committed launchd definitions", () => {
+  const outDir = mkdtempSync(path.join(tmpdir(), "factory-event-launchd-"));
+  try {
+    const rendered = renderEventRuntimePlists({
+      outDir,
+      workers: "2",
+      environmentPath: "/usr/bin:/bin",
+    });
+    expect(rendered.map((item) => path.basename(item.file))).toEqual([
+      "com.wattmind.factory.event-serve.plist",
+      "com.wattmind.factory.event-work.plist",
+    ]);
+    expect(readFileSync(rendered[0].file, "utf8")).toContain('event-runtime-daemon" serve');
+    expect(readFileSync(rendered[1].file, "utf8")).toContain('event-runtime-daemon" work 2:2');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("committed event-runtime plists match the generator default", () => {
+  for (const role of ["serve", "work"]) {
+    const file = path.join(
+      ROOT,
+      "deploy",
+      "launchd",
+      `com.wattmind.factory.event-${role}.plist`,
+    );
+    expect(readFileSync(file, "utf8")).toBe(eventRuntimePlist(role));
+  }
+});
+
+function daemonFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-event-daemon-"));
+  const home = path.join(root, "home");
+  const checkout = path.join(root, "factory");
+  const calls = path.join(root, "bun-calls");
+  const fakeBun = path.join(home, ".bun", "bin", "bun");
+  mkdirSync(path.dirname(fakeBun), { recursive: true });
+  mkdirSync(path.join(checkout, "event-runtime"), { recursive: true });
+  writeFileSync(fakeBun, '#!/bin/bash\nprintf \'%s\\n\' "$*" >> "$CALLS_FILE"\n');
+  chmodSync(fakeBun, 0o755);
+  return { root, home, checkout, calls };
+}
+
+function daemonEnv(fixture, port) {
+  return {
+    ...process.env,
+    HOME: fixture.home,
+    FACTORY_ROOT: fixture.checkout,
+    FACTORY_EVENT_PORT: String(port),
+    FACTORY_EVENT_LOG_DIR: path.join(fixture.root, "logs"),
+    FACTORY_EVENT_HEALTH_RETRIES: "2",
+    FACTORY_EVENT_HEALTH_RETRY_DELAY: "0",
+    FACTORY_EVENT_HEALTH_RETRY_MAX_TIME: "2",
+    FACTORY_EVENT_HEALTH_REQUEST_TIMEOUT: "1",
+    CALLS_FILE: fixture.calls,
+  };
+}
+
+test("daemon worker never invokes supervise when health is unavailable", async () => {
+  const fixture = daemonFixture();
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
+  const port = probe.port;
+  probe.stop(true);
+  try {
+    const child = Bun.spawn([path.join(ROOT, "bin", "event-runtime-daemon"), "work", "2:4"], {
+      env: daemonEnv(fixture, port),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await child.exited).toBe(75);
+    expect(existsSync(fixture.calls)).toBe(false);
+    expect(readFileSync(path.join(fixture.root, "logs", "factory-event-work.err.log"), "utf8"))
+      .toContain("control API did not become healthy");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("daemon worker waits for healthy serve, then forwards the configured range", async () => {
+  const fixture = daemonFixture();
+  let requests = 0;
+  let superviseStartedBeforeHealth = false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      requests += 1;
+      superviseStartedBeforeHealth ||= existsSync(fixture.calls);
+      return requests === 1
+        ? new Response("starting", { status: 503 })
+        : Response.json({ ok: true });
+    },
+  });
+  try {
+    const child = Bun.spawn([path.join(ROOT, "bin", "event-runtime-daemon"), "work", "2:4"], {
+      env: daemonEnv(fixture, server.port),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await child.exited).toBe(0);
+    expect(requests).toBeGreaterThanOrEqual(2);
+    expect(superviseStartedBeforeHealth).toBe(false);
+    expect(readFileSync(fixture.calls, "utf8").trim()).toBe(
+      "event-runtime/cli.mjs supervise --workers 2:4",
+    );
+  } finally {
+    server.stop(true);
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });

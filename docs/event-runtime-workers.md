@@ -1,7 +1,8 @@
 # Event runtime: workers, placement, and chaining
 
-Status: **stage 1 shipped (OPS-233), pool supervision shipped (WM-226);
-stages 2–3 are still design**. Tracking: OPS-221 and WM-308.
+Status: **stage 1 shipped (OPS-233), pool supervision shipped (WM-226),
+launchd definitions shipped (WM-139); stages 2–3 are still design**.
+Tracking: OPS-221 and WM-308.
 Companion to [event-runtime.md](event-runtime.md) §3, §8, §10, §11 — this
 note describes process and node placement. WM-308 deliberately replaces the
 former "second process → Postgres → remote workers" line: remote workers use
@@ -142,6 +143,65 @@ the §4 placement machinery and need claim-side class filtering first. A
 budget-aware ceiling — throttling spawns when rolling token spend crosses a
 threshold — is blocked on WM-66's per-run usage data; until it exists,
 `workers.max` is the only guard on the usage window, and it is a blunt one.
+
+## 2b. launchd user agents — **shipped, WM-139**
+
+The production-on-a-Mac process boundary is generated and reviewable, not a
+pair of background shells tied to a coding session:
+
+- `deploy/launchd/com.wattmind.factory.event-serve.plist` keeps `serve` alive;
+- `deploy/launchd/com.wattmind.factory.event-work.plist` keeps `supervise`
+  alive, and the supervisor owns the actual worker processes from §2a.
+
+`bun deploy/gen.mjs --workers min:max` regenerates both. The committed default
+is `1:2`; a single number means a fixed pool (`--workers 2` → `2:2`). This is
+one worker-pool plist rather than N near-identical plists, so scale decisions,
+drain semantics, pidfiles, logs, and status continue to have the single §2a
+implementation.
+
+Both agents execute `bin/event-runtime-daemon` with `KeepAlive` and
+`RunAtLoad`. The launcher resolves the durable checkout from `FACTORY_ROOT`
+(default `~/Develop/factory`), loads the mode-600
+`~/.factory/secrets.env`, and writes to
+`~/Library/Logs/factory-event-{serve,work}.{out,err}.log`. Generated plists
+therefore contain neither a renderer worktree path nor a secret. The complete
+template, install, bootstrap, validation, scaling, and rollback commands are
+in [SETUP.md](../SETUP.md#3a-event-runtime-as-launchd-user-agents-wm-139).
+
+The worker launch is deliberately conditional, not delayed by an arbitrary
+timer: its launcher retries the loopback `/health` request for at most 120
+seconds, then execs `supervise`. A healthy response means `serve` has already
+opened the database and settled WAL mode, so OPS-376's concurrent first-open
+race cannot occur even when launchd starts both plists together. If health
+never arrives, the launcher exits and launchd retries under `KeepAlive`; it
+never opens SQLite first.
+
+Install into `gui/$(id -u)`, not the background `user/$(id -u)` domain. The
+GUI login domain is the full user context: `HOME`, keychain, `~/.ssh`, and its
+SSH environment remain reachable to worker children. This is still proved at
+deployment time, not inferred from the plist: run an allowlisted read-only
+`disk-diagnose@1` SSH probe through a daemon worker and retain its run
+receipt/trace. A terminal-side SSH success does not prove the worker child.
+Mutating dispatch runs separately record their push outcome and continue to
+use `gh`'s HTTPS credential helper as the paved road (WM-128), regardless of
+whether SSH is available.
+
+There are two liveness views by design:
+
+```
+launchctl print gui/$(id -u)/com.wattmind.factory.event-serve
+launchctl print gui/$(id -u)/com.wattmind.factory.event-work
+bun event-runtime/cli.mjs status
+bun event-runtime/cli.mjs workers
+```
+
+The first pair says whether launchd owns the long-running processes. The
+second pair says whether the control plane is healthy, the pool supervisor is
+alive, and workers have registered/continued heartbeating. Stop the worker
+agent before the serve agent on rollback so the pool drains before the control
+plane disappears. Manual `serve`, `work`, and `supervise` commands remain the
+development fallback; a sandboxed interactive shell may not carry a usable SSH
+context, which is precisely why that fallback is not the production setup.
 
 ## 3. Stage 2 — workers on other nodes
 

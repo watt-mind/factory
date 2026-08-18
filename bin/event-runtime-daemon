@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# launchd entry point for the event-runtime control plane and worker pool.
+# Generated plists stay host-independent; this resolves HOME/FACTORY_ROOT,
+# loads the operator-owned environment, and keeps logs out of the checkout.
+set -euo pipefail
+
+mode="${1:-}"
+worker_range="${2:-1:2}"
+case "$mode" in
+  serve | work) ;;
+  *) echo "usage: event-runtime-daemon serve | work [min:max]" >&2; exit 64 ;;
+esac
+
+FACTORY_ROOT="${FACTORY_ROOT:-$HOME/Develop/factory}"
+FACTORY_EVENT_SECRETS_FILE="${FACTORY_EVENT_SECRETS_FILE:-$HOME/.factory/secrets.env}"
+export FACTORY_ROOT FACTORY_EVENT_SECRETS_FILE
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+if [[ -r "$FACTORY_EVENT_SECRETS_FILE" ]]; then
+  set -a
+  # This is an operator-owned shell environment file (chmod 600), not dotenv.
+  # shellcheck disable=SC1090
+  source "$FACTORY_EVENT_SECRETS_FILE"
+  set +a
+fi
+
+[[ -d "$FACTORY_ROOT/event-runtime" ]] || {
+  echo "event-runtime checkout not found below FACTORY_ROOT=$FACTORY_ROOT" >&2
+  exit 66
+}
+command -v bun >/dev/null || { echo "bun is not available on PATH" >&2; exit 69; }
+
+log_dir="${FACTORY_EVENT_LOG_DIR:-$HOME/Library/Logs}"
+mkdir -p "$log_dir"
+umask 077
+exec >>"$log_dir/factory-event-$mode.out.log" 2>>"$log_dir/factory-event-$mode.err.log"
+cd "$FACTORY_ROOT"
+
+if [[ "$mode" == "serve" ]]; then
+  exec bun event-runtime/cli.mjs serve
+fi
+
+[[ "$worker_range" =~ ^[0-9]+:[0-9]+$ ]] || {
+  echo "worker range must be min:max (got $worker_range)" >&2
+  exit 64
+}
+
+# Serve must settle SQLite's journal mode before the supervisor opens the same
+# database (OPS-376). curl retries the actual /health condition; there is no
+# fixed startup delay and failure stays bounded so launchd can retry cleanly.
+port="${FACTORY_EVENT_PORT:-7381}"
+health="http://127.0.0.1:$port/health"
+health_retries="${FACTORY_EVENT_HEALTH_RETRIES:-120}"
+health_retry_delay="${FACTORY_EVENT_HEALTH_RETRY_DELAY:-1}"
+health_retry_max_time="${FACTORY_EVENT_HEALTH_RETRY_MAX_TIME:-120}"
+health_request_timeout="${FACTORY_EVENT_HEALTH_REQUEST_TIMEOUT:-2}"
+for value in "$health_retries" "$health_retry_delay" "$health_retry_max_time" "$health_request_timeout"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "event-runtime health wait settings must be non-negative integers" >&2
+    exit 64
+  }
+done
+[[ "$health_retry_max_time" -gt 0 && "$health_request_timeout" -gt 0 ]] || {
+  echo "event-runtime health wait timeouts must be greater than zero" >&2
+  exit 64
+}
+if ! /usr/bin/curl --fail --silent --show-error \
+  --retry "$health_retries" --retry-delay "$health_retry_delay" \
+  --retry-connrefused --retry-max-time "$health_retry_max_time" \
+  --max-time "$health_request_timeout" "$health" >/dev/null; then
+  echo "control API did not become healthy at $health within ${health_retry_max_time}s" >&2
+  exit 75
+fi
+
+exec bun event-runtime/cli.mjs supervise --workers "$worker_range"

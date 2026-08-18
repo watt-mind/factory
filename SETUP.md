@@ -25,9 +25,14 @@ Symlinks rather than copies: `git pull` then updates every harness at once, and 
 
 **`bun run link-repos` is not optional for headless dispatch.** `runners/run-agent.sh` invokes `claude -p`, which reads project commands from `<repo>/.claude/commands/` directly — it does not go through the marketplace plugin in step 4 below (that route needs an interactive session; see the comment above `--link-repos` in `build/emit.mjs`). Skip this and a repo's headless commands silently run against whatever command set was symlinked in last, however old. **Re-run it every time a `/factory-*` command is added, renamed, or removed** — nothing else notices the drift; OPS-69 is exactly this bug (`factory-unblock` merged, never linked into cashsaas/bj29/legalease, first headless run failed with `Unknown command: /factory-unblock`).
 
-## 3. Scheduling — deliberately empty
+## 3. Scheduling — orchestrator loops deliberately empty
 
-**Nothing is scheduled.** The factory runs in the foreground where it can be watched; every job in `config/schedule.yaml` is `enabled: false` and `deploy/launchd/` is empty. Enabling a loop is a decision, not a setup step — flip one, watch it for a week, then consider the next.
+**No orchestrator loop is scheduled.** The factory's Linear/git loops run in
+the foreground where they can be watched; every job in `config/schedule.yaml`
+is `enabled: false`. The two committed plists in `deploy/launchd/` are instead
+the event runtime's always-on control plane and worker pool (§3a). They do not
+enable a scheduled orchestrator loop. Enabling a loop is still a decision, not
+a setup step — flip one, watch it for a week, then consider the next.
 
 Run the reaper by hand when you want it:
 
@@ -37,11 +42,148 @@ bun orchestrator/reaper.mjs --apply
 ```
 
 ```bash
-launchctl list | grep wattmind    # expect no output
+launchctl list | rg wattmind
+# Before §3a: expect no output. After §3a: expect only event-serve/event-work.
 ```
 
 > [!NOTE]
 > `com.wattmind.linear-reaper` was installed by hand on 2026-08-03 and **unloaded the same day** under this policy. Its wrapper and script remain; only the timer is gone. Re-enabling means setting `enabled: true` in `config/schedule.yaml` and running `bun deploy/gen.mjs --install` — never writing a plist by hand.
+
+### 3a. Event runtime as launchd user agents (WM-139)
+
+`deploy/gen.mjs` also emits two long-running user agents:
+
+- `com.wattmind.factory.event-serve` — API, planner, scheduler, and outbox;
+- `com.wattmind.factory.event-work` — a pool supervisor, which starts workers
+  only after `http://127.0.0.1:$FACTORY_EVENT_PORT/health` answers.
+
+They must be bootstrapped into the **GUI domain**. That is the login-session
+context carrying the user's keychain, `HOME`, `~/.ssh`, and launchd-provided
+SSH environment. Do not install either agent from this ticket worktree; install
+from the durable checkout after the change lands.
+
+Generate and validate the committed definitions (the default pool is 1–2
+workers; `--workers 2` fixes it at two, and `--workers 2:4` permits two to
+four):
+
+```bash
+cd ~/Develop/factory
+bun deploy/gen.mjs --workers 1:2
+plutil -lint deploy/launchd/com.wattmind.factory.event-{serve,work}.plist
+```
+
+Create the operator-owned environment file. It is sourced as shell syntax by
+`bin/event-runtime-daemon`; keep it mode `600`. Values are intentionally not
+present in either plist or git:
+
+```bash
+umask 077
+mkdir -p ~/.factory
+cat > ~/.factory/secrets.env <<'EOF'
+# Required only for authenticated event/webhook intake.
+FACTORY_EVENT_SECRET='replace-with-the-runtime-secret'
+
+# Optional runtime settings.
+FACTORY_EVENT_NOTIFY=0
+FACTORY_EVENT_PORT=7381
+FACTORY_EVENT_HOME="$HOME/.factory/event-runtime"
+FACTORY_EVENT_ENV=live
+EOF
+chmod 600 ~/.factory/secrets.env
+```
+
+`FACTORY_EVENT_SECRETS_FILE` may name another file. Set it in the GUI launchd
+domain before bootstrap (`launchctl setenv FACTORY_EVENT_SECRETS_FILE
+/absolute/path`) if the default is not used. `launchctl setenv` can likewise
+provide individual values for the current login session, but the file is the
+persistent setup across the next login.
+
+Install and bootstrap. Starting both immediately is safe: the worker launcher
+polls the real `/health` condition for up to 120 seconds before the supervisor
+opens SQLite, preventing the serve/worker WAL initialization race (OPS-376).
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+install -m 0644 deploy/launchd/com.wattmind.factory.event-serve.plist ~/Library/LaunchAgents/
+install -m 0644 deploy/launchd/com.wattmind.factory.event-work.plist  ~/Library/LaunchAgents/
+
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wattmind.factory.event-serve.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wattmind.factory.event-work.plist
+```
+
+Verify liveness after bootstrap (and after a logout/login or reboot):
+
+```bash
+curl --fail --show-error http://127.0.0.1:7381/health
+FACTORY_EVENT_PORT=7381 bun event-runtime/cli.mjs status
+FACTORY_EVENT_PORT=7381 bun event-runtime/cli.mjs workers
+launchctl print "gui/$(id -u)/com.wattmind.factory.event-serve"
+launchctl print "gui/$(id -u)/com.wattmind.factory.event-work"
+tail -f ~/Library/Logs/factory-event-{serve,work}.{out,err}.log
+```
+
+The `workers`/`status` output is the runtime view (registered workers and pool
+liveness); `launchctl print` is the process-manager view. For the SSH
+acceptance smoke, inject and approve a read-only `disk-diagnose@1` run for an
+allowlisted host, then inspect its trace/receipt. The SSH command must succeed
+**inside that daemon worker run**, not merely in the terminal that bootstrapped
+it:
+
+```bash
+cat > /tmp/factory-daemon-ssh-smoke.json <<'EOF'
+{
+  "schemaVersion": "factory.event/v1",
+  "eventId": "daemon-ssh-smoke-001",
+  "type": "keephq.disk-alert.raised",
+  "source": "replay-cli",
+  "subject": "lab",
+  "occurredAt": "2026-08-18T00:00:00Z",
+  "correlationId": "daemon-ssh-smoke-001",
+  "causationId": null,
+  "payload": { "host": "lab", "mount": "/", "usedPct": 0, "alertId": "daemon-ssh-smoke-001" }
+}
+EOF
+bun event-runtime/cli.mjs inject /tmp/factory-daemon-ssh-smoke.json
+bun event-runtime/cli.mjs proposals            # note the disk-diagnose proposal id
+bun event-runtime/cli.mjs approve <proposal-id>
+bun event-runtime/cli.mjs runs                 # note the completed run id
+bun event-runtime/cli.mjs inspect <run-id>     # receipt/evidence must contain the successful SSH probe
+bun event-runtime/cli.mjs trace <run-id>
+```
+
+Use only a currently allowlisted host and retain the run ID as deployment
+evidence. `disk-diagnose` may authenticate through the login keychain/agent or
+the user's configured key file; the smoke proves what the daemon child can
+actually use. A terminal-side `ssh ... true` is a useful preflight but is not
+acceptance evidence.
+
+For mutating dispatch runs, keep `gh` over HTTPS as the paved push route even
+when the daemon has a working SSH context:
+
+```bash
+gh auth status
+git remote set-url origin https://github.com/watt-mind/factory.git
+git push -u origin HEAD
+```
+
+Record the push result in the dispatch run receipt/trace. Daemonization fixes
+the process's full user context; it does not change the WM-128 rule that SSH
+must not be the only way an unattended branch can be pushed.
+
+Rollback (worker first) leaves manual foreground development fully supported:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.wattmind.factory.event-work"
+launchctl bootout "gui/$(id -u)/com.wattmind.factory.event-serve"
+rm ~/Library/LaunchAgents/com.wattmind.factory.event-{serve,work}.plist
+
+# Foreground/manual fallback:
+bun event-runtime/cli.mjs serve
+bun event-runtime/cli.mjs supervise --workers 1:2
+```
+
+Foreground processes launched from a sandboxed coding shell may still lack a
+usable SSH agent; that is a shell limitation, not a runtime fallback guarantee.
 
 ## 4. Enable a product repo
 
