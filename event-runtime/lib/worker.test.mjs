@@ -589,6 +589,17 @@ describe("worker", () => {
         { id: "answer", label: "Answer the agent", effect: "answer" },
         { id: "dismiss", label: "Not now", effect: "dismiss" },
       ],
+      // An `answer` option needs an applicable required text field (WM-716)
+      // for this to remain the *valid* ask.
+      fields: [
+        {
+          id: "reply",
+          kind: "text",
+          label: "Your answer",
+          required: true,
+          whenOption: ["answer"],
+        },
+      ],
     };
     const invalid = { ...authored, recommended: "missing" };
     const refusingAdapter = (decision) => ({
