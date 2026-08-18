@@ -159,7 +159,7 @@ function looksBinary(raw: string): boolean {
   if (!sample) return false;
   if (sample.includes("\u0000")) return true;
   const undecodable = sample.replace(/[^\uFFFD]/g, "").length;
-  return undecodable / sample.length > 0.02;
+  return undecodable / Math.max(sample.length, 50) > 0.02;
 }
 
 function containsArtifactHash(

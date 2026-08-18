@@ -397,6 +397,32 @@ describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
     ).toContain("1.0 KB");
     expect(view.getByRole("link", { name: "Download" })).toBeTruthy();
   });
+
+  test("short text with one replacement character remains previewable", async () => {
+    globalThis.fetch = mock(
+      async () => new Response("partially decoded: \uFFFD", { status: 200 }),
+    ) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts();
+
+    const preview = await view.findByRole("region", {
+      name: "Artifact content",
+    });
+    expect(preview.textContent).toContain("partially decoded: \uFFFD");
+    expect(view.queryByText(/cannot be previewed/i)).toBeNull();
+  });
+
+  test("a long sample with more than two percent replacement characters uses the binary fallback", async () => {
+    const raw = `${"a".repeat(4000)}${"\uFFFD".repeat(96)}trailing text`;
+    globalThis.fetch = mock(
+      async () => new Response(raw, { status: 200 }),
+    ) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts();
+
+    expect(await view.findByText(/cannot be previewed/i)).toBeTruthy();
+    expect(view.queryByRole("region", { name: "Artifact content" })).toBeNull();
+  });
 });
 
 describe("Artifacts inspector renders a view for the producing agent's artifact (WM-455)", () => {
