@@ -175,6 +175,16 @@ export function tabForRunState(state: string): RunTab {
  */
 const rowModel = (r: RunListItem) => pinnedModelText(r.adapter, r.model);
 
+/** The budget deadline shared by the Remaining display and its sort order. */
+const remainingDeadline = (r: RunListItem): string => {
+  if (r.deadlineAt) return r.deadlineAt;
+  if (!r.startedAt || !r.timeoutSeconds || r.timeoutSeconds <= 0) return "";
+  const deadline = new Date(
+    Date.parse(r.startedAt) + r.timeoutSeconds * 1000,
+  );
+  return Number.isNaN(deadline.getTime()) ? "" : deadline.toISOString();
+};
+
 /**
  * Grouping/ordering/columns (OPS-493). One config for every status tab: the
  * tabs only filter rows, the column set never changes with them.
@@ -212,7 +222,7 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     {
       key: "remaining",
       label: "Remaining",
-      get: (r) => r.deadlineAt ?? "",
+      get: remainingDeadline,
       column: "remaining",
     },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
@@ -324,12 +334,9 @@ function leasePart(c: Clock, budget: Clock | null): RemainingPart | null {
  * around it, for a number this column already carried.
  */
 function RemainingCell({ r, now }: { r: RunListItem; now: number }) {
-  const { startedAt, leaseExpiresAt, deadlineAt, timeoutSeconds = 0 } = r;
-  const budgetClock = deadlineAt
-    ? clockTo(deadlineAt, 0, now)
-    : startedAt && timeoutSeconds > 0
-      ? clockTo(startedAt, timeoutSeconds * 1000, now)
-      : null;
+  const { leaseExpiresAt, timeoutSeconds = 0 } = r;
+  const deadline = remainingDeadline(r);
+  const budgetClock = deadline ? clockTo(deadline, 0, now) : null;
   const leaseClock = leaseExpiresAt ? clockTo(leaseExpiresAt, 0, now) : null;
   const budget = budgetClock && budgetPart(budgetClock, timeoutSeconds);
   const lease = leaseClock && leasePart(leaseClock, budgetClock);
@@ -1081,7 +1088,7 @@ export function Runs({
                     </td>
                   )}
                   {show.has("remaining") && (
-                    <td className="max-w-36 whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    <td className="max-w-36 overflow-hidden whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
                       {IN_FLIGHT.includes(r.state) ? (
                         <RemainingCell r={r} now={now} />
                       ) : (

@@ -191,6 +191,39 @@ describe("Runs sortable columns (OPS-492)", () => {
       },
     );
   });
+
+  test("Remaining sorts a started-at timeout fallback among explicit deadlines", async () => {
+    const now = Date.now();
+    const early = stubListItem("run_early", "RUNNING", {
+      deadlineAt: new Date(now + 5 * 60_000).toISOString(),
+    });
+    const fallback = stubListItem("run_fallback", "RUNNING", {
+      deadlineAt: null,
+      startedAt: new Date(now).toISOString(),
+      timeoutSeconds: 600,
+    });
+    const late = stubListItem("run_late", "RUNNING", {
+      deadlineAt: new Date(now + 15 * 60_000).toISOString(),
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [early, fallback, late] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        await waitFor(() => r.getByRole("columnheader", { name: /Remaining/ }));
+
+        fireEvent.click(r.getByRole("button", { name: /Remaining/ }));
+        expect(
+          Array.from(
+            r.container.querySelectorAll("tbody tr td:first-child"),
+          ).map((cell) => cell.getAttribute("title")),
+        ).toEqual(["run_early", "run_fallback", "run_late"]);
+      },
+    );
+  });
 });
 
 describe("Runs table short run ids (WM-96)", () => {
@@ -1264,6 +1297,7 @@ describe("Runs in-flight row height (WM-725)", () => {
         expect(remaining.textContent).toContain("lease");
         expect(remaining.querySelectorAll("div").length).toBe(0);
         expect(remaining.className).toContain("whitespace-nowrap");
+        expect(remaining.className).toContain("overflow-hidden");
 
         // A lease that outlives the budget is not the binding deadline, so it
         // stays off the row rather than padding the column with a number the
