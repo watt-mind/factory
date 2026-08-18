@@ -840,4 +840,39 @@ describe("Tickets hub landing view", () => {
     fireEvent.keyDown(document.body, { key: "k" });
     expect(document.activeElement).toBe(jumpInput);
   });
+
+  test("hub rows use py-1.5 and keep id/title and activity/Ago on one line each (WM-843)", async () => {
+    globalThis.fetch = ticketsFetch();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Ticket ticketId={null} onNavigate={() => {}} />
+      </QueryClientProvider>,
+    );
+
+    const id = await view.findByText("WM-822");
+    const row = id.closest("tr");
+    expect(row).toBeTruthy();
+    const cells = [...row!.querySelectorAll("td")];
+    expect(cells.length).toBeGreaterThan(0);
+    for (const td of cells) {
+      const tokens = td.className.split(/\s+/);
+      expect(tokens).toContain("py-1.5");
+      expect(tokens).not.toContain("py-2");
+      expect(tokens).toContain("whitespace-nowrap");
+    }
+
+    const idCell = id.closest("td")!;
+    expect(idCell.querySelector("div")).toBeNull();
+    expect(view.getByText("Tickets hub landing view").closest("td")).toBe(
+      idCell,
+    );
+
+    const activity = view.getByText("dispatch@1 leased");
+    const activityCell = activity.closest("td")!;
+    expect(activityCell.querySelector("div")).toBeNull();
+    expect(activityCell.textContent).toMatch(/ago/i);
+  });
 });

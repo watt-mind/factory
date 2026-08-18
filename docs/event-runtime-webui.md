@@ -651,7 +651,8 @@ top-right (WM-97). A view that needs a different frame is a spec change
   group headers can pin at exactly `top-7`), optional `GroupHeaderRow` bands
   under it.
 - Cells: `px-3 py-1.5 border-b border-(--border)` — one row height across
-  the app. (`Schedules` uses `py-2` today; that is debt, not a variant.)
+  the app. In-cell 24×24 controls (`Button size="sm"`, Artifacts download)
+  use `-my-1.5` so they sit in that padding instead of growing the row.
   Numeric columns are `tabular-nums` and right-aligned via `Th align="right"`.
 - Ids and machine values are `.mono`; prose columns are body text; secondary
   columns are `--text-dim`, tertiary `--text-faint`. Long values `truncate`
@@ -813,9 +814,10 @@ besides the env chip. Weights: `font-medium` for active/emphasis,
 #### Known debt (filed, not fixed here)
 
 State-icon implementation is OPS-498. Syntax normalization, wash
-normalization, and the Projects team-hue fix are WM-134. Table row-height
-(`Schedules` `py-2`), sub-11px sizes, and bare `animate-pulse` are additional
-WM-134 scope — this section is the standard they normalize _to_.
+normalization, and the Projects team-hue fix are WM-134. Sub-11px sizes
+and bare `animate-pulse` are additional WM-134 scope — this section is the
+standard they normalize _to_. List-row height (in-cell 24px controls vs
+`py-1.5`) is WM-843.
 
 ## 6. Liveness and concurrency honesty
 

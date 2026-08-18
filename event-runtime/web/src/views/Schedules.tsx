@@ -677,6 +677,8 @@ export function Schedules({
                     <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-right">
                       <span className="pointer-events-none opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                         <Button
+                          size="sm"
+                          className="-my-1.5"
                           disabled={connected === false}
                           onClick={() => setConfirmLoop(s)}
                         >

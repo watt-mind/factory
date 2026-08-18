@@ -728,3 +728,19 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
   });
 });
+
+describe("Artifacts list row height (WM-843)", () => {
+  test("SHA download stays 24×24 and overlaps py-1.5 padding", async () => {
+    const view = renderArtifacts();
+    const download = await view.findByRole("link", {
+      name: "Download aaaaaaaaaaaa.report",
+    });
+    const tokens = download.className.split(/\s+/);
+    expect(tokens).toContain("h-6");
+    expect(tokens).toContain("w-6");
+    expect(tokens).toContain("-my-1.5");
+    const cell = download.closest("td");
+    expect(cell).toBeTruthy();
+    expect(cell!.className.split(/\s+/)).toContain("py-1.5");
+  });
+});

@@ -6,6 +6,7 @@ import {
   fireEvent,
   render,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -719,5 +720,26 @@ describe("Schedules manual merge targeting (WM-426)", () => {
     await waitFor(() =>
       expect(calls).toEqual([{ loop: "merge-factory", prNumbers: undefined }]),
     );
+  });
+});
+
+describe("Schedules list row height (WM-843)", () => {
+  test("list Run now uses sm (h-6) and overlaps py-1.5 padding", async () => {
+    const view = renderSchedules();
+    await waitFor(() =>
+      expect(
+        view.getAllByRole("button", { name: "Run now…" }).length,
+      ).toBeGreaterThan(0),
+    );
+    const table = view.container.querySelector("table");
+    expect(table).toBeTruthy();
+    const btn = within(table as HTMLElement).getAllByRole("button", {
+      name: "Run now…",
+    })[0]!;
+    expect(btn.getAttribute("data-control-size")).toBe("sm");
+    const tokens = btn.className.split(/\s+/);
+    expect(tokens).toContain("h-6");
+    expect(tokens).toContain("-my-1.5");
+    expect(tokens).not.toContain("h-7");
   });
 });

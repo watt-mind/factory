@@ -497,49 +497,54 @@ function TicketsHub({
                       selected ? "bg-(--surface-1)" : ""
                     }`}
                   >
-                    <td className="mono px-3 py-2 font-medium">
-                      <a
-                        href={`#/tickets/${encodeURIComponent(ticket.id)}`}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          onNavigate(ticket.id);
-                        }}
-                        className="text-(--accent) hover:underline"
-                      >
-                        {ticket.id}
-                      </a>
-                      {ticket.title && (
-                        <div className="max-w-xs truncate font-sans text-[11px] font-normal text-(--text-dim)">
-                          {ticket.title}
-                        </div>
-                      )}
+                    <td className="mono px-3 py-1.5 whitespace-nowrap font-medium">
+                      <span className="inline-flex max-w-xs items-center gap-2">
+                        <a
+                          href={`#/tickets/${encodeURIComponent(ticket.id)}`}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            onNavigate(ticket.id);
+                          }}
+                          className="shrink-0 text-(--accent) hover:underline"
+                        >
+                          {ticket.id}
+                        </a>
+                        {ticket.title && (
+                          <span
+                            className="min-w-0 truncate font-sans text-[11px] font-normal text-(--text-dim)"
+                            title={ticket.title}
+                          >
+                            {ticket.title}
+                          </span>
+                        )}
+                      </span>
                     </td>
-                    <td className="mono px-3 py-2 text-(--text-dim)">
+                    <td className="mono px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
                       {ticket.repo || ticket.repos?.join(", ") || "—"}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="px-3 py-1.5 whitespace-nowrap">
                       {ticket.state ? (
                         <StateBadge state={ticket.state} hues={STATE_HUES} />
                       ) : (
                         <span className="text-(--text-faint)">—</span>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-(--text-dim)">
-                      <div>
+                    <td className="max-w-xs truncate px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      <span>
                         {ticket.lastActivityDescription ||
                           ticket.lastActivityKind ||
                           "—"}
-                      </div>
+                      </span>
                       {ticket.lastActivityAt && (
-                        <div className="text-[11px] text-(--text-faint)">
+                        <span className="ml-2 text-(--text-faint)">
                           <Ago iso={ticket.lastActivityAt} now={now} />
-                        </div>
+                        </span>
                       )}
                     </td>
-                    <td className="mono px-3 py-2 tabular-nums text-(--text-dim)">
+                    <td className="mono px-3 py-1.5 whitespace-nowrap tabular-nums text-(--text-dim)">
                       {ticket.attempts != null ? ticket.attempts : "—"}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="px-3 py-1.5 whitespace-nowrap">
                       {(() => {
                         const prNumber =
                           typeof ticket.pr === "number"
