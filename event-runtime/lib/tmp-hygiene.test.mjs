@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { withTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-tmp-hygiene-test-mjs";
+import { commandFixture } from "../test-support/command-fixture.mjs";
+import { TMP_PREFIXES } from "../../orchestrator/chrome-sweep.mjs";
 
 describe("temporary-directory test hygiene", () => {
   test("event-runtime tests use the tracked tmpDir helper", () => {
@@ -53,5 +55,23 @@ describe("temporary-directory test hygiene", () => {
     });
 
     expect(existsSync(dir)).toBe(false);
+  });
+
+  test("commandFixture creates directories under a sweep-matched prefix (WM-760)", () => {
+    // commandFixture() is used by merge.test.mjs / merge-apply.test.mjs with
+    // caller-supplied prefixes ("merge-apply-linear-", "branch-guard-", ...)
+    // that don't themselves appear in the CI sweep / chrome-sweep janitor
+    // prefix lists. The helper must force every fixture root under a prefix
+    // those sweeps do match, regardless of what the caller passes, or the
+    // directories leak forever instead of just until the next sweep.
+    const fixture = commandFixture("some-caller-supplied-prefix-");
+    try {
+      const base = path.basename(fixture.root);
+      expect(TMP_PREFIXES.some((prefix) => base.startsWith(prefix))).toBe(
+        true,
+      );
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   });
 });

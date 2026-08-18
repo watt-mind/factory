@@ -3,8 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
+// The `evrt-` prefix is required, not cosmetic: it is one of the patterns the
+// CI/e2e workflow sweeps and orchestrator/chrome-sweep.mjs's janitor reap on
+// the shared shadow host (see WM-760). A caller-supplied prefix without it
+// would create directories no sweep pattern matches, leaking permanently.
 export function commandFixture(prefix = "event-runtime-command-") {
-  const root = mkdtempSync(path.join(os.tmpdir(), prefix));
+  const root = mkdtempSync(path.join(os.tmpdir(), `evrt-${prefix}`));
   const bin = path.join(root, "bin");
   Bun.spawnSync(["mkdir", "-p", bin]);
   return { root, bin, log: path.join(root, "commands.log") };

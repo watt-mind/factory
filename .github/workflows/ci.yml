@@ -97,7 +97,7 @@ jobs:
       - name: Sweep stale shared-host temp directories
         shell: bash
         run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       - name: Checkout (no action download)
         shell: bash
@@ -158,7 +158,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
   verify:
     name: Full verification
@@ -178,7 +178,7 @@ jobs:
       - name: Sweep stale shared-host temp directories
         shell: bash
         run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       # No `uses:` steps in this job on purpose (WM-573). Every marketplace
       # action is fetched from codeload.github.com at "Set up job", and the
@@ -394,7 +394,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
   required-verify:
     name: Verify

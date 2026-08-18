@@ -38,7 +38,7 @@ jobs:
       - name: Sweep stale shared-host temp directories
         shell: bash
         run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       - name: Checkout (no action download)
         shell: bash
@@ -131,4 +131,4 @@ jobs:
         if: always()
         shell: bash
         run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} +
+          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
