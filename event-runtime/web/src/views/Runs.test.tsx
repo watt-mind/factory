@@ -1,5 +1,12 @@
 import "../test-dom";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterEach,
+  describe,
+  expect,
+  mock,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { Runs, runDrilldownFilters, statesForRunTab } from "./Runs";
@@ -28,6 +35,7 @@ afterEach(() => {
   cleanup();
   restoreApi();
   localStorage.clear();
+  setSystemTime();
 });
 
 const noop = () => {};
@@ -237,6 +245,139 @@ describe("Runs sortable columns (OPS-492)", () => {
             r.container.querySelectorAll("tbody tr td:first-child"),
           ).map((cell) => cell.getAttribute("title")),
         ).toEqual(["run_early", "run_fallback", "run_late"]);
+      },
+    );
+  });
+
+  test("Duration sorts by numeric elapsed seconds", async () => {
+    setSystemTime(new Date("2026-08-18T12:03:00.000Z"));
+    const early = "2026-08-18T12:00:00.000Z";
+    const short = stubListItem("run_short", "COMPLETED", {
+      startedAt: early,
+      updated_at: "2026-08-18T12:01:00.000Z",
+    });
+    const long = stubListItem("run_long", "COMPLETED", {
+      startedAt: early,
+      updated_at: "2026-08-18T12:02:00.000Z",
+    });
+    const live = stubListItem("run_live", "RUNNING", {
+      startedAt: "2026-08-18T12:00:30.000Z",
+      updated_at: "2026-08-18T12:00:45.000Z",
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [live, long, short] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        await r.findByRole("columnheader", { name: /Duration/ });
+        fireEvent.click(r.getByRole("button", { name: /Duration/ }));
+        expect(
+          Array.from(
+            r.container.querySelectorAll("tbody tr td:first-child"),
+          ).map((cell) => cell.getAttribute("title")),
+        ).toEqual(["run_short", "run_long", "run_live"]);
+      },
+    );
+  });
+});
+
+describe("Runs Duration column (WM-871)", () => {
+  function cellFor(
+    r: ReturnType<typeof renderRuns>,
+    runId: string,
+    label: string,
+  ): HTMLTableCellElement {
+    const index = [...r.container.querySelectorAll("thead th")].findIndex(
+      (th) => (th.textContent ?? "").startsWith(label),
+    );
+    expect(index).toBeGreaterThanOrEqual(0);
+    const row = r.container
+      .querySelector(`td[title="${runId}"]`)
+      ?.closest("tr");
+    expect(row).toBeTruthy();
+    return row!.querySelectorAll("td")[index] as HTMLTableCellElement;
+  }
+
+  test("renders terminal elapsed time, ticks in-flight rows, and never fetches row details", async () => {
+    const t0 = Date.parse("2026-08-18T12:00:00.000Z");
+    setSystemTime(new Date(t0 + 150_000));
+    let detailCalls = 0;
+    const completed = stubListItem("run_completed", "COMPLETED", {
+      startedAt: new Date(t0).toISOString(),
+      created_at: new Date(t0 - 60_000).toISOString(),
+      updated_at: new Date(t0 + 150_000).toISOString(),
+    });
+    const running = stubListItem("run_running", "RUNNING", {
+      startedAt: new Date(t0).toISOString(),
+      updated_at: new Date(t0 + 30_000).toISOString(),
+    });
+    const queued = stubListItem("run_queued", "QUEUED", {
+      created_at: new Date(t0).toISOString(),
+      updated_at: new Date(t0 + 30_000).toISOString(),
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [completed, running, queued] }),
+        run: async () => {
+          detailCalls += 1;
+          return stubDetail("run_running", "RUNNING", []);
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        await waitFor(() =>
+          expect(
+            r.container.querySelector('td[title="run_completed"]'),
+          ).toBeTruthy(),
+        );
+        const headers = [...r.container.querySelectorAll("thead th")].map(
+          (th) => th.textContent?.replace(/[↕↑↓×]/g, "").trim(),
+        );
+        expect(headers.indexOf("Duration")).toBe(
+          headers.indexOf("Remaining") + 1,
+        );
+        expect(cellFor(r, "run_completed", "Duration").textContent).toBe(
+          "2m 30s",
+        );
+        expect(cellFor(r, "run_running", "Duration").textContent).toBe(
+          "2m 30s",
+        );
+        expect(cellFor(r, "run_queued", "Duration").textContent).toBe("—");
+        expect(detailCalls).toBe(0);
+
+        setSystemTime(new Date(t0 + 152_000));
+        await waitFor(
+          () =>
+            expect(cellFor(r, "run_running", "Duration").textContent).toBe(
+              "2m 32s",
+            ),
+          { timeout: 4000 },
+        );
+        expect(detailCalls).toBe(0);
+      },
+    );
+  }, 10_000);
+
+  test("stays visible when saved options only hide another column", async () => {
+    localStorage.setItem(
+      "evrt-display-runs",
+      JSON.stringify({ hiddenColumns: ["model"] }),
+    );
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem("run_saved", "COMPLETED")] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        expect(
+          await r.findByRole("columnheader", { name: /Duration/ }),
+        ).toBeTruthy();
       },
     );
   });

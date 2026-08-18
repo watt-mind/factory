@@ -36,7 +36,7 @@ import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
 import { AgentHoverCard } from "../components/AgentHoverCard";
 import { CausationGlyphs, chainHref } from "../components/EventHoverCard";
-import { RunHoverCard } from "../components/RunHoverCard";
+import { RunHoverCard, runDurationSeconds } from "../components/RunHoverCard";
 import { chainKeyOfEvent, runNodeId } from "../graph/chainModel";
 import {
   ApprovalRiskDetails,
@@ -257,6 +257,12 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
       get: remainingDeadline,
       column: "remaining",
     },
+    {
+      key: "duration",
+      label: "Duration",
+      get: (r) => runDurationSeconds(r, undefined, Date.now()) ?? -1,
+      column: "duration",
+    },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
     {
       key: "adapter",
@@ -302,6 +308,7 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     { key: "run", label: "Run", always: true },
     { key: "state", label: "State" },
     { key: "remaining", label: "Remaining" },
+    { key: "duration", label: "Duration" },
     { key: "agent", label: "Agent" },
     { key: "adapter", label: "Adapter" },
     { key: "model", label: "Model" },
@@ -391,6 +398,11 @@ function RemainingCell({ r, now }: { r: RunListItem; now: number }) {
       )}
     </span>
   );
+}
+
+function DurationCell({ r, now }: { r: RunListItem; now: number }) {
+  const duration = runDurationSeconds(r, undefined, now);
+  return <span>{duration === null ? EMPTY : formatDuration(duration)}</span>;
 }
 
 /**
@@ -638,8 +650,19 @@ export function Runs({
       groups: RUNS_DISPLAY.groups.map((g) =>
         g.key === "state" ? { ...g, order: statesForRunTab(tab) } : g,
       ),
+      // Every row sorts against the same clock it renders against. Calling
+      // Date.now() per getter could straddle a second boundary mid-sort.
+      sorts: RUNS_DISPLAY.sorts.map((s) =>
+        s.key === "duration"
+          ? {
+              ...s,
+              get: (r: RunListItem) =>
+                runDurationSeconds(r, undefined, now) ?? -1,
+            }
+          : s,
+      ),
     }),
-    [tab],
+    [tab, now],
   );
   const [display, setDisplay] = useDisplayOptions(displayConfig);
   const sections = useMemo(
@@ -767,9 +790,15 @@ export function Runs({
   // pane and the unselected list retain every configured column.
   const listCols = sel
     ? cols.filter((c) =>
-        ["run", "state", "remaining", "reason", "origin", "updated"].includes(
-          c.key,
-        ),
+        [
+          "run",
+          "state",
+          "remaining",
+          "duration",
+          "reason",
+          "origin",
+          "updated",
+        ].includes(c.key),
       )
     : cols;
   const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
@@ -1275,6 +1304,11 @@ export function Runs({
                       ) : (
                         ""
                       )}
+                    </td>
+                  )}
+                  {show.has("duration") && (
+                    <td className="max-w-24 overflow-hidden whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      <DurationCell r={r} now={now} />
                     </td>
                   )}
                   {show.has("agent") && (

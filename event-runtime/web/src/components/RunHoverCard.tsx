@@ -3,9 +3,9 @@
  * what set it off", without opening the detail pane and losing the list.
  *
  * The list row already knows the agent, state and attempt budget; only the
- * duration and the artifacts a run produced need the detail endpoint, so that
- * query sits behind `enabled: open` with a `staleTime`. Sweeping a pointer
- * down a hundred rows must not fetch a hundred run details.
+ * attempt-level duration and the artifacts a run produced need the detail
+ * endpoint, so that query sits behind `enabled: open` with a `staleTime`.
+ * Sweeping a pointer down a hundred rows must not fetch a hundred run details.
  *
  * The shared pieces — `CausationGlyphs`, `HoverCardAction`, `chainHref` —
  * come from `EventHoverCard`; see the note there on why they live in that file.
@@ -16,7 +16,7 @@ import { api } from "../api";
 import { resolveEntity } from "../entities";
 import { EMPTY, formatDuration } from "../format";
 import { runNodeId } from "../graph/chainModel";
-import type { RunDetail, RunListItem } from "../types";
+import type { RunDetail, RunListItem, RunState } from "../types";
 import {
   HOVER_CARD_STALE_MS,
   HoverCardAction,
@@ -25,6 +25,19 @@ import {
 } from "./EventHoverCard";
 import { HoverCard } from "./HoverCard";
 import { StateBadge, shortId } from "./ui";
+
+const IN_FLIGHT_DURATION_STATES = new Set<RunState>([
+  "LEASED",
+  "RUNNING",
+  "VERIFYING",
+]);
+const TERMINAL_DURATION_STATES = new Set<RunState>([
+  "COMPLETED",
+  "REFUSED",
+  "FAILED",
+  "TIMED_OUT",
+  "CANCELLED",
+]);
 
 /**
  * Wall-clock time this run has spent executing: first attempt's start to the
@@ -56,10 +69,18 @@ export function runDurationSeconds(
     return Math.max(0, Math.round((end - Math.min(...starts)) / 1000));
   }
 
-  const created = at(run.created_at);
-  const updated = at(run.updated_at);
-  if (created === null || updated === null) return null;
-  return Math.max(0, Math.round((updated - created) / 1000));
+  if (
+    !IN_FLIGHT_DURATION_STATES.has(run.state) &&
+    !TERMINAL_DURATION_STATES.has(run.state)
+  )
+    return null;
+
+  const started = at(run.startedAt ?? run.created_at);
+  const finished = IN_FLIGHT_DURATION_STATES.has(run.state)
+    ? now
+    : at(run.updated_at);
+  if (started === null || finished === null) return null;
+  return Math.max(0, Math.round((finished - started) / 1000));
 }
 
 /** Stored outputs this run produced; the pre-`artifacts[]` shape counts as one. */

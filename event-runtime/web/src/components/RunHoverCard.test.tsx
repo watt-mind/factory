@@ -103,6 +103,20 @@ describe("runDurationSeconds", () => {
     expect(runDurationSeconds(stubRun(), undefined, NOW_MS)).toBe(150);
   });
 
+  test("ticks an in-flight list fallback to now instead of updated_at", () => {
+    const run = stubRun({ state: "RUNNING", startedAt: T0, updated_at: T1 });
+    expect(runDurationSeconds(run, undefined, NOW_MS)).toBe(300);
+  });
+
+  test("leaves queued and proposed list fallbacks empty", () => {
+    expect(
+      runDurationSeconds(stubRun({ state: "QUEUED" }), undefined, NOW_MS),
+    ).toBeNull();
+    expect(
+      runDurationSeconds(stubRun({ state: "PROPOSED" }), undefined, NOW_MS),
+    ).toBeNull();
+  });
+
   test("is null when nothing dates the run", () => {
     const detail = stubDetail({ attempts: [] });
     const run = stubRun({ created_at: "", updated_at: "" });
