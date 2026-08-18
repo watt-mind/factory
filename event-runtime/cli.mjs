@@ -3,7 +3,14 @@
 import { COMMANDS } from "./cli/commands.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { createAdapterRegistry } from "./lib/adapters/index.mjs";
-import { API_HOST, DEFAULT_PORT } from "./lib/config.mjs";
+import { backfillResultArtifacts } from "./lib/artifacts.mjs";
+import {
+  API_HOST,
+  DEFAULT_PORT,
+  artifactsRoot,
+  runtimeHome,
+} from "./lib/config.mjs";
+import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
 import {
   loadExtensions,
@@ -13,10 +20,18 @@ import {
 const USAGE = BASE_USAGE.replace(
   "  inbox                          open items waiting on the human",
   "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API",
-).replace(
-  "  agents                         registered agent definitions and event routing",
-  "  agents                         registered agent definitions and event routing\n  adapters                       registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts\n  extensions validate <path>     validate a factory-extension.json without loading it",
-);
+)
+  .replace(
+    "  agents                         registered agent definitions and event routing",
+    "  agents                         registered agent definitions and event routing\n  adapters                       registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts\n  extensions validate <path>     validate a factory-extension.json without loading it",
+  )
+  .concat(
+    "\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
+  )
+  .replace(
+    "All commands except serve, work, supervise, and update-pins are clients of the control",
+    "All commands except serve, work, supervise, update-pins, and artifacts are clients of the control",
+  );
 
 // Preserve the small programmatic surface used by runtime tests and tooling.
 export {
@@ -221,12 +236,38 @@ export async function extensionsCommand(args = []) {
   process.exit(1);
 }
 
+/** Backfill accepted typed output into the content store (WM-858). */
+export function artifactsCommand(
+  args = [],
+  { db = null, storeRoot = artifactsRoot(runtimeHome()) } = {},
+) {
+  const [sub, ...rest] = args;
+  if (sub !== "backfill-results" || rest.some((arg) => arg !== "--apply")) {
+    throw new Error("usage: artifacts backfill-results [--apply]");
+  }
+  const apply = rest.includes("--apply");
+  const ownedDb = db ?? openDb();
+  try {
+    const counts = backfillResultArtifacts(ownedDb, storeRoot, { apply });
+    const action = apply
+      ? `${counts.materialized} materialized`
+      : `${counts.wouldMaterialize} would be materialized`;
+    console.log(
+      `result artifacts: ${counts.scanned} rows scanned, ${counts.eligible} eligible, ${counts.alreadyStored} already stored, ${action}, ${counts.invalid} invalid${apply ? "" : " (dry run)"}`,
+    );
+    return counts;
+  } finally {
+    if (!db) ownedDb.close();
+  }
+}
+
 export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === "decide") return decideCommand(args);
   if (command === "inbox") return inboxCommand(args);
   if (command === "adapters") return adaptersCommand(args);
   if (command === "extensions") return extensionsCommand(args);
+  if (command === "artifacts") return artifactsCommand(args);
   if (!Object.hasOwn(COMMANDS, command)) {
     console.error(USAGE);
     process.exit(1);

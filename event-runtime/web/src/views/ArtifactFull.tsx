@@ -94,17 +94,23 @@ export function ArtifactFull({
   );
 
   const producerAgent: AgentDef | undefined = useMemo(() => {
-    const refs =
-      selected?.references
-        ?.map((reference) => reference.agent)
-        .filter(Boolean) ?? [];
+    const references = [...(selected?.references ?? [])].sort(
+      (a, b) => Number(b.kind === "result") - Number(a.kind === "result"),
+    );
     const defs = agentsQ.data?.agents ?? [];
-    for (const ref of refs) {
-      const def = defs.find((a) => a.ref === ref || a.id === ref);
-      if (def?.outputView) return def;
+    for (const reference of references) {
+      const def = defs.find(
+        (agent) =>
+          agent.ref === reference.agent || agent.id === reference.agent,
+      );
+      if (
+        parsedArtifact !== null &&
+        viewApplies(def?.outputView, parsedArtifact)
+      )
+        return def;
     }
     return undefined;
-  }, [selected, agentsQ.data]);
+  }, [selected, agentsQ.data, parsedArtifact]);
 
   const canToggleView =
     parsedArtifact !== null &&

@@ -1,5 +1,6 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-artifacts-test-mjs";
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -11,16 +12,19 @@ import {
 import path from "node:path";
 import {
   artifactPath,
+  backfillResultArtifacts,
   findArtifact,
   hashFile,
+  listArtifacts,
   materializeArtifact,
   pinRunArtifact,
   pruneArtifacts,
   referencedHashes,
   storeCollected,
+  storeResultArtifact,
   storeStats,
 } from "./artifacts.mjs";
-import { sha256Hex } from "./canonical.mjs";
+import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 
 const tmp = (p) => tmpDir(p);
@@ -181,6 +185,165 @@ describe("storeCollected (OPS-406)", () => {
     const remainingFiles = readdirSync(storeRoot);
     expect(remainingFiles).toEqual([]);
     expect(existsSync(path.join(storeRoot, hash))).toBe(false);
+  });
+});
+
+describe("result artifacts (WM-858)", () => {
+  test("stores canonical typed output under the hash already carried by the result", () => {
+    const storeRoot = tmp("evrt-result-store-");
+    const artifact = { zebra: 1, alpha: { two: 2, one: 1 } };
+    const artifactHash = hashJson(artifact);
+
+    const stored = storeResultArtifact({ artifact, artifactHash, storeRoot });
+
+    expect(stored).toEqual({
+      kind: "result",
+      sha256: artifactHash.slice("sha256:".length),
+      uri: `file://${path.join(storeRoot, artifactHash.slice("sha256:".length))}`,
+      sizeBytes: Buffer.byteLength(canonicalJson(artifact)),
+    });
+    expect(readFileSync(stored.uri.slice("file://".length), "utf8")).toBe(
+      canonicalJson(artifact),
+    );
+    expect(hashFile(stored.uri.slice("file://".length))).toBe(stored.sha256);
+
+    // Identical typed output is content-addressed and therefore idempotent.
+    expect(storeResultArtifact({ artifact, artifactHash, storeRoot })).toEqual(
+      stored,
+    );
+  });
+
+  test("inventory and prune treat the singular result artifact as a live result reference", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-result-store-");
+    const artifact = { outcome: "UPDATED", pr: 669 };
+    const artifactHash = hashJson(artifact);
+    const stored = storeResultArtifact({ artifact, artifactHash, storeRoot });
+    const createdAt = "2026-08-18T12:00:00.000Z";
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+       VALUES ('run_result', 'idem_result', ?, 'spec-hash', 'COMPLETED', ?, ?)`,
+    ).run(JSON.stringify({ agent: "merge-fix@1" }), createdAt, createdAt);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES ('run_result', 2, ?, ?, '{}', '{}', ?)`,
+    ).run(
+      JSON.stringify({ artifact, artifactHash, artifacts: [] }),
+      artifactHash,
+      createdAt,
+    );
+
+    expect(referencedHashes(db)).toContain(stored.sha256);
+    expect(listArtifacts(db, storeRoot)).toEqual([
+      expect.objectContaining({
+        sha256: stored.sha256,
+        referenced: true,
+        references: [
+          {
+            runId: "run_result",
+            attempt: 2,
+            kind: "result",
+            agent: "merge-fix@1",
+            state: "COMPLETED",
+            createdAt,
+          },
+        ],
+      }),
+    ]);
+    expect(pruneArtifacts(db, storeRoot, { olderThanMs: -1 }).deleted).toBe(0);
+    expect(findArtifact(storeRoot, stored.sha256)).not.toBeNull();
+  });
+
+  test("backfill dry-runs, applies canonical result bytes, and is idempotent", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-result-store-");
+    const artifact = { summary: "existing accepted output", count: 3 };
+    const artifactHash = hashJson(artifact);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES ('run_old', 1, ?, ?, '{}', '{}', ?)`,
+    ).run(
+      JSON.stringify({ artifact, artifactHash, artifacts: [] }),
+      artifactHash,
+      new Date().toISOString(),
+    );
+
+    expect(backfillResultArtifacts(db, storeRoot)).toEqual({
+      scanned: 1,
+      eligible: 1,
+      alreadyStored: 0,
+      wouldMaterialize: 1,
+      materialized: 0,
+      invalid: 0,
+    });
+    expect(findArtifact(storeRoot, artifactHash.slice(7))).toBeNull();
+
+    expect(backfillResultArtifacts(db, storeRoot, { apply: true })).toEqual({
+      scanned: 1,
+      eligible: 1,
+      alreadyStored: 0,
+      wouldMaterialize: 0,
+      materialized: 1,
+      invalid: 0,
+    });
+    expect(
+      readFileSync(path.join(storeRoot, artifactHash.slice(7)), "utf8"),
+    ).toBe(canonicalJson(artifact));
+
+    expect(backfillResultArtifacts(db, storeRoot, { apply: true })).toEqual({
+      scanned: 1,
+      eligible: 1,
+      alreadyStored: 1,
+      wouldMaterialize: 0,
+      materialized: 0,
+      invalid: 0,
+    });
+  });
+
+  test("artifacts backfill-results is dry by default and applies only with --apply", () => {
+    const home = tmp("evrt-result-home-");
+    const db = openDb(path.join(home, "runtime.db"));
+    const artifact = { summary: "CLI backfill" };
+    const artifactHash = hashJson(artifact);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES ('run_cli', 1, ?, ?, '{}', '{}', ?)`,
+    ).run(
+      JSON.stringify({ artifact, artifactHash, artifacts: [] }),
+      artifactHash,
+      new Date().toISOString(),
+    );
+    db.close();
+    const cli = path.resolve(import.meta.dir, "../cli.mjs");
+    const run = (...args) =>
+      spawnSync(
+        process.execPath,
+        [cli, "artifacts", "backfill-results", ...args],
+        {
+          encoding: "utf8",
+          env: { ...process.env, FACTORY_EVENT_HOME: home },
+        },
+      );
+
+    const dry = run();
+    expect(dry.status).toBe(0);
+    expect(dry.stdout).toContain("1 would be materialized");
+    expect(dry.stdout).toContain("dry run");
+    expect(
+      findArtifact(path.join(home, "artifacts"), artifactHash.slice(7)),
+    ).toBeNull();
+
+    const apply = run("--apply");
+    expect(apply.status).toBe(0);
+    expect(apply.stdout).toContain("1 materialized");
+    expect(
+      readFileSync(path.join(home, "artifacts", artifactHash.slice(7)), "utf8"),
+    ).toBe(canonicalJson(artifact));
+
+    const again = run("--apply");
+    expect(again.status).toBe(0);
+    expect(again.stdout).toContain("1 already stored");
+    expect(again.stdout).toContain("0 materialized");
   });
 });
 

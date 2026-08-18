@@ -32,7 +32,7 @@ import {
   writeWorkerLease,
 } from "../../lib/worker-leases.mjs";
 import { loadForge } from "../../lib/forge/index.mjs";
-import { storeCollected } from "./artifacts.mjs";
+import { storeCollected, storeResultArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
@@ -2750,6 +2750,11 @@ export async function executeClaimed(
     // commits. Orphans from a failed commit are harmless; dead links are not.
     verified.result.artifacts = storeCollected({
       entries: verified.result.artifacts,
+      storeRoot: artifactStore,
+    });
+    storeResultArtifact({
+      artifact: verified.result.artifact,
+      artifactHash: verified.result.artifactHash,
       storeRoot: artifactStore,
     });
 

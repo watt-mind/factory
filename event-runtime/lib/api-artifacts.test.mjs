@@ -3,6 +3,7 @@ import {
   trackTmpDir,
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-artifacts-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
   GH_SECRET,
   PV,
@@ -249,6 +250,35 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
 
       const view = await client.run(summary.runId);
       const report = view.result.artifacts.find((a) => a.kind === "report");
+      const resultDigest = view.result.artifactHash.slice("sha256:".length);
+      const typedResult = await fetch(
+        `http://127.0.0.1:${port}/artifacts/${resultDigest}`,
+      );
+      expect(typedResult.status).toBe(200);
+      expect(await typedResult.text()).toBe(
+        canonicalJson(view.result.artifact),
+      );
+
+      const inventory = await (
+        await fetch(`http://127.0.0.1:${port}/artifacts`)
+      ).json();
+      expect(
+        inventory.artifacts.find(
+          (artifact) => artifact.sha256 === resultDigest,
+        ),
+      ).toEqual(
+        expect.objectContaining({
+          referenced: true,
+          references: [
+            expect.objectContaining({
+              runId: summary.runId,
+              attempt: 1,
+              kind: "result",
+            }),
+          ],
+        }),
+      );
+
       const res = await fetch(
         `http://127.0.0.1:${port}/artifacts/${report.sha256}`,
       );
@@ -280,6 +310,14 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(
         (await fetch(`http://127.0.0.1:${port}/artifacts/not-a-hash`)).status,
       ).toBe(404);
+
+      const corruptHash = sha256Hex("expected bytes");
+      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
+      expect(
+        (await fetch(`http://127.0.0.1:${port}/artifacts/${corruptHash}`))
+          .status,
+      ).toBe(404);
+      expect(existsSync(path.join(home, "artifacts", corruptHash))).toBe(false);
     } finally {
       server.close();
     }

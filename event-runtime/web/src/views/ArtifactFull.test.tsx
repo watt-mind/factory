@@ -135,7 +135,7 @@ describe("ArtifactFull reader view (WM-828)", () => {
     expect(writeText).toHaveBeenCalledWith(SHA_A);
   });
 
-  test("renders schema-derived ArtifactView and toggles raw with 'r' key shortcut", async () => {
+  test("renders a result artifact with its agent ArtifactView and toggles raw with 'r' key shortcut", async () => {
     const MERGE_VIEW = JSON.parse(
       readFileSync(
         path.resolve(import.meta.dir, "../../../agents/merge-scan.view.json"),
@@ -156,8 +156,15 @@ describe("ArtifactFull reader view (WM-828)", () => {
       referenced: true,
       references: [
         {
-          runId: "run_merge",
+          runId: "run_collected",
           kind: "report",
+          agent: "unrelated@1",
+          state: "COMPLETED",
+          createdAt: "2026-01-04T03:04:05.000Z",
+        },
+        {
+          runId: "run_merge",
+          kind: "result",
           agent: "merge-scan@2",
           state: "COMPLETED",
           createdAt: "2026-01-05T03:04:05.000Z",
@@ -191,7 +198,19 @@ describe("ArtifactFull reader view (WM-828)", () => {
       digest: MERGE_SHA,
       seed: {
         items: [MERGE_ITEM],
-        agents: [MERGE_AGENT],
+        agents: [
+          {
+            ref: "unrelated@1",
+            id: "unrelated",
+            outputSchema: {},
+            outputView: {
+              schemaVersion: "factory.artifact-view/v1",
+              summary: "/not-present",
+              sections: [],
+            },
+          },
+          MERGE_AGENT,
+        ],
       },
     });
 

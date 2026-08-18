@@ -20,11 +20,44 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalJson, hashJson } from "./canonical.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
+const SHA256 = /^sha256:([0-9a-f]{64})$/;
+
+function resultDigest(artifactHash) {
+  return SHA256.exec(artifactHash ?? "")?.[1] ?? null;
+}
+
+/** Atomically persist bytes whose digest is already known. */
+function storeBytes({ bytes, sha256hex, storeRoot }) {
+  mkdirSync(storeRoot, { recursive: true });
+  const dest = artifactPath(storeRoot, sha256hex);
+  if (existsSync(dest)) {
+    if (hashFile(dest) === sha256hex) return dest;
+    rmSync(dest, { force: true });
+  }
+
+  const tmpName = `${sha256hex}.tmp.${process.pid}.${Date.now()}.${randomBytes(6).toString("hex")}`;
+  const tmpPath = path.join(storeRoot, tmpName);
+  try {
+    writeFileSync(tmpPath, bytes);
+    const tmpHash = hashFile(tmpPath);
+    if (tmpHash !== sha256hex) {
+      throw new Error(
+        `artifact store hash mismatch: expected ${sha256hex}, got ${tmpHash}`,
+      );
+    }
+    renameSync(tmpPath, dest);
+  } finally {
+    if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
+  }
+  return dest;
+}
 
 /** Compute sha256 hex digest of a file on disk. */
 export function hashFile(filePath) {
@@ -100,6 +133,83 @@ export function storeCollected({ entries, storeRoot }) {
   });
 }
 
+/**
+ * Materialize the singular, schema-validated result artifact as canonical
+ * JSON. `hashJson` and these bytes deliberately share `canonicalJson`, so the
+ * hash carried by results and completion events is also a retrievable object.
+ */
+export function storeResultArtifact({ artifact, artifactHash, storeRoot }) {
+  if (artifact === undefined) return null;
+  const sha256 = resultDigest(artifactHash);
+  if (!sha256) throw new Error(`invalid result artifact hash: ${artifactHash}`);
+  const bytes = canonicalJson(artifact);
+  const actualHash = hashJson(artifact);
+  if (actualHash !== artifactHash) {
+    throw new Error(
+      `result artifact hash mismatch: expected ${artifactHash}, got ${actualHash}`,
+    );
+  }
+  const dest = storeBytes({ bytes, sha256hex: sha256, storeRoot });
+  return {
+    kind: "result",
+    sha256,
+    uri: `file://${dest}`,
+    sizeBytes: statSync(dest).size,
+  };
+}
+
+/**
+ * Materialize result artifacts from accepted historical rows. Dry by default;
+ * applying repeatedly is safe because the store is content-addressed.
+ */
+export function backfillResultArtifacts(db, storeRoot, { apply = false } = {}) {
+  const counts = {
+    scanned: 0,
+    eligible: 0,
+    alreadyStored: 0,
+    wouldMaterialize: 0,
+    materialized: 0,
+    invalid: 0,
+  };
+  const rows = db
+    .query(`SELECT result_json, artifact_hash FROM results ORDER BY rowid`)
+    .all();
+  for (const row of rows) {
+    counts.scanned += 1;
+    let result;
+    try {
+      result = JSON.parse(row.result_json);
+    } catch {
+      counts.invalid += 1;
+      continue;
+    }
+    if (result.artifact === undefined) continue;
+    counts.eligible += 1;
+    const artifactHash = result.artifactHash ?? row.artifact_hash;
+    const sha256 = resultDigest(artifactHash);
+    if (!sha256 || hashJson(result.artifact) !== artifactHash) {
+      counts.invalid += 1;
+      continue;
+    }
+    const found = findArtifact(storeRoot, sha256);
+    if (found && hashFile(found.file) === sha256) {
+      counts.alreadyStored += 1;
+      continue;
+    }
+    if (!apply) {
+      counts.wouldMaterialize += 1;
+      continue;
+    }
+    storeResultArtifact({
+      artifact: result.artifact,
+      artifactHash,
+      storeRoot,
+    });
+    counts.materialized += 1;
+  }
+  return counts;
+}
+
 /** Locate a stored artifact for serving; null when absent. */
 export function findArtifact(storeRoot, sha256hex) {
   if (!HEX64.test(sha256hex ?? "")) return null;
@@ -162,9 +272,16 @@ export function materializeArtifact({
 /** Every artifact hash any accepted result still points at. */
 export function referencedHashes(db) {
   const hashes = new Set();
-  for (const row of db.query(`SELECT result_json FROM results`).all()) {
-    for (const entry of JSON.parse(row.result_json).artifacts ?? []) {
+  for (const row of db
+    .query(`SELECT result_json, artifact_hash FROM results`)
+    .all()) {
+    const result = JSON.parse(row.result_json);
+    for (const entry of result.artifacts ?? []) {
       if (entry.sha256) hashes.add(entry.sha256);
+    }
+    if (result.artifact !== undefined) {
+      const sha256 = resultDigest(result.artifactHash ?? row.artifact_hash);
+      if (sha256) hashes.add(sha256);
     }
   }
   return hashes;
@@ -185,7 +302,8 @@ export function listArtifacts(
   const references = new Map();
   const rows = db
     .query(
-      `SELECT results.run_id, results.result_json, runs.spec_json, runs.state, runs.created_at
+      `SELECT results.run_id, results.attempt, results.result_json, results.artifact_hash,
+              runs.spec_json, runs.state, runs.created_at
      FROM results
      LEFT JOIN runs ON runs.run_id = results.run_id`,
     )
@@ -197,7 +315,8 @@ export function listArtifacts(
     } catch {
       // A catalogue read should still expose the bytes if an old spec is bad.
     }
-    for (const entry of JSON.parse(row.result_json).artifacts ?? []) {
+    const result = JSON.parse(row.result_json);
+    for (const entry of result.artifacts ?? []) {
       if (!HEX64.test(entry.sha256 ?? "")) continue;
       const refs = references.get(entry.sha256) ?? [];
       refs.push({
@@ -208,6 +327,21 @@ export function listArtifacts(
         createdAt: row.created_at ?? null,
       });
       references.set(entry.sha256, refs);
+    }
+    if (result.artifact !== undefined) {
+      const sha256 = resultDigest(result.artifactHash ?? row.artifact_hash);
+      if (sha256) {
+        const refs = references.get(sha256) ?? [];
+        refs.push({
+          runId: row.run_id,
+          attempt: row.attempt,
+          kind: "result",
+          agent,
+          state: row.state ?? null,
+          createdAt: row.created_at ?? null,
+        });
+        references.set(sha256, refs);
+      }
     }
   }
 

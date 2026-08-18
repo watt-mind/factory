@@ -590,12 +590,19 @@ create unique directory
 ```
 
 The workspace is scratch state. Accepted, content-addressed artifacts and run
-events are durable state: at publish time the worker copies every verified
-artifact file (including the adapter-captured transcript) into
-`<home>/artifacts/<sha256>`, and the control API serves them from there —
-result rows never reference files that died with a workspace. Passing work
-between agents means materializing an accepted artifact into a new workspace,
-not letting two agents share a live directory. The same rule covers memory:
+events are durable state. Two result fields have distinct meanings:
+
+- the **result artifact (typed output)** is `result.artifact`, validated by the
+  agent's output schema and written as canonical JSON under
+  `result.artifactHash`; and
+- **collected artifacts (files)** are `result.artifacts`, such as reports and
+  the adapter-captured transcript, copied from the workspace after validation.
+
+At publish time the worker materializes both kinds into
+`<home>/artifacts/<sha256>`, and the control API serves them from there. Result
+rows never reference bytes that died with a workspace. Passing work between
+agents means materializing an accepted artifact into a new workspace, not
+letting two agents share a live directory. The same rule covers memory:
 agents get no board or shared scratch to read at will — cross-run knowledge is
 a **memo** (`factory.memo/v1`), an artifact of an accepted run or of an inbox
 decision, declared by the consumer, folded by the planner into the spec input

@@ -74,6 +74,20 @@ export const TERMINAL: RunState[] = [
 export const isCancellable = (state: RunState) =>
   !TERMINAL.includes(state) && state !== "VERIFYING";
 
+/** Full-page route for a typed result hash; null for legacy/malformed hashes. */
+export function resultArtifactHref(
+  artifactHash: string | null | undefined,
+  currentHash: string,
+): string | null {
+  const digest = /^sha256:([0-9a-f]{64})$/.exec(artifactHash ?? "")?.[1];
+  return digest
+    ? `#/${withProject(
+        `artifact/${encodeURIComponent(digest)}`,
+        hashProject(currentHash),
+      )}`
+    : null;
+}
+
 /**
  * The states `reapExpiredLeases` sweeps (lib/worker.mjs) — exactly the states
  * where the current attempt is still racing its attempt and lease deadlines.
@@ -756,6 +770,15 @@ export function RunDetailBlocks({
   const agentDef = (agentsQ.data?.agents ?? []).find(
     (a) => a.ref === d.run.spec.agent || a.id === d.run.spec.agent,
   );
+  const resultArtifactLink = resultArtifactHref(
+    d.result?.artifactHash,
+    window.location.hash,
+  );
+  const openResultArtifact = resultArtifactLink
+    ? () => {
+        window.location.hash = resultArtifactLink;
+      }
+    : undefined;
 
   return (
     <>
@@ -1076,17 +1099,14 @@ export function RunDetailBlocks({
         >
           {d.result.artifact !== undefined ? (
             <Disclosure label="artifact" defaultOpen>
-              {agentDef?.outputView ? (
-                <Suspense fallback={<JsonBlock value={d.result.artifact} />}>
-                  <ArtifactPanel
-                    artifact={d.result.artifact}
-                    schema={agentDef.outputSchema}
-                    view={agentDef.outputView}
-                  />
-                </Suspense>
-              ) : (
-                <JsonBlock value={d.result.artifact} />
-              )}
+              <Suspense fallback={<JsonBlock value={d.result.artifact} />}>
+                <ArtifactPanel
+                  artifact={d.result.artifact}
+                  schema={agentDef?.outputSchema}
+                  view={agentDef?.outputView}
+                  onOpenFull={openResultArtifact}
+                />
+              </Suspense>
             </Disclosure>
           ) : (
             <Disclosure label="result" defaultOpen>

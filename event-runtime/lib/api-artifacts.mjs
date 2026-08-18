@@ -5,8 +5,14 @@ import {
   openSync,
   readFileSync,
   readSync,
+  rmSync,
 } from "node:fs";
-import { findArtifact, listArtifacts, pruneArtifacts } from "./artifacts.mjs";
+import {
+  findArtifact,
+  hashFile,
+  listArtifacts,
+  pruneArtifacts,
+} from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 
 /** Crude but honest content-type: render text in the browser, download the rest. */
@@ -112,6 +118,10 @@ export async function handleArtifactApiRoute({
   if (req.method === "GET" && artifactGet) {
     const found = findArtifact(artifactsRoot(env.home), artifactGet[1]);
     if (!found) return send(404, { error: `no artifact ${artifactGet[1]}` });
+    if (hashFile(found.file) !== artifactGet[1]) {
+      rmSync(found.file, { force: true });
+      return send(404, { error: `no artifact ${artifactGet[1]}` });
+    }
     const rawName = url.searchParams.get("name");
     const safeName = rawName
       ? rawName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)

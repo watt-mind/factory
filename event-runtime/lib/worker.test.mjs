@@ -327,7 +327,7 @@ describe("worker", () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec());
     linkEvent(db, spec.runId);
-    const o = opts();
+    const o = opts({ artifactStore: freshRoot() });
 
     const summary = await runOnce(db, registry, adapters, o);
     expect(summary.terminalState).toBe("COMPLETED");
@@ -344,6 +344,16 @@ describe("worker", () => {
     expect(receipt.runSpecHash).toBe(hashJson(spec));
     expect(receipt.artifactHash).toBe(result.artifact_hash);
     expect(summary.receipt).toEqual(receipt);
+
+    const parsedResult = JSON.parse(result.result_json);
+    const resultDigest = result.artifact_hash.slice("sha256:".length);
+    const storedResult = path.join(o.artifactStore, resultDigest);
+    expect(readFileSync(storedResult, "utf8")).toBe(
+      canonicalJson(parsedResult.artifact),
+    );
+    expect(
+      createHash("sha256").update(readFileSync(storedResult)).digest("hex"),
+    ).toBe(resultDigest);
 
     const outbox = db.query(`SELECT * FROM outbox`).all();
     expect(outbox).toHaveLength(1);

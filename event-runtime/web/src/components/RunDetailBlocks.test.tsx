@@ -11,6 +11,7 @@ import {
   isCancellable,
   modelTierText,
   pinnedModelText,
+  resultArtifactHref,
 } from "./RunDetailBlocks";
 import {
   TicketDecisions,
@@ -412,7 +413,12 @@ describe("artifact position renders the agent's view (WM-455)", () => {
         state: "COMPLETED",
         spec: { agent: "triage-scan@1" },
       } as RunDetail["run"],
-      result: { terminalState: "COMPLETED", reasonCode: null, artifact },
+      result: {
+        terminalState: "COMPLETED",
+        reasonCode: null,
+        artifact,
+        artifactHash: `sha256:${"a".repeat(64)}`,
+      },
     });
 
   afterEach(() => localStorage.removeItem(ARTIFACT_RAW_KEY));
@@ -440,6 +446,23 @@ describe("artifact position renders the agent's view (WM-455)", () => {
     expect(localStorage.getItem(ARTIFACT_RAW_KEY)).toBe("1");
   });
 
+  test("opens the typed result artifact in the full-page artifact view", async () => {
+    stubApi({
+      agents: mock(async () =>
+        createAgentsFixture({ agents: [triageAgent] as never }),
+      ),
+    });
+    const detail = withArtifact();
+
+    const r = renderBlocks(detail);
+    expect(
+      await r.findByRole("button", { name: /Open in full page/ }),
+    ).toBeTruthy();
+    expect(
+      resultArtifactHref(detail.result!.artifactHash, "#/runs/run_result"),
+    ).toBe(`#\/artifact\/${"a".repeat(64)}`);
+  });
+
   test("no view for the agent → the JSON block, unchanged, and no toggle", async () => {
     stubApi({
       agents: mock(async () =>
@@ -451,6 +474,9 @@ describe("artifact position renders the agent's view (WM-455)", () => {
     const r = renderBlocks(withArtifact());
     await waitFor(() => expect(api.agents).toHaveBeenCalled());
     expect(r.queryByRole("group", { name: "Artifact rendering" })).toBeNull();
+    expect(
+      await r.findByRole("button", { name: /Open in full page/ }),
+    ).toBeTruthy();
     expect(r.queryByRole("table")).toBeNull();
     const pre = Array.from(r.container.querySelectorAll("pre")).find((el) =>
       el.textContent?.includes('"issueId": "WM-7"'),
