@@ -5,6 +5,10 @@
   "input_schema": "schemas/merge-apply.input.json",
   "output_schema": "schemas/merge-applied.output.json",
   "output_contract": "factory.merge-applied/v2",
+  "chainCommandEdges": [
+    "factory.merge.requested",
+    "factory.merge-landed"
+  ],
   "itemsField": "plan",
   "itemKey": "ticket",
   "actionRegistry": {

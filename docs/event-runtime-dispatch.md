@@ -149,6 +149,30 @@ parseable `Owned Paths` owns everything (dispatchable, but alone), and
 ambiguous glob overlap errs toward collision — a false positive serializes
 two tickets, a false negative puts two agents in one file.
 
+**Collision mode (WM-677).** `config/policy.yaml` `dispatch.owned_paths_collision`
+selects what a collision *does*:
+
+| mode | on overlap | still refuses |
+| --- | --- | --- |
+| `strict` (default when absent) | refuse, `owned_paths_overlap` | — |
+| `advisory` | record on the proposal as `evidence.ownedPathsOverlap` (`{ticket, path, inFlightPath}` per pair) and dispatch | `**` on either side → `owned_paths_conflict_hard` |
+
+Advisory exists because the strict oracle refuses far more than it protects:
+tickets scope themselves with qualified claims (`views/*.tsx (formatter
+call-sites only)`) that the glob algebra cannot see, and shared-prefix
+wildcards collide by construction. On 2026-08-18 nine dispatch attempts
+became two running workers under strict, while six textually-overlapping PRs
+rebased onto develop clean the same day. Textual overlap is a rebase job and
+`merge-fix` already does it; the pool should not idle waiting for it. What
+advisory keeps hard is only the `**` sentinel, whose whole meaning is
+"alone". Two tickets naming the *same file* is not hard: same file is not
+same lines — tickets qualify claims (`App.tsx (interval constants only)`) for
+exactly this — and an identical-file rule tried first refused four tickets in
+one batch on `App.tsx`/`hooks.ts`/`api.mjs`. Merging remains serialized (`concurrency.max_concurrent_merges`),
+which is where real conflicts are caught. Both the planner and the worker's
+execute-time re-check read the same setting, so operator approval and worker
+claim cannot disagree.
+
 **Rejected: a second overlap implementation inside the runtime.** The
 existing parser has already bitten once — architecture.md §2.3's CLNT-616,
 where a correctly specced ticket parsed as empty and dispatch refused it —
@@ -201,6 +225,9 @@ through the runtime's existing `claude` adapter
 tier-2 workspace from §5. Same registry, same conformance bar, same
 lifecycle, same receipts as every other run — repository mutation is a
 capability and a workspace type, not a parallel execution path.
+Every worktree agent passes the dispatch gate unless its definition declares
+`dispatchGateExempt: true`, which registry validation permits only on a
+`workspace.type: worktree` definition.
 
 **Rejected: a closed command template shelling to `runners/run-agent.sh`.**
 It looks like less work — the runner already spawns ticket-shaped sessions —
@@ -276,6 +303,10 @@ The failure this prevents: earned-automation creep quietly consuming the one
 decision the whole factory routes through a human. Every other gate here may
 someday relax on evidence; this one may not, and the place that says so is a
 validator, not a paragraph.
+
+Command-emitted chain authority is definition data: `chainCommandEdges`
+declares its registered event types, and `chainRepoMustMatchInput: true`
+requires the emitted repository to match the predecessor input.
 
 ---
 

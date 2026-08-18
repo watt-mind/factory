@@ -35,6 +35,103 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
+describe("run deadline extension (WM-566)", () => {
+  const start = Date.parse("2026-08-12T10:00:00Z");
+
+  function insertAttempt(db, runId, { state = "RUNNING", timeoutSeconds = 60, adapter = "fake" } = {}) {
+    const spec = {
+      schemaVersion: "factory.run-spec/v1",
+      runId,
+      agent: "factory-status-report@1",
+      input: { repos: ["ok"] },
+      workspace: { type: "ephemeral" },
+      adapter,
+      outputContract: "factory.status-report/v1",
+      timeoutSeconds,
+      maxAttempts: 1,
+      idempotencyKey: `idem-${runId}`,
+    };
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'sha256:test', ?, 1, ?, ?)`,
+    ).run(runId, spec.idempotencyKey, JSON.stringify(spec), state, new Date(start).toISOString(), new Date(start).toISOString());
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, lease_owner, started_at, lease_expires_at)
+       VALUES (?, 1, 1, 'worker-test', ?, ?)`,
+    ).run(
+      runId,
+      new Date(start).toISOString(),
+      new Date(start + (timeoutSeconds + 120) * 1000).toISOString(),
+    );
+  }
+
+  test("extends a running deadline, lease, and audited lifecycle", async () => {
+    const s = await makeServer({ now: () => start + 10_000 });
+    try {
+      insertAttempt(s.db, "run-extend-happy");
+      const outcome = await s.client.extend("run-extend-happy", 900);
+      expect(outcome).toEqual({
+        extended: true,
+        runId: "run-extend-happy",
+        seconds: 900,
+        deadlineAt: new Date(start + 960_000).toISOString(),
+        leaseExpiresAt: new Date(start + 1_080_000).toISOString(),
+        override: false,
+      });
+      const lifecycle = s.db.query(
+        `SELECT from_state, to_state, actor, reason FROM lifecycle_events WHERE run_id = ?`,
+      ).get("run-extend-happy");
+      expect(lifecycle.from_state).toBe("RUNNING");
+      expect(lifecycle.to_state).toBe("RUNNING");
+      expect(lifecycle.actor).toBe("operator");
+      expect(JSON.parse(lifecycle.reason)).toEqual({
+        deadlineAt: outcome.deadlineAt,
+        override: false,
+        seconds: 900,
+        type: "deadline_extended",
+      });
+      expect((await s.client.run("run-extend-happy")).deadlineAt).toBe(outcome.deadlineAt);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("returns typed terminal refusals for state, policy cap, and per-call bound", async () => {
+    const s = await makeServer({ now: () => start });
+    try {
+      insertAttempt(s.db, "run-extend-queued", { state: "QUEUED" });
+      const wrongState = await rejection(s.client.extend("run-extend-queued", 60));
+      expect(wrongState.status).toBe(409);
+      expect(wrongState.body.refusal).toMatchObject({ code: "run_not_extendable", retryable: false });
+
+      insertAttempt(s.db, "run-extend-cap", { timeoutSeconds: 5_390 });
+      const capped = await rejection(s.client.extend("run-extend-cap", 20));
+      expect(capped.status).toBe(409);
+      expect(capped.body.refusal).toMatchObject({ code: "policy_run_limit", retryable: false });
+      expect((await s.client.extend("run-extend-cap", 20, { override: true })).override).toBe(true);
+
+      insertAttempt(s.db, "run-extend-actions", { adapter: "actions" });
+      const actions = await rejection(s.client.extend("run-extend-actions", 60));
+      expect(actions.status).toBe(409);
+      expect(actions.body.refusal).toMatchObject({
+        code: "adapter_deadline_not_extendable",
+        retryable: false,
+        adapter: "actions",
+      });
+
+      const bounded = await rejection(s.client.extend("run-extend-cap", 3_601));
+      expect(bounded.status).toBe(422);
+      expect(bounded.body.refusal).toEqual(expect.objectContaining({
+        code: "extension_too_large",
+        retryable: false,
+        maxSeconds: 3_600,
+      }));
+    } finally {
+      s.close();
+    }
+  });
+});
+
 describe("repoNamesFromInput (OPS-356)", () => {
   test("unscoped is []; repoPin / repo / repos[] (string or {name}); dedupes", () => {
     expect(repoNamesFromInput(null)).toEqual([]);

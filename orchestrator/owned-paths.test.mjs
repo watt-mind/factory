@@ -12,6 +12,8 @@ import { test, expect } from "bun:test";
 const expectEqual = (a, b, msg) => expect(a, msg).toEqual(b);
 const expectTrue = (v, msg) => expect(v, msg).toBeTruthy();
 import {
+  hardPathConflicts,
+  pathOverlaps,
   parseOwnedPaths,
   effectiveOwnedPaths,
   globsOverlap,
@@ -270,4 +272,30 @@ test("supports level 4 numbered headers (#### 4. Owned Paths)", () => {
 
 - \`event-runtime/cli.mjs\``;
   expectEqual(parseOwnedPaths(desc), ["event-runtime/cli.mjs"]);
+});
+
+// WM-677: advisory mode needs the overlap as pairs (to record it) and a narrow
+// hard-conflict predicate (to still refuse). These pin the boundary between
+// "textual overlap a rebase resolves" and "the same file, or everything".
+test("pathOverlaps returns every overlapping pair, in order", () => {
+  expectEqual(
+    pathOverlaps(["src/api/**", "docs/a.md"], ["src/api/routes.ts", "docs/a.md", "lib/x.mjs"]),
+    [
+      { a: "src/api/**", b: "src/api/routes.ts" },
+      { a: "docs/a.md", b: "docs/a.md" },
+    ],
+  );
+  expectEqual(pathOverlaps(["a.md"], ["b.md"]), []);
+});
+
+test("hardPathConflicts: ** on either side — nothing else", () => {
+  // Containment, shared-prefix, same-glob, and even the SAME concrete file are
+  // NOT hard: same file is not same lines, and a rebase resolves it.
+  expectEqual(hardPathConflicts(["src/api/**"], ["src/api/routes.ts"]), []);
+  expectEqual(hardPathConflicts(["src/**/*.test.mjs"], ["src/lib/registry.test.mjs"]), []);
+  expectEqual(hardPathConflicts(["views/*.tsx"], ["views/*.tsx"]), []);
+  expectEqual(hardPathConflicts(["docs/a.md"], ["docs/a.md"]), []);
+  // `**` on either side is hard against anything it reaches.
+  expectTrue(hardPathConflicts(["**"], ["docs/a.md"]).length === 1);
+  expectTrue(hardPathConflicts(["docs/a.md"], ["**"]).length === 1);
 });

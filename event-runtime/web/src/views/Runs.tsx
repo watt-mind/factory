@@ -164,6 +164,7 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
   sorts: [
     { key: "run", label: "Run", get: (r) => r.runId, column: "run" },
     { key: "state", label: "State", get: (r) => r.state, column: "state" },
+    { key: "remaining", label: "Remaining", get: (r) => r.deadlineAt ?? "", column: "remaining" },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
     { key: "adapter", label: "Adapter", get: (r) => r.adapter, column: "adapter" },
     { key: "model", label: "Model", get: rowModel, column: "model" },
@@ -181,6 +182,7 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
   columns: [
     { key: "run", label: "Run", always: true },
     { key: "state", label: "State" },
+    { key: "remaining", label: "Remaining" },
     { key: "agent", label: "Agent" },
     { key: "adapter", label: "Adapter" },
     { key: "model", label: "Model" },
@@ -191,9 +193,21 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
   ],
 };
 
+function RemainingCell({ deadlineAt, now }: { deadlineAt?: string | null; now: number }) {
+  if (!deadlineAt) return <span>—</span>;
+  const left = Math.max(0, Date.parse(deadlineAt) - now);
+  if (!Number.isFinite(left)) return <span>—</span>;
+  const minutes = Math.ceil(left / 60_000);
+  return <span title={deadlineAt}>{minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`}</span>;
+}
+
 function RowDeadlines({ r, now }: { r: RunListItem; now: number }) {
-  const { startedAt, leaseExpiresAt, timeoutSeconds = 0 } = r as { startedAt?: string | null; leaseExpiresAt?: string | null; timeoutSeconds?: number };
-  const t = startedAt && timeoutSeconds > 0 ? clockTo(startedAt, timeoutSeconds * 1000, now) : null;
+  const { startedAt, leaseExpiresAt, deadlineAt, timeoutSeconds = 0 } = r;
+  const t = deadlineAt
+    ? clockTo(deadlineAt, 0, now)
+    : startedAt && timeoutSeconds > 0
+      ? clockTo(startedAt, timeoutSeconds * 1000, now)
+      : null;
   const l = leaseExpiresAt ? clockTo(leaseExpiresAt, 0, now) : null;
   const hasT = t && t.kind !== "off";
   const hasL = l && l.kind !== "off";
@@ -432,7 +446,7 @@ export function Runs({
   // decision-bearing columns instead of forcing a horizontal scrollbar; the
   // pane and the unselected list retain every configured column.
   const listCols = sel
-    ? cols.filter((c) => ["run", "state", "reason", "origin", "updated"].includes(c.key))
+    ? cols.filter((c) => ["run", "state", "remaining", "reason", "origin", "updated"].includes(c.key))
     : cols;
   const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
 
@@ -778,6 +792,11 @@ export function Runs({
                         })()}
                       </div>
                       {IN_FLIGHT.includes(r.state) && <RowDeadlines r={r} now={now} />}
+                    </td>
+                  )}
+                  {show.has("remaining") && (
+                    <td className="max-w-24 whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                      {IN_FLIGHT.includes(r.state) ? <RemainingCell deadlineAt={r.deadlineAt} now={now} /> : ""}
                     </td>
                   )}
                   {show.has("agent") && (

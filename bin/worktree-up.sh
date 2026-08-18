@@ -164,6 +164,22 @@ else
       [[ "$OPEN_PR_COUNT" == "1" ]] && RESUMING=1
     fi
 
+    # WM-680: a branch whose tip is already on origin is preserved work, not
+    # litter — an orphaned or blocked run's WIP that the orchestrator (or the
+    # worker's own preservation) pushed so nothing is lost. Refusing to build
+    # on it forces a human to run --resume by hand for every re-dispatch, and
+    # an unattended loop just loses the slot. Resume it. A branch with unique
+    # commits that exist ONLY locally still refuses below: that is the case
+    # where nobody has vouched for the work by pushing it.
+    if [[ "$RESUMING" -eq 0 && "$UNIQUE_COMMITS" -gt 0 ]]; then
+      if [[ "${FACTORY_WORKTREE_RESUME:-0}" == "1" ]]; then
+        RESUMING=1
+      elif REMOTE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH") \
+           && [[ "$REMOTE_SHA" == "$BRANCH_SHA" ]]; then
+        RESUMING=1
+      fi
+    fi
+
     if [[ "$RESUMING" -eq 1 ]]; then
       if [[ -d "$WT" ]]; then
         CURRENT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -173,7 +189,7 @@ else
       [[ "$CHECKOUT_ONLY" -eq 1 ]] || info "resuming branch $BRANCH as-is"
     else
       if [[ "$UNIQUE_COMMITS" -gt 0 ]]; then
-        die "worktree_branch_has_commits: branch '$BRANCH' has $UNIQUE_COMMITS unique commit(s) beyond $BASE_REF — re-run with --resume or remove branch '$BRANCH' explicitly before re-dispatch"
+        die "worktree_branch_has_commits: branch '$BRANCH' has $UNIQUE_COMMITS unique commit(s) beyond $BASE_REF that are not on origin — push them (they are then resumed automatically), re-run with --resume, or remove branch '$BRANCH' explicitly before re-dispatch"
       fi
 
       if [[ -d "$WT" ]]; then

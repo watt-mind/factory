@@ -26,6 +26,56 @@ WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
 mkdir -p "$RUN_DIR" "$HOME_DIR"
 REPO="$(repo_root)"
 
+elapsed_seconds() {
+  local elapsed="${1//[[:space:]]/}" days=0 rest hours=0 minutes=0 seconds=0
+  rest="$elapsed"
+  if [[ "$rest" == *-* ]]; then
+    days="${rest%%-*}"
+    rest="${rest#*-}"
+  fi
+  local parts=()
+  IFS=: read -r -a parts <<<"$rest"
+  case "${#parts[@]}" in
+    2) minutes="${parts[0]}"; seconds="${parts[1]}" ;;
+    3) hours="${parts[0]}"; minutes="${parts[1]}"; seconds="${parts[2]}" ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' $((10#$days * 86400 + 10#$hours * 3600 + 10#$minutes * 60 + 10#$seconds))
+}
+
+cleanup_stale_fake_runtimes() {
+  local max_age_minutes="${FACTORY_FAKE_RUNTIME_MAX_AGE_MINUTES:-30}"
+  [[ "$max_age_minutes" =~ ^[0-9]+$ ]] || {
+    warn "ignoring invalid FACTORY_FAKE_RUNTIME_MAX_AGE_MINUTES=$max_age_minutes"
+    return 0
+  }
+
+  local pid pgid elapsed command age_seconds process_with_env seen_groups=" "
+  local current_pgid
+  current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+  while read -r pid pgid elapsed command; do
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
+    [[ "$pgid" =~ ^[0-9]+$ ]] || continue
+    [[ -z "$current_pgid" || "$pgid" != "$current_pgid" ]] || continue
+    [[ "$command" =~ event-runtime/cli\.mjs[[:space:]]+(serve|work)([[:space:]]|$) ]] || continue
+    [[ " $command " == *" --adapter-override fake "* ]] || continue
+    if [[ "$command" != *"factory-test-"* ]]; then
+      process_with_env="$(ps eww -p "$pid" -o command= 2>/dev/null || true)"
+      [[ "$process_with_env" =~ FACTORY_TEST_TRACKED_PROCESS=[^[:space:]]+ ]] || continue
+    fi
+    age_seconds="$(elapsed_seconds "$elapsed")" || continue
+    (( age_seconds >= max_age_minutes * 60 )) || continue
+    [[ "$seen_groups" == *" $pgid "* ]] && continue
+    seen_groups+="$pgid "
+
+    warn "killing stale fake-adapter test runtime pid $pid (age $elapsed): $command"
+    # The explicit test-owner marker prevents --fake live/staging stacks from
+    # being mistaken for test debris. Marked runtimes are detached group
+    # leaders, so a group kill also removes wrappers and grandchildren.
+    kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  done < <(ps -axo pid=,pgid=,etime=,command=)
+}
+
 case "$ACTION" in
   up)
     ADAPTER_FLAG=()
@@ -371,6 +421,7 @@ case "$ACTION" in
     await_daemon "$RUN_DIR/worker.pid" "worker"
     await_daemon "$RUN_DIR/serve.pid" "event runtime"
     rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.drain "$RUN_DIR"/*.id
+    cleanup_stale_fake_runtimes
     info "done — live factory stack is down (durable state preserved at $HOME_DIR)"
     ;;
 

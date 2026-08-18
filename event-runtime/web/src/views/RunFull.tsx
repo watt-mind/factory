@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { api, ApiError } from "../api";
+import { api, ApiError, extendRun } from "../api";
 import { keyGuard, useNow } from "../hooks";
 import { hashPath, hashProject, withProject } from "../hash";
 import { setContextActions } from "../palette";
@@ -57,6 +57,9 @@ export function RunFull({
   const queryClient = useQueryClient();
   const [confirm, setConfirm] = useState<"cancel" | "force-retry" | null>(null);
   const [confirmApprove, setConfirmApprove] = useState(false);
+  const [customExtend, setCustomExtend] = useState(false);
+  const [customMinutes, setCustomMinutes] = useState("15");
+  const [extendNotice, setExtendNotice] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
   const detail = useQuery({
@@ -117,6 +120,12 @@ export function RunFull({
     : false;
   const unknownRun =
     detail.isError && (detail.error as ApiError).status === 404;
+  const customMinutesNumber = Number(customMinutes);
+  const customMinutesValid =
+    customMinutes.trim() !== "" &&
+    Number.isInteger(customMinutesNumber) &&
+    customMinutesNumber >= 1 &&
+    customMinutesNumber <= 60;
 
   const invalidate = () => queryClient.invalidateQueries();
 
@@ -130,6 +139,23 @@ export function RunFull({
       setCancelReason("");
     },
     onError: invalidate,
+  });
+
+  const extend = useMutation({
+    mutationFn: ({ id, seconds }: { id: string; seconds: number }) =>
+      extendRun(id, seconds),
+    onSuccess: (outcome) => {
+      invalidate();
+      const minutes = Math.round(outcome.seconds / 60);
+      const message = `Run extended by ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+      setExtendNotice(message);
+      notify(`${message} (${outcome.runId})`, "ok");
+      setCustomExtend(false);
+    },
+    onError: () => {
+      setExtendNotice(null);
+      invalidate();
+    },
   });
 
   const retry = useMutation({
@@ -376,6 +402,43 @@ export function RunFull({
                 </span>
               </Button>
             )}
+            {d && ["RUNNING", "VERIFYING"].includes(d.run.state) && (
+              <div className="flex flex-wrap items-center gap-1.5 text-[12px] text-(--text-dim)">
+                <span
+                  className="mr-1 tabular-nums"
+                  title="Current execution deadline. The sidebar budget meter preserves the original approved RunSpec; its lease clock reflects extensions."
+                >
+                  Remaining{" "}
+                  {d.deadlineAt
+                    ? (() => {
+                        const left = Math.max(0, Date.parse(d.deadlineAt) - now);
+                        const minutes = Math.ceil(left / 60_000);
+                        return minutes >= 60
+                          ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+                          : `${minutes}m`;
+                      })()
+                    : "—"}
+                </span>
+                <Button
+                  disabled={!connected || extend.isPending}
+                  onClick={() => extend.mutate({ id: d.run.runId, seconds: 15 * 60 })}
+                >
+                  +15m
+                </Button>
+                <Button
+                  disabled={!connected || extend.isPending}
+                  onClick={() => extend.mutate({ id: d.run.runId, seconds: 30 * 60 })}
+                >
+                  +30m
+                </Button>
+                <Button
+                  disabled={extend.isPending}
+                  onClick={() => setCustomExtend(true)}
+                >
+                  Custom…
+                </Button>
+              </div>
+            )}
             {d && d.run.state === "FAILED" &&
               (attemptsExhausted ? (
                 <Button
@@ -419,6 +482,12 @@ export function RunFull({
             </Button>
           </div>
         </div>
+        {extend.error && !customExtend && <VerbError error={extend.error} />}
+        {extendNotice && (
+          <div className="mt-1 text-[12px] text-(--hue-ok)" role="status">
+            {extendNotice}. The Remaining clock is the current execution deadline; the sidebar budget preserves the original approved RunSpec.
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
           <CopyActions
             id={runId}
@@ -633,6 +702,55 @@ export function RunFull({
               }}
             >
               Approve and queue <span className="mono ml-1 opacity-80" aria-hidden="true">↵</span>
+            </Button>
+          </div>
+        </Dialog>
+      )}
+
+      {customExtend && d && (
+        <Dialog title={`Extend ${d.run.runId}`} onClose={() => setCustomExtend(false)}>
+          <div className="mb-3 text-[12px] text-(--text-dim)">
+            Add up to 60 minutes per request. The policy run limit still applies.
+          </div>
+          <VerbError error={extend.error} />
+          <label className="mb-3 block text-[12px] text-(--text-dim)">
+            Minutes
+            <input
+              aria-label="Extension minutes"
+              aria-describedby="extension-minutes-help"
+              aria-invalid={!customMinutesValid}
+              type="number"
+              min="1"
+              max="60"
+              step="1"
+              value={customMinutes}
+              onChange={(e) => setCustomMinutes(e.target.value)}
+              className="mt-1 w-full rounded-md border border-(--border-strong) bg-(--surface-0) px-2.5 py-1.5 text-(--text) outline-none focus:border-(--accent)"
+            />
+            <span
+              id="extension-minutes-help"
+              className={customMinutesValid ? "mt-1 block text-(--text-faint)" : "mt-1 block text-(--hue-err)"}
+            >
+              Enter a whole number from 1 to 60.
+            </span>
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setCustomExtend(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={
+                !connected ||
+                extend.isPending ||
+                !customMinutesValid
+              }
+              onClick={() =>
+                extend.mutate({
+                  id: d.run.runId,
+                  seconds: customMinutesNumber * 60,
+                })
+              }
+            >
+              Extend run
             </Button>
           </div>
         </Dialog>

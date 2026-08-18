@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
+import { spawnTracked } from "./test-helpers-process.mjs";
 import {
   GH_SECRET,
   PV,
@@ -485,11 +486,10 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
   });
 
   test("serve with invalid non-numeric FACTORY_EVENT_PORT fails loudly", async () => {
-    const { spawn } = await import("node:child_process");
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-port-err-"));
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
 
-    const child = spawn("bun", [CLI, "serve"], {
+    const child = spawnTracked("bun", [CLI, "serve"], {
       env: {
         ...process.env,
         FACTORY_EVENT_HOME: home,
@@ -508,7 +508,6 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
   });
 
   test("serve startup banner warns when FACTORY_EVENT_SECRET is unset", async () => {
-    const { spawn } = await import("node:child_process");
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-banner-"));
     const port = String(59600 + (process.pid % 200));
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
@@ -516,7 +515,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
     const env = { ...process.env, FACTORY_EVENT_HOME: home };
     delete env.FACTORY_EVENT_SECRET;
 
-    const child = spawn("bun", [CLI, "serve", "--port", port], {
+    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });

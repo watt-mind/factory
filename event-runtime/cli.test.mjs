@@ -24,6 +24,7 @@ const EXPECTED_COMMANDS = [
   "requeue",
   "cancel",
   "retry",
+  "extend",
   "inspect",
   "trace",
   "update-pins",

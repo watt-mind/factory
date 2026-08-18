@@ -50,6 +50,8 @@ usage: bun event-runtime/cli.mjs <command>
   requeue <source> <event-id>    re-plan a dead-lettered or human_needed event
   cancel <run-id> [reason]       cancel a run before it is RUNNING
   retry <run-id> [--force]       re-queue a FAILED run (--force past maxAttempts)
+  extend <run-id> --seconds N [--override]
+                                 extend a RUNNING/VERIFYING deadline (max 3600s per call)
   inspect <run-id>               spec, lifecycle journal, result, receipt, workspace
   trace <run-id>                 live agent trace: assistant text, tool calls, usage
   update-pins [--pack NAME]      re-pin built-in definitions, or one explicitly named pack

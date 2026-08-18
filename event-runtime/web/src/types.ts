@@ -143,6 +143,11 @@ export interface RunListItem {
    */
   modelTier?: string | null;
   model?: string | null;
+  /** Current execution and lease deadlines, null before the first claim. */
+  startedAt?: string | null;
+  leaseExpiresAt?: string | null;
+  deadlineAt?: string | null;
+  timeoutSeconds?: number;
   /** Repos the spec input names. Empty if unscoped. */
   repos: string[];
 }
@@ -268,6 +273,21 @@ export interface ArtifactInventoryItem {
   references: ArtifactReference[];
 }
 
+export interface DeadlineExtensionReceipt {
+  seq: number;
+  actor: string;
+  at: string;
+  type: "deadline_extended";
+  seconds: number;
+  deadlineAt: string;
+  override: boolean;
+}
+
+export type RunReceipt = Record<string, string | null> & {
+  /** Canonical JSON array of DeadlineExtensionReceipt records. */
+  readonly deadlineExtensions?: string;
+};
+
 export interface RunDetail {
   run: {
     runId: string;
@@ -289,8 +309,10 @@ export interface RunDetail {
     artifacts?: ArtifactRef[];
     evidence?: unknown;
   } | null;
-  receipt: Record<string, string | null> | null;
+  receipt: RunReceipt | null;
   workspace: string | null;
+  /** Mutable execution deadline; extensions do not change the immutable RunSpec. */
+  deadlineAt?: string | null;
   /**
    * What the harness reported it actually ran on, read out of the stored
    * transcript (WM-221) — the only source for a run whose spec pins the

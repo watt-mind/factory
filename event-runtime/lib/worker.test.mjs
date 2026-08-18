@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildClaudeArgv, execute as executeClaude } from "./adapters/claude.mjs";
@@ -20,10 +20,11 @@ import { transcriptSessionId } from "./transcripts.mjs";
 import {
   acquireClaimLock, cancelRun, claimNext, CODE_RELOAD_EXIT, codeStamp, codeStampFiles, codeStampRoot,
   createReloadWatcher, DEFAULT_MAX_ENVIRONMENT_RETRIES, defaultLocksDir, dispatchLockPath,
-  executeClaimed, classifyFailureCause, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
+  executeClaimed, classifyFailureCause, expireRunDeadline, extendRunDeadline, reapExpiredLeases, releaseClaimLock, repositoryIsClean,
   repositoryStatus, resolveLinearApiKey, retryRun, runLinearCli, runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases, writeWorkerLease } from "../../lib/worker-leases.mjs";
+import { cleanupTrackedProcesses, processOwnerWatchdogSource, trackMarkedFakeRuntimeGroups, trackProcess, trackProcessGroupsMatching } from "./test-helpers-process.mjs";
 
 const registry = loadRegistry();
 const adapters = { fake };
@@ -405,6 +406,160 @@ describe("worker", () => {
     expect(summary.terminalState).toBe("TIMED_OUT");
     expect(summary.reasonCode).toBe("timeout");
     expect(runState(db, spec.runId)).toBe("TIMED_OUT");
+  });
+
+  test("a running adapter honors a DB deadline extension past its original timeout (WM-566)", async () => {
+    const db = openDb(":memory:");
+    const completesAfterOriginalDeadline = {
+      async execute({ workspaceDir, abortSignal }) {
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            writeFileSync(path.join(workspaceDir, "result.json"), JSON.stringify({
+              schemaVersion: "factory.agent-result/v1",
+              terminalState: "completed",
+              artifact: {
+                repos: [{ name: "extended", triage: 1, agentReady: 2, inProgress: 0, blocked: 0 }],
+                recommendedAction: "dispatch",
+              },
+              evidence: { queries: ["fake"] },
+            }));
+            resolve({ exitCode: 0, timedOut: false });
+          }, 120);
+          abortSignal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve({ exitCode: null, timedOut: false });
+          }, { once: true });
+        });
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 0.05 }));
+    const running = runOnce(db, registry, { fake: completesAfterOriginalDeadline }, opts());
+
+    for (let i = 0; i < 50 && runState(db, spec.runId) !== "RUNNING"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(runState(db, spec.runId)).toBe("RUNNING");
+    const extension = extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 20,
+    });
+    expect(extension.deadlineAt).toBe(new Date(T0 + 1_050).toISOString());
+
+    const summary = await running;
+    expect(summary).toMatchObject({ terminalState: "COMPLETED", reasonCode: "ok" });
+    const receipt = JSON.parse(
+      db.query(`SELECT receipt_json FROM results WHERE run_id = ?`).get(spec.runId).receipt_json,
+    );
+    expect(JSON.parse(receipt.deadlineExtensions)).toEqual([
+      expect.objectContaining({
+        actor: "operator",
+        seconds: 1,
+        deadlineAt: extension.deadlineAt,
+        type: "deadline_extended",
+      }),
+    ]);
+    expect(db.query(`SELECT lease_expires_at FROM attempts WHERE run_id = ?`).get(spec.runId).lease_expires_at)
+      .toBe(new Date(T0 + 121_050).toISOString());
+  });
+
+  test("expiry wins atomically and refuses extension throughout adapter kill grace (WM-566)", async () => {
+    const db = openDb(":memory:");
+    let releaseKillGrace;
+    const killGrace = new Promise((resolve) => { releaseKillGrace = resolve; });
+    let termStarted;
+    const term = new Promise((resolve) => { termStarted = resolve; });
+    const ignoresTermBriefly = {
+      async execute({ abortSignal }) {
+        abortSignal.addEventListener("abort", () => termStarted(), { once: true });
+        await killGrace;
+        return { exitCode: null, timedOut: false };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 0.03 }));
+    const running = runOnce(db, registry, { fake: ignoresTermBriefly }, opts());
+
+    await term;
+    expect(runState(db, spec.runId)).toBe("RUNNING");
+    const refused = extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 40,
+    });
+    expect(refused).toMatchObject({
+      refused: true,
+      code: "deadline_already_expired",
+      status: 409,
+    });
+    const expiryRows = lifecycleOf(db, spec.runId).filter((row) => {
+      try { return JSON.parse(row.reason)?.type === "deadline_expired"; } catch { return false; }
+    });
+    expect(expiryRows).toHaveLength(1);
+
+    releaseKillGrace();
+    const summary = await running;
+    expect(summary).toMatchObject({ terminalState: "TIMED_OUT", reasonCode: "timeout" });
+  });
+
+  test("extension refuses after the edge even before the worker records expiry", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ timeoutSeconds: 1 }));
+    const claim = claimNext(db, opts());
+    transition(db, {
+      runId: spec.runId,
+      to: "RUNNING",
+      expectFrom: "LEASED",
+      actor: "w1",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    db.query(`UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`)
+      .run(new Date(T0).toISOString(), spec.runId, claim.attempt);
+
+    expect(extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 1_001,
+    })).toMatchObject({
+      refused: true,
+      code: "deadline_already_expired",
+      status: 409,
+      deadlineAt: new Date(T0 + 1_000).toISOString(),
+    });
+    expect(lifecycleOf(db, spec.runId).some((row) => {
+      try { return JSON.parse(row.reason)?.type === "deadline_extended"; } catch { return false; }
+    })).toBe(false);
+  });
+
+  test("expire transaction observes an extension that committed before the old edge", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ timeoutSeconds: 1 }));
+    const claim = claimNext(db, opts());
+    transition(db, {
+      runId: spec.runId,
+      to: "RUNNING",
+      expectFrom: "LEASED",
+      actor: "w1",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    db.query(`UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`)
+      .run(new Date(T0).toISOString(), spec.runId, claim.attempt);
+    const extension = extendRunDeadline(db, spec.runId, {
+      seconds: 1,
+      actor: "operator",
+      policyVersion: "test",
+      now: T0 + 999,
+    });
+    expect(extension.refused).toBeUndefined();
+    expect(expireRunDeadline(db, spec.runId, claim.attempt, claim.fencingToken, {
+      actor: "w1",
+      policyVersion: "test",
+      now: T0 + 1_001,
+    })).toMatchObject({ expired: false, deadlineMs: T0 + 2_000 });
   });
 
   test("timeout accepts a valid result.json written before the adapter hangs (WM-538)", async () => {
@@ -1991,6 +2146,64 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     expect(sum5.reasonCode).toBe("ticket_claim_lost");
   });
 
+  // WM-677: under `dispatch.owned_paths_collision: advisory` a textual overlap
+  // is evidence, not a refusal — the run is claimed and executes. Only the
+  // narrow hard-conflict set (identical concrete file, or `**`) still refuses.
+  // The worker consumes the same gate as the planner, so this is the
+  // execute-time half of the contract; the fixture policy.yaml is `{}` for
+  // every other test here, which is why they still see strict.
+  test("advisory owned-paths mode dispatches across overlap and refuses only hard conflicts (WM-677)", async () => {
+    const db = openDb(":memory:");
+    const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-advisory-"));
+    const policyPath = path.join(factoryRoot, "config", "policy.yaml");
+    const priorPolicy = readFileSync(policyPath, "utf8");
+    writeFileSync(policyPath, "dispatch:\n  owned_paths_collision: advisory\n");
+    try {
+      // Containment overlap (src/api/** vs src/api/routes.ts): strict refuses this
+      // exact pair in the test above; advisory lets it run.
+      const specA = queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-707" } }));
+      const sumA = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+        dispatch: {
+          locksDir: lockDir,
+          fetchTicket: () => readyDispatchTicket("WM-707", { description: "## Owned Paths\n- src/api/**\n" }),
+          fetchInFlight: () => [{ identifier: "WM-800", description: "## Owned Paths\n- src/api/routes.ts\n" }],
+          countLeases: () => 0,
+        },
+      }));
+      expect(sumA.terminalState).not.toBe("REFUSED");
+      expect(sumA.reasonCode).not.toBe("owned_paths_overlap");
+
+      // Identical concrete file on both sides: same file is not same lines —
+      // advisory lets it run too (evidence carries the pair).
+      queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-708" } }));
+      const sumB = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+        dispatch: {
+          locksDir: lockDir,
+          fetchTicket: () => readyDispatchTicket("WM-708", { description: "## Owned Paths\n- src/api/routes.ts\n" }),
+          fetchInFlight: () => [{ identifier: "WM-801", description: "## Owned Paths\n- src/api/routes.ts\n" }],
+          countLeases: () => 0,
+        },
+      }));
+      expect(sumB.terminalState).not.toBe("REFUSED");
+      expect(sumB.reasonCode).not.toBe("owned_paths_conflict_hard");
+
+      // A `**` claim on the in-flight side: still a hard conflict.
+      queueRun(db, makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-709" } }));
+      const sumC = await runOnce(db, registry, { fake: dispatchFakeAdapter }, opts({
+        dispatch: {
+          locksDir: lockDir,
+          fetchTicket: () => readyDispatchTicket("WM-709", { description: "## Owned Paths\n- docs/readme.md\n" }),
+          fetchInFlight: () => [{ identifier: "WM-802", description: "## Owned Paths\n- **\n" }],
+          countLeases: () => 0,
+        },
+      }));
+      expect(sumC.terminalState).toBe("REFUSED");
+      expect(sumC.reasonCode).toBe("owned_paths_conflict_hard");
+    } finally {
+      writeFileSync(policyPath, priorPolicy);
+    }
+  });
+
   test("lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)", async () => {
     const db = openDb(":memory:");
     const lockDir = mkdtempSync(path.join(os.tmpdir(), "evrt-claim-retry-locks-"));
@@ -2349,12 +2562,14 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     );
 
     const testPortBase = 18400 + Math.floor(Math.random() * 1000) * 2;
+    const testProcessMarker = `wm334-${process.pid}-${ticket}`;
 
     const bunStubLines = [
       "#!/usr/bin/env node",
       "const fs = require(\"fs\");",
       "const path = require(\"path\");",
       "const { spawn } = require(\"child_process\");",
+      ...processOwnerWatchdogSource().split("\n"),
       `const stateDir = process.env.WM334_LINEAR_STATE_DIR || ${JSON.stringify(linearStateDir)}`,
       `const realBun = process.env.WM334_REAL_BUN || ${JSON.stringify(realBun)}`,
       "const args = process.argv.slice(2);",
@@ -2414,7 +2629,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       "}",
       "const child = spawn(realBun, args, {",
       "  stdio: \"inherit\",",
-      "  env: process.env,",
+      `  argv0: ${JSON.stringify(`factory-test-${testProcessMarker}`)},`,
+      `  env: { ...process.env, FACTORY_TEST_TRACKED_PROCESS: ${JSON.stringify(testProcessMarker)} },`,
       "});",
       "process.on(\"SIGTERM\", () => child.kill(\"SIGTERM\"));",
       "process.on(\"SIGINT\", () => child.kill(\"SIGINT\"));",
@@ -2465,6 +2681,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       WM334_LINEAR_STATE_DIR: process.env.WM334_LINEAR_STATE_DIR,
       WM334_REAL_BUN: process.env.WM334_REAL_BUN,
       WM334_BUN_LOG: process.env.WM334_BUN_LOG,
+      FACTORY_TEST_TRACKED_PROCESS: process.env.FACTORY_TEST_TRACKED_PROCESS,
     };
     try {
       process.env.FACTORY_REPOS_ROOT = tmpRoot;
@@ -2477,6 +2694,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       process.env.WM334_LINEAR_STATE_DIR = linearStateDir;
       process.env.WM334_REAL_BUN = realBun;
       process.env.WM334_BUN_LOG = path.join(tmpRoot, 'bun-calls.log');
+      process.env.FACTORY_TEST_TRACKED_PROCESS = testProcessMarker;
 
       const db = openDb(":memory:");
       const lockDir = mkdtempSync(path.join(os.tmpdir(), "wm334-real-locks-"));
@@ -2527,18 +2745,30 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           input: { repo: repoName, ticket },
           workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: false },
         }));
-        return runOnce(db, registry, { fake: observedAdapter }, opts({
-          workspacesRoot: mkdtempSync(path.join(os.tmpdir(), `${repoName}-run-`)),
-          dispatch: {
-            locksDir: lockDir,
-            leasesDir: leaseDir,
-            fetchTicket: () => readyDispatchTicket(ticket),
-            fetchInFlight: () => [],
-            countLeases: () => 0,
-            claimTicket: () => ({ ok: true }),
-            blockBaselineTicket: blockTicket,
-          },
-        }));
+        try {
+          return await runOnce(db, registry, { fake: observedAdapter }, opts({
+            workspacesRoot: mkdtempSync(path.join(os.tmpdir(), `${repoName}-run-`)),
+            dispatch: {
+              locksDir: lockDir,
+              leasesDir: leaseDir,
+              fetchTicket: () => readyDispatchTicket(ticket),
+              fetchInFlight: () => [],
+              countLeases: () => 0,
+              claimTicket: () => ({ ok: true }),
+              blockBaselineTicket: blockTicket,
+            },
+          }));
+        } finally {
+          trackProcessGroupsMatching(tmpRoot);
+          trackMarkedFakeRuntimeGroups(testProcessMarker);
+          const runDir = path.join(worktreeRoot, ticket, ".factory", "run");
+          if (existsSync(runDir)) {
+            for (const name of readdirSync(runDir).filter((entry) => entry.endsWith(".pid"))) {
+              const pid = Number(readFileSync(path.join(runDir, name), "utf8").trim());
+              if (Number.isInteger(pid) && pid > 0) trackProcess(pid);
+            }
+          }
+        }
       };
 
       const first = await run();
@@ -2570,6 +2800,9 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       });
       expect(comments[0].body).toContain(`<!-- ${marker} -->`);
     } finally {
+      trackProcessGroupsMatching(tmpRoot);
+      trackMarkedFakeRuntimeGroups(testProcessMarker);
+      await cleanupTrackedProcesses();
       if (detachedBaseBranch) {
         spawnSync("git", ["-C", repoRoot, "update-ref", "-d", `refs/remotes/origin/${detachedBaseBranch}`]);
       }

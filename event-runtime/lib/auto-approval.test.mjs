@@ -57,7 +57,7 @@ function seed(
     )
     .find((entry) => entry.edge.eventType === type);
   if (trustedPredecessor && seedPredecessor) {
-    if (!predecessor)
+    if (!predecessor && !predecessorAgent)
       throw new Error(`test fixture has no registered predecessor for ${type}`);
     const parentEventId = `parent-event-${id}`;
     const parentAgent = predecessorAgent ?? predecessor.agent;
@@ -66,10 +66,10 @@ function seed(
     const parentResult = {
       artifact:
         predecessorArtifact ??
-        {
+        (parentRule ? {
           [parentRule.recommendationField]:
             predecessorRecommendation ?? predecessor.recommendation,
-        },
+        } : {}),
     };
     const at = new Date(now).toISOString();
     db.query(
@@ -378,6 +378,74 @@ function autoMerge(db) {
     runtimeGuard: () => null,
   });
 }
+
+describe("declared chain command edge characterization (WM-469)", () => {
+  test.each([
+    ["factory.merge.requested", { repo: "factory" }],
+    [
+      "factory.merge-landed",
+      {
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr: 469,
+        ticket: "WM-469",
+        headSha: "a".repeat(40),
+        headRef: "feat/WM-469",
+        mergeCommitSha: "c".repeat(40),
+      },
+    ],
+  ])("merge-apply@2 auto-approves its %s command edge", (type, input) => {
+    const db = openDb(":memory:");
+    const predecessorInput = reviewedMergeInput({ pr: 469, ticket: "WM-469" });
+    const candidate = seed(db, {
+      id: `merge-apply-command-${type}`,
+      type,
+      input,
+      predecessorAgent: "merge-apply@2",
+      predecessorInput,
+      predecessorArtifact: { outcome: "applied" },
+    });
+
+    expect(autoMerge(db).approved).toEqual([
+      { proposalId: candidate.id, runId: candidate.runId },
+    ]);
+  });
+
+  test("merge-verify@1 auto-approves factory.merge.requested when repo matches input", () => {
+    const db = openDb(":memory:");
+    const candidate = seed(db, {
+      id: "merge-verify-command-match",
+      type: "factory.merge.requested",
+      input: { repo: "factory" },
+      predecessorAgent: "merge-verify@1",
+      predecessorInput: { repo: "factory" },
+      predecessorArtifact: { outcome: "verified" },
+    });
+
+    expect(autoMerge(db).approved).toEqual([
+      { proposalId: candidate.id, runId: candidate.runId },
+    ]);
+  });
+
+  test("merge-verify@1 repo mismatch remains chain_command_edge_payload_mismatch", () => {
+    const db = openDb(":memory:");
+    const candidate = seed(db, {
+      id: "merge-verify-command-mismatch",
+      type: "factory.merge.requested",
+      input: { repo: "other" },
+      predecessorAgent: "merge-verify@1",
+      predecessorInput: { repo: "factory" },
+      predecessorArtifact: { outcome: "verified" },
+    });
+
+    expect(autoMerge(db).approved).toEqual([]);
+    expect(runState(db, candidate.runId)).toBe("PROPOSED");
+    expect(openProposals(db, {})[0].reason).toContain(
+      "chain_command_edge_payload_mismatch",
+    );
+  });
+});
 
 describe("chain auto approval (WM-357)", () => {
   test("git-owned policy is an explicit closed allowlist", () => {

@@ -6,23 +6,38 @@ isolated worktree for the ticket. This is not a general implementation run.
 1. Read the ticket and all comments. Re-read the PR head/base and required
    checks. Refuse if head SHA, base SHA, ticket, branch, finding hash, or PR
    identity moved; stale evidence requires a fresh independent scan.
-2. Confirm the finding is mechanical, round is 1 or 2, the change is wholly
-   within the supplied Owned Paths and the ticket's live Owned Paths, and no
+2. Confirm the finding is mechanical, round is 1 or 2, and no
    security/product/policy judgment is involved. Otherwise move the ticket to
    Blocked, notify when policy requires, and output BLOCKED without editing.
+   Owned Paths bound the *correction*, not the *rebase* (WM-679):
+   - `rebase_onto_base` / `rerun_ci_at_head`: rebase the head branch onto the
+     current base. Resolve conflicts faithfully to both sides, reading the
+     surrounding code; the files git reports as conflicting are in scope for
+     the resolution regardless of the ticket's Owned Paths, because a rebase
+     touches what the base touched. Never `git stash` or `--autostash`. If a
+     hunk is genuinely ambiguous — two real behaviours, no way to keep both —
+     that is the one case to BLOCK with the hunk named. Then re-run
+     verification and push with `--force-with-lease`.
+   - A finding that names an Owned Paths deviation (an expectation outside the
+     ticket's paths that the PR's own change invalidated): make that one
+     correction, and record the deviation on the ticket in your comment.
+   - Any other change outside the supplied Owned Paths and the ticket's live
+     Owned Paths: BLOCK.
 3. Move the ticket from In Review to In Progress. Check out the existing PR
    head branch at the pinned SHA. Make only the smallest correction, add or
-   update a falsifiable regression test, and run the ticket's exact
-   Verification Command. Never weaken or skip it.
+   update a falsifiable regression test where the finding is a code change (a
+   pure rebase adds none), and run the ticket's exact Verification Command.
+   Never weaken or skip it.
 4. Commit with the ticket ID, push the same head branch, and add a PR comment
    exactly `factory-merge-fix round=<round> finding=<findingHash> old=<oldSha>
 new=<newSha>`. Do not merge, approve, mark Done, or delete anything.
 5. Return UPDATED with the new 40-hex head SHA. Completion chains to a wholly
    new merge-scan run. You are forbidden to declare your own update mergeable.
 
-If the branch cannot be reconstructed safely, verification fails, a path is
-out of scope, or any evidence is uncertain, preserve the worktree/branch,
-block the ticket with one answerable reason, and return BLOCKED.
+If the branch cannot be reconstructed safely, verification fails, a change
+beyond the finding is out of scope, or any evidence is uncertain, preserve
+the worktree/branch, block the ticket with one answerable reason, and return
+BLOCKED.
 
 ## Result contract
 

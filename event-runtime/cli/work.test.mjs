@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -24,6 +24,7 @@ import {
   runCli,
   runNotifierDeliveryCase,
   seedRun,
+  spawnTracked,
   spawnSupervisor,
   spawnWorker,
   waitFor,
@@ -200,7 +201,7 @@ describe("work command", () => {
     });
     db.close();
 
-    const child = spawn("bun", [CLI, "work", "--adapter-override", "fake"], {
+    const child = spawnTracked("bun", [CLI, "work", "--adapter-override", "fake"], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -240,7 +241,7 @@ describe("work command", () => {
 
   test("work --adapter-override pi is accepted at the work call site (OPS-517)", async () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-work-pi-"));
-    const child = spawn("bun", [CLI, "work", "--adapter-override", "pi"], {
+    const child = spawnTracked("bun", [CLI, "work", "--adapter-override", "pi"], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -462,7 +463,7 @@ describe("work command", () => {
 
   test("work --adapter-override cursor is accepted at the work call site (WM-440)", async () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-work-cursor-"));
-    const child = spawn("bun", [CLI, "work", "--adapter-override", "cursor"], {
+    const child = spawnTracked("bun", [CLI, "work", "--adapter-override", "cursor"], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });

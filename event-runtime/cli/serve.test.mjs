@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -23,6 +23,7 @@ import {
   runCli,
   runNotifierDeliveryCase,
   seedRun,
+  spawnTracked,
   spawnSupervisor,
   spawnWorker,
   waitFor,
@@ -32,7 +33,7 @@ describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-watch-"));
     const port = String(59000 + (process.pid % 800));
-    const child = spawn("bun", [CLI, "serve", "--watch", "--port", port], {
+    const child = spawnTracked("bun", [CLI, "serve", "--watch", "--port", port], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -58,7 +59,7 @@ describe("serve command", () => {
   test("serve binds the control API, starts the loop, and answers /health", async () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-serve-"));
     const port = String(59800 + (process.pid % 100));
-    const child = spawn("bun", [CLI, "serve", "--port", port], {
+    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
       env: { ...process.env, FACTORY_EVENT_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -89,7 +90,7 @@ describe("serve command", () => {
   test("serve --adapter-override pi is accepted at the serve call site (OPS-517)", async () => {
     const home = mkdtempSync(path.join(os.tmpdir(), "evrt-serve-pi-"));
     const port = String(59800 + (process.pid % 150));
-    const child = spawn(
+    const child = spawnTracked(
       "bun",
       [CLI, "serve", "--adapter-override", "pi", "--port", port],
       {
