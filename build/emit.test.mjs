@@ -1,0 +1,44 @@
+import { expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+const ROOT = path.resolve(import.meta.dir, "..");
+
+test("emit purges orphaned commands, skills, and prompts from every output tree", () => {
+  const orphaned = [
+    "plugins/core/commands/orphaned-command.md",
+    "plugins/core/skills/orphaned-skill/SKILL.md",
+    "dist/codex/skills/orphaned-skill/SKILL.md",
+    "dist/gemini/skills/orphaned-skill/SKILL.md",
+    "dist/cursor/commands/orphaned-command.md",
+    "dist/pi/skills/orphaned-skill/SKILL.md",
+    "dist/pi/prompts/orphaned-command.md",
+  ].map((file) => path.join(ROOT, file));
+  const handMaintained = path.join(
+    ROOT,
+    "plugins/core/.claude-plugin/emit-preserves-this.txt",
+  );
+
+  try {
+    for (const file of [...orphaned, handMaintained]) {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, "sentinel\n");
+    }
+
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs"],
+      cwd: ROOT,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+    for (const file of orphaned) expect(existsSync(file)).toBe(false);
+    expect(existsSync(handMaintained)).toBe(true);
+  } finally {
+    for (const file of [...orphaned, handMaintained]) {
+      rmSync(file, { force: true });
+    }
+  }
+});

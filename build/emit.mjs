@@ -98,6 +98,13 @@ function emit(file, content) {
   writeFileSync(file, content);
 }
 
+/** Purge generated subtrees before writing so renamed or deleted sources cannot linger. */
+function cleanGenerated(...directories) {
+  if (CHECK) return;
+  for (const directory of directories)
+    rmSync(directory, { recursive: true, force: true });
+}
+
 // ------------------------------------------------------------------ inputs ---
 const floor = read(path.join(SHARED, "floor.md"));
 const commands = listFiles(path.join(SHARED, "commands")).filter((f) => f.endsWith(".md"));
@@ -118,13 +125,15 @@ const agentDefinitions = agents.map((file) => {
 // Shared frontmatter uses Claude's expressive keys by default. Pi-only fields
 // are stripped so one harness's tool names cannot alter Claude's allowlist.
 const CLAUDE = path.join(ROOT, "plugins", "core");
+cleanGenerated(
+  path.join(CLAUDE, "commands"),
+  path.join(CLAUDE, "skills"),
+  path.join(CLAUDE, "agents"),
+);
 for (const f of commands) emit(path.join(CLAUDE, "commands", path.basename(f)), read(f));
 for (const s of skillDirs)
   for (const f of listFiles(path.join(SHARED, "skills", s)))
     emit(path.join(CLAUDE, "skills", s, path.relative(path.join(SHARED, "skills", s), f)), read(f));
-// Agent directories are cleaned on a normal emit so renames do not leave a
-// second, stale specialist registered alongside the canonical one.
-if (!CHECK) rmSync(path.join(CLAUDE, "agents"), { recursive: true, force: true });
 for (const agent of agentDefinitions)
   emit(
     path.join(CLAUDE, "agents", `${agent.name}.md`),
@@ -136,7 +145,11 @@ for (const agent of agentDefinitions)
 // become skills so they work in the desktop app too; custom prompts are a
 // deprecated CLI/IDE-only surface.
 const CODEX = path.join(ROOT, "dist", "codex");
-if (!CHECK) rmSync(path.join(CODEX, "agents"), { recursive: true, force: true });
+cleanGenerated(
+  path.join(CODEX, "agents"),
+  path.join(CODEX, "skills"),
+  path.join(CODEX, "prompts"),
+);
 for (const agent of agentDefinitions)
   emit(path.join(CODEX, "agents", `${agent.name}.toml`), codexAgent(agent));
 for (const s of skillDirs)
@@ -150,14 +163,10 @@ for (const f of commands) {
   emit(path.join(CODEX, "skills", name, "SKILL.md"),
     `---\nname: ${name}\ndescription: ${fm.description || `Run the ${name} Factory workflow.`}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`);
 }
-// Remove the legacy custom-prompt output on regular emits. In --check mode it
-// remains visible as an orphan, which catches a missing regeneration.
-if (!CHECK) rmSync(path.join(CODEX, "prompts"), { recursive: true, force: true });
-
 // ------------------------------------------------- Gemini CLI / Antigravity ---
 // Antigravity shares ~/.gemini, so one emit covers both.
 const GEMINI = path.join(ROOT, "dist", "gemini");
-if (!CHECK) rmSync(path.join(GEMINI, "agents"), { recursive: true, force: true });
+cleanGenerated(path.join(GEMINI, "agents"), path.join(GEMINI, "skills"));
 for (const agent of agentDefinitions)
   emit(path.join(GEMINI, "agents", `${agent.name}.md`), markdownAgent(agent, { kind: "local" }));
 for (const s of skillDirs)
@@ -174,7 +183,7 @@ for (const f of commands) {
 // ------------------------------------------------------------- Cursor --------
 // ~/.cursor/commands/*.md — plain markdown, no frontmatter.
 const CURSOR = path.join(ROOT, "dist", "cursor");
-if (!CHECK) rmSync(path.join(CURSOR, "agents"), { recursive: true, force: true });
+cleanGenerated(path.join(CURSOR, "agents"), path.join(CURSOR, "commands"));
 for (const agent of agentDefinitions)
   emit(path.join(CURSOR, "agents", `${agent.name}.md`), markdownAgent(agent, { readonly: true }));
 for (const f of commands) {
@@ -186,7 +195,11 @@ for (const f of commands) {
 // dist/pi/ — skills and prompts for the Pi coding agent.
 const PI = path.join(ROOT, "dist", "pi");
 const PI_DEFAULT_AGENT_TOOLS = "read, grep, find, ls, bash";
-if (!CHECK) rmSync(path.join(PI, "agents"), { recursive: true, force: true });
+cleanGenerated(
+  path.join(PI, "agents"),
+  path.join(PI, "skills"),
+  path.join(PI, "prompts"),
+);
 for (const agent of agentDefinitions) {
   // Pi-specific declarations live in shared frontmatter so an exceptional
   // agent's surface is reviewable at the source. Prefixing them avoids passing
