@@ -80,6 +80,24 @@ async function shAsync(body, extraEnv = {}) {
   return { status, stdout, stderr };
 }
 
+function firstPortNotListening(preferred) {
+  for (let port = preferred, i = 0; i < PORT_SPAN; port += 2, i++) {
+    // Use the allocator's own availability probe instead of assuming a port
+    // in the test band stayed free after pickPortBase checked it.
+    if (sh(`port_listening ${port}`).status !== 0) return port;
+  }
+  throw new Error(`could not find a free API port at or after ${preferred}`);
+}
+
+function expectPortBindable(port) {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port,
+    socket: { data() {} },
+  });
+  listener.stop(true);
+}
+
 function mockLsofDir() {
   const dir = mkdtempSync(path.join(tmpdir(), "wm-473-lsof-"));
   const executable = path.join(dir, "lsof");
@@ -438,15 +456,17 @@ test("adapter_banner reports the /health adapter, not the local flag", () => {
 });
 
 test("allocate_api_port returns the preferred slot when nothing answers /health", () => {
-  const r = sh(`allocate_api_port ${P(352)} /tmp/expected-home`);
+  const preferred = firstPortNotListening(P(352));
+  const r = sh(`allocate_api_port ${preferred} /tmp/expected-home`);
   expect(r.status).toBe(0);
-  expect(r.stdout).toBe(String(P(352)));
+  expect(r.stdout).toBe(String(preferred));
 });
 
 test("allocate_api_port skips port occupied by another runtime", async () => {
+  const heldPort = firstPortNotListening(P(360));
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: P(360),
+    port: heldPort,
     fetch(req) {
       if (new URL(req.url).pathname === "/health") {
         return new Response(JSON.stringify({ ok: true, env: { home: "/other/worktree/.factory/event-runtime" } }), {
@@ -457,33 +477,39 @@ test("allocate_api_port skips port occupied by another runtime", async () => {
     },
   });
   try {
-    const r = await shAsync(`allocate_api_port ${P(360)} /this/worktree/.factory/event-runtime`);
+    const expectedPort = firstPortNotListening(heldPort + 2);
+    const r = await shAsync(`allocate_api_port ${heldPort} /this/worktree/.factory/event-runtime`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe(String(P(362)));
+    expect(r.stdout.trim()).toBe(String(expectedPort));
   } finally {
     server.stop(true);
   }
 });
 
 test("allocate_api_port skips port squatted by an alien process that does not answer /health", async () => {
+  const heldPort = firstPortNotListening(P(364));
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: P(364),
+    port: heldPort,
     fetch() {
       return new Response("I am an alien process", { status: 500 });
     },
   });
   try {
-    const r = await shAsync(`allocate_api_port ${P(364)} /this/worktree/.factory/event-runtime`);
+    const expectedPort = firstPortNotListening(heldPort + 2);
+    const r = await shAsync(`allocate_api_port ${heldPort} /this/worktree/.factory/event-runtime`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe(String(P(366)));
+    const allocatedPort = Number(r.stdout.trim());
+    expect(allocatedPort).toBeGreaterThan(heldPort);
+    expect(allocatedPort).toBe(expectedPort);
+    expectPortBindable(allocatedPort);
   } finally {
     server.stop(true);
   }
 });
 
 test("allocate_api_port skips port held by raw TCP listener", async () => {
-  const heldPort = P(372);
+  const heldPort = firstPortNotListening(P(372));
   const listener = Bun.listen({
     hostname: "127.0.0.1",
     port: heldPort,
@@ -494,11 +520,12 @@ test("allocate_api_port skips port held by raw TCP listener", async () => {
     },
   });
   try {
+    const expectedPort = firstPortNotListening(heldPort + 2);
     const r = await shAsync(`allocate_api_port ${heldPort} /this/worktree/.factory/event-runtime`);
     expect(r.status).toBe(0);
     // The skip property: allocation succeeds and lands off the held slot.
     expect(r.stdout.trim()).not.toBe(String(heldPort));
-    expect(r.stdout.trim()).toBe(String(P(374)));
+    expect(r.stdout.trim()).toBe(String(expectedPort));
   } finally {
     listener.stop(true);
   }
@@ -506,9 +533,10 @@ test("allocate_api_port skips port held by raw TCP listener", async () => {
 
 test("allocate_api_port reuses port when /health reports matching expected home", async () => {
   const home = "/this/worktree/.factory/event-runtime";
+  const heldPort = firstPortNotListening(P(374));
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: P(374),
+    port: heldPort,
     fetch(req) {
       if (new URL(req.url).pathname === "/health") {
         return new Response(JSON.stringify({ ok: true, env: { home } }), {
@@ -519,9 +547,9 @@ test("allocate_api_port reuses port when /health reports matching expected home"
     },
   });
   try {
-    const r = await shAsync(`allocate_api_port ${P(374)} '${home}'`);
+    const r = await shAsync(`allocate_api_port ${heldPort} '${home}'`);
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe(String(P(374)));
+    expect(r.stdout.trim()).toBe(String(heldPort));
   } finally {
     server.stop(true);
   }
@@ -649,5 +677,4 @@ test("web_build_hash computes deterministic sha1 and changes on file rename or c
     rmSync(mockWebDir, { recursive: true, force: true });
   }
 });
-
 
