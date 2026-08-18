@@ -80,21 +80,41 @@ cancelled, stale-SHA, wrong-workflow, API-error, or otherwise ambiguous
 evidence fails closed. Never substitute all currently visible checks for
 either authoritative set; that recreates the early auxiliary-check race.
 
-ESCALATE auth/authz, money movement, credentials/secrets, destructive
-migrations, production infrastructure, CLNT security behavior, any
-`escalate_paths` match, product ambiguity, missing/uncertain evidence,
-`main`/`master`, or the configured deploy branch. Notify-worthy ambiguity is
-not a mechanical fix. Existing draft/escalated holds stay held and are
-summarized.
+ESCALATE is for conditions a human must decide, and nothing else: auth/authz,
+money movement, credentials/secrets, destructive migrations, production
+infrastructure, CLNT security behavior, any `escalate_paths` match, product
+ambiguity in the diff itself, `main`/`master`, the configured deploy branch,
+and a fix whose next round would exceed `merge.max_fix_rounds`. Existing
+draft/escalated holds stay held and are summarized.
 
-A FIX may auto-dispatch only when it is mechanical, wholly inside the ticket's
-Owned Paths, and its next round is at most `merge.max_fix_rounds` (2). Read PR
-comments for `factory-merge-fix round=<n> finding=<hash>` markers. Set the next
-round and SHA-256 hash of the exact finding. Exhausted, outside-scope,
-security, or ambiguous findings are ESCALATE, never FIX.
+Operational conditions are FIX, never ESCALATE (WM-679). They are mechanical
+and merge-fix already performs them; the round counter bounds them:
 
-Fail closed if GitHub, Linear, config, mergeability, base SHA, or checks are
-uncertain. Populate `escalate`, `fix`, and `plan` independently per PR: an
+- CONFLICTING, or behind base → FIX, finding `rebase_onto_base`.
+- Green only on an old SHA, or no run at `headRefOid` → FIX, finding
+  `rerun_ci_at_head` (rebase first if behind, then a fresh run). The evidence
+  is not uncertain; it is old.
+- A red check on a test the PR does not touch, where the same test is also red
+  on the base branch at the merge-base SHA → this is base red, not the PR. Do
+  not escalate the PR. Emit one `CI RED` item for the base (once per base SHA,
+  not per PR) and hold the PR as FIX pending base green, finding
+  `base_red:<test>`.
+- A red test outside the PR's Owned Paths that the PR's own change caused (an
+  expectation its refactor invalidated) → FIX, with the Owned Paths deviation
+  named in the finding so merge-fix updates the expectation and records the
+  deviation on the ticket. Being outside scope alone is not a reason to stop.
+
+A FIX may auto-dispatch only when it is mechanical and its next round is at
+most `merge.max_fix_rounds` (2). Read PR comments for
+`factory-merge-fix round=<n> finding=<hash>` markers. Set the next round and
+SHA-256 hash of the exact finding. Exhausted rounds, security findings, and
+genuine product ambiguity are ESCALATE.
+
+Fail closed only on what truly cannot be evidenced — GitHub or Linear API
+errors, malformed config, an unresolvable base SHA — and record those as
+`noopReason` for the next tick, not as a per-PR human escalation.
+
+Populate `escalate`, `fix`, and `plan` independently per PR: an
 escalated or held PR appears in `escalate` but suppresses only itself, never an
 eligible fix or safe merge for another PR. Include every eligible mechanical
 fix in `fix`, and put exactly one deterministic safe candidate (lowest PR

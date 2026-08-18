@@ -35,7 +35,7 @@
   },
   "mutating": true,
   "pins": {
-    "agents/merge-fix.md": "sha256:0c60e0346e1c58fe32a7eb86d4b8cd812d59a79174baff0b571142f0ce40a327",
+    "agents/merge-fix.md": "sha256:3f2a4733d1bf5dffc8a7d0ba9874a4a01b389592f434cc317f3f867e4e4fb12d",
     "schemas/merge-fix.input.json": "sha256:71a8c16d52dfc908972bf3f9ca6d942c93ab6b0213588298a1cd2715e265aa6c",
     "schemas/merge-fix.output.json": "sha256:0aa6ba59514abbb6609ef53c124f627c7e5ab09eca655696c99aa4e38e34ce46"
   }

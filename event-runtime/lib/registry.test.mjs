@@ -104,7 +104,10 @@ describe("registry", () => {
     // Regenerated 2026-08-18: #559 (WM-662, merge agents cursor→pi/terra) landed
     // between #479's review and its merge, changing event-types.json and two
     // agent defs — registry inputs. Reason in PR body per the rule above.
-    const expected = "sha256:b2a2887bf5869f236339199447c91acd8dd617fcb5c85c095c1f85e1d6b1ea9b";
+    // Regenerated 2026-08-18 (WM-679): merge-scan.md / merge-fix.md re-prompted so
+    // operational conditions route to FIX instead of ESCALATE; both are registry
+    // inputs. Reason in PR body per the rule above.
+    const expected = "sha256:677ed34e1e04aa29437594922a2fd9ebca419c68a8a4c794dac78b2435897aeb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
