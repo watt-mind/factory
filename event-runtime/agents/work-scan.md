@@ -92,12 +92,23 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    still plannable, but only alone, with nothing in flight. Ambiguous overlap
    is overlap — the same biases as `orchestrator/owned-paths.mjs`, always toward
    collision.
-5. **Select the plan**: walk the entire ordered candidate queue. Take each
-   ticket whose Owned Paths are disjoint from every in-flight ticket's paths AND
-   from every ticket already selected while a free slot remains. Selected in
-   order, each item pins `{ticket, ownedPaths, reason}`. Every candidate not
-   selected goes in `deferred` as `{ticket, reason}`, where `reason` is the typed
-   value `owned_paths_overlap` for a collision or `cap_full` when no slot remains.
+5. **Select the plan**: walk the entire ordered candidate queue. Owned Paths
+   overlap is **advisory** (WM-677, `config/policy.yaml`
+   `dispatch.owned_paths_collision: advisory`): a textual overlap with an
+   in-flight ticket or an already-selected ticket does NOT disqualify — select
+   the ticket while a free slot remains and record the overlap in its `reason`
+   (`overlaps WM-123 on event-runtime/web/src/App.tsx`); rebase and merge-fix
+   resolve real conflicts later. Only two collisions are hard and defer a
+   candidate as `owned_paths_overlap`: (a) an in-flight or selected ticket
+   claims `**` (including a ticket with no parseable Owned Paths section — see
+   step 4), or (b) the candidate and an in-flight/selected ticket claim the
+   _identical_ concrete file (no globs on either side). Selected in order, each
+   item pins `{ticket, ownedPaths, reason}`. Every candidate not selected goes
+   in `deferred` as `{ticket, reason}`, where `reason` is the typed value
+   `owned_paths_overlap` for a hard collision or `cap_full` when no slot
+   remains. When a hard collision comes from an in-flight ticket with no
+   parseable Owned Paths, name that ticket in the `summary` so the operator can
+   fix its description (WM-868).
    Do not stop accounting when the slots fill: mark every remaining candidate
    `cap_full`.
 
