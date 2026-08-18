@@ -203,6 +203,51 @@ describe("Chains list (WM-537)", () => {
     });
   });
 
+  test("States is a proportional bar, not wrapping badges (WM-826)", async () => {
+    const mixed = chain({
+      correlationId: "corr-mixed",
+      states: { FAILED: 1, COMPLETED: 2 },
+      runCount: 3,
+    });
+    await withApi(
+      { chains: async () => ({ chains: [...rows, mixed] }) },
+      async () => {
+        const view = renderChains();
+        await waitFor(() => {
+          expect(
+            view.container.querySelector('[data-chain-id="corr-mixed"]'),
+          ).toBeTruthy();
+        });
+        const row = view.container.querySelector(
+          '[data-chain-id="corr-mixed"]',
+        ) as HTMLElement;
+        const bar = row.querySelector('[role="img"]');
+        expect(bar).toBeTruthy();
+        expect(bar?.getAttribute("aria-label")).toBe("COMPLETED 2, FAILED 1");
+        expect(row.textContent).not.toMatch(/COMPLETED 2/);
+        expect(row.textContent).not.toMatch(/FAILED 1/);
+        expect(bar?.querySelectorAll("[data-state]")).toHaveLength(2);
+        expect(
+          (bar?.querySelector('[data-state="COMPLETED"]') as HTMLElement).style
+            .flexGrow,
+        ).toBe("2");
+        expect(
+          (bar?.querySelector('[data-state="FAILED"]') as HTMLElement).style
+            .flexGrow,
+        ).toBe("1");
+        expect(
+          view.container.querySelector('col[data-col="depth"]')?.className,
+        ).toContain("w-12");
+        expect(
+          view.container.querySelector('col[data-col="events"]')?.className,
+        ).toContain("w-12");
+        expect(
+          view.container.querySelector('col[data-col="runs"]')?.className,
+        ).toContain("w-12");
+      },
+    );
+  });
+
   test("renders compact single-line table with source icon and repo badges", async () => {
     await withApi({ chains: async () => ({ chains: rows }) }, async () => {
       const view = renderChains();

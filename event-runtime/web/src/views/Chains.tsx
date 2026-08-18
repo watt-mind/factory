@@ -34,7 +34,6 @@ import {
   RepoBadge,
   STATE_HUES,
   SourceIcon,
-  StateBadge,
   TableWindowFooter,
   Th,
   shortId,
@@ -77,6 +76,56 @@ const STATUS_HUES: Record<ChainStatus, string> = {
   "no runs": "var(--hue-idle)",
   other: "var(--hue-warn)",
 };
+
+const STATE_ORDER = Object.keys(STATE_HUES);
+
+const NARROW_COLS = new Set(["depth", "events", "runs"]);
+
+function chainStateSegments(
+  states: ChainListItem["states"],
+): { state: string; count: number }[] {
+  return STATE_ORDER.flatMap((state) => {
+    const count = states[state as RunState] ?? 0;
+    return count > 0 ? [{ state, count }] : [];
+  });
+}
+
+function ChainStateBar({
+  states,
+  runCount,
+}: {
+  states: ChainListItem["states"];
+  runCount: number;
+}) {
+  const parts = chainStateSegments(states);
+  if (runCount === 0 || parts.length === 0) {
+    return <span className="text-(--text-faint)">—</span>;
+  }
+  const summary = parts
+    .map(({ state, count }) => `${state} ${count}`)
+    .join(", ");
+  return (
+    <div
+      className="flex h-1.5 w-24 overflow-hidden rounded-full bg-(--surface-2)"
+      role="img"
+      aria-label={summary}
+      title={summary}
+    >
+      {parts.map(({ state, count }) => (
+        <span
+          key={state}
+          data-state={state}
+          className="h-full min-w-[2px]"
+          style={{
+            flexGrow: count,
+            flexBasis: 0,
+            background: STATE_HUES[state] ?? "var(--hue-idle)",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
 
 const CHAIN_FACETS: FilterFacets<ChainListItem> = {
   fields: {
@@ -328,6 +377,21 @@ export function Chains({
         }
       >
         <table className="w-full table-fixed border-separate border-spacing-0">
+          <colgroup>
+            {cols.map((column) => (
+              <col
+                key={column.key}
+                data-col={column.key}
+                className={
+                  NARROW_COLS.has(column.key)
+                    ? "w-12"
+                    : column.key === "states"
+                      ? "w-28"
+                      : undefined
+                }
+              />
+            ))}
+          </colgroup>
           <thead>
             <tr className="text-left text-[11px] text-(--text-faint)">
               {cols.map((column) => {
@@ -434,24 +498,11 @@ export function Chains({
                     </td>
                   )}
                   {show.has("states") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                      <div className="flex items-center gap-1">
-                        {Object.entries(chain.states).map(([state, count]) =>
-                          count ? (
-                            <StateBadge
-                              key={state}
-                              state={`${state} ${count}`}
-                              hues={{
-                                [`${state} ${count}`]: STATE_HUES[state],
-                              }}
-                              dot={false}
-                            />
-                          ) : null,
-                        )}
-                        {chain.runCount === 0 && (
-                          <span className="text-(--text-faint)">—</span>
-                        )}
-                      </div>
+                    <td className="border-b border-(--border) px-3 py-1.5">
+                      <ChainStateBar
+                        states={chain.states}
+                        runCount={chain.runCount}
+                      />
                     </td>
                   )}
                   {show.has("activity") && (
