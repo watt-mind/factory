@@ -405,6 +405,19 @@ function DurationCell({ r, now }: { r: RunListItem; now: number }) {
   return <span>{duration === null ? EMPTY : formatDuration(duration)}</span>;
 }
 
+/** Missing durations are not zero-length runs; keep them behind measured rows. */
+function measuredDurationsFirst(rows: RunListItem[], now: number) {
+  const measured: RunListItem[] = [];
+  const missing: RunListItem[] = [];
+  for (const row of rows) {
+    (runDurationSeconds(row, undefined, now) === null
+      ? missing
+      : measured
+    ).push(row);
+  }
+  return [...measured, ...missing];
+}
+
 /**
  * The sentence the row's `↳` / `→ N` arrows stand for (WM-702). The Run column
  * has room for the glyphs and nothing else; this is where they say what they
@@ -665,10 +678,18 @@ export function Runs({
     [tab, now],
   );
   const [display, setDisplay] = useDisplayOptions(displayConfig);
-  const sections = useMemo(
-    () => buildSections(visible, displayConfig, display),
-    [visible, displayConfig, display],
-  );
+  const sections = useMemo(() => {
+    const built = buildSections(visible, displayConfig, display);
+    if (display.sortBy !== "duration") return built;
+    return built.map((section) => ({
+      ...section,
+      rows: measuredDurationsFirst(section.rows, now),
+      subsections: section.subsections?.map((subsection) => ({
+        ...subsection,
+        rows: measuredDurationsFirst(subsection.rows, now),
+      })),
+    }));
+  }, [visible, displayConfig, display, now]);
   const flat = useMemo(
     () => flattenSections(sections, display.collapsed),
     [sections, display.collapsed],
@@ -1207,7 +1228,10 @@ export function Runs({
           </>
         }
       >
-        <Table className="w-full table-fixed border-separate border-spacing-0">
+        <Table
+          className="w-full table-fixed border-separate border-spacing-0"
+          style={{ minWidth: `${listCols.length * 112}px` }}
+        >
           <thead>
             <tr className="text-left">
               {listCols.map((c) => {

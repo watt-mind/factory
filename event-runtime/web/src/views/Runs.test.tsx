@@ -264,10 +264,11 @@ describe("Runs sortable columns (OPS-492)", () => {
       startedAt: "2026-08-18T12:00:30.000Z",
       updated_at: "2026-08-18T12:00:45.000Z",
     });
+    const missing = stubListItem("run_missing", "QUEUED");
 
     await withApi(
       {
-        runs: async () => ({ runs: [live, long, short] }),
+        runs: async () => ({ runs: [missing, live, long, short] }),
         status: async () => createStatusFixture(),
       },
       async () => {
@@ -278,7 +279,14 @@ describe("Runs sortable columns (OPS-492)", () => {
           Array.from(
             r.container.querySelectorAll("tbody tr td:first-child"),
           ).map((cell) => cell.getAttribute("title")),
-        ).toEqual(["run_short", "run_long", "run_live"]);
+        ).toEqual(["run_short", "run_long", "run_live", "run_missing"]);
+
+        fireEvent.click(r.getByRole("button", { name: /Duration/ }));
+        expect(
+          Array.from(
+            r.container.querySelectorAll("tbody tr td:first-child"),
+          ).map((cell) => cell.getAttribute("title")),
+        ).toEqual(["run_live", "run_long", "run_short", "run_missing"]);
       },
     );
   });
@@ -340,6 +348,9 @@ describe("Runs Duration column (WM-871)", () => {
         );
         expect(headers.indexOf("Duration")).toBe(
           headers.indexOf("Remaining") + 1,
+        );
+        expect(r.container.querySelector("table")?.style.minWidth).toBe(
+          `${headers.length * 112}px`,
         );
         expect(cellFor(r, "run_completed", "Duration").textContent).toBe(
           "2m 30s",
