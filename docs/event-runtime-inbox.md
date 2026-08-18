@@ -200,6 +200,8 @@ classification (which also has `const`, `string-array`, `json`): a decision is
 answered in seconds by a person, not authored as a payload. `json` in
 particular is excluded — if an agent needs a structured object from the
 operator, it should ask the two or three questions that object is made of.
+Every `answer` and `reject_proposal` option must have an applicable required
+`text` field, accounting for `whenOption` gating.
 Adding a kind is a schema bump plus a renderer case; the vocabulary is
 expected to grow slowly, if at all.
 
@@ -211,15 +213,18 @@ Every option carries exactly one `effect` from this closed set. The renderer
 does not know what an effect does; the API does, and applies it in the same
 transaction that stores the response.
 
-| Effect             | What the runtime does                                                                                                                                                                                          | Legal only when the item has            |
-| :----------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------- |
-| `authorise`        | Records the authorisation (§3.1) and emits a `factory.dispatch.requested` envelope for `refs.issue` on `refs.repo` with `humanDecision` in the payload (§5). The item resolves as `operator:authorised`.       | `refs.issue`, `refs.repo`, `refs.runId` |
-| `send_to_triage`   | Moves `refs.issue` to `Triage`, removes `ai:agent-ready`, comments the operator's fields (`tools/linear.mjs`). Resolves as `operator:triaged`.                                                                 | `refs.issue`                            |
-| `answer`           | Comments the operator's `text` field(s) on `refs.issue`, moves it `Blocked → Todo` (WM-287's "Answer" verb, unchanged). Resolves as `operator:answered`.                                                       | `refs.issue`                            |
-| `requeue`          | `POST /events/requeue` for `refs.eventSource`/`refs.eventId` (existing planner path). Resolves as `operator:requeued`.                                                                                         | `refs.eventSource`, `refs.eventId`      |
-| `approve_proposal` | `approveProposal(refs.proposalId)`; an expired proposal takes the existing SpecDiff re-plan path and the item stays open until that second approval — never auto-approve. Resolves as `operator:approved`.     | `refs.proposalId`                       |
-| `reject_proposal`  | `rejectProposal(refs.proposalId, reason)` with the operator's `text` field as the reason (required — the request validator enforces a required `text` field for this effect). Resolves as `operator:rejected`. | `refs.proposalId`                       |
-| `dismiss`          | Resolves the item as `operator:dismissed`, records the fields, touches nothing else. Every default template offers it; agents are told to offer it.                                                            | —                                       |
+| Effect             | What the runtime does                                                                                                                                                                                      | Legal only when the item has            |
+| :----------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------- |
+| `authorise`        | Records the authorisation (§3.1) and emits a `factory.dispatch.requested` envelope for `refs.issue` on `refs.repo` with `humanDecision` in the payload (§5). The item resolves as `operator:authorised`.   | `refs.issue`, `refs.repo`, `refs.runId` |
+| `send_to_triage`   | Moves `refs.issue` to `Triage`, removes `ai:agent-ready`, comments the operator's fields (`tools/linear.mjs`). Resolves as `operator:triaged`.                                                             | `refs.issue`                            |
+| `answer`           | Comments the operator's `text` field(s) on `refs.issue` (at least one applicable field is required), moves it `Blocked → Todo` (WM-287's "Answer" verb, unchanged). Resolves as `operator:answered`.       | `refs.issue`                            |
+| `requeue`          | `POST /events/requeue` for `refs.eventSource`/`refs.eventId` (existing planner path). Resolves as `operator:requeued`.                                                                                     | `refs.eventSource`, `refs.eventId`      |
+| `approve_proposal` | `approveProposal(refs.proposalId)`; an expired proposal takes the existing SpecDiff re-plan path and the item stays open until that second approval — never auto-approve. Resolves as `operator:approved`. | `refs.proposalId`                       |
+| `reject_proposal`  | `rejectProposal(refs.proposalId, reason)` with the operator's applicable required `text` field as the reason. Resolves as `operator:rejected`.                                                             | `refs.proposalId`                       |
+| `dismiss`          | Resolves the item as `operator:dismissed`, records the fields, touches nothing else. Every default template offers it; agents are told to offer it.                                                        | —                                       |
+
+For both `answer` and `reject_proposal`, the applicable required `text` field
+rule accounts for `whenOption` gating before the effect is offered.
 
 Effect legality is checked when the _request_ is created, not when the
 response arrives: an agent that offers `requeue` on an item with no event refs

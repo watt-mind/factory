@@ -108,6 +108,18 @@
           }
         }
       ]
+    },
+    {
+      "name": "answer-without-required-text",
+      "request": {
+        "schemaVersion": "factory.decision-request/v1",
+        "question": "What should unblock WM-716?",
+        "options": [{ "id": "answer", "label": "Answer", "effect": "answer" }]
+      },
+      "refs": { "issue": "WM-716" },
+      "requestValid": false,
+      "hash": "sha256:0d884a94bcedf4c4e03df2865afc0443df8de1c52f19802cd90020b2df46bfca",
+      "responses": []
     }
   ]
 }

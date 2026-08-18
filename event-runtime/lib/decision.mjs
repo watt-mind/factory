@@ -248,19 +248,18 @@ function checkRequest(request, { refs, checkEffectLegality }) {
     }
   }
 
-  for (const [index, option] of request.options.entries()) {
-    if (option.effect !== "reject_proposal") continue;
-    const reasonField = fields.some(
+  for (const option of request.options) {
+    if (option.effect !== "answer" && option.effect !== "reject_proposal")
+      continue;
+    const textField = fields.some(
       (field) =>
         field.kind === "text" &&
         field.required === true &&
         (field.whenOption === undefined ||
           field.whenOption.includes(option.id)),
     );
-    if (!reasonField) {
-      errors.push(
-        `$.options[${index}].effect: "reject_proposal" requires an applicable required text field`,
-      );
+    if (!textField) {
+      errors.push(`option_requires_text:${option.id}`);
     }
   }
 

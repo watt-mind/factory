@@ -116,12 +116,12 @@ function requestForEffect(effect) {
     };
   }
   const request = dismissRequest({ options: [option] });
-  if (effect === "reject_proposal") {
+  if (effect === "answer" || effect === "reject_proposal") {
     request.fields = [
       {
-        id: "reason",
+        id: "text",
         kind: "text",
-        label: "Reason",
+        label: "Text",
         required: true,
         whenOption: ["choice"],
       },
@@ -351,38 +351,42 @@ describe("validateDecisionRequest", () => {
     }
   });
 
-  test("reject_proposal requires an applicable required text field", () => {
-    expect(
-      validateDecisionRequest(requestForEffect("reject_proposal"), {
-        refs: ALL_REFS,
-      }).valid,
-    ).toBe(true);
+  test("answer and reject_proposal require an applicable required text field", () => {
+    for (const effect of ["answer", "reject_proposal"]) {
+      expect(
+        validateDecisionRequest(requestForEffect(effect), {
+          refs: ALL_REFS,
+        }).valid,
+      ).toBe(true);
 
-    const absent = requestForEffect("reject_proposal");
-    absent.fields = [];
-    expectInvalid(absent);
+      const absent = requestForEffect(effect);
+      absent.fields = [];
+      expect(
+        validateDecisionRequest(absent, { refs: ALL_REFS }).errors,
+      ).toContain("option_requires_text:choice");
 
-    const optional = requestForEffect("reject_proposal");
-    optional.fields[0].required = false;
-    expectInvalid(optional);
+      const optional = requestForEffect(effect);
+      optional.fields[0].required = false;
+      expectInvalid(optional);
 
-    const wrongKind = requestForEffect("reject_proposal");
-    wrongKind.fields[0] = {
-      id: "reason",
-      kind: "confirm",
-      label: "Reason",
-      required: true,
-    };
-    expectInvalid(wrongKind);
+      const wrongKind = requestForEffect(effect);
+      wrongKind.fields[0] = {
+        id: "text",
+        kind: "confirm",
+        label: "Text",
+        required: true,
+      };
+      expectInvalid(wrongKind);
 
-    const gatedElsewhere = requestForEffect("reject_proposal");
-    gatedElsewhere.options.push({
-      id: "other",
-      label: "Other",
-      effect: "dismiss",
-    });
-    gatedElsewhere.fields[0].whenOption = ["other"];
-    expectInvalid(gatedElsewhere);
+      const gatedElsewhere = requestForEffect(effect);
+      gatedElsewhere.options.push({
+        id: "other",
+        label: "Other",
+        effect: "dismiss",
+      });
+      gatedElsewhere.fields[0].whenOption = ["other"];
+      expectInvalid(gatedElsewhere);
+    }
   });
 
   test("enforces field count, ids, kind-specific keys, choices, and numeric relations", () => {
@@ -624,6 +628,14 @@ describe("decisionRequestHash", () => {
       expect(decisionRequestHash(fixture.request), fixture.name).toBe(
         fixture.hash,
       );
+      if (fixture.requestValid !== undefined) {
+        expect(
+          validateDecisionRequest(fixture.request, {
+            refs: fixture.refs ?? {},
+          }).valid,
+          `${fixture.name}/request`,
+        ).toBe(fixture.requestValid);
+      }
       for (const response of fixture.responses) {
         expect(
           validateDecisionResponse(response.value, fixture.request).valid,
