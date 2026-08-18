@@ -56,6 +56,22 @@ import {
 } from "../components/ui";
 import { health, WORKER_HUES } from "../workerHealth";
 
+/**
+ * Short display form of a worker id: `worker_<pid>_<hex>` → `worker_<hex>`
+ * (WM-552 follow-up). `shortId()` assumes a single-underscore `type_hexbody`
+ * shape (correct for run/event ids) and would keep the *pid* segment here,
+ * which collides for every worker spawned by the same supervisor process.
+ * Worker ids carry two underscores, so this keeps the trailing hash segment
+ * — the part that actually varies between workers — instead. Ids that don't
+ * match the `type_pid_hex` shape fall back to `shortId()` unchanged.
+ */
+export function shortWorkerId(id: string): string {
+  const parts = id.split("_");
+  if (parts.length < 3) return shortId(id);
+  const hex = parts[parts.length - 1];
+  return `${parts[0]}_${hex.length <= 8 ? hex : hex.slice(0, 8)}`;
+}
+
 export const WORKER_TABS = ["ALL", "LIVE", "STOPPED"] as const;
 export type WorkerTab = (typeof WORKER_TABS)[number];
 export type WorkerDisplayState = ReturnType<typeof health> | "draining";
@@ -1124,7 +1140,7 @@ export function Workers({
                   hues={WORKER_STATE_HUES}
                 />
                 <span className="mono truncate" title={sel.workerId}>
-                  {shortId(sel.workerId)}
+                  {shortWorkerId(sel.workerId)}
                 </span>
               </span>
             </nav>
@@ -1297,7 +1313,11 @@ export function Workers({
                 No adapters declared — this worker claims nothing.
               </div>
             ) : (
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Worker adapters">
+              <div
+                className="flex flex-wrap gap-1.5"
+                role="group"
+                aria-label="Worker adapters"
+              >
                 {sel.adapters.map((a) => (
                   <span
                     key={a}
@@ -1316,9 +1336,13 @@ export function Workers({
               run&apos;s placement constraints are matched against.
             </div>
             {Object.keys(sel.labels).length === 0 ? (
-              <div className="text-(--text-faint)">No placement labels declared.</div>
+              <div className="text-(--text-faint)">
+                No placement labels declared.
+              </div>
             ) : (
-              Object.entries(sel.labels).map(([key, value]) => <KV key={key} k={key} v={value} />)
+              Object.entries(sel.labels).map(([key, value]) => (
+                <KV key={key} k={key} v={value} />
+              ))
             )}
           </Section>
         </DetailPane>
