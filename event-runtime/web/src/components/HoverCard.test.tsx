@@ -675,6 +675,29 @@ describe("HoverCard", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  test("Shift+Tab from a card with no controls returns focus to the trigger", async () => {
+    const r = render(
+      <HoverCard
+        label="Agent triage-scan"
+        openDelayMs={0}
+        closeDelayMs={0}
+        trigger="triage-scan"
+      >
+        <span>card body</span>
+      </HoverCard>,
+    );
+    const trigger = triggerOf(r.container);
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+
+    const panel = await waitFor(() => r.getByRole("dialog"));
+    expect(document.activeElement).toBe(panel);
+
+    fireEvent.keyDown(panel, { key: "Tab", shiftKey: true });
+
+    expect(document.activeElement).toBe(trigger);
+  });
+
   test("Tab from a nested portal does not return focus to the trigger", async () => {
     const portalHost = document.createElement("div");
     document.body.appendChild(portalHost);
