@@ -4843,9 +4843,9 @@ describe("handoff verification gate (WM-718)", () => {
     `${OWNED}## Verification Command\n\n\`\`\`\n${cmd}\n\`\`\`\n`;
 
   beforeAll(() => {
-    factoryRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-factory-"));
-    repoDir = mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-repo-"));
-    wtRoot = mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-trees-"));
+    factoryRoot = tmpDir("evrt-handoff-factory-");
+    repoDir = tmpDir("evrt-handoff-repo-");
+    wtRoot = tmpDir("evrt-handoff-trees-");
     mkdirSync(path.join(repoDir, "bin"), { recursive: true });
     // A real git worktree with an `origin/develop` ref, so the gate can diff
     // merge-base..HEAD exactly as it does for a repo-owned worktree_up.
@@ -4989,10 +4989,8 @@ describe("handoff verification gate (WM-718)", () => {
       { fake: adapter },
       opts({
         dispatch: {
-          locksDir: mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-locks-")),
-          leasesDir: mkdtempSync(
-            path.join(os.tmpdir(), "evrt-handoff-leases-"),
-          ),
+          locksDir: tmpDir("evrt-handoff-locks-"),
+          leasesDir: tmpDir("evrt-handoff-leases-"),
           fetchTicket: () => ({
             identifier: spec.input.ticket,
             state: { name: "Todo" },

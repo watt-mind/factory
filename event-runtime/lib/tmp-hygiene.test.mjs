@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 import { withTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-tmp-hygiene-test-mjs";
 import { commandFixture } from "../test-support/command-fixture.mjs";
@@ -67,9 +73,7 @@ describe("temporary-directory test hygiene", () => {
     const fixture = commandFixture("some-caller-supplied-prefix-");
     try {
       const base = path.basename(fixture.root);
-      expect(TMP_PREFIXES.some((prefix) => base.startsWith(prefix))).toBe(
-        true,
-      );
+      expect(TMP_PREFIXES.some((prefix) => base.startsWith(prefix))).toBe(true);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }

@@ -958,7 +958,7 @@ describe("handoff verification helpers (WM-718)", () => {
   });
 
   test("changedFilesSince diffs merge-base(origin/<base>)..HEAD and reports an unusable tree instead of guessing", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-diff-"));
+    const dir = tmpDir("evrt-handoff-diff-");
     const git = (...args) => execFileSync("git", args, { cwd: dir });
     git("init", "-q", "-b", "develop");
     git("config", "user.email", "t@t");
@@ -980,7 +980,7 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(diff.baseRef).toBe("origin/develop");
     expect(diff.files).toEqual(["base.txt", "src/new.mjs"]);
 
-    const notGit = mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-nogit-"));
+    const notGit = tmpDir("evrt-handoff-nogit-");
     const none = changedFilesSince({ worktreePath: notGit, base: "develop" });
     expect(none.ok).toBe(false);
     expect(none.files).toBeNull();
@@ -1036,7 +1036,7 @@ describe("handoff verification helpers (WM-718)", () => {
   });
 
   test("policyOwnedPathsConformance defaults to advisory and only 'strict' tightens", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "evrt-handoff-policy-"));
+    const root = tmpDir("evrt-handoff-policy-");
     expect(policyOwnedPathsConformance(root)).toBe("advisory");
     mkdirSync(path.join(root, "config"));
     const file = path.join(root, "config", "policy.yaml");
