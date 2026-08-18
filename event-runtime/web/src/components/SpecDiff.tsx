@@ -167,7 +167,7 @@ export function SpecDiff({
         ))}
       </div>
       {linesBelow > 0 && (
-        <div className="pointer-events-none sticky bottom-0 -mt-10 flex h-10 items-end justify-center bg-linear-to-t from-(--surface-3) to-transparent px-3 pb-2 text-center text-[10px] text-(--text-faint)">
+        <div className="pointer-events-none sticky bottom-0 -mt-10 flex h-10 items-end justify-center bg-linear-to-t from-(--surface-3) to-transparent px-3 pb-2 text-center text-xs text-(--text-faint)">
           {`${linesBelow} more line${linesBelow === 1 ? "" : "s"} below`}
         </div>
       )}

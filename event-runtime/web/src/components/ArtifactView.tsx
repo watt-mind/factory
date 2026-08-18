@@ -23,7 +23,14 @@ import {
   type TableRow,
 } from "../lib/artifactView";
 import type { ArtifactTone, ArtifactView as ArtifactViewDoc } from "../types";
-import { DisclosureChevron, JsonBlock, JumpLink, StateBadge, Th } from "./ui";
+import {
+  DisclosureChevron,
+  JsonBlock,
+  JumpLink,
+  StateBadge,
+  Table,
+  Th,
+} from "./ui";
 
 // ---------------------------------------------------------------------------
 // Raw toggle persistence
@@ -189,7 +196,7 @@ function Value({
               {f.value.map((v, i) => (
                 <li
                   key={i}
-                  className="mono break-all py-px text-[11.5px] text-(--text-dim)"
+                  className="mono break-all py-px text-sm text-(--text-dim)"
                 >
                   {String(v)}
                 </li>
@@ -264,7 +271,7 @@ function ExpandedRow({
         colSpan={colSpan}
         className="border-b border-(--border) bg-(--surface-1) px-3 py-2 whitespace-normal"
       >
-        <div className="grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 text-[11.5px]">
+        <div className="grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 text-sm">
           {row.expand.map((cell) => (
             <Fragment key={cell.key}>
               <span className="truncate text-(--text-faint)" title={cell.key}>
@@ -392,14 +399,14 @@ function GroupRow({
               boxShadow: `0 0 0 3px color-mix(in oklch, ${hue} 18%, transparent)`,
             }}
           />
-          <span className="text-[11.5px] font-medium text-(--text)">
+          <span className="text-sm font-medium text-(--text)">
             {group.label}
           </span>
           <span className="tabular-nums text-[11px] text-(--text-faint)">
             {group.rows.length}
           </span>
           {collapsed && (
-            <span className="ml-auto pr-1 text-[10px] text-(--text-faint)">
+            <span className="ml-auto pr-1 text-xs text-(--text-faint)">
               collapsed
             </span>
           )}
@@ -442,9 +449,9 @@ function TableSection({
         <div className="text-[12px] text-(--text-faint)">None.</div>
       ) : (
         <div className="overflow-x-auto rounded-md border border-(--border)">
-          <table className="w-full border-separate border-spacing-0 text-[12px]">
+          <Table className="w-full border-separate border-spacing-0">
             <thead>
-              <tr className="text-left text-[11px] text-(--text-faint)">
+              <tr className="text-left">
                 {s.hasExpand && <Th label="" />}
                 {s.columns.map((c) => (
                   <Th key={c} label={c} />
@@ -484,7 +491,7 @@ function TableSection({
                 />
               )}
             </tbody>
-          </table>
+          </Table>
         </div>
       )}
     </section>
@@ -588,7 +595,7 @@ function SectionBlock({
           <SectionHeading label={s.label} />
           <pre
             data-language={s.language}
-            className="mono overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap"
+            className="mono overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-sm leading-relaxed whitespace-pre-wrap"
           >
             {s.text}
           </pre>

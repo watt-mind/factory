@@ -63,6 +63,7 @@ import {
   PROPOSAL_STATUS_HUES,
   GroupHeaderRow,
   Section,
+  Table,
   TableWindowFooter,
   StateBadge,
   Th,
@@ -1031,7 +1032,7 @@ export function Proposals({
         <ListPane
           chrome={
             <>
-              <h1 className="display mb-4 text-lg font-semibold">Proposals</h1>
+              <h1 className="display mb-4 text-h1 font-semibold">Proposals</h1>
               {context.kind === "inflight" && (
                 <ScopeCaption context={context} surface="fleet" />
               )}
@@ -1084,7 +1085,7 @@ export function Proposals({
                         )}
                         <span
                           aria-hidden="true"
-                          className="mono ml-1 text-(--text-faint) text-[10px] opacity-70"
+                          className="mono ml-1 text-(--text-faint) text-xs opacity-70"
                         >
                           {idx + 1}
                         </span>
@@ -1133,9 +1134,9 @@ export function Proposals({
             </>
           }
         >
-          <table className="w-full table-fixed border-separate border-spacing-0 max-sm:[&_th:nth-child(n+4)]:hidden max-sm:[&_td:nth-child(n+4)]:hidden">
+          <Table className="w-full table-fixed border-separate border-spacing-0 max-sm:[&_th:nth-child(n+4)]:hidden max-sm:[&_td:nth-child(n+4)]:hidden">
             <thead>
-              <tr className="text-left text-[11px] text-(--text-faint)">
+              <tr className="text-left">
                 {tab === "open" && (
                   <th className="sticky top-0 z-10 h-7 w-8 bg-(--surface-0) px-3 shadow-[inset_0_-1px_0_var(--border)]">
                     <input
@@ -1384,7 +1385,7 @@ export function Proposals({
                 />
               )}
             </tbody>
-          </table>
+          </Table>
         </ListPane>
       </div>
 
@@ -1766,7 +1767,7 @@ export function Proposals({
               ? "Approving…"
               : `Approve selected (${approvableSelected.length})`}
             <span
-              className="mono ml-1 text-[10px] text-(--text-faint)"
+              className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
             >
               A
@@ -1784,7 +1785,7 @@ export function Proposals({
           >
             Reject selected ({selectedIds.size})
             <span
-              className="mono ml-1 text-[10px] text-(--text-faint)"
+              className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
             >
               X

@@ -226,7 +226,7 @@ export function ApprovalSafetyCard({
               risk.caps.map((c) => (
                 <span
                   key={c}
-                  className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-[11.5px] text-(--text-dim)"
+                  className="rounded bg-(--surface-2) px-1.5 py-0.5 mono text-sm text-(--text-dim)"
                 >
                   {c}
                 </span>

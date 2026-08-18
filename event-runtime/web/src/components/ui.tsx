@@ -2,6 +2,7 @@ import {
   createContext,
   forwardRef,
   type ButtonHTMLAttributes,
+  type ComponentProps,
   type ReactNode,
   useContext,
   useEffect,
@@ -555,7 +556,7 @@ export function FilterInput<T = unknown, C = unknown>({
         {!value && (
           <kbd
             aria-hidden
-            className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-(--border) px-1 font-sans text-[10px] text-(--text-faint)"
+            className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-(--border) px-1 font-sans text-xs text-(--text-faint)"
           >
             /
           </kbd>
@@ -600,7 +601,7 @@ export function FilterInput<T = unknown, C = unknown>({
                     {s.label}
                   </span>
                 </span>
-                <span className="mono shrink-0 truncate text-[10px] text-(--text-faint)">
+                <span className="mono shrink-0 truncate text-xs text-(--text-faint)">
                   {s.kind === "facet" ? "facet" : s.field || s.description}
                 </span>
               </li>
@@ -717,7 +718,7 @@ export function PaneHeader({
       )}
       {/* Row 3: Utility Row (copy/share quiet text line) */}
       {utility != null && (
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-(--text-faint)">
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 text-xs text-(--text-faint)">
           {utility}
         </div>
       )}
@@ -725,7 +726,17 @@ export function PaneHeader({
   );
 }
 
-/** Pinned header chrome; the spec and payload scroll underneath (WM-209). */
+/** The shared data-table type contract: caption headers, body copy, mono data. */
+export function Table({ className = "", ...props }: ComponentProps<"table">) {
+  return (
+    <table
+      {...props}
+      className={`text-sm [&_thead]:text-xs [&_thead]:uppercase [&_thead]:text-(--text-faint) [&_td.mono]:text-sm ${className}`}
+    />
+  );
+}
+
+/** Pinned title, verb, and utility rows; the spec and payload scroll underneath (WM-209). */
 export function DetailPane({
   widthClass,
   title,
@@ -904,7 +915,7 @@ export function Th({
             {label}
             <span
               aria-hidden
-              className={`text-[9px] transition-opacity ${dir ? "opacity-100" : "opacity-0 group-hover/th:opacity-50"}`}
+              className={`text-xs transition-opacity ${dir ? "opacity-100" : "opacity-0 group-hover/th:opacity-50"}`}
             >
               {(dir ?? naturalDir ?? "asc") === "desc" ? "↓" : "↑"}
             </span>
@@ -995,7 +1006,7 @@ export function GroupHeaderRow({
             />
           )}
           <span
-            className={`font-medium ${sub ? "text-[11.5px] text-(--text-dim)" : "text-[12px] text-(--text)"}`}
+            className={`font-medium ${sub ? "text-sm text-(--text-dim)" : "text-sm text-(--text)"}`}
           >
             {section.label}
           </span>
@@ -1003,7 +1014,7 @@ export function GroupHeaderRow({
             {section.count}
           </span>
           {collapsed && section.count > 0 && (
-            <span className="ml-auto pr-1 text-[10px] text-(--text-faint)">
+            <span className="ml-auto pr-1 text-xs text-(--text-faint)">
               collapsed
             </span>
           )}
@@ -1397,7 +1408,7 @@ export function StatCard({
         {label}
       </div>
       <div
-        className={`display font-semibold tabular-nums ${compact ? "mt-0.5 text-lg" : "mt-1 text-xl"}`}
+        className={`display font-semibold tabular-nums ${compact ? "mt-0.5 text-h1" : "mt-1 text-h1"}`}
       >
         <span data-stat-value style={hue ? { color: hue } : undefined}>
           {value}
@@ -1405,11 +1416,7 @@ export function StatCard({
         {suffix}
       </div>
       {caption != null && (
-        <div
-          className={`${compact ? "text-[10px]" : "text-[11px]"} mt-0.5 text-(--text-faint)`}
-        >
-          {caption}
-        </div>
+        <div className="mt-0.5 text-xs text-(--text-faint)">{caption}</div>
       )}
     </div>
   );
@@ -1430,7 +1437,7 @@ export function StatTile({
     <>
       <div className="text-[11px] text-(--text-faint)">{label}</div>
       <div
-        className="display text-xl tabular-nums"
+        className="display text-h1 tabular-nums"
         style={hue ? { color: hue } : undefined}
       >
         {value}
@@ -1727,7 +1734,7 @@ export function JsonBlock({ value }: { value: unknown }) {
         bare
         type="button"
         onClick={copy}
-        className="absolute top-2 right-2 rounded border border-(--border) bg-(--surface-1) px-2 py-0.5 text-[10px] font-medium text-(--text-dim) opacity-0 transition-opacity group-hover:opacity-100 hover:bg-(--surface-2) hover:text-(--text)"
+        className="absolute top-2 right-2 rounded border border-(--border) bg-(--surface-1) px-2 py-0.5 text-xs font-medium text-(--text-dim) opacity-0 transition-opacity group-hover:opacity-100 hover:bg-(--surface-2) hover:text-(--text)"
       >
         {copied ? "Copied!" : "Copy"}
       </Button>
@@ -2326,7 +2333,7 @@ export function Tabs({
           aria-disabled={t.disabled || undefined}
           title={t.title}
           onClick={() => onSelect(t.id)}
-          className={`rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
+          className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
             active === t.id
               ? "bg-(--surface-3) text-(--text)"
               : t.disabled

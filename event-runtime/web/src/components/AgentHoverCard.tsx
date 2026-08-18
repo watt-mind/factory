@@ -124,14 +124,14 @@ export function AgentHoverCard({
                   {agent?.ref ?? agentRef}
                 </span>
                 {agent?.version !== undefined && (
-                  <span className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-[10px] text-(--text-dim)">
+                  <span className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-xs text-(--text-dim)">
                     v{agent.version}
                   </span>
                 )}
               </div>
               {agent?.promptFile && (
                 <div
-                  className="mt-0.5 mono text-[10px] text-(--text-faint) truncate"
+                  className="mt-0.5 mono text-xs text-(--text-faint) truncate"
                   title={agent.promptFile}
                 >
                   {agent.promptFile}
@@ -190,21 +190,21 @@ export function AgentHoverCard({
 
               {agent.eventTypes && agent.eventTypes.length > 0 && (
                 <div className="mt-2 pt-2 border-t border-(--border)">
-                  <div className="text-(--text-faint) text-[10px] mb-1 uppercase tracking-wide">
+                  <div className="text-(--text-faint) text-xs mb-1 uppercase tracking-wide">
                     Subscribed Events ({agent.eventTypes.length})
                   </div>
                   <div className="flex flex-wrap gap-1">
                     {agent.eventTypes.slice(0, 3).map((et) => (
                       <span
                         key={et.type}
-                        className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-[10px] text-(--text-dim) truncate max-w-[200px]"
+                        className="mono rounded bg-(--surface-2) px-1.5 py-0.5 text-xs text-(--text-dim) truncate max-w-[200px]"
                         title={et.type}
                       >
                         {et.type}
                       </span>
                     ))}
                     {agent.eventTypes.length > 3 && (
-                      <span className="mono text-[10px] text-(--text-faint) self-center">
+                      <span className="mono text-xs text-(--text-faint) self-center">
                         +{agent.eventTypes.length - 3} more
                       </span>
                     )}

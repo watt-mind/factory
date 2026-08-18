@@ -75,6 +75,7 @@ import {
   StateBadge,
   STATE_HUES,
   GroupHeaderRow,
+  Table,
   TableWindowFooter,
   Th,
   VerbError,
@@ -1061,7 +1062,7 @@ export function Runs({
       <ListPane
         chrome={
           <>
-            <h1 className="display mb-4 text-lg font-semibold">Runs</h1>
+            <h1 className="display mb-4 text-h1 font-semibold">Runs</h1>
 
             {/* `flex-wrap`: the token chips are a full-width item, so they take
             their own line under the tabs and the box instead of squeezing them. */}
@@ -1098,7 +1099,7 @@ export function Runs({
                       )}
                       <span
                         aria-hidden="true"
-                        className="mono ml-1 text-(--text-faint) text-[10px] opacity-70"
+                        className="mono ml-1 text-(--text-faint) text-xs opacity-70"
                       >
                         {idx + 1}
                       </span>
@@ -1126,9 +1127,9 @@ export function Runs({
           </>
         }
       >
-        <table className="w-full table-fixed border-separate border-spacing-0">
+        <Table className="w-full table-fixed border-separate border-spacing-0">
           <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+            <tr className="text-left">
               {listCols.map((c) => {
                 const sort = displayConfig.sorts.find(
                   (s) => s.column === c.key,
@@ -1363,7 +1364,7 @@ export function Runs({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
 
       {sel && (

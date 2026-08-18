@@ -356,7 +356,7 @@ export function DecisionCard({
                 boxShadow: chosen ? `inset 3px 0 ${hue}` : undefined,
               }}
             >
-              <span className="mono mt-0.5 text-[10px] text-(--text-faint)">
+              <span className="mono mt-0.5 text-xs text-(--text-faint)">
                 {index + 1}
               </span>
               <span className="min-w-0 flex-1">
@@ -375,7 +375,7 @@ export function DecisionCard({
                   </span>
                 </span>
                 {option.id === currentRequest.recommended && (
-                  <span className="ml-2 rounded bg-(--surface-3) px-1.5 py-0.5 text-[10px] text-(--accent)">
+                  <span className="ml-2 rounded bg-(--surface-3) px-1.5 py-0.5 text-xs text-(--accent)">
                     suggested
                   </span>
                 )}

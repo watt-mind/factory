@@ -108,7 +108,7 @@ export function Line({
 }) {
   return (
     <div
-      className="mono truncate text-[11.5px]"
+      className="mono truncate text-sm"
       style={{ color: dim ? "var(--text-faint)" : "var(--text-dim)" }}
     >
       {children}
@@ -133,7 +133,7 @@ export function EventTypeNode({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-1">
         <span
-          className="text-[10px] tracking-wide uppercase"
+          className="text-xs tracking-wide uppercase"
           style={{ color: NODE_STYLES.eventType.accent }}
         >
           event type
@@ -199,7 +199,7 @@ export function AgentNode({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-2">
         <span
-          className="text-[10px] tracking-wide uppercase"
+          className="text-xs tracking-wide uppercase"
           style={{ color: accent }}
         >
           {node.execution === "model"
@@ -262,7 +262,7 @@ export function TerminalNode({ data, selected }: NodeProps) {
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div
-        className="text-[10px] tracking-wide uppercase"
+        className="text-xs tracking-wide uppercase"
         style={{ color: "var(--text-faint)" }}
       >
         terminal
@@ -289,7 +289,7 @@ export function ProposalNode({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <div className="flex items-center justify-between gap-1">
         <span
-          className="text-[10px] tracking-wide uppercase font-semibold"
+          className="text-xs tracking-wide uppercase font-semibold"
           style={{ color: NODE_STYLES.proposal.accent }}
         >
           proposal

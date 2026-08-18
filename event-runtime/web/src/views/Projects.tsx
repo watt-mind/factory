@@ -35,6 +35,7 @@ import {
   ListEmpty,
   ListPane,
   Section,
+  Table,
   Th,
   VerbError,
   copyLink,
@@ -478,7 +479,7 @@ export function Projects({
       <ListPane
         chrome={
           <>
-            <h1 className="display mb-4 text-lg font-semibold">Projects</h1>
+            <h1 className="display mb-4 text-h1 font-semibold">Projects</h1>
             <ScopeCaption
               context={context}
               surface="registry"
@@ -533,7 +534,7 @@ export function Projects({
                     </span>
                     <span
                       aria-hidden="true"
-                      className="mono ml-1 text-(--text-faint) text-[10px] opacity-70"
+                      className="mono ml-1 text-(--text-faint) text-xs opacity-70"
                     >
                       {idx + 1}
                     </span>
@@ -550,12 +551,12 @@ export function Projects({
           </>
         }
       >
-        <table
+        <Table
           aria-label="Projects table"
           className="w-full min-w-[760px] border-separate border-spacing-0"
         >
           <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+            <tr className="text-left">
               {PROJECTS_SORT.columns.map((column) => {
                 const field = PROJECTS_SORT.sorts.find(
                   (candidate) => candidate.column === column.key,
@@ -619,11 +620,11 @@ export function Projects({
                       {r.reportOnly ? "Report Only" : "Dispatchable"}
                     </span>
                   </td>
-                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-dim)">
+                  <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
                     {r.base}
                     {r.deployBranch ? ` → ${r.deployBranch}` : ""}
                   </td>
-                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11px] text-(--text-faint)">
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-xs text-(--text-faint)">
                     {worktreeScripts(r) || (
                       <span className="text-(--text-faint)">—</span>
                     )}
@@ -641,7 +642,7 @@ export function Projects({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
 
       {sel && (
@@ -670,7 +671,7 @@ export function Projects({
                 GitHub
                 <span
                   aria-hidden="true"
-                  className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70"
+                  className="mono ml-1.5 text-(--text-faint) text-xs opacity-70"
                 >
                   g h
                 </span>
@@ -712,7 +713,7 @@ export function Projects({
                   Triage Scan
                   <span
                     aria-hidden="true"
-                    className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70"
+                    className="mono ml-1.5 text-(--text-faint) text-xs opacity-70"
                   >
                     d t
                   </span>
@@ -731,7 +732,7 @@ export function Projects({
                   Status Report
                   <span
                     aria-hidden="true"
-                    className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70"
+                    className="mono ml-1.5 text-(--text-faint) text-xs opacity-70"
                   >
                     d s
                   </span>
@@ -750,7 +751,7 @@ export function Projects({
                   Janitor Scan
                   <span
                     aria-hidden="true"
-                    className="mono ml-1.5 text-(--text-faint) text-[10px] opacity-70"
+                    className="mono ml-1.5 text-(--text-faint) text-xs opacity-70"
                   >
                     d j
                   </span>

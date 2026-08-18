@@ -376,7 +376,7 @@ export function ContextTabs({
           {goArmed && (
             <span
               aria-hidden="true"
-              className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-[10px] font-semibold text-(--accent)"
+              className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-xs font-semibold text-(--accent)"
             >
               0
             </span>
@@ -414,7 +414,7 @@ export function ContextTabs({
                 {goArmed && idx < 9 && (
                   <span
                     aria-hidden="true"
-                    className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-[10px] font-semibold text-(--accent)"
+                    className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-xs font-semibold text-(--accent)"
                   >
                     {idx + 1}
                   </span>
@@ -461,7 +461,7 @@ export function ContextTabs({
                   onFocus={() => setTabStopId(tabKey)}
                   title={`Run ${runId}`}
                 >
-                  <span className="opacity-70 text-[10px]" aria-hidden="true">
+                  <span className="opacity-70 text-xs" aria-hidden="true">
                     ▶
                   </span>
                   <span className="mono max-w-32 truncate">{runId}</span>
@@ -512,7 +512,7 @@ export function ContextTabs({
           {goArmed && (
             <span
               aria-hidden="true"
-              className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-[10px] font-semibold text-(--accent)"
+              className="mono ml-0.5 rounded bg-(--surface-2) px-1 text-xs font-semibold text-(--accent)"
             >
               i
             </span>

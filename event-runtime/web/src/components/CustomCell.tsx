@@ -53,11 +53,11 @@ export function CustomCell({ row, path }: { row: unknown; path: string }) {
 
   return (
     <td
-      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-[11.5px] text-(--text-dim)"
+      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
       title={title}
     >
       {isComplex ? (
-        <span className="mono rounded bg-(--surface-2) px-1 py-0.5 text-[10.5px] text-(--text-faint)">
+        <span className="mono rounded bg-(--surface-2) px-1 py-0.5 text-xs text-(--text-faint)">
           {text}
         </span>
       ) : typeof value === "boolean" ? (

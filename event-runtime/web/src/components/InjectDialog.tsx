@@ -1109,7 +1109,7 @@ export function InjectDialog({
               placeholder="JSON…"
               className={`${inputCls} resize-y leading-relaxed`}
             />
-            <div className="mt-0.5 flex items-center gap-1.5 text-[10px]">
+            <div className="mt-0.5 flex items-center gap-1.5 text-xs">
               <span
                 className="size-1.5 rounded-full"
                 style={{
@@ -1177,7 +1177,7 @@ export function InjectDialog({
             {f.name}
           </label>
           {f.required && (
-            <span className="text-[10px] text-(--text-faint)">required</span>
+            <span className="text-xs text-(--text-faint)">required</span>
           )}
           <span className="flex-1" />
           {f.kind === "string" && isAtField(f.name) && (
@@ -1185,7 +1185,7 @@ export function InjectDialog({
               bare
               type="button"
               onClick={() => setField(f.name, new Date().toISOString())}
-              className="rounded border border-(--border) px-1.5 py-0.5 text-[10px] text-(--text-dim) hover:bg-(--surface-2)"
+              className="rounded border border-(--border) px-1.5 py-0.5 text-xs text-(--text-dim) hover:bg-(--surface-2)"
               title="Write the current time as an ISO timestamp"
             >
               Now
@@ -1196,7 +1196,7 @@ export function InjectDialog({
               bare
               type="button"
               onClick={() => setField(f.name, triggerId(Date.now()))}
-              className="rounded border border-(--border) px-1.5 py-0.5 text-[10px] text-(--text-dim) hover:bg-(--surface-2)"
+              className="rounded border border-(--border) px-1.5 py-0.5 text-xs text-(--text-dim) hover:bg-(--surface-2)"
               title="Generate a fresh web-trigger id"
             >
               Generate
@@ -1204,7 +1204,7 @@ export function InjectDialog({
           )}
         </div>
         {f.description && (
-          <div className="mb-1 text-[10px] text-(--text-faint)">
+          <div className="mb-1 text-xs text-(--text-faint)">
             {f.description}
           </div>
         )}
@@ -1300,7 +1300,7 @@ export function InjectDialog({
 
             {filteredRecent.length > 0 && (
               <div className="pt-1 pb-1">
-                <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-(--text-faint)">
+                <div className="px-1 text-xs font-semibold uppercase tracking-wider text-(--text-faint)">
                   Recent
                 </div>
                 <div className="mt-1 space-y-1">
@@ -1339,14 +1339,14 @@ export function InjectDialog({
             {groupedTemplates.length > 0 && (
               <div className={filteredRecent.length > 0 ? "pt-1" : ""}>
                 {filteredRecent.length > 0 && (
-                  <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-(--text-faint)">
+                  <div className="px-1 pb-1 text-xs font-semibold uppercase tracking-wider text-(--text-faint)">
                     Templates
                   </div>
                 )}
                 <div className="space-y-2">
                   {groupedTemplates.map((group) => (
                     <div key={group.domain} data-template-domain={group.domain}>
-                      <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-(--text-faint)">
+                      <div className="px-1 pb-1 text-xs font-semibold uppercase tracking-wider text-(--text-faint)">
                         {group.domain}
                       </div>
                       <div className="space-y-1">

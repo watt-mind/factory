@@ -51,7 +51,7 @@ async function fetchTicketJourney(
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-24 rounded-md border border-(--border) bg-(--surface-0) px-3 py-2">
-      <div className="text-[10px] font-medium tracking-wide text-(--text-faint) uppercase">
+      <div className="text-xs font-medium tracking-wide text-(--text-faint) uppercase">
         {label}
       </div>
       <div className="mt-0.5 tabular-nums text-[13px] font-medium text-(--text)">
@@ -122,13 +122,13 @@ function TimelineRow({ item, last }: { item: TimelineItem; last: boolean }) {
           </div>
         </SourceLink>
         {item.detail && (
-          <div className="mt-0.5 break-words text-[11.5px] text-(--text-faint)">
+          <div className="mt-0.5 break-words text-sm text-(--text-faint)">
             {item.detail}
           </div>
         )}
       </div>
       <time
-        className="mono shrink-0 text-[10px] text-(--text-faint)"
+        className="mono shrink-0 text-xs text-(--text-faint)"
         dateTime={item.at}
         title={item.at}
       >
@@ -143,7 +143,7 @@ function TimelineRow({ item, last }: { item: TimelineItem; last: boolean }) {
 
   return (
     <li className="flex items-start gap-3" data-kind={item.kind}>
-      <div className="mono w-16 shrink-0 pt-0.5 text-right text-[10px] tabular-nums text-(--text-faint)">
+      <div className="mono w-16 shrink-0 pt-0.5 text-right text-xs tabular-nums text-(--text-faint)">
         {item.durationMs == null ? "" : `+${formatDuration(item.durationMs)}`}
       </div>
       {item.children?.length ? (
@@ -215,7 +215,7 @@ function TicketPicker({
   };
   return (
     <div className="mx-auto max-w-lg p-8">
-      <h1 className="display text-xl font-semibold">Ticket journey</h1>
+      <h1 className="display text-h1 font-semibold">Ticket journey</h1>
       <p className="mt-2 text-[13px] text-(--text-dim)">
         Enter a Linear ticket id to see its decisions, attempts, PR, CI, and
         merge history on one timeline.
@@ -283,7 +283,7 @@ function JourneyLayout({
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="display mono text-lg font-semibold text-(--text)">
+                <h1 className="display mono text-h1 font-semibold text-(--text)">
                   {heading}
                 </h1>
                 {state && <StateBadge state={state} />}

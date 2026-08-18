@@ -49,6 +49,7 @@ import {
   Section,
   StateBadge,
   StatCard,
+  Table,
   Th,
   copyLink,
   copyText,
@@ -758,7 +759,7 @@ export function Workers({
       <ListPane
         chrome={
           <>
-            <h1 className="display mb-4 text-lg font-semibold">Workers</h1>
+            <h1 className="display mb-4 text-h1 font-semibold">Workers</h1>
             <ScopeCaption context={context} surface="fleet" />
             {query.isSuccess && <CapacityBand capacity={capacity} />}
             <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -815,7 +816,7 @@ export function Workers({
                     )}
                     <span
                       aria-hidden="true"
-                      className="mono ml-1 text-(--text-faint) text-[10px] opacity-70"
+                      className="mono ml-1 text-(--text-faint) text-xs opacity-70"
                     >
                       {idx + 1}
                     </span>
@@ -860,9 +861,9 @@ export function Workers({
           </>
         }
       >
-        <table className="w-full border-separate border-spacing-0">
+        <Table className="w-full border-separate border-spacing-0">
           <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+            <tr className="text-left">
               {cols.map((c) => {
                 const sort = WORKERS_DISPLAY.sorts.find(
                   (s) => s.column === c.key,
@@ -1111,7 +1112,7 @@ export function Workers({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
 
       {sel && (

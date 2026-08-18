@@ -356,7 +356,7 @@ export function RunFull({
                   <span>← Runs</span>
                   <span
                     aria-hidden="true"
-                    className="mono ml-1 text-(--text-faint) text-[10px]"
+                    className="mono ml-1 text-(--text-faint) text-xs"
                   >
                     Esc
                   </span>
@@ -495,7 +495,7 @@ export function RunFull({
               <span>Open in tab</span>
               <span
                 aria-hidden="true"
-                className="mono ml-1 text-(--text-faint) text-[10px]"
+                className="mono ml-1 text-(--text-faint) text-xs"
               >
                 p
               </span>
@@ -630,7 +630,7 @@ export function RunFull({
                                   {e.type}
                                 </span>
                                 <span
-                                  className="mono shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase"
+                                  className="mono shrink-0 rounded px-1.5 py-0.5 text-xs font-medium tracking-wide uppercase"
                                   style={{
                                     background:
                                       e.status === "planned" ||

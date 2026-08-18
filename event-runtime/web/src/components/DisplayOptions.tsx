@@ -165,7 +165,7 @@ function ListboxSelect({
         className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-(--border) bg-(--surface-2) px-2 py-1 text-left text-[12px] text-(--text) outline-none hover:border-(--border-strong) focus:border-(--accent) disabled:cursor-not-allowed disabled:opacity-40"
       >
         <span className="truncate">{selected?.label}</span>
-        <span aria-hidden className="shrink-0 text-[9px] text-(--text-faint)">
+        <span aria-hidden className="shrink-0 text-xs text-(--text-faint)">
           ▼
         </span>
       </PrimitiveButton>
@@ -444,7 +444,7 @@ function DiscoveredFieldSuggestInput({
         >
           {indexedGroups.map((group) => (
             <li key={group.root} role="presentation">
-              <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-medium tracking-wide text-(--text-faint) uppercase">
+              <div className="px-2 pt-1.5 pb-0.5 text-xs font-medium tracking-wide text-(--text-faint) uppercase">
                 {group.root}
               </div>
               <ul role="group" aria-label={`${group.root} fields`}>
@@ -467,7 +467,7 @@ function DiscoveredFieldSuggestInput({
                     }`}
                   >
                     <div className="mono truncate">{field.path}</div>
-                    <div className="flex items-center justify-between gap-2 text-[10px] text-(--text-faint)">
+                    <div className="flex items-center justify-between gap-2 text-xs text-(--text-faint)">
                       <span className="truncate">{field.sampleValue}</span>
                       <span className="shrink-0">
                         {field.occurrenceCount}{" "}
@@ -483,7 +483,7 @@ function DiscoveredFieldSuggestInput({
       )}
 
       {showNotSeenHint && (
-        <div role="status" className="mt-1 text-[10px] text-(--text-faint)">
+        <div role="status" className="mt-1 text-xs text-(--text-faint)">
           not seen in loaded items; the column will show — until a row has it
         </div>
       )}
@@ -614,7 +614,7 @@ export function DisplayOptions<T>({
         Display
         <span
           aria-hidden="true"
-          className="mono ml-1 text-(--text-faint) text-[10px]"
+          className="mono ml-1 text-(--text-faint) text-xs"
         >
           v
         </span>
@@ -723,7 +723,7 @@ export function DisplayOptions<T>({
                       onClick={() =>
                         onChange((s) => ({ ...s, sortDir: direction }))
                       }
-                      className={`cursor-pointer rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+                      className={`cursor-pointer rounded px-1.5 py-0.5 text-xs transition-colors ${
                         pressed
                           ? "bg-(--surface-2) text-(--text) shadow-sm"
                           : "text-(--text-faint) hover:text-(--text-dim)"

@@ -113,7 +113,7 @@ export class ErrorBoundary extends Component<Props, State> {
           role="alert"
           className="max-w-lg border-l-2 border-(--hue-warn) pl-4"
         >
-          <h1 className="display text-lg font-semibold">{title}</h1>
+          <h1 className="display text-h1 font-semibold">{title}</h1>
           <p className="mt-2 text-sm text-(--text-dim)">{detail}</p>
           {!reloading && (
             <PrimitiveButton

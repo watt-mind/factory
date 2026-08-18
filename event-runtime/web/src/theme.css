@@ -1,6 +1,15 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter/opsz.css";
 
+/* The complete product type scale (webui spec §5.4). Keep component markup
+   semantic so a size change remains a token edit rather than a view sweep. */
+@theme {
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-h1: 18px;
+}
+
 /*
  * Three color tokens drive text, borders, and state hues (webui spec §5.1,
  * after Linear's redesign). Dark is the default. Light additionally declares
@@ -64,7 +73,7 @@ body {
   background: var(--surface-0);
   color: var(--text);
   font-family: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
-  font-size: 13px;
+  font-size: var(--text-base);
   font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
 }
@@ -81,7 +90,7 @@ body {
 
   .mono {
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 11.5px;
+    font-size: var(--text-sm);
   }
 
   /* Table banding is intentionally a semantic surface rather than a separate
@@ -108,7 +117,7 @@ body {
 
   [cmdk-group-heading] {
     padding: 8px 12px 2px;
-    font-size: 11px;
+    font-size: var(--text-xs);
     color: var(--text-faint);
   }
 }

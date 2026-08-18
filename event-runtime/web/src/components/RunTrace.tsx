@@ -229,7 +229,7 @@ export function MarkdownView({
             </TraceIconButton>
           </div>
         )}
-        <pre className="mono overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap text-(--text-dim)">
+        <pre className="mono overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-sm leading-relaxed whitespace-pre-wrap text-(--text-dim)">
           {text}
         </pre>
       </div>
@@ -500,7 +500,7 @@ function TimingWaterfall({
       : `${durationMs}ms`;
   return (
     <div
-      className="flex items-center gap-1.5 mono text-[10px] text-(--text-faint)"
+      className="flex items-center gap-1.5 mono text-xs text-(--text-faint)"
       title={`Execution time: ${durLabel}`}
     >
       <div className="h-1.5 w-12 overflow-hidden rounded-full bg-(--surface-2)">
@@ -657,7 +657,7 @@ function TraceBody({
         >
           {originatingCall?.input !== undefined && (
             <div className="mb-2">
-              <div className="mb-1 text-[10px] font-medium tracking-wide text-(--text-faint) uppercase">
+              <div className="mb-1 text-xs font-medium tracking-wide text-(--text-faint) uppercase">
                 Originating call · {originatingCall.name ?? "unknown tool"}
               </div>
               <JsonBlock value={originatingCall.input} />
@@ -1180,7 +1180,7 @@ export function RunTrace({
               <span>{followLive ? "Follow live" : "Follow live (paused)"}</span>
               <span
                 aria-hidden="true"
-                className="mono ml-0.5 text-(--text-faint) text-[10px]"
+                className="mono ml-0.5 text-(--text-faint) text-xs"
               >
                 l
               </span>
@@ -1247,7 +1247,7 @@ export function RunTrace({
                 )}
                 <span
                   aria-hidden="true"
-                  className="mono ml-1 text-(--text-faint) text-[10px] opacity-70"
+                  className="mono ml-1 text-(--text-faint) text-xs opacity-70"
                 >
                   {idx + 1}
                 </span>
@@ -1267,7 +1267,7 @@ export function RunTrace({
               >
                 <ArrowDownIcon aria-hidden="true" className="size-3" />
                 <span>next error</span>
-                <span className="mono text-[10px] opacity-75">
+                <span className="mono text-xs opacity-75">
                   {activeErrorIdx === null
                     ? 0
                     : (activeErrorIdx % counts.errors) + 1}
@@ -1275,7 +1275,7 @@ export function RunTrace({
                 </span>
                 <span
                   aria-hidden="true"
-                  className="mono ml-0.5 opacity-75 text-[10px]"
+                  className="mono ml-0.5 opacity-75 text-xs"
                 >
                   .
                 </span>
@@ -1299,14 +1299,14 @@ export function RunTrace({
               {!search && (
                 <kbd
                   aria-hidden="true"
-                  className="mono text-[9px] text-(--text-faint) border border-(--border) rounded px-1 bg-(--surface-1)"
+                  className="mono text-xs text-(--text-faint) border border-(--border) rounded px-1 bg-(--surface-1)"
                 >
                   /
                 </kbd>
               )}
               {search && (
                 <>
-                  <span className="mono text-[10px] text-(--text-faint)">
+                  <span className="mono text-xs text-(--text-faint)">
                     {searchMatches.length
                       ? `${(activeMatch % searchMatches.length) + 1}/${searchMatches.length}`
                       : "0"}
@@ -1369,7 +1369,7 @@ export function RunTrace({
               <span>{expandAll ? "Collapse details" : "Expand details"}</span>
               <span
                 aria-hidden="true"
-                className="mono text-[10px] text-(--text-faint)"
+                className="mono text-xs text-(--text-faint)"
               >
                 e
               </span>
@@ -1466,7 +1466,7 @@ export function RunTrace({
                 </span>
                 <span
                   aria-hidden="true"
-                  className="mono ml-0.5 text-white/75 text-[10px]"
+                  className="mono ml-0.5 text-white/75 text-xs"
                 >
                   G
                 </span>

@@ -35,6 +35,7 @@ import {
   ListPane,
   ModelCell,
   Section,
+  Table,
   Th,
   copyText,
   copyLink,
@@ -349,7 +350,7 @@ export function Agents({
         <ListPane
           chrome={
             <>
-              <h1 className="display mb-4 text-lg font-semibold">Agents</h1>
+              <h1 className="display mb-4 text-h1 font-semibold">Agents</h1>
               <ScopeCaption
                 context={context}
                 surface="registry"
@@ -388,7 +389,7 @@ export function Agents({
                       </span>
                       <span
                         aria-hidden="true"
-                        className="mono ml-1 text-[10px] text-(--text-faint) opacity-70"
+                        className="mono ml-1 text-xs text-(--text-faint) opacity-70"
                       >
                         {index + 1}
                       </span>
@@ -414,9 +415,9 @@ export function Agents({
             </>
           }
         >
-          <table className="w-full border-separate border-spacing-0">
+          <Table className="w-full border-separate border-spacing-0">
             <thead>
-              <tr className="text-left text-[11px] text-(--text-faint)">
+              <tr className="text-left">
                 {cols.map((c) => {
                   const sort = AGENTS_DISPLAY.sorts.find(
                     (s) => s.column === c.key,
@@ -630,7 +631,7 @@ export function Agents({
                 />
               )}
             </tbody>
-          </table>
+          </Table>
 
           <div className="mt-6">
             <Section title="Shared contracts">

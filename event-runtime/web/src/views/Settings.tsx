@@ -46,7 +46,7 @@ function ReloadChip({ reload }: { reload: ConfigReload }) {
     <span
       tabIndex={0}
       aria-label={`${reload}. ${RELOAD_HELP[reload]}`}
-      className="mono shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[10px] text-(--text-dim)"
+      className="mono shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-xs text-(--text-dim)"
       title={RELOAD_HELP[reload]}
     >
       {reload}
@@ -82,14 +82,14 @@ function SettingsRow({
           {value}
         </pre>
         {entry.note && (
-          <div className="mt-1 text-[10px] text-(--text-faint)">
+          <div className="mt-1 text-xs text-(--text-faint)">
             {entry.note}
           </div>
         )}
       </div>
       <div className="flex items-start gap-1.5 md:justify-end">
         <span
-          className="mono shrink-0 rounded border border-(--border) px-1.5 py-0.5 text-[10px] text-(--text-faint)"
+          className="mono shrink-0 rounded border border-(--border) px-1.5 py-0.5 text-xs text-(--text-faint)"
           title={section.source.file}
         >
           {sourceName(section.source.file)}
@@ -213,7 +213,7 @@ export function Settings({
                   className={`flex min-w-max items-center justify-between gap-3 rounded px-2.5 py-1.5 text-left text-[12px] md:min-w-0 ${selected?.id === section.id ? "bg-(--surface-3) font-medium text-(--text)" : "text-(--text-dim) hover:bg-(--surface-2)"}`}
                 >
                   <span>{section.title}</span>
-                  <span className="mono text-[10px] text-(--text-faint)">
+                  <span className="mono text-xs text-(--text-faint)">
                     {section.entries.length}
                   </span>
                 </button>
@@ -239,7 +239,7 @@ export function Settings({
                     >
                       {section.title}
                     </h2>
-                    <span className="mono text-[10px] text-(--text-faint)">
+                    <span className="mono text-xs text-(--text-faint)">
                       {section.source.file}
                     </span>
                   </div>

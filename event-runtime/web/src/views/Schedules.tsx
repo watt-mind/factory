@@ -27,6 +27,7 @@ import {
   ListEmpty,
   ListPane,
   Section,
+  Table,
   Th,
   VerbError,
   copyLink,
@@ -454,7 +455,7 @@ export function Schedules({
       <ListPane
         chrome={
           <>
-            <h1 className="display mb-4 text-lg font-semibold">Schedules</h1>
+            <h1 className="display mb-4 text-h1 font-semibold">Schedules</h1>
             <ScopeCaption
               context={context}
               surface="registry"
@@ -521,9 +522,9 @@ export function Schedules({
           role="tabpanel"
           aria-labelledby={`schedule-tab-${tab}`}
         >
-          <table className="w-full border-separate border-spacing-0">
+          <Table className="w-full border-separate border-spacing-0">
             <thead>
-              <tr className="text-left text-[11px] text-(--text-faint)">
+              <tr className="text-left">
                 {SCHEDULES_SORT.columns.map((column) => {
                   const field = SCHEDULES_SORT.sorts.find(
                     (candidate) => candidate.column === column.key,
@@ -691,7 +692,7 @@ export function Schedules({
                 />
               )}
             </tbody>
-          </table>
+          </Table>
           <div className="px-3 py-2 text-[11px] text-(--text-faint)">
             Enable or disable schedules in{" "}
             <code className="mono">event-runtime/schedules.json</code> (or via

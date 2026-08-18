@@ -70,7 +70,7 @@ export function SectionTitle({
       >
         <span
           aria-hidden="true"
-          className={`text-[9px] text-(--text-faint) transition-transform ${collapsed ? "" : "rotate-90"}`}
+          className={`text-xs text-(--text-faint) transition-transform ${collapsed ? "" : "rotate-90"}`}
         >
           ▶
         </span>
@@ -201,7 +201,7 @@ export function StatLegendItem({
         {value}
       </span>
       {factoryWide && (
-        <span className="text-[10px] text-(--text-faint)">(all)</span>
+        <span className="text-xs text-(--text-faint)">(all)</span>
       )}
     </PrimitiveButton>
   );
@@ -238,7 +238,7 @@ export function StageCard({
             {meta && <span>{meta}</span>}
             {headline != null && (
               <span
-                className="display text-xl font-semibold tabular-nums"
+                className="display text-h1 font-semibold tabular-nums"
                 style={headlineHue ? { color: headlineHue } : undefined}
               >
                 {headline}
@@ -617,7 +617,7 @@ function CategoryPill({ kind }: { kind: AnomalyKind }) {
     configuration: "configuration",
   };
   return (
-    <span className="shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-(--text-dim)">
+    <span className="shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-xs font-medium tracking-wide text-(--text-dim)">
       {labels[kind]}
     </span>
   );
@@ -1237,7 +1237,7 @@ export function Overview({
   return (
     <div className="h-full min-w-0 overflow-auto p-5">
       <div className="mb-4 flex items-baseline justify-between gap-3">
-        <h1 className="display text-lg font-semibold">Overview</h1>
+        <h1 className="display text-h1 font-semibold">Overview</h1>
       </div>
       <OverviewScopeNotice context={context} />
 
@@ -1697,7 +1697,7 @@ export function Overview({
                   className="flex w-full cursor-pointer items-center gap-3 rounded-md border border-(--border) bg-(--surface-1) px-3 py-1.5 text-left hover:bg-(--surface-2)"
                 >
                   <span
-                    className="display text-xl tabular-nums"
+                    className="display text-h1 tabular-nums"
                     style={
                       s.inbox.open > 0
                         ? { color: "var(--hue-warn)" }

@@ -12,6 +12,7 @@ import {
   ListEmpty,
   ListPane,
   StatCard,
+  Table,
   Th,
   copyText,
   shortId,
@@ -443,7 +444,7 @@ export function Artifacts({
           <>
             <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
               <div>
-                <h1 className="display text-lg font-semibold">Artifacts</h1>
+                <h1 className="display text-h1 font-semibold">Artifacts</h1>
                 <p className="mt-1 text-[12px] text-(--text-faint)">
                   Physical files in the content-addressed store. Project context
                   does not narrow this factory-wide inventory.
@@ -549,16 +550,14 @@ export function Artifacts({
           </>
         }
       >
-        <table
+        <Table
           role="grid"
           aria-label="Artifacts inventory"
-          className="w-full border-separate border-spacing-0 text-[12px]"
+          className="w-full border-separate border-spacing-0"
         >
           <thead role="rowgroup">
-            <tr
-              role="row"
-              className="text-left text-[11px] text-(--text-faint)"
-            >
+            <tr role="row" className="text-left">
+
               {columns.map((column) => {
                 const sort = ARTIFACTS_DISPLAY.sorts.find(
                   (field) => field.column === column.key,
@@ -753,7 +752,7 @@ export function Artifacts({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
 
       {selectedSha && (
@@ -993,7 +992,7 @@ export function Artifacts({
                   These bytes cannot be previewed as text. Download the file to
                   open it in a local viewer.
                 </p>
-                <dl className="mono mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[11.5px]">
+                <dl className="mono mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
                   <dt className="text-(--text-faint)">File</dt>
                   <dd className="break-all">{selectedName}</dd>
                   <dt className="text-(--text-faint)">Size</dt>
@@ -1030,7 +1029,7 @@ export function Artifacts({
                     <div
                       role="region"
                       aria-label="Artifact content"
-                      className="mono max-h-[60vh] overflow-auto rounded-md border border-(--border) bg-(--surface-0) py-2 text-[11.5px] leading-relaxed"
+                      className="mono max-h-[60vh] overflow-auto rounded-md border border-(--border) bg-(--surface-0) py-2 text-sm leading-relaxed"
                     >
                       {previewLines.map((line, index) => (
                         <div

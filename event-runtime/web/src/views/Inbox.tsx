@@ -46,6 +46,7 @@ import {
   ListPane,
   Section,
   StateBadge,
+  Table,
   Th,
   VerbError,
   notify,
@@ -737,7 +738,7 @@ export function Inbox({
         <ListPane
           chrome={
             <>
-              <h1 className="display mb-4 text-lg font-semibold">Inbox</h1>
+              <h1 className="display mb-4 text-h1 font-semibold">Inbox</h1>
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <div
                   className="flex min-w-0 flex-1 flex-wrap gap-1"
@@ -767,7 +768,7 @@ export function Inbox({
                       )}
                       <span
                         aria-hidden="true"
-                        className="mono ml-1 text-[10px] text-(--text-faint) opacity-70"
+                        className="mono ml-1 text-xs text-(--text-faint) opacity-70"
                       >
                         {idx + 1}
                       </span>
@@ -819,9 +820,9 @@ export function Inbox({
               Nothing waiting on you.
             </div>
           ) : (
-            <table className="w-full border-separate border-spacing-0">
+            <Table className="w-full border-separate border-spacing-0">
               <thead>
-                <tr className="text-left text-[11px] text-(--text-faint)">
+                <tr className="text-left">
                   {selectionEnabled && (
                     <th className="sticky top-0 z-10 h-7 w-8 bg-(--surface-0) px-3 shadow-[inset_0_-1px_0_var(--border)]">
                       <input
@@ -1022,7 +1023,7 @@ export function Inbox({
                   />
                 )}
               </tbody>
-            </table>
+            </Table>
           )}
         </ListPane>
       </div>
@@ -1253,7 +1254,7 @@ export function Inbox({
           >
             {bulkAcking ? "Acking…" : "Ack"}
             <span
-              className="mono ml-1 text-[10px] text-(--text-faint)"
+              className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
             >
               A
@@ -1267,7 +1268,7 @@ export function Inbox({
           >
             Resolve…
             <span
-              className="mono ml-1 text-[10px] text-(--text-faint)"
+              className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
             >
               X
@@ -1357,7 +1358,7 @@ function RefChips({
 }) {
   const r = item.refs;
   const chip =
-    "inline-block max-w-20 truncate rounded border border-(--border) bg-(--surface-1) px-1 align-bottom text-[10px]";
+    "inline-block max-w-20 truncate rounded border border-(--border) bg-(--surface-1) px-1 align-bottom text-xs";
   const chips: { key: string; description: string; node: React.ReactNode }[] =
     [];
   if (r.runId)

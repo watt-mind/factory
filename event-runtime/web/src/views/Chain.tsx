@@ -501,7 +501,7 @@ export function Chain({
                 : "absolute top-4 left-5 z-10 max-w-[60%]"
             }
           >
-            <h1 className="display text-lg font-semibold">Chain</h1>
+            <h1 className="display text-h1 font-semibold">Chain</h1>
             <div
               className="mono truncate text-[11px] text-(--text-faint)"
               title={correlationId}
@@ -1061,7 +1061,7 @@ function ChainTimelineList({
                 >
                   {time}
                 </span>
-                <span className="mono w-[52px] shrink-0 pt-0.5 text-right text-[10px] tabular-nums text-(--text-faint)">
+                <span className="mono w-[52px] shrink-0 pt-0.5 text-right text-xs tabular-nums text-(--text-faint)">
                   {row.kind === "next" ? "" : formatDelta(row.deltaMs)}
                 </span>
                 <span
@@ -1084,7 +1084,7 @@ function ChainTimelineList({
                       dot={false}
                     />
                   </span>
-                  <span className="min-w-0 flex-1 break-words text-[11.5px] leading-relaxed text-(--text-dim)">
+                  <span className="min-w-0 flex-1 break-words text-sm leading-relaxed text-(--text-dim)">
                     {row.actor && (
                       <span className="mono text-(--text)">{row.actor}</span>
                     )}

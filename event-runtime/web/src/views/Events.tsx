@@ -75,6 +75,7 @@ import {
   GroupHeaderRow,
   Section,
   StateBadge,
+  Table,
   TableWindowFooter,
   Th,
   VerbError,
@@ -938,7 +939,7 @@ export function Events({
       <ListPane
         chrome={
           <>
-            <h1 className="display mb-4 text-lg font-semibold">Events</h1>
+            <h1 className="display mb-4 text-h1 font-semibold">Events</h1>
             {context.kind === "inflight" && (
               <ScopeCaption context={context} surface="fleet" />
             )}
@@ -979,7 +980,7 @@ export function Events({
                     )}
                     <span
                       aria-hidden="true"
-                      className="mono ml-1 text-(--text-faint) text-[10px] opacity-70"
+                      className="mono ml-1 text-(--text-faint) text-xs opacity-70"
                     >
                       {idx + 1}
                     </span>
@@ -1112,9 +1113,9 @@ export function Events({
           </>
         }
       >
-        <table className="w-full table-fixed border-separate border-spacing-0">
+        <Table className="w-full table-fixed border-separate border-spacing-0">
           <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+            <tr className="text-left">
               {listCols.map((c) => {
                 const sort = displayConfig.sorts.find(
                   (s) => s.column === c.key,
@@ -1334,7 +1335,7 @@ export function Events({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
 
       {sel && (

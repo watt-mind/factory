@@ -107,7 +107,7 @@ function flowEdges(graph: {
       strokeWidth: 1.5,
       strokeDasharray: EDGE_STYLES[edge.kind].strokeDasharray,
     },
-    labelStyle: { fill: "var(--text-faint)", fontSize: 10 },
+    labelStyle: { fill: "var(--text-faint)", fontSize: "var(--text-xs)" },
     labelBgStyle: { fill: "var(--surface-0)" },
   }));
 }
@@ -433,7 +433,7 @@ export function Graph({
     <div className="flex h-full min-w-0">
       <div className="relative min-w-0 flex-1">
         <div className="absolute top-4 left-5 z-10 rounded-md bg-(--surface-0)/85 px-2.5 py-2 backdrop-blur-sm">
-          <h1 className="display text-lg font-semibold">Graph</h1>
+          <h1 className="display text-h1 font-semibold">Graph</h1>
           <div className="text-[11px] text-(--text-faint)">
             what this runtime can do — registered routes and recommendation
             edges

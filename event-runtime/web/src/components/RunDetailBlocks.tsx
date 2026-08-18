@@ -374,7 +374,7 @@ export function ArtifactRow({ a }: { a: ArtifactRef }) {
             </div>
           )}
           {content !== null && (
-            <pre className="mono max-h-64 overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap">
+            <pre className="mono max-h-64 overflow-auto rounded-md border border-(--border) bg-(--surface-0) p-2.5 text-sm leading-relaxed whitespace-pre-wrap">
               {content}
             </pre>
           )}
@@ -961,7 +961,7 @@ export function RunDetailBlocks({
                   <span className="flex w-[100px] shrink-0 items-center gap-1">
                     {jumped && (
                       <span
-                        className="shrink-0 text-[10px] text-(--text-faint)"
+                        className="shrink-0 text-xs text-(--text-faint)"
                         title={`from ${e.from_state ?? "·"}`}
                       >
                         {e.from_state ?? "·"}→
@@ -971,12 +971,12 @@ export function RunDetailBlocks({
                   </span>
                   {/* WM-145: wrap the reason; title includes it, not actor alone. */}
                   <span
-                    className="min-w-0 flex-1 break-words whitespace-pre-wrap text-[11.5px] leading-relaxed text-(--text-faint)"
+                    className="min-w-0 flex-1 break-words whitespace-pre-wrap text-sm leading-relaxed text-(--text-faint)"
                     title={e.reason ? `${e.actor} · ${e.reason}` : e.actor}
                   >
                     <ActorRef
                       actor={e.actor}
-                      className="text-[11.5px]"
+                      className="text-sm"
                       title={e.reason ? `${e.actor} · ${e.reason}` : e.actor}
                     />
                     {e.reason ? ` · ${e.reason}` : ""}

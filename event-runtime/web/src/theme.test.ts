@@ -2,6 +2,14 @@ import { describe, expect, test } from "bun:test";
 import fs from "fs";
 import path from "path";
 
+function sourceFiles(dir: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(dir, entry.name);
+    if (entry.isDirectory()) return sourceFiles(target);
+    return /\.(?:ts|tsx)$/.test(entry.name) ? [target] : [];
+  });
+}
+
 export interface OklchColor {
   l: number;
   c: number;
@@ -313,5 +321,33 @@ describe("Theme contrast & accessibility (OPS-447, OPS-338)", () => {
     expect(css).toMatch(
       /\.row-selected\s*\{[^}]*var\(--hue-accent\)\s+1[2-6]%,\s*transparent[^}]*inset\s+2px\s+0\s+0\s+var\(--hue-accent\)/s,
     );
+  });
+
+  test("type scale exposes four semantic tokens and source has no undersized/off-scale literals (WM-557)", () => {
+    const css = fs.readFileSync(path.resolve(__dirname, "theme.css"), "utf-8");
+    expect(css).toMatch(/--text-xs:\s*11px;/);
+    expect(css).toMatch(/--text-sm:\s*12px;/);
+    expect(css).toMatch(/--text-base:\s*13px;/);
+    expect(css).toMatch(/--text-h1:\s*18px;/);
+
+    const offenders = sourceFiles(__dirname).flatMap((file) => {
+      const source = fs.readFileSync(file, "utf-8");
+      const utilityOffenders =
+        source
+          .match(/text-\[\d+(?:\.\d+)?px\]/g)
+          ?.filter((literal) => {
+            const size = Number(literal.match(/[\d.]+/)?.[0]);
+            return size < 11 || size === 11.5;
+          })
+          .map((literal) => `${path.relative(__dirname, file)}: ${literal}`) ??
+        [];
+      const inlineOffenders = [
+        ...source.matchAll(/fontSize\s*:\s*["']?(\d+(?:\.\d+)?)/g),
+      ]
+        .filter((match) => Number(match[1]) < 11)
+        .map((match) => `${path.relative(__dirname, file)}: ${match[0]}`);
+      return [...utilityOffenders, ...inlineOffenders];
+    });
+    expect(offenders).toEqual([]);
   });
 });

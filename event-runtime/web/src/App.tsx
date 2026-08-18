@@ -1196,7 +1196,7 @@ export function GoPrefixHint({
                   >
                     <span className="mono text-(--text-dim)">{n.go}</span>{" "}
                     {n.label}{" "}
-                    <span className="rounded px-1 text-[10px] text-(--text-faint) ring-1 ring-inset ring-(--border)">
+                    <span className="rounded px-1 text-xs text-(--text-faint) ring-1 ring-inset ring-(--border)">
                       current
                     </span>
                   </span>

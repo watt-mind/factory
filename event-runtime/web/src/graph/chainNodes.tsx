@@ -48,7 +48,7 @@ export function ChainEventNode({ data, selected }: NodeProps) {
       )}
       <div className="flex items-center justify-between gap-1">
         <span
-          className="text-[10px] tracking-wide uppercase"
+          className="text-xs tracking-wide uppercase"
           style={{ color: accent }}
         >
           {node.root ? "origin event" : "event"} · {e.source}
@@ -88,7 +88,7 @@ export function ChainRunNode({ data, selected }: NodeProps) {
       )}
       <div className="flex items-center justify-between gap-1">
         <span
-          className="text-[10px] tracking-wide uppercase"
+          className="text-xs tracking-wide uppercase"
           style={{ color: accent }}
         >
           run{r.adapter ? ` · ${r.adapter}` : ""}

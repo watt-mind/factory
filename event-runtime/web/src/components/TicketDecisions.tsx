@@ -293,7 +293,7 @@ export function TicketDecisions({
               {decisions.map((d, i) => (
                 <li
                   key={`${d.proposalId ?? ""}:${d.runId ?? ""}:${d.event?.eventId ?? ""}:${i}`}
-                  className="py-1 text-[11.5px]"
+                  className="py-1 text-sm"
                 >
                   <div className="flex items-baseline gap-2">
                     <span
