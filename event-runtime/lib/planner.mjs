@@ -22,6 +22,7 @@ import {
   readPinManifestRequirements,
   ownedPathsClosureGaps,
 } from "../../orchestrator/owned-paths.mjs";
+import { openBlockers } from "../../orchestrator/blockers.mjs";
 import { loadForge } from "../../lib/forge/index.mjs";
 import { budgetExhausted } from "../../lib/spend.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
@@ -677,6 +678,14 @@ export function worktreeDispatchAutoEligibility(
   if (evidence.ticket.labels.includes("ai:escalated")) {
     return refusal("ticket_escalated", evidence);
   }
+
+  const blockers = openBlockers(ticket);
+  evidence.ticket.openBlockers = blockers;
+  if (blockers.length > 0) {
+    evidence.checks.ticket_unblocked = false;
+    return refusal(`ticket_blocked_by_open:${blockers.join(",")}`, evidence);
+  }
+  evidence.checks.ticket_unblocked = true;
 
   // Never let effectiveOwnedPaths' fail-closed `**` sentinel masquerade as a
   // real path during a sensitive-path check. Unknown ticket scope is its own
@@ -1341,7 +1350,12 @@ export function planEvent(
         ttlSeconds,
       });
       setEventStatus(db, event, "noop");
-      return { decision: "noop", proposal, reason: worktreeRefusal.reason };
+      return {
+        decision: "noop",
+        proposal,
+        reason: worktreeRefusal.reason,
+        evidence: worktreeEligibility.evidence,
+      };
     }
 
     // §7 tier 1 (OPS-228): a repository workspace resolves its ref to an

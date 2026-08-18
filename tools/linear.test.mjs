@@ -23,7 +23,9 @@ import {
   parsePositionalArgs,
   closureCheckMessages,
   __resetLinearReposCache,
+  ISSUE_FIELDS,
 } from "./linear.mjs";
+import { BLOCKING_RELATIONS_GQL } from "../orchestrator/blockers.mjs";
 
 const LABELS = [
   { id: "l-ready", name: "ai:agent-ready" },
@@ -144,6 +146,10 @@ test("formatTicket shows the fields the protocol acts on", () => {
   expect(text).toContain("Todo");
   expect(text).toContain("(unassigned)");
   expect(text).toContain("ai:agent-ready");
+});
+
+test("issue reads request the shared blocked-by relation fields", () => {
+  expect(ISSUE_FIELDS).toContain(BLOCKING_RELATIONS_GQL);
 });
 
 // ------------------------------------------------------------- comments ---

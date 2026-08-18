@@ -54,6 +54,7 @@ import {
   readPinManifestRequirements,
   formatOwnedPathClosureGaps,
 } from "../orchestrator/owned-paths.mjs";
+import { BLOCKING_RELATIONS_GQL } from "../orchestrator/blockers.mjs";
 
 // Every verb here is a fresh `bun` process, so nothing in module scope survives
 // between calls — and the protocol calls this constantly (claim, heartbeat
@@ -260,10 +261,11 @@ export function appendIssueDetail(currentDescription, rawDetail) {
 }
 
 // --------------------------------------------------------------- helpers ---
-const ISSUE_FIELDS = `id identifier title url description
+export const ISSUE_FIELDS = `id identifier title url description
   state{ id name type } assignee{ id name }
   team{ key } project{ name }
-  labels(first:30){ nodes{ id name } }`;
+  labels(first:30){ nodes{ id name } }
+  ${BLOCKING_RELATIONS_GQL}`;
 
 const COMMENTS_FIELDS = `id identifier title
   comments(first:50){ nodes{ id body createdAt user{ id name } } }`;

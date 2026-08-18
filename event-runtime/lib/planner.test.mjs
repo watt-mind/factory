@@ -866,6 +866,86 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  test("open Linear blockers refuse dispatch with blocker ids in evidence (WM-709)", () => {
+    withReposRoot(tierRepo, () => {
+      const openRelations = {
+        nodes: [
+          {
+            type: "blocks",
+            issue: { identifier: "WM-703", state: { type: "started" } },
+          },
+          {
+            type: "related",
+            issue: { identifier: "WM-701", state: { type: "started" } },
+          },
+          {
+            type: "blocks",
+            issue: { identifier: "WM-702", state: { type: "unstarted" } },
+          },
+        ],
+      };
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "dispatch-open-blockers",
+        correlationId: "dispatch-open-blockers",
+        payload: { repo: "tiered", ticket: "WM-704" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: {
+          ...tierDispatch(),
+          fetchTicket: () => ({
+            ...tierTicket(),
+            identifier: "WM-704",
+            inverseRelations: openRelations,
+          }),
+        },
+      });
+
+      expect(outcome).toMatchObject({
+        decision: "noop",
+        reason: "ticket_blocked_by_open:WM-703,WM-702",
+        evidence: {
+          checks: { ticket_unblocked: false },
+          ticket: { openBlockers: ["WM-703", "WM-702"] },
+        },
+      });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
+  test("finished blockers and non-blocking relations remain dispatchable (WM-709)", () => {
+    withReposRoot(tierRepo, () => {
+      const relations = [
+        {
+          type: "blocks",
+          issue: { identifier: "WM-700", state: { type: "completed" } },
+        },
+        {
+          type: "blocks",
+          issue: { identifier: "WM-701", state: { type: "canceled" } },
+        },
+        {
+          type: "duplicate",
+          issue: { identifier: "WM-702", state: { type: "started" } },
+        },
+      ];
+      for (const inverseRelations of [undefined, { nodes: relations }]) {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "WM-704" },
+          {
+            ...tierDispatch(),
+            fetchTicket: () => ({ ...tierTicket(), inverseRelations }),
+          },
+        );
+        expect(result.ok).toBe(true);
+        expect(result.evidence.checks.ticket_unblocked).toBe(true);
+        expect(result.evidence.ticket.openBlockers).toEqual([]);
+      }
+    });
+  });
+
   test("a label tier with no routed-adapter mapping fails closed (WM-694)", () => {
     withReposRoot(tierRepo, () => {
       const missingLight = {

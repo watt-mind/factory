@@ -50,6 +50,11 @@ RunSpec — and says nothing about tickets. An event run that finds its target
 ticket already assigned refuses with a typed NOOP (`ticket_assigned`); it
 never steals, and it never queues behind the holder.
 
+At plan time the runtime admits only a `Todo`, unassigned,
+`ai:agent-ready` ticket with no unfinished Linear `blocked by` relation.
+Open blockers refuse with `ticket_blocked_by_open:<ID>` (comma-separated for
+several); blockers in completed or canceled states do not gate dispatch.
+
 **Rejected: a ticket lock in the runtime database.** The runtime's ledger is
 authoritative for event facts only (§10); Linear is the authority for
 business work, and architecture.md §1 is explicit that two agents cannot
