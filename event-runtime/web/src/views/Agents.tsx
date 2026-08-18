@@ -644,7 +644,12 @@ export function Agents({
                         {routeModel(r)}
                       </span>{" "}
                       · idempotency {r.idempotencyScope}
-                      {r.proposalTtlSeconds != null ? ` · proposal TTL ${r.proposalTtlSeconds}s` : ""}
+                      {r.proposalTtlSeconds != null ? (
+                        <>
+                          {" · proposal TTL "}
+                          <span title={`${r.proposalTtlSeconds}s`}>{formatDuration(r.proposalTtlSeconds)}</span>
+                        </>
+                      ) : ""}
                     </div>
                   </a>
                 ))}
