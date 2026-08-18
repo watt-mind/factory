@@ -1556,6 +1556,40 @@ describe("Runs in-flight row height (WM-725)", () => {
       },
     );
   });
+
+  test("Remaining title includes the ISO deadline alongside the relative countdown (WM-747)", async () => {
+    const now = Date.now();
+    const deadlineAt = new Date(now + 9 * 60_000).toISOString();
+    const calm = stubListItem("run_iso_deadline", "RUNNING", {
+      startedAt: new Date(now - 2 * 60_000).toISOString(),
+      deadlineAt,
+      leaseExpiresAt: new Date(now + 11 * 60_000).toISOString(),
+      timeoutSeconds: 600,
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [calm] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        await waitFor(() =>
+          expect(
+            r.container.querySelector('td[title="run_iso_deadline"]'),
+          ).toBeTruthy(),
+        );
+
+        const remaining = cellFor(r, "run_iso_deadline", "Remaining");
+        const title =
+          remaining.querySelector("[title]")?.getAttribute("title") ?? "";
+        expect(title).toContain("timeout in");
+        expect(title).toContain(deadlineAt);
+        expect(remaining.textContent).toMatch(/\b9m\b/);
+        expect(remaining.textContent).not.toContain(deadlineAt);
+      },
+    );
+  });
 });
 
 // One-hop causation on the row (WM-702): `↳` when the run's own origin event

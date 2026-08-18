@@ -329,14 +329,27 @@ const leftLabel = (leftMs: number) => {
 
 type RemainingPart = { text: string; title: string; hue?: string };
 
+/** Relative phrasing plus the wall-clock ISO, matching other time-column titles (WM-747). */
+function remainingTitle(relative: string, iso?: string | null): string {
+  return iso ? `${relative} · ${iso}` : relative;
+}
+
 /**
  * The compact form of the detail pane's `BudgetClock`, on the same thresholds
  * so the two never disagree: the full phrasing moves to the cell's title.
  */
-function budgetPart(c: Clock, timeoutSeconds: number): RemainingPart | null {
+function budgetPart(
+  c: Clock,
+  timeoutSeconds: number,
+  iso?: string | null,
+): RemainingPart | null {
   if (c.kind === "off") return null;
   if (c.kind === "spent")
-    return { text: "spent", title: "budget spent", hue: "var(--hue-err)" };
+    return {
+      text: "spent",
+      title: remainingTitle("budget spent", iso),
+      hue: "var(--hue-err)",
+    };
   // The last tenth of the declared budget — long enough to notice on a long run.
   const hue =
     timeoutSeconds > 0 && c.leftMs <= timeoutSeconds * 100
@@ -344,7 +357,10 @@ function budgetPart(c: Clock, timeoutSeconds: number): RemainingPart | null {
       : undefined;
   return {
     text: leftLabel(c.leftMs),
-    title: `timeout in ${formatDuration(c.leftMs / 1000)}`,
+    title: remainingTitle(
+      `timeout in ${formatDuration(c.leftMs / 1000)}`,
+      iso,
+    ),
     hue,
   };
 }
@@ -354,14 +370,25 @@ function budgetPart(c: Clock, timeoutSeconds: number): RemainingPart | null {
  * expires after the budget and adds nothing to the row. It earns its half of
  * the line only when it is the deadline that will actually fire first.
  */
-function leasePart(c: Clock, budget: Clock | null): RemainingPart | null {
+function leasePart(
+  c: Clock,
+  budget: Clock | null,
+  iso?: string | null,
+): RemainingPart | null {
   if (c.kind === "off") return null;
   if (c.kind === "spent")
-    return { text: "lease due", title: "reap due", hue: "var(--hue-err)" };
+    return {
+      text: "lease due",
+      title: remainingTitle("reap due", iso),
+      hue: "var(--hue-err)",
+    };
   if (budget?.kind === "live" && c.leftMs >= budget.leftMs) return null;
   return {
     text: `lease ${leftLabel(c.leftMs)}`,
-    title: `reaped in ${formatDuration(c.leftMs / 1000)}`,
+    title: remainingTitle(
+      `reaped in ${formatDuration(c.leftMs / 1000)}`,
+      iso,
+    ),
     hue: budget?.kind === "spent" ? "var(--hue-warn)" : undefined,
   };
 }
@@ -377,8 +404,10 @@ function RemainingCell({ r, now }: { r: RunListItem; now: number }) {
   const deadline = remainingDeadline(r);
   const budgetClock = deadline ? clockTo(deadline, 0, now) : null;
   const leaseClock = leaseExpiresAt ? clockTo(leaseExpiresAt, 0, now) : null;
-  const budget = budgetClock && budgetPart(budgetClock, timeoutSeconds);
-  const lease = leaseClock && leasePart(leaseClock, budgetClock);
+  const budget =
+    budgetClock && budgetPart(budgetClock, timeoutSeconds, r.deadlineAt || deadline);
+  const lease =
+    leaseClock && leasePart(leaseClock, budgetClock, leaseExpiresAt);
   if (!budget && !lease) return <span>{EMPTY}</span>;
 
   return (
