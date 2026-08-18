@@ -54,6 +54,15 @@ const isWorkerHealthFilter = (
 ): value is WorkerHealthFilter =>
   value === "live" || value === "busy" || value === "stale";
 
+export function navIsCurrent(key: NavKey, view?: string): boolean {
+  return (
+    key === view ||
+    (key === "runs" && view === "run") ||
+    (key === "tickets" && view === "prs") ||
+    (key === "chains" && view === "chain")
+  );
+}
+
 type NavBadge = {
   count: number;
   hue: string;
@@ -647,23 +656,18 @@ export function App() {
           <div className="flex-1 px-2">
             {NAV.map((n) => {
               const badge = navBadges[n.key];
+              const current = navIsCurrent(n.key, view);
               return (
                 <button
                   key={n.key}
                   type="button"
-                  aria-current={
-                    view === n.key ||
-                    (n.key === "runs" && view === "run") ||
-                    (n.key === "tickets" && view === "prs")
-                      ? "page"
-                      : undefined
-                  }
+                  aria-current={current ? "page" : undefined}
                   aria-describedby={
                     badge.count > 0 ? `nav-badge-${n.key}` : undefined
                   }
                   onClick={() => navigate(n.key)}
                   className={`flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-[13px] ${
-                    view === n.key || (n.key === "runs" && view === "run")
+                    current
                       ? "bg-(--surface-3) font-medium text-(--text)"
                       : "text-(--text-dim) hover:bg-(--surface-2)"
                   }`}
@@ -828,9 +832,7 @@ export function App() {
             ) : view === "chains" ? (
               <Suspense
                 fallback={
-                  <div className="p-5 text-(--text-faint)">
-                    Loading chains…
-                  </div>
+                  <div className="p-5 text-(--text-faint)">Loading chains…</div>
                 }
               >
                 <Chains
@@ -1175,9 +1177,7 @@ export function GoPrefixHint({
             </span>
             <span className="text-(--text-dim)">then</span>
             {NAV.map((n) => {
-              const isCurrent =
-                n.key === currentView ||
-                (n.key === "runs" && currentView === "run");
+              const isCurrent = navIsCurrent(n.key, currentView);
               if (isCurrent) {
                 return (
                   <span

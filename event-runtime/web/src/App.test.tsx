@@ -9,7 +9,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { App } from "./App";
+import { App, navIsCurrent } from "./App";
 import { goPrefix } from "./goSequence";
 import { NAV } from "./nav";
 import type { StatusView } from "./types";
@@ -127,6 +127,13 @@ afterEach(() => {
 });
 
 describe("sidebar navigation accessibility", () => {
+  test("detail routes keep their parent navigation entry current", () => {
+    expect(navIsCurrent("runs", "run")).toBe(true);
+    expect(navIsCurrent("tickets", "prs")).toBe(true);
+    expect(navIsCurrent("chains", "chain")).toBe(true);
+    expect(navIsCurrent("events", "chain")).toBe(false);
+  });
+
   test("every NAV entry is a button whose accessible name is exactly its label", async () => {
     const { sidebar } = renderApp();
     // Wait for the status fixture to land so badge-carrying entries (Events 6,

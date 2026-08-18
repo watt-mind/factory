@@ -133,7 +133,9 @@ function maxChainDepth(events, runs) {
       parentEventByRun.set(run.runId, eventKey(run.eventSource, run.eventId));
     }
   }
-  const byId = new Map(events.map((event) => [eventKey(event.source, event.eventId), event]));
+  const byId = new Map(
+    events.map((event) => [eventKey(event.source, event.eventId), event]),
+  );
   const memo = new Map();
 
   function depth(key, visiting = new Set()) {
@@ -157,7 +159,8 @@ function maxChainDepth(events, runs) {
 }
 
 function chainSummary(view) {
-  const origin = view.events.find((event) => !event.causationId) ?? view.events[0];
+  const origin =
+    view.events.find((event) => !event.causationId) ?? view.events[0];
   const states = {};
   const repos = new Set();
   let lastActivityAt = origin.admittedAt;
@@ -190,7 +193,14 @@ function chainSummary(view) {
 }
 
 /** Recent chain instances, newest activity first. */
-export function chainsView(db, { windowMs = DEFAULT_WINDOW_MS, limit = DEFAULT_LIMIT, nowMs = Date.now() } = {}) {
+export function chainsView(
+  db,
+  {
+    windowMs = DEFAULT_WINDOW_MS,
+    limit = DEFAULT_LIMIT,
+    nowMs = Date.now(),
+  } = {},
+) {
   const cutoff = new Date(nowMs - windowMs).toISOString();
   // Find recent keys in SQL before expanding each complete trace. Run activity
   // counts even when the last event is old, including a causation parent run.
@@ -230,7 +240,11 @@ export function chainsView(db, { windowMs = DEFAULT_WINDOW_MS, limit = DEFAULT_L
     .map(({ chain_key }) => chainView(db, chain_key))
     .filter(Boolean)
     .map(chainSummary)
-    .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt) || a.correlationId.localeCompare(b.correlationId));
+    .sort(
+      (a, b) =>
+        b.lastActivityAt.localeCompare(a.lastActivityAt) ||
+        a.correlationId.localeCompare(b.correlationId),
+    );
 }
 
 function windowMs(value) {
@@ -246,16 +260,30 @@ function rowLimit(value) {
   if (value == null || value === "") return DEFAULT_LIMIT;
   if (!/^\d+$/.test(value)) return null;
   const result = Number(value);
-  return Number.isSafeInteger(result) && result >= 1 && result <= MAX_LIMIT ? result : null;
+  return Number.isSafeInteger(result) && result >= 1 && result <= MAX_LIMIT
+    ? result
+    : null;
 }
 
 export function handleChainApiRoute({ route, url, send, db, nowMs }) {
   if (route === "GET /chains") {
     const parsedWindow = windowMs(url.searchParams.get("window"));
     const parsedLimit = rowLimit(url.searchParams.get("limit"));
-    if (parsedWindow == null) return send(400, { error: "window must be a positive duration such as 24h" });
-    if (parsedLimit == null) return send(400, { error: `limit must be an integer from 1 to ${MAX_LIMIT}` });
-    return send(200, { chains: chainsView(db, { windowMs: parsedWindow, limit: parsedLimit, nowMs }) });
+    if (parsedWindow == null)
+      return send(400, {
+        error: "window must be a positive duration such as 24h",
+      });
+    if (parsedLimit == null)
+      return send(400, {
+        error: `limit must be an integer from 1 to ${MAX_LIMIT}`,
+      });
+    return send(200, {
+      chains: chainsView(db, {
+        windowMs: parsedWindow,
+        limit: parsedLimit,
+        nowMs,
+      }),
+    });
   }
   const match = url.pathname.match(/^\/chain\/([^/]+)$/);
   if (!match || route !== `GET ${url.pathname}`) return false;

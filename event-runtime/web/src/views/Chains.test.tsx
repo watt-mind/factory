@@ -2,7 +2,12 @@ import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
 import type { ChainListItem } from "../types";
-import { changeInput, renderWithClient, restoreApi, withApi } from "../test-render";
+import {
+  changeInput,
+  renderWithClient,
+  restoreApi,
+  withApi,
+} from "../test-render";
 import { Chains } from "./Chains";
 
 afterEach(() => {
@@ -11,9 +16,12 @@ afterEach(() => {
   localStorage.clear();
 });
 
-const at = (minute: number) => new Date(Date.UTC(2026, 7, 17, 12, minute)).toISOString();
+const at = (minute: number) =>
+  new Date(Date.UTC(2026, 7, 17, 12, minute)).toISOString();
 
-function chain(overrides: Partial<ChainListItem> & Pick<ChainListItem, "correlationId">): ChainListItem {
+function chain(
+  overrides: Partial<ChainListItem> & Pick<ChainListItem, "correlationId">,
+): ChainListItem {
   return {
     origin: {
       source: "github",
@@ -34,7 +42,11 @@ function chain(overrides: Partial<ChainListItem> & Pick<ChainListItem, "correlat
 }
 
 const rows = [
-  chain({ correlationId: "corr-active", states: { RUNNING: 1 }, lastActivityAt: at(30) }),
+  chain({
+    correlationId: "corr-active",
+    states: { RUNNING: 1 },
+    lastActivityAt: at(30),
+  }),
   chain({
     correlationId: "corr-failed",
     origin: {
@@ -66,7 +78,9 @@ const rows = [
   }),
 ];
 
-function renderChains(overrides: Partial<React.ComponentProps<typeof Chains>> = {}) {
+function renderChains(
+  overrides: Partial<React.ComponentProps<typeof Chains>> = {},
+) {
   return renderWithClient(
     <Chains
       context={{ kind: "all" }}
@@ -83,20 +97,36 @@ describe("Chains list (WM-537)", () => {
     await withApi({ chains: async () => ({ chains: rows }) }, async () => {
       const view = renderChains({ onOpenChain });
       await waitFor(() => {
-        expect(view.container.querySelector('[data-chain-id="corr-active"]')).toBeTruthy();
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeTruthy();
       });
-      expect(view.container.querySelector('[data-chain-id="corr-failed"]')).toBeTruthy();
-      expect(view.container.querySelector('[data-chain-id="single-root"]')).toBeNull();
-      expect(view.getByRole("button", { name: "Single-event roots 1" }).getAttribute("aria-pressed")).toBe("false");
+      expect(
+        view.container.querySelector('[data-chain-id="corr-failed"]'),
+      ).toBeTruthy();
+      expect(
+        view.container.querySelector('[data-chain-id="single-root"]'),
+      ).toBeNull();
+      expect(
+        view
+          .getByRole("button", { name: "Single-event roots 1" })
+          .getAttribute("aria-pressed"),
+      ).toBe("false");
       expect(view.getByText("active")).toBeTruthy();
       expect(view.getByText("failed")).toBeTruthy();
 
-      fireEvent.click(view.container.querySelector('[data-chain-id="corr-active"]')!);
+      fireEvent.click(
+        view.container.querySelector('[data-chain-id="corr-active"]')!,
+      );
       expect(onOpenChain).toHaveBeenCalledWith("corr-active");
 
-      fireEvent.click(view.getByRole("button", { name: "Single-event roots 1" }));
+      fireEvent.click(
+        view.getByRole("button", { name: "Single-event roots 1" }),
+      );
       await waitFor(() => {
-        expect(view.container.querySelector('[data-chain-id="single-root"]')).toBeTruthy();
+        expect(
+          view.container.querySelector('[data-chain-id="single-root"]'),
+        ).toBeTruthy();
       });
     });
   });
@@ -106,18 +136,69 @@ describe("Chains list (WM-537)", () => {
       const view = renderChains({ context: { kind: "repo", name: "factory" } });
       const input = view.getByLabelText("Filter chains") as HTMLInputElement;
       await waitFor(() => {
-        expect(view.container.querySelector('[data-chain-id="corr-active"]')).toBeTruthy();
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeTruthy();
       });
-      expect(view.container.querySelector('[data-chain-id="corr-failed"]')).toBeNull();
+      expect(
+        view.container.querySelector('[data-chain-id="corr-failed"]'),
+      ).toBeNull();
       expect(view.getByText(/Scoped to/)).toBeTruthy();
 
       changeInput(input, "is:failed");
       await waitFor(() => {
-        expect(view.container.querySelector('[data-chain-id="corr-active"]')).toBeNull();
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeNull();
       });
       changeInput(input, "state:running");
       await waitFor(() => {
-        expect(view.container.querySelector('[data-chain-id="corr-active"]')).toBeTruthy();
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeTruthy();
+      });
+    });
+  });
+
+  test("syncs query-derived state changes and never opens a filtered-out selection", async () => {
+    const onOpenChain = mock(() => {});
+    await withApi({ chains: async () => ({ chains: rows }) }, async () => {
+      const view = renderChains({ initialStateFilter: "running", onOpenChain });
+      const input = view.getByLabelText("Filter chains") as HTMLInputElement;
+      await waitFor(() => {
+        expect(input.value).toBe("state:running");
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeTruthy();
+      });
+
+      fireEvent.keyDown(document.body, { key: "j" });
+      expect(
+        view.container
+          .querySelector('[data-chain-id="corr-active"]')
+          ?.getAttribute("aria-selected"),
+      ).toBe("true");
+      changeInput(input, "type:does-not-exist");
+      await waitFor(() => {
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeNull();
+      });
+      fireEvent.keyDown(document.body, { key: "Enter" });
+      expect(onOpenChain).not.toHaveBeenCalled();
+
+      view.rerender(
+        <Chains
+          context={{ kind: "all" }}
+          initialStateFilter="failed"
+          onOpenChain={onOpenChain}
+        />,
+      );
+      await waitFor(() => {
+        expect(input.value).toBe("state:failed");
+        expect(
+          view.container.querySelector('[data-chain-id="corr-failed"]'),
+        ).toBeTruthy();
       });
     });
   });

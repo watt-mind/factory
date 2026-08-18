@@ -224,7 +224,8 @@ describe("GET /chain/:correlationId (WM-527)", () => {
 describe("GET /chains (WM-537)", () => {
   let s;
   const now = Date.UTC(2026, 7, 17, 14, 0);
-  const t = (hour, minute = 0) => new Date(Date.UTC(2026, 7, 17, hour, minute)).toISOString();
+  const t = (hour, minute = 0) =>
+    new Date(Date.UTC(2026, 7, 17, hour, minute)).toISOString();
 
   function insertRun(db, runId, state, at, eventId, repo) {
     db.query(
@@ -247,44 +248,65 @@ describe("GET /chains (WM-537)", () => {
 
   beforeAll(async () => {
     s = await makeServer({ now: () => now });
-    await s.client.replay(envelope({
-      eventId: "origin-alpha",
-      correlationId: "corr-alpha",
-      occurredAt: t(12),
-      payload: { repo: "factory" },
-    }));
-    insertRun(s.db, "run-alpha", "COMPLETED", t(12, 5), "origin-alpha", "factory");
-    expect(admitChainEvent(s.db, registry, envelope({
-      eventId: "alpha-child",
-      source: "chain",
-      type: "factory.child.requested",
-      correlationId: "corr-alpha",
-      causationId: "run-alpha",
-      occurredAt: t(12, 10),
-      payload: { repo: "factory" },
-    })).admitted).toBe(true);
+    await s.client.replay(
+      envelope({
+        eventId: "origin-alpha",
+        correlationId: "corr-alpha",
+        occurredAt: t(12),
+        payload: { repo: "factory" },
+      }),
+    );
+    insertRun(
+      s.db,
+      "run-alpha",
+      "COMPLETED",
+      t(12, 5),
+      "origin-alpha",
+      "factory",
+    );
+    expect(
+      admitChainEvent(
+        s.db,
+        registry,
+        envelope({
+          eventId: "alpha-child",
+          source: "chain",
+          type: "factory.child.requested",
+          correlationId: "corr-alpha",
+          causationId: "run-alpha",
+          occurredAt: t(12, 10),
+          payload: { repo: "factory" },
+        }),
+      ).admitted,
+    ).toBe(true);
 
-    await s.client.replay(envelope({
-      eventId: "origin-bravo",
-      correlationId: null,
-      type: "factory.bravo.requested",
-      occurredAt: t(12, 20),
-      payload: { repo: "bravo" },
-    }));
+    await s.client.replay(
+      envelope({
+        eventId: "origin-bravo",
+        correlationId: null,
+        type: "factory.bravo.requested",
+        occurredAt: t(12, 20),
+        payload: { repo: "bravo" },
+      }),
+    );
     insertRun(s.db, "run-bravo", "RUNNING", t(12, 25), "origin-bravo", "bravo");
 
-    await s.client.replay(envelope({
-      eventId: "single-charlie",
-      correlationId: null,
-      type: "factory.charlie.requested",
-      occurredAt: t(12, 30),
-      payload: { repo: "charlie" },
-    }));
-    await s.client.replay(envelope({
-      eventId: "outside-window",
-      correlationId: null,
-      occurredAt: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
-    }));
+    await s.client.replay(
+      envelope({
+        eventId: "single-charlie",
+        correlationId: null,
+        type: "factory.charlie.requested",
+        occurredAt: t(12, 30),
+        payload: { repo: "charlie" },
+      }),
+    );
+    await s.client.replay(
+      envelope({
+        eventId: "outside-window",
+        correlationId: null,
+        occurredAt: new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+      }),
+    );
     // Intake stamps admitted_at from the injected clock; make this fixture's
     // chronology explicit so the endpoint's window/order assertions are real.
     s.db.query(`UPDATE events SET admitted_at = occurred_at`).run();
@@ -300,7 +322,9 @@ describe("GET /chains (WM-537)", () => {
       "origin-bravo",
       "corr-alpha",
     ]);
-    expect(chains.find((chain) => chain.correlationId === "outside-window")).toBeUndefined();
+    expect(
+      chains.find((chain) => chain.correlationId === "outside-window"),
+    ).toBeUndefined();
     expect(chains[0]).toMatchObject({
       correlationId: "single-charlie",
       origin: {

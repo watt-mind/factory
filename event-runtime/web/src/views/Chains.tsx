@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
@@ -17,7 +17,13 @@ import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import type { FilterFacets } from "../filterQuery";
 import { matchesFilterQuery, parseFilterQuery } from "../filterQuery";
-import { tableTokens, useDisplayOptions, useListKeys, useNow, useTableWindow } from "../hooks";
+import {
+  tableTokens,
+  useDisplayOptions,
+  useListKeys,
+  useNow,
+  useTableWindow,
+} from "../hooks";
 import type { ChainListItem, RunState } from "../types";
 import {
   Ago,
@@ -32,13 +38,24 @@ import {
   shortId,
 } from "../components/ui";
 
-const ACTIVE_STATES = new Set<RunState>(["QUEUED", "LEASED", "RUNNING", "VERIFYING"]);
+const ACTIVE_STATES = new Set<RunState>([
+  "QUEUED",
+  "LEASED",
+  "RUNNING",
+  "VERIFYING",
+]);
 const FAILED_STATES = new Set<RunState>(["FAILED", "TIMED_OUT", "REFUSED"]);
 
-export type ChainStatus = "active" | "failed" | "completed" | "cancelled" | "no runs" | "other";
+export type ChainStatus =
+  "active" | "failed" | "completed" | "cancelled" | "no runs" | "other";
 
-export function chainHasState(chain: ChainListItem, states: ReadonlySet<RunState>): boolean {
-  return Object.entries(chain.states).some(([state, count]) => (count ?? 0) > 0 && states.has(state as RunState));
+export function chainHasState(
+  chain: ChainListItem,
+  states: ReadonlySet<RunState>,
+): boolean {
+  return Object.entries(chain.states).some(
+    ([state, count]) => (count ?? 0) > 0 && states.has(state as RunState),
+  );
 }
 
 export function chainStatus(chain: ChainListItem): ChainStatus {
@@ -88,7 +105,17 @@ const CHAIN_FACETS: FilterFacets<ChainListItem> = {
     ...Object.keys(chain.states),
   ],
   values: {
-    state: ["queued", "leased", "running", "verifying", "completed", "failed", "timed_out", "refused", "cancelled"],
+    state: [
+      "queued",
+      "leased",
+      "running",
+      "verifying",
+      "completed",
+      "failed",
+      "timed_out",
+      "refused",
+      "cancelled",
+    ],
   },
 };
 
@@ -103,18 +130,61 @@ const CHAINS_DISPLAY: DisplayConfig<ChainListItem> = {
       hue: STATUS_HUES,
     },
     { key: "type", label: "Origin type", get: (chain) => chain.origin.type },
-    { key: "repo", label: "Repo", get: (chain) => chain.repos.join(", ") || "unscoped" },
+    {
+      key: "repo",
+      label: "Repo",
+      get: (chain) => chain.repos.join(", ") || "unscoped",
+    },
   ],
   subGroups: ["type", "repo", "status"],
   sorts: [
-    { key: "origin", label: "Origin", get: (chain) => chain.origin.type, column: "origin" },
-    { key: "root", label: "Root event", get: (chain) => chain.origin.eventId, column: "root" },
-    { key: "depth", label: "Depth", get: (chain) => chain.maxDepth, defaultDir: "desc", column: "depth" },
-    { key: "events", label: "Events", get: (chain) => chain.eventCount, defaultDir: "desc", column: "events" },
-    { key: "runs", label: "Runs", get: (chain) => chain.runCount, defaultDir: "desc", column: "runs" },
+    {
+      key: "origin",
+      label: "Origin",
+      get: (chain) => chain.origin.type,
+      column: "origin",
+    },
+    {
+      key: "root",
+      label: "Root event",
+      get: (chain) => chain.origin.eventId,
+      column: "root",
+    },
+    {
+      key: "depth",
+      label: "Depth",
+      get: (chain) => chain.maxDepth,
+      defaultDir: "desc",
+      column: "depth",
+    },
+    {
+      key: "events",
+      label: "Events",
+      get: (chain) => chain.eventCount,
+      defaultDir: "desc",
+      column: "events",
+    },
+    {
+      key: "runs",
+      label: "Runs",
+      get: (chain) => chain.runCount,
+      defaultDir: "desc",
+      column: "runs",
+    },
     { key: "status", label: "States", get: chainStatus, column: "states" },
-    { key: "activity", label: "Last activity", get: (chain) => chain.lastActivityAt, defaultDir: "desc", column: "activity" },
-    { key: "repo", label: "Repos", get: (chain) => chain.repos.join(", "), column: "repos" },
+    {
+      key: "activity",
+      label: "Last activity",
+      get: (chain) => chain.lastActivityAt,
+      defaultDir: "desc",
+      column: "activity",
+    },
+    {
+      key: "repo",
+      label: "Repos",
+      get: (chain) => chain.repos.join(", "),
+      column: "repos",
+    },
   ],
   columns: [
     { key: "origin", label: "Origin", always: true },
@@ -139,28 +209,41 @@ export function Chains({
   onOpenChain: (correlationId: string) => void;
 }) {
   const now = useNow();
-  const [filter, setFilter] = useState(() => initialStateFilter ? `state:${initialStateFilter}` : "");
+  const [filter, setFilter] = useState(() =>
+    initialStateFilter ? `state:${initialStateFilter}` : "",
+  );
   const [showSingles, setShowSingles] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  useEffect(() => {
+    setFilter(initialStateFilter ? `state:${initialStateFilter}` : "");
+  }, [initialStateFilter]);
   const list = useQuery({
     queryKey: ["chains", "24h", 100],
     queryFn: () => api.chains("24h", 100),
     refetchInterval: 3000,
   });
-  const parsed = useMemo(() => parseFilterQuery(filter, CHAIN_FACETS), [filter]);
+  const parsed = useMemo(
+    () => parseFilterQuery(filter, CHAIN_FACETS),
+    [filter],
+  );
   const scoped = useMemo(
-    () => (list.data?.chains ?? []).filter((chain) =>
-      matchesRepo(chain.repos, context) &&
-      (context.kind !== "inflight" || chainHasState(chain, ACTIVE_STATES)),
-    ),
+    () =>
+      (list.data?.chains ?? []).filter(
+        (chain) =>
+          matchesRepo(chain.repos, context) &&
+          (context.kind !== "inflight" || chainHasState(chain, ACTIVE_STATES)),
+      ),
     [list.data, context],
   );
   const withoutSingles = useMemo(
-    () => showSingles ? scoped : scoped.filter((chain) => !chain.single),
+    () => (showSingles ? scoped : scoped.filter((chain) => !chain.single)),
     [scoped, showSingles],
   );
   const visible = useMemo(
-    () => withoutSingles.filter((chain) => matchesFilterQuery(chain, parsed, CHAIN_FACETS, undefined)),
+    () =>
+      withoutSingles.filter((chain) =>
+        matchesFilterQuery(chain, parsed, CHAIN_FACETS, undefined),
+      ),
     [withoutSingles, parsed],
   );
   const [display, setDisplay] = useDisplayOptions(CHAINS_DISPLAY);
@@ -168,7 +251,10 @@ export function Chains({
     () => buildSections(visible, CHAINS_DISPLAY, display),
     [visible, display],
   );
-  const flat = useMemo(() => flattenSections(sections, display.collapsed), [sections, display.collapsed]);
+  const flat = useMemo(
+    () => flattenSections(sections, display.collapsed),
+    [sections, display.collapsed],
+  );
   const cols = visibleColumns(CHAINS_DISPLAY, display);
   const show = useMemo(() => new Set(cols.map((column) => column.key)), [cols]);
   const tokens = tableTokens(sections, display.collapsed, grouped(display));
@@ -178,13 +264,15 @@ export function Chains({
     (chain) => chain.correlationId,
     JSON.stringify([filter, showSingles, context, display]),
   );
-  const selectedIndex = flat.findIndex((chain) => chain.correlationId === selectedId);
+  const selectedIndex = flat.findIndex(
+    (chain) => chain.correlationId === selectedId,
+  );
   useListKeys({
     count: flat.length,
     selected: selectedIndex,
     onSelect: (index) => setSelectedId(flat[index]?.correlationId ?? null),
-    onOpen: () => selectedId && onOpenChain(selectedId),
-    onClose: () => filter ? setFilter("") : setSelectedId(null),
+    onOpen: () => selectedIndex >= 0 && selectedId && onOpenChain(selectedId),
+    onClose: () => (filter ? setFilter("") : setSelectedId(null)),
   });
 
   const hiddenSingles = scoped.filter((chain) => chain.single).length;
@@ -194,11 +282,13 @@ export function Chains({
         <>
           <h1 className="display mb-1 text-lg font-semibold">Chains</h1>
           <p className="mb-3 text-[11px] text-(--text-faint)">
-            Correlated event and run journeys with activity in the last 24 hours.
+            Correlated event and run journeys with activity in the last 24
+            hours.
           </p>
           {context.kind === "repo" && (
             <p className="mb-3 text-[11px] text-(--text-faint)">
-              Scoped to <span className="mono">{context.name}</span> — only chains naming this repo.
+              Scoped to <span className="mono">{context.name}</span> — only
+              chains naming this repo.
             </p>
           )}
           <div className="flex flex-wrap items-center gap-2">
@@ -207,13 +297,20 @@ export function Chains({
               aria-pressed={showSingles}
               onClick={() => setShowSingles((value) => !value)}
               className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
-                showSingles ? "bg-(--surface-3) text-(--text)" : "text-(--text-faint) hover:bg-(--surface-1)"
+                showSingles
+                  ? "bg-(--surface-3) text-(--text)"
+                  : "text-(--text-faint) hover:bg-(--surface-1)"
               }`}
             >
               Single-event roots{hiddenSingles > 0 ? ` ${hiddenSingles}` : ""}
             </button>
             <span className="ml-auto">
-              <DisplayOptions config={CHAINS_DISPLAY} state={display} onChange={setDisplay} rows={scoped} />
+              <DisplayOptions
+                config={CHAINS_DISPLAY}
+                state={display}
+                onChange={setDisplay}
+                rows={scoped}
+              />
             </span>
             <FilterInput
               value={filter}
@@ -231,18 +328,35 @@ export function Chains({
         <thead>
           <tr className="text-left text-[11px] text-(--text-faint)">
             {cols.map((column) => {
-              const sort = CHAINS_DISPLAY.sorts.find((item) => item.column === column.key);
-              const isCustom = column.isCustom || column.key.startsWith("custom:");
+              const sort = CHAINS_DISPLAY.sorts.find(
+                (item) => item.column === column.key,
+              );
+              const isCustom =
+                column.isCustom || column.key.startsWith("custom:");
               const path = column.key.replace(/^custom:/, "");
-              const current = isCustom ? display.sortBy === column.key : sort && display.sortBy === sort.key;
+              const current = isCustom
+                ? display.sortBy === column.key
+                : sort && display.sortBy === sort.key;
               return (
                 <Th
                   key={column.key}
                   label={column.label}
                   dir={current ? display.sortDir : null}
                   naturalDir={sort?.defaultDir ?? "asc"}
-                  onSort={sort || isCustom ? () => setDisplay((state) => cycleColumnSort(CHAINS_DISPLAY, state, column.key)) : undefined}
-                  onRemove={isCustom ? () => setDisplay((state) => removeCustomColumn(state, path)) : undefined}
+                  onSort={
+                    sort || isCustom
+                      ? () =>
+                          setDisplay((state) =>
+                            cycleColumnSort(CHAINS_DISPLAY, state, column.key),
+                          )
+                      : undefined
+                  }
+                  onRemove={
+                    isCustom
+                      ? () =>
+                          setDisplay((state) => removeCustomColumn(state, path))
+                      : undefined
+                  }
                 />
               );
             })}
@@ -258,7 +372,9 @@ export function Chains({
                   colSpan={cols.length}
                   section={section}
                   collapsed={display.collapsed.includes(section.key)}
-                  onToggle={() => setDisplay((state) => toggleCollapsed(state, section.key))}
+                  onToggle={() =>
+                    setDisplay((state) => toggleCollapsed(state, section.key))
+                  }
                   sub={sub}
                 />
               );
@@ -274,36 +390,94 @@ export function Chains({
                 className={`cursor-pointer hover:bg-(--surface-1) ${selected ? "row-selected" : ""}`}
               >
                 <td className="max-w-56 border-b border-(--border) px-3 py-1.5">
-                  <div className="truncate text-(--text-dim)" title={chain.origin.type}>{chain.origin.type}</div>
-                  <div className="mono truncate text-[10px] text-(--text-faint)" title={chain.origin.source}>{chain.origin.source}</div>
+                  <div
+                    className="truncate text-(--text-dim)"
+                    title={chain.origin.type}
+                  >
+                    {chain.origin.type}
+                  </div>
+                  <div
+                    className="mono truncate text-[10px] text-(--text-faint)"
+                    title={chain.origin.source}
+                  >
+                    {chain.origin.source}
+                  </div>
                 </td>
                 {show.has("root") && (
-                  <td className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5" title={chain.origin.eventId}>
+                  <td
+                    className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5"
+                    title={chain.origin.eventId}
+                  >
                     {shortId(chain.origin.eventId)}
                   </td>
                 )}
-                {show.has("depth") && <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">{chain.maxDepth}</td>}
-                {show.has("events") && <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">{chain.eventCount}</td>}
-                {show.has("runs") && <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">{chain.runCount}</td>}
+                {show.has("depth") && (
+                  <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    {chain.maxDepth}
+                  </td>
+                )}
+                {show.has("events") && (
+                  <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    {chain.eventCount}
+                  </td>
+                )}
+                {show.has("runs") && (
+                  <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    {chain.runCount}
+                  </td>
+                )}
                 {show.has("states") && (
                   <td className="border-b border-(--border) px-3 py-1.5">
                     <div className="flex flex-wrap gap-1">
                       {Object.entries(chain.states).map(([state, count]) =>
-                        count ? <StateBadge key={state} state={`${state} ${count}`} hues={{ [`${state} ${count}`]: STATE_HUES[state] }} dot={false} /> : null,
+                        count ? (
+                          <StateBadge
+                            key={state}
+                            state={`${state} ${count}`}
+                            hues={{ [`${state} ${count}`]: STATE_HUES[state] }}
+                            dot={false}
+                          />
+                        ) : null,
                       )}
-                      {chain.runCount === 0 && <span className="text-(--text-faint)">—</span>}
+                      {chain.runCount === 0 && (
+                        <span className="text-(--text-faint)">—</span>
+                      )}
                     </div>
                   </td>
                 )}
-                {show.has("activity") && <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"><Ago iso={chain.lastActivityAt} now={now} /></td>}
-                {show.has("repos") && <td className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)" title={chain.repos.join(", ")}>{chain.repos.join(", ") || "—"}</td>}
-                {cols.filter((column) => column.isCustom || column.key.startsWith("custom:")).map((column) => (
-                  <CustomCell key={column.key} row={chain} path={column.key.replace(/^custom:/, "")} />
-                ))}
+                {show.has("activity") && (
+                  <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)">
+                    <Ago iso={chain.lastActivityAt} now={now} />
+                  </td>
+                )}
+                {show.has("repos") && (
+                  <td
+                    className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                    title={chain.repos.join(", ")}
+                  >
+                    {chain.repos.join(", ") || "—"}
+                  </td>
+                )}
+                {cols
+                  .filter(
+                    (column) =>
+                      column.isCustom || column.key.startsWith("custom:"),
+                  )
+                  .map((column) => (
+                    <CustomCell
+                      key={column.key}
+                      row={chain}
+                      path={column.key.replace(/^custom:/, "")}
+                    />
+                  ))}
               </tr>
             );
           })}
-          <TableWindowFooter colSpan={cols.length} range={[windowStart, windowEnd, tokens.length]} move={moveWindow} />
+          <TableWindowFooter
+            colSpan={cols.length}
+            range={[windowStart, windowEnd, tokens.length]}
+            move={moveWindow}
+          />
           {visible.length === 0 && (
             <ListEmpty
               colSpan={cols.length}
@@ -311,7 +485,13 @@ export function Chains({
               filtered={withoutSingles.length > 0}
               onClear={filter ? () => setFilter("") : undefined}
               noun="chains"
-              empty={context.kind === "repo" ? `No chains for ${context.name}.` : showSingles ? "No chains in the last 24 hours." : "No multi-step chains in the last 24 hours."}
+              empty={
+                context.kind === "repo"
+                  ? `No chains for ${context.name}.`
+                  : showSingles
+                    ? "No chains in the last 24 hours."
+                    : "No multi-step chains in the last 24 hours."
+              }
               escHint={Boolean(filter)}
             />
           )}
