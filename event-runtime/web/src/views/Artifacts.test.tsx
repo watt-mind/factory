@@ -300,6 +300,27 @@ describe("Artifacts inventory (WM-207)", () => {
 describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
   const SHA_A = "a".repeat(64);
 
+  test("opening and closing the inspector preserves project context (WM-748)", async () => {
+    globalThis.fetch = mock(
+      async () => new Response("line one", { status: 200 }),
+    ) as unknown as typeof fetch;
+    window.location.hash = "#/artifacts?project=factory";
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    const sha = view.getByRole("link", { name: "aaaaaaaaaaaa" });
+    expect(sha.getAttribute("href")).toBe(
+      `#/artifacts/${SHA_A}?project=factory`,
+    );
+
+    fireEvent.click(view.getByText("1.0 KB").closest("tr")!);
+    expect(window.location.hash).toBe(
+      `#/artifacts/${SHA_A}?project=factory`,
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Close" }));
+    expect(window.location.hash).toBe("#/artifacts?project=factory");
+  });
+
   test("the SHA is a deep link into the inspector, not a download", async () => {
     globalThis.fetch = mock(
       async () => new Response("line one\nline two", { status: 200 }),
