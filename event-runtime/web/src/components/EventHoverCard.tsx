@@ -21,7 +21,7 @@ import { api } from "../api";
 import { resolveEntity } from "../entities";
 import { EMPTY, formatRelative } from "../format";
 import { chainKeyOfEvent, eventNodeId } from "../graph/chainModel";
-import { hashPath } from "../hash";
+import { hashPath, hashProject, withProject } from "../hash";
 import type { AdmittedEvent, RunListItem } from "../types";
 import { formatCellValue } from "./CustomCell";
 import { HoverCard } from "./HoverCard";
@@ -103,7 +103,7 @@ export function chainHref(
   nodeId?: string | null,
 ): string | null {
   if (!correlationId) return null;
-  return `#/${hashPath("chain", correlationId, nodeId)}`;
+  return `#/${withProject(hashPath("chain", correlationId, nodeId), hashProject(window.location.hash))}`;
 }
 
 export interface CausationGlyphsProps {

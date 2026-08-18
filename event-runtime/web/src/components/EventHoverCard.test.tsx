@@ -19,6 +19,7 @@ import type { AdmittedEvent } from "../types";
 afterEach(() => {
   cleanup();
   restoreApi();
+  window.location.hash = "";
 });
 
 const NOW = new Date().toISOString();
@@ -111,6 +112,16 @@ describe("chainHref", () => {
       "#/chain/corr_1001/event%3Agithub%3Aevt_1001",
     );
     expect(chainHref(null)).toBeNull();
+  });
+
+  test("keeps ?project= from the current hash (WM-787)", () => {
+    window.location.hash = "#/runs?project=factory";
+    expect(chainHref("corr_1001")).toBe("#/chain/corr_1001?project=factory");
+    expect(chainHref("corr_1001", "event:github:evt_1001")).toBe(
+      "#/chain/corr_1001/event%3Agithub%3Aevt_1001?project=factory",
+    );
+    window.location.hash = "#/runs";
+    expect(chainHref("corr_1001")).toBe("#/chain/corr_1001");
   });
 });
 
