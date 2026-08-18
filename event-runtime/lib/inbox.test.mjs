@@ -1024,6 +1024,64 @@ describe("approving an expired proposal retargets its item (WM-714)", () => {
     // Supersession does not lose the retarget the operator already paid for.
     expect(again.responseHistory).toHaveLength(1);
   });
+
+  test("applied replanned with no newProposalId is recorded failed and stays retryable", () => {
+    const db = openDb(":memory:");
+    const { id, approve } = replanned(db);
+    const decided = decideInboxItem(db, id, approve, {
+      now: 2000,
+      applyEffect: () => ({
+        outcome: "applied",
+        detail: "replanned_awaiting_approval",
+      }),
+    });
+    expect(decided.effect.outcome).toBe("failed");
+    expect(decided.item.resolvedAt).toBeNull();
+    expect(decided.item.response.effect.outcome).toBe("failed");
+    expect(decided.item.response.effect.detail).toBe(
+      "replanned_awaiting_approval",
+    );
+
+    let invoked = 0;
+    const retried = retryInboxDecision(db, id, {
+      now: 3000,
+      applyEffect: () => {
+        invoked += 1;
+        return {
+          outcome: "applied",
+          detail: "replanned_awaiting_approval",
+          newProposalId: FRESH,
+        };
+      },
+    });
+    expect(invoked).toBe(1);
+    expect(retried.item.refs.proposalId).toBe(FRESH);
+    expect(retried.item.resolvedAt).toBeNull();
+  });
+
+  test("applied replanned with an empty newProposalId is also failed and retryable", () => {
+    const db = openDb(":memory:");
+    const { id, approve } = replanned(db);
+    const decided = decideInboxItem(db, id, approve, {
+      now: 2000,
+      applyEffect: () => ({
+        outcome: "applied",
+        detail: "replanned_awaiting_approval",
+        newProposalId: "   ",
+      }),
+    });
+    expect(decided.effect.outcome).toBe("failed");
+    expect(decided.item.resolvedAt).toBeNull();
+    expect(decided.item.response.effect.outcome).toBe("failed");
+    let invoked = 0;
+    retryInboxDecision(db, id, {
+      applyEffect: () => {
+        invoked += 1;
+        return { outcome: "applied" };
+      },
+    });
+    expect(invoked).toBe(1);
+  });
 });
 
 describe("inbox decisions register precedent memos (WM-812)", () => {

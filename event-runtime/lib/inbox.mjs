@@ -569,16 +569,27 @@ function settleInboxDecision(
   effect,
   { now, recordedEffect = effect, artifactStore },
 ) {
-  const answer = { ...response, effect: recordedEffect };
   const replanned =
     effect.outcome === "applied" && effect.detail === REPLANNED_DETAIL;
-  if (
-    replanned &&
+  const newProposalId =
     typeof effect.newProposalId === "string" &&
     effect.newProposalId.trim() !== ""
-  ) {
+      ? effect.newProposalId
+      : null;
+  // A re-plan with no fresh id is a broken effect — WM-391 throws on it rather
+  // than returning one. Coerce to failed before recording so retry sees a
+  // failed outcome instead of already_applied (WM-783).
+  if (replanned && !newProposalId) {
+    const error =
+      recordedEffect.error ??
+      "replanned_awaiting_approval without newProposalId";
+    effect = { ...effect, outcome: "failed", error };
+    recordedEffect = { ...recordedEffect, outcome: "failed", error };
+  }
+  const answer = { ...response, effect: recordedEffect };
+  if (replanned && newProposalId) {
     return {
-      item: retargetInboxDecision(db, id, answer, effect.newProposalId, {
+      item: retargetInboxDecision(db, id, answer, newProposalId, {
         now,
       }),
       effect,
@@ -588,9 +599,6 @@ function settleInboxDecision(
     JSON.stringify(answer),
     id,
   );
-  // A re-plan with no fresh id is a broken effect — WM-391 throws on it rather
-  // than returning one. Leave the item open and retryable instead of resolving
-  // on a detail the ledger cannot act on.
   if (effect.outcome === "applied" && !replanned) {
     db.query(
       `UPDATE inbox_items
