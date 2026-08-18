@@ -19,14 +19,20 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { loadSchedule, toSeconds, ROOT } from "../lib/schedule.mjs";
 const OUT = path.join(ROOT, "deploy", "launchd");
-const DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+// Committed plists must be byte-identical from any checkout on any host (CI
+// regenerates them and diffs), so nothing below reads the renderer's
+// environment: PATH is this fixed macOS toolchain list, the deploy root is
+// resolved by the job's shell at runtime, and home-relative paths stay as a
+// literal `~/` until --install materialises them for the installing user
+// (launchd itself does not expand `~` or `$HOME` in plist values).
+export const DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const EVENT_LABEL_PREFIX = "com.wattmind.factory.event";
 const DEFAULT_EVENT_WORKERS = "1:2";
-// Resolve at job runtime so committed plists are identical whether rendered from
-// the deployed checkout, a disposable ticket worktree, or a CI checkout.
 const DEPLOY_ROOT = '"${FACTORY_ROOT:-$HOME/Develop/factory}"';
 
-const expand = (p) => p.replace(/^~/, homedir());
+// Expand `~/` at the start of a plist string or of a PATH entry.
+export const materialize = (text, home = homedir()) =>
+  text.replace(/(<string>|:)~\//g, `$1${home}/`);
 
 const xml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -50,7 +56,7 @@ function optionValue(name, args = process.argv.slice(2)) {
   return value;
 }
 
-export function launchdPath(environmentPath = process.env.PATH, home = homedir()) {
+export function launchdPath(environmentPath = DEFAULT_PATH, home = "~") {
   const entries = (environmentPath || DEFAULT_PATH).split(":").filter(Boolean);
   for (const entry of [path.join(home, ".bun", "bin"), path.join(home, ".local", "bin")]) {
     if (!entries.includes(entry)) entries.push(entry);
@@ -60,7 +66,7 @@ export function launchdPath(environmentPath = process.env.PATH, home = homedir()
 
 export function plist(job, defaults, environmentPath = launchdPath()) {
   const label = `${defaults.label_prefix}.${job.name}`;
-  const logDir = expand(defaults.log_dir || "~/Library/Logs");
+  const logDir = defaults.log_dir || "~/Library/Logs";
   const args = ["/bin/bash", "-lc", `cd ${DEPLOY_ROOT} && ${job.command}`];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -179,13 +185,16 @@ export function installPlists(enabled, defaults, {
   agentsDir = path.join(homedir(), "Library/LaunchAgents"),
   run = execFileSync,
   uid = process.getuid(),
+  home = homedir(),
 } = {}) {
   mkdirSync(agentsDir, { recursive: true });
+  // launchd creates the log files but not their directory.
+  mkdirSync((defaults.log_dir || "~/Library/Logs").replace(/^~(?=\/|$)/, home), { recursive: true });
   for (const job of enabled) {
     const label = job.label ?? `${defaults.label_prefix}.${job.name}`;
     const src = job.file ?? path.join(outDir, `${label}.plist`);
     const dst = path.join(agentsDir, `${label}.plist`);
-    writeFileSync(dst, readFileSync(src));
+    writeFileSync(dst, materialize(readFileSync(src, "utf8"), home));
     try { run("launchctl", ["bootout", `gui/${uid}/${label}`], { stdio: "ignore" }); } catch {}
     run("launchctl", ["bootstrap", `gui/${uid}`, dst]);
     console.log(`  loaded    ${label}`);

@@ -123,6 +123,9 @@ jobs:
   - name: triage
     every: 5m
     gate_command: bun orchestrator/queue.mjs --repo {{repo}} --gate triage
+    # The gate embedded in `command` below is the launchd path (each plist runs
+    # `command` alone); under orchestrator/run.mjs, which runs gate_command
+    # separately first, it is a redundant second check.
     dry_command: bun orchestrator/queue.mjs --repo {{repo}}
     command: >-
       { code=0; bun orchestrator/queue.mjs --repo {{repo}} --gate triage || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: triage gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;

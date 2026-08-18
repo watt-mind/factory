@@ -8,14 +8,16 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
+  DEFAULT_PATH,
   eventRuntimePlist,
   eventWorkerRange,
   installPlists,
   launchdPath,
   main,
+  materialize,
   plist,
   renderEventRuntimePlists,
 } from "./gen.mjs";
@@ -64,6 +66,35 @@ test("launchdPath uses the macOS toolchain fallback when PATH is missing", () =>
   );
 });
 
+test("rendering ignores the renderer's PATH and home: sentinel never leaks", () => {
+  const sentinel = "/sentinel/only/bin";
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${sentinel}:${prevPath}`;
+  try {
+    const rendered = plist(job, defaults);
+    expect(rendered).not.toContain(sentinel);
+    expect(rendered).not.toContain(homedir());
+    expect(rendered).toContain(`<string>${DEFAULT_PATH}:~/.bun/bin:~/.local/bin</string>`);
+    expect(rendered).toContain("<string>~/Library/Logs/triage.out.log</string>");
+    expect(rendered).toContain("<string>~/Library/Logs/triage.err.log</string>");
+    // Same bytes regardless of the environment the renderer runs in.
+    process.env.PATH = "/usr/bin";
+    expect(plist(job, defaults)).toBe(rendered);
+  } finally {
+    process.env.PATH = prevPath;
+  }
+});
+
+test("materialize expands ~/ only where launchd would need an absolute path", () => {
+  const rendered = plist(job, defaults);
+  const installed = materialize(rendered, "/Users/factory");
+  expect(installed).toContain(`<string>${DEFAULT_PATH}:/Users/factory/.bun/bin:/Users/factory/.local/bin</string>`);
+  expect(installed).toContain("<string>/Users/factory/Library/Logs/triage.out.log</string>");
+  expect(installed).not.toContain("~/");
+  // The runtime deploy root is still resolved by the job's shell, not the installer.
+  expect(installed).toContain('cd "${FACTORY_ROOT:-$HOME/Develop/factory}"');
+});
+
 test("installPlists creates a missing LaunchAgents directory before copying", () => {
   const root = mkdtempSync(path.join(tmpdir(), "factory-launchd-"));
   const outDir = path.join(root, "rendered");
@@ -74,21 +105,23 @@ test("installPlists creates a missing LaunchAgents directory before copying", ()
 
   try {
     mkdirSync(outDir, { recursive: true });
-    writeFileSync(source, "<plist>generated</plist>\n");
+    writeFileSync(source, "<plist><string>~/Library/Logs/x.log</string></plist>\n");
     expect(existsSync(agentsDir)).toBe(false);
 
     installPlists([job], defaults, {
       outDir,
       agentsDir,
       uid: 501,
+      home: path.join(root, "home"),
       run(command, args) {
         calls.push([command, args]);
       },
     });
 
     expect(readFileSync(path.join(agentsDir, `${label}.plist`), "utf8")).toBe(
-      "<plist>generated</plist>\n",
+      `<plist><string>${path.join(root, "home")}/Library/Logs/x.log</string></plist>\n`,
     );
+    expect(existsSync(path.join(root, "home", "Library", "Logs"))).toBe(true);
     expect(calls).toEqual([
       ["launchctl", ["bootout", `gui/501/${label}`]],
       ["launchctl", ["bootstrap", "gui/501", path.join(agentsDir, `${label}.plist`)]],
@@ -114,6 +147,7 @@ test("installPlists prefers rendered label/file over the prefix concatenation", 
       outDir: path.join(root, "unused"),
       agentsDir,
       uid: 501,
+      home: path.join(root, "home"),
       run(command, args) {
         calls.push([command, args]);
       },

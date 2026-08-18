@@ -22,15 +22,15 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/home/hdkiller/.bun/bin:/home/hdkiller/.local/bin:/home/hdkiller/.local/bin:/home/hdkiller/.bun/bin:/home/hdkiller/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:~/.bun/bin:~/.local/bin</string>
     </dict>
 
     <!-- .out.log, not .log: a job whose wrapper already writes its own
          structured log would otherwise have two writers on one file. -->
     <key>StandardOutPath</key>
-    <string>/home/hdkiller/Library/Logs/factory-triage.out.log</string>
+    <string>~/Library/Logs/factory-triage.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/home/hdkiller/Library/Logs/factory-triage.err.log</string>
+    <string>~/Library/Logs/factory-triage.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>
