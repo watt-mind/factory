@@ -7,16 +7,15 @@
 # Loops and their rationale: linear.md §14.
 #
 # ┌──────────────────────────────────────────────────────────────────────────┐
-# │ EVERYTHING IS DISABLED ON PURPOSE (2026-08-03).                          │
+# │ WATCHED ROLLOUT: ONE CLOCK FLOOR IS ENABLED (2026-08-18).                 │
 # │                                                                          │
-# │ Standing policy for now: the factory runs in the FOREGROUND, watched.    │
-# │ No launchd job may act on Linear, git, or CI without someone looking at  │
-# │ it. Nothing here has eval coverage yet, per-agent identity doesn't exist │
-# │ (OPS-40), and the reaper has already demonstrated it can act on 31       │
-# │ tickets from one bad predicate. Trust is earned one loop at a time.      │
+# │ Scheduled commands admit events to the event runtime; they do not launch │
+# │ ticket agents directly. Runtime proposals remain the approval boundary.  │
+# │ Trust is earned one loop at a time: factory-triage is the first enabled   │
+# │ floor, gated on low agent-ready supply and limited to one daily tick.     │
 # │                                                                          │
-# │ Enabling anything here is a deliberate decision, not a default. Flip one │
-# │ job, watch it for a week, then consider the next.                        │
+# │ Enabling another loop is a deliberate reviewed decision. Observe the     │
+# │ current loop before changing the next enabled flag.                      │
 # └──────────────────────────────────────────────────────────────────────────┘
 
 defaults:
@@ -36,6 +35,10 @@ defaults:
   run_at_load: false
 
 jobs:
+  # Every apply command below uses the same small admission shim. It calls
+  # the runtime's fail-soft loopback emitter, then turns a refusal/unreachable
+  # runtime into a non-zero scheduler result. The timestamp makes one event ID
+  # per actual tick; runtime idempotency still converges retries of that event.
   # ---------------------------------------------------------------- reaper ---
   # Returns crashed agents' Linear claims to Todo. Only touches tickets carrying
   # ai:in-progress / agent:* -- an In Progress ticket without those labels is a
@@ -46,7 +49,9 @@ jobs:
   - name: linear-reaper
     every: 15m
     dry_command: bun orchestrator/reaper.mjs
-    command: bun orchestrator/reaper.mjs --apply
+    command: >-
+      bun -e 'const [type,repo,loop,cadence]=process.argv.slice(1);const at=new Date().toISOString();const payload={loop,slot:at,cadenceSeconds:Number(cadence),skippedSlots:0};const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,payload,{eventId:`schedule:${loop}:${at}`,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      clock.tick.reaper - linear-reaper 900
     enabled: false
     why: >
       Threshold is 45 minutes of silence, so 15m would sample it 3x. Disabled
@@ -91,7 +96,9 @@ jobs:
   - name: label-guard
     every: 5m
     dry_command: bun orchestrator/label-guard.mjs --repo {{repo}}
-    command: bun orchestrator/label-guard.mjs --repo {{repo}} --apply
+    command: >-
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.label-guard.requested {{repo}} label-guard
     enabled: false
     why: >
       Checks only Owned Paths and Verification Command — the two §5 sections
@@ -117,7 +124,10 @@ jobs:
     every: 5m
     gate_command: bun orchestrator/queue.mjs --repo {{repo}} --gate triage
     dry_command: bun orchestrator/queue.mjs --repo {{repo}}
-    command: runners/run-agent.sh --harness {{harness}} --repo {{repo}} --command factory-triage --read-only --args "5"
+    command: >-
+      { code=0; bun orchestrator/queue.mjs --repo {{repo}} --gate triage || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: triage gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.triage.requested {{repo}} triage; }
     enabled: false
     why: >
       Turns Triage tickets into ai:agent-ready ones by exploring the codebase,
@@ -133,7 +143,10 @@ jobs:
     every: 2h
     gate_command: bun orchestrator/warm.mjs --repo {{repo}} --gate
     dry_command: bun orchestrator/warm.mjs --repo {{repo}}
-    command: bun orchestrator/warm.mjs --repo {{repo}} --apply
+    command: >-
+      { code=0; bun orchestrator/warm.mjs --repo {{repo}} --gate || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: warm gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.warm.requested {{repo}} warm; }
     enabled: false
     why: >
       Compiles once so that N worktrees don't. Cheapest thing to run before a
@@ -148,13 +161,15 @@ jobs:
   #     BOTH ARE MANUAL-START BY DESIGN (OPS-67), not just disabled-for-now:
   #     the digest from the watch TUI's `b` or this CLI, the sweep from the
   #     TUI's `u` (spawns immediately, no dry step — it is Linear-write-only
-  #     and rule-bound to touch nothing without new evidence) or run-agent.sh.
+  #     and rule-bound to touch nothing without new evidence).
   #     Listed here so the verbs have one canonical spelling and don't become
   #     orphans like the reaper once was.
   - name: unblock-digest
     every: 24h
     dry_command: bun orchestrator/digest.mjs
-    command: bun orchestrator/digest.mjs
+    command: >-
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.unblock-digest.requested {{repo}} unblock-digest
     enabled: false
     why: >
       Read-only report of every ai:blocked ticket with its blocking question,
@@ -164,7 +179,9 @@ jobs:
   - name: unblock
     every: 24h
     dry_command: bun orchestrator/digest.mjs --repo {{repo}}
-    command: runners/run-agent.sh --harness {{harness}} --repo {{repo}} --command factory-unblock --read-only --args "10"
+    command: >-
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.unblock.requested {{repo}} unblock
     enabled: false
     why: >
       Agent pass over held tickets, oldest first: releases a hold only on new
@@ -180,13 +197,15 @@ jobs:
     every: 5m
     gate_command: bun orchestrator/queue.mjs --repo {{repo}} --gate dispatch
     dry_command: bun orchestrator/queue.mjs --repo {{repo}}
-    command: bun orchestrator/tick.mjs --repo {{repo}} --harness {{harness}} --apply
+    command: >-
+      { code=0; bun orchestrator/queue.mjs --repo {{repo}} --gate dispatch || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: dispatch gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.work.requested {{repo}} dispatch; }
     enabled: false
     why: >
-      One OS PROCESS PER TICKET: tick.mjs claims, builds the worktree via
-      bin/worktree-up.sh, then spawns `claude -p /factory-ticket <ID>` in it.
-      Each ticket gets its own log, budget and session id, so one stuck ticket
-      can be killed alone and one failed ticket resumed alone.
+      Emits factory.work.requested. The runtime work-scan selects bounded,
+      non-colliding tickets and emits one factory.dispatch.requested event per
+      candidate; dispatch then owns the claim and delegated worktree lifecycle.
 
   # 2b. RECONCILE. A ticket left In Progress after its PR is open holds a
   #     dispatch slot forever, and nothing reports it because a stuck ticket
@@ -197,7 +216,10 @@ jobs:
     every: 10m
     gate_command: bun orchestrator/reconcile.mjs --repo {{repo}} --gate
     dry_command: bun orchestrator/reconcile.mjs --repo {{repo}}
-    command: bun orchestrator/reconcile.mjs --repo {{repo}} --apply
+    command: >-
+      { code=0; bun orchestrator/reconcile.mjs --repo {{repo}} --gate || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: reconcile gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.reconcile.requested {{repo}} reconcile; }
     enabled: false
     why: >
       Positive evidence, not silence: an open PR means the implementation phase
@@ -213,35 +235,16 @@ jobs:
     every: 10m
     gate_command: bun orchestrator/queue.mjs --repo {{repo}} --gate merge
     dry_command: bun orchestrator/queue.mjs --repo {{repo}}
-    command: runners/run-agent.sh --harness {{harness}} --repo {{repo}} --command factory-merge
+    command: >-
+      { code=0; bun orchestrator/queue.mjs --repo {{repo}} --gate merge || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: merge gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.merge.requested {{repo}} merge; }
     enabled: false
     why: >
       Reviews In Review PRs as their CI finishes, fixes what is mechanical,
       merges what qualifies into develop, and moves tickets to Done once base CI
       and the dev smoke check are green. Escalation list still applies: payments,
       auth and migrations never auto-merge in this client repo.
-
-  # 3b. LEARN. The one loop that improves the others: retro reads what runs
-  #     actually did (friction.mjs for wasted time, economics.mjs for context
-  #     burn) and turns repeats into harness changes — a shared/ fix when
-  #     mechanical, a `FIP:` issue in OPS Triage when not. Without this on a
-  #     cadence, every agent run is ephemeral and learning only happens when a
-  #     human remembers to look. Runs against the factory checkout itself
-  #     (repos.yaml: factory), the one stage that does.
-  - name: retro
-    every: 24h
-    gate_command: bun orchestrator/economics.mjs --gate
-    dry_command: bun orchestrator/friction.mjs
-    command: runners/run-agent.sh --harness {{harness}} --repo factory --command factory-retro
-    enabled: false
-    why: >
-      Gated on un-rolled transcripts (>=5 completed runs not yet in
-      metrics/runs.jsonl), so it fires after real batches, not on quiet days.
-      The retro itself runs economics --roll, which both persists the durable
-      record and closes the gate until new work accumulates. Disabled under
-      the foreground policy like everything else — it can edit shared/, so
-      watch its first passes; its edits still land by ordinary commit, never
-      silently.
 
   # 4. RECLAIM. Worktrees whose tickets finished. The merge stage is supposed to
   #    tear its own down, but crashed runs, hand-merges and tickets closed in
@@ -251,10 +254,74 @@ jobs:
     every: 1h
     gate_command: bun orchestrator/janitor.mjs --repo {{repo}} --gate
     dry_command: bun orchestrator/janitor.mjs --repo {{repo}}
-    command: bun orchestrator/janitor.mjs --repo {{repo}} --apply
+    command: >-
+      { code=0; bun orchestrator/janitor.mjs --repo {{repo}} --gate || code=$?; if [ "$code" -eq 1 ]; then echo "{{repo}}: janitor gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.janitor-scan.requested {{repo}} janitor; }
     enabled: false
     why: >
-      Calls the repo's worktree-down.sh WITHOUT --force, so anything holding
-      uncommitted or unpushed work refuses to be removed and is reported
-      instead. Never add --force: losing an agent's unpushed work is far worse
-      than the disk it occupies.
+      Emits a read-only janitor scan; only typed SAFE results chain to the
+      runtime's apply node. The apply node calls the repo's worktree-down.sh
+      WITHOUT --force, so uncommitted or unpushed work refuses removal. Never
+      add --force: losing an agent's unpushed work is worse than the disk.
+
+  # =============================================================== factory ===
+  # The factory repo's own liveness floor. The chain is primary: work-scan
+  # emits triage when supply is low, and completed dispatches re-fire work.
+  # These clocks only prevent cold start/new intake from leaving the factory
+  # asleep forever. Triage is enabled first, watched through the runtime, and
+  # capped by its existing queue gate; dispatch, merge, and reaper stay off
+  # until the preceding loop has been observed and explicitly promoted.
+  - name: factory-triage
+    every: 24h
+    gate_command: bun orchestrator/queue.mjs --repo factory --gate triage
+    dry_command: bun orchestrator/queue.mjs --repo factory
+    command: >-
+      { code=0; bun orchestrator/queue.mjs --repo factory --gate triage || code=$?; if [ "$code" -eq 1 ]; then echo "factory: triage gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.triage.requested factory factory-triage; }
+    enabled: true
+    why: >
+      Daily cold-start/new-intake floor for the chain-first supply loop. The
+      gate admits a watched triage proposal only when agent-ready supply is
+      low and actionable Triage work exists; otherwise the tick is a cheap,
+      observable no-op. This is the first and only newly enabled loop.
+
+  - name: factory-dispatch
+    every: 5m
+    gate_command: bun orchestrator/queue.mjs --repo factory --gate dispatch
+    dry_command: bun orchestrator/queue.mjs --repo factory
+    command: >-
+      { code=0; bun orchestrator/queue.mjs --repo factory --gate dispatch || code=$?; if [ "$code" -eq 1 ]; then echo "factory: dispatch gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.work.requested factory factory-dispatch; }
+    enabled: false
+    why: >
+      Five-minute fallback matching the existing dispatch cadence. The runtime
+      work-scan/dispatch chain is the primary trigger; keep this floor disabled
+      until the triage floor has earned promotion.
+
+  - name: factory-merge
+    every: 10m
+    gate_command: bun orchestrator/queue.mjs --repo factory --gate merge
+    dry_command: bun orchestrator/queue.mjs --repo factory
+    command: >-
+      { code=0; bun orchestrator/queue.mjs --repo factory --gate merge || code=$?; if [ "$code" -eq 1 ]; then echo "factory: merge gate idle; no event admitted"; exit 0; elif [ "$code" -ne 0 ]; then exit "$code"; fi;
+      bun -e 'const [type,repo,loop]=process.argv.slice(1);const at=new Date().toISOString();const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,{repo},{eventId:`schedule:${loop}:${repo}:${at}`,subject:repo,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      factory.merge.requested factory factory-merge; }
+    enabled: false
+    why: >
+      Ten-minute fallback matching the existing merge cadence. Merge changes
+      repository state and is deliberately last in the watched rollout.
+
+  - name: factory-reaper
+    every: 60m
+    dry_command: bun orchestrator/reaper.mjs
+    command: >-
+      bun -e 'const [type,repo,loop,cadence]=process.argv.slice(1);const at=new Date().toISOString();const payload={loop,slot:at,cadenceSeconds:Number(cadence),skippedSlots:0};const outcome=await (await import("./lib/emit-event.mjs")).emitFactoryEvent(type,payload,{eventId:`schedule:${loop}:${at}`,occurredAt:at});if(!outcome?.admitted&&!outcome?.duplicate)throw new Error("event runtime refused or unreachable");console.log(JSON.stringify(outcome))'
+      clock.tick.reaper - factory-reaper 3600
+    enabled: false
+    why: >
+      Hourly global stale-claim cleanup associated with the factory control
+      plane. It has no repo gate because reaper safety comes from its strict
+      ai:in-progress/agent:* predicate and the runtime approval boundary.

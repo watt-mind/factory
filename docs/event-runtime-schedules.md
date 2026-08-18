@@ -1,7 +1,8 @@
 # Event runtime: scheduled clock events
 
 Status: **implemented** (OPS-381). Tracking: OPS-380 (this spec), OPS-381
-(implementation), WM-112 (repo loops §12, GitHub webhook intake §13).
+(implementation), WM-112 (repo loops §12, GitHub webhook intake §13), WM-328
+(gated launchd bridge and Factory rollout §15).
 Parent: [event-runtime.md](event-runtime.md) §2 (`clock.tick.<loop>`), §3
 (isolation and capacity), §5.4 (idempotency), §12 (approval).
 
@@ -30,18 +31,25 @@ absorbed:
 - Automation is **earned per loop**, never global (§2's rule applied to
   clock events). A loop starts watched; auto-approval is a deliberate,
   recorded decision after it has been observed.
-- `config/schedule.yaml` and launchd stay exactly as they are. This is a
-  second, independent mechanism; §3 forbids the event runtime from touching
-  the orchestrator's timers, and one config file must not mean two things.
+- `config/schedule.yaml` and launchd remain the host clock/gate registry, but
+  their apply commands admit typed events instead of launching agents or
+  mutating orchestrator scripts. The runtime still never edits or installs
+  those timers; `deploy/gen.mjs` is the one-way renderer and operator action
+  remains the deployment boundary. See §15 for the first enabled floor.
 
 ## 2. Who fires the tick
 
-**In the `serve` process**, which already runs a one-second loop for planning
-and outbox publication. Rejected alternatives:
+Native runtime schedules fire **in the `serve` process**, which already runs a
+one-second loop for planning and outbox publication. The gated compatibility
+bridge in §15 is deliberately narrower: launchd supplies a cold-start clock,
+the existing cheap gate decides whether admission is useful, and the command
+only posts an ordinary event to the running `serve` process. Rejected as the
+primary runtime scheduler:
 
-- **External cron/launchd calling `cli.mjs inject`** — reintroduces exactly
-  the bare timer the design rejects, splits the schedule between a plist and
-  the registry, and makes "why didn't it fire" a two-system question.
+- **External cron/launchd directly running work** — reintroduces the bare job
+  the design rejects. The §15 bridge is acceptable only because it performs no
+  work itself: gate output is in launchd logs and accepted events, proposals,
+  and runs remain visible in the runtime journal.
 - **A separate scheduler process** — more moving parts for something that is
   one timer and one `admitEvent` call, and a third process to supervise.
 
@@ -207,9 +215,9 @@ error, not a surprise at 03:00.
   `previous_run_in_flight`, not a second queued run.
 - Six missed slots under `catchUp: none` produce one run and five recorded
   skips.
-- Disabling a loop in the registry stops ticks with no leftover timer; the
-  orchestrator's `config/schedule.yaml` and launchd state are untouched
-  throughout.
+- Disabling a native loop in the registry stops its in-process ticks. A §15
+  bridge loop is independently controlled by its reviewed `enabled` flag and
+  rendered plist; neither mechanism edits the other's configuration.
 - `cli.mjs schedule` answers "is it running, when did it last fire, what
   happened", and a stopped clock raises a doctor anomaly.
 
@@ -381,3 +389,52 @@ by git-owned policy, schema proofs, immediate live rechecks, and the global
 one-merge barrier. Slot event IDs, singleton planning, SHA pins, and the
 unverified-landing barrier make restart replay idempotent. Work and ship loops
 remain disabled/watched, and deploy/main/master decisions remain human-only.
+
+## 15. Gated host-clock bridge and Factory rollout (WM-328)
+
+`config/schedule.yaml` is still the source for the host timers rendered into
+`deploy/launchd/`, but scheduled **apply** commands no longer run an agent or a
+mutating orchestrator script. Each command admits the corresponding typed
+event through `lib/emit-event.mjs`:
+
+| Scheduled stage | Admitted event |
+| :--- | :--- |
+| triage | `factory.triage.requested {repo}` |
+| dispatch | `factory.work.requested {repo}` |
+| merge | `factory.merge.requested {repo}` |
+| unblock | `factory.unblock.requested {repo}` |
+| deterministic maintenance | its registered request type (`label-guard`, `warm`, `reconcile`, `unblock-digest`, `janitor-scan`) |
+| reaper | `clock.tick.reaper` with an explicit loop/slot payload |
+
+The command fails non-zero if the runtime is unreachable or refuses the event.
+Once admitted, planning, approval, adapter execution, output verification, and
+chain resolution are entirely runtime-owned. `gate_command` and `dry_command`
+remain unchanged and execute before admission, so a frequent clock can still
+be cheap without bypassing the runtime audit trail. The old aggregate
+`factory-retro` job is not silently mapped to the per-run postmortem agent: it
+has no equivalent typed event and is tracked separately by WM-684.
+
+### Factory repo clocks
+
+The Factory control repo now has the same explicit four-stage floor as client
+repos. Cadences start conservative, and only the lowest-risk stage is on:
+
+| Loop | Cadence | Enabled | Gate | Runtime effect |
+| :--- | :--- | :--- | :--- | :--- |
+| `factory-triage` | `24h` | **yes** | `queue.mjs --repo factory --gate triage` | watched `factory.triage.requested` proposal when supply is low and Triage can help |
+| `factory-dispatch` | `5m` | no | `queue.mjs --repo factory --gate dispatch` | `factory.work.requested`; work-scan chooses bounded candidates |
+| `factory-merge` | `10m` | no | `queue.mjs --repo factory --gate merge` | `factory.merge.requested`; mutating follow-ups retain their own gates |
+| `factory-reaper` | `60m` | no | none; strict stale-claim predicate inside reaper | watched `clock.tick.reaper` proposal |
+
+This is **chain-first, not cron-first**. `work-scan@1` emits
+`factory.triage.requested` on `LOW_SUPPLY`, and promoted triage work returns to
+`factory.work.requested`; completed dispatches re-fire work immediately. The
+daily triage timer exists only for cold start and new intake, which have no
+predecessor completion to create a chain event. Its supply gate makes a full
+queue an observed no-op rather than an unnecessary agent run.
+
+Rollout is one enabled flag at a time: observe triage before considering
+dispatch, and merge last. Enabling a plist only enables event admission; it
+does not grant auto-approval. The runtime's watched proposal remains the
+authority boundary unless the runtime registry separately and explicitly
+earns `approval: auto` for that event path.
