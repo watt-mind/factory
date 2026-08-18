@@ -241,7 +241,9 @@ describe("model surfacing (WM-221)", () => {
     const r = renderBlocks(modelDetail({}));
     expect(r.getByText("not declared")).toBeTruthy();
     expect(r.getByText("default (CLI)")).toBeTruthy();
-    expect(r.getByText("not recorded")).toBeTruthy();
+    const observed = r.getByText("n/a");
+    expect(observed).toBeTruthy();
+    expect(observed.getAttribute("title")).toBe("observed model not recorded");
   });
 
   test("an exact-id override with no tier reads as `override`", () => {

@@ -116,7 +116,7 @@ describe("ApprovalSafetyCard (WM-505)", () => {
     expect(text).toContain("Risk");
     expect(text).toContain("gh:write");
     expect(text).toContain("linear:read");
-    expect(text).toContain("900s");
+    expect(text).toContain("15m");
     expect(text).toContain("max 2 att");
     expect(text).toContain("github");
   });
@@ -153,7 +153,7 @@ describe("ApprovalRiskDetails (WM-505)", () => {
     );
     const text = r.container.textContent ?? "";
     expect(text).toContain("gh:write");
-    expect(text).toContain("900s");
+    expect(text).toContain("15m");
     expect(text).toContain("Mutating");
     expect(text).toContain("immutable RunSpec");
   });
