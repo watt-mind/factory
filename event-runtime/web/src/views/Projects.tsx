@@ -307,7 +307,9 @@ export function Projects({
       setConfirmOpen(false);
       setConfirmInput("");
       queryClient.invalidateQueries({ queryKey: ["repos"] });
-      notify(`Cleaned ${normalized.removed.length} worktrees for ${normalized.repo}`);
+      notify(
+        `Cleaned ${normalized.removed.length} worktrees for ${normalized.repo}`,
+      );
     },
     onError: (err: ApiError) => {
       notify(`Janitor apply failed: ${err.message}`, "err");

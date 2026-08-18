@@ -37,17 +37,16 @@ function renderRunFull(runId: string, connected = true) {
 
 describe("RunFull layout (WM-194)", () => {
   test("keeps the loading fallback when run detail resolves without a run (WM-266)", async () => {
-    await withApi(
-      { run: async () => ({}) as RunDetail },
-      async () => {
-        const r = renderRunFull("run_partial_detail");
+    await withApi({ run: async () => ({}) as RunDetail }, async () => {
+      const r = renderRunFull("run_partial_detail");
 
-        await waitFor(() => {
-          expect(r.queryClient.getQueryState(["run", "run_partial_detail"])?.status).toBe("success");
-        });
-        expect(r.getByText("Loading run…")).toBeTruthy();
-      },
-    );
+      await waitFor(() => {
+        expect(
+          r.queryClient.getQueryState(["run", "run_partial_detail"])?.status,
+        ).toBe("success");
+      });
+      expect(r.getByText("Loading run…")).toBeTruthy();
+    });
   });
 
   test("centers the capped trace container on wide viewports", async () => {

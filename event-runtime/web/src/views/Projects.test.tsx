@@ -147,7 +147,8 @@ describe("Projects Clean Reclaimable Apply (WM-157)", () => {
     await withApi(
       {
         repos: async () => ({ repos: [repo()] }),
-        janitor: async (name: string) => ({ repo: name, apply: false, actor: "janitor" }) as JanitorResult,
+        janitor: async (name: string) =>
+          ({ repo: name, apply: false, actor: "janitor" }) as JanitorResult,
       },
       async () => {
         const r = await openJanitor();

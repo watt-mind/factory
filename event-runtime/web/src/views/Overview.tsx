@@ -760,7 +760,9 @@ const ATTENTION_KEYS = new Set([
 ]);
 
 /** Keep a resolved-but-partial status response on the same safe fallback path as an empty cache. */
-function normalizeStatus(status: StatusView | undefined): StatusView | undefined {
+function normalizeStatus(
+  status: StatusView | undefined,
+): StatusView | undefined {
   if (!status) return undefined;
   return {
     ...status,
@@ -992,7 +994,7 @@ export function Overview({
     reject.mutate({ proposalId: rejectingProposalId, why: rejectReason });
   };
 
-  const s = normalizeStatus(status.data);
+  const s = useMemo(() => normalizeStatus(status.data), [status.data]);
   const anomalies = s?.anomalies;
   const proposalsById = useMemo(() => {
     return new Map<string, Proposal>(
@@ -1206,7 +1208,7 @@ export function Overview({
     (s?.workers?.live ?? 0) - (s?.workers?.busy ?? 0),
   );
   const capacity = s
-    ? ({
+    ? {
         running: s.workers.busy,
         capacity: s.workers.live,
         queued: s.runs.byState.QUEUED ?? 0,
@@ -1221,7 +1223,7 @@ export function Overview({
         limitingFactor: null,
         ...(s.capacity ?? {}),
         classes: s.capacity?.classes ?? [],
-      })
+      }
     : null;
   const jumpToWorkerHealth = (health: WorkerHealthFilter) => {
     if (onJumpWorkers) onJumpWorkers(health);

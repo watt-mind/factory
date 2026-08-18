@@ -738,9 +738,9 @@ export function Runs({
 
   const canApprove = Boolean(
     selProposal &&
-      selProposal.status === "open" &&
-      selProposal.decision === "run" &&
-      (sel?.state === "PROPOSED" || d?.run?.state === "PROPOSED"),
+    selProposal.status === "open" &&
+    selProposal.decision === "run" &&
+    (sel?.state === "PROPOSED" || d?.run?.state === "PROPOSED"),
   );
 
   const pendingC = useRef<number>(0);

@@ -208,9 +208,9 @@ export function RunFull({
 
   const canApprove = Boolean(
     selProposal &&
-      selProposal.status === "open" &&
-      selProposal.decision === "run" &&
-      d?.run?.state === "PROPOSED",
+    selProposal.status === "open" &&
+    selProposal.decision === "run" &&
+    d?.run?.state === "PROPOSED",
   );
 
   // Verbs: Esc back to list, x cancel, c copy id, c i / c c copy CLI inspect command, c l copy link.

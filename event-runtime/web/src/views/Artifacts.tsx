@@ -332,9 +332,7 @@ export function Artifacts({
   const linkedEvents = (eventsQ.data?.events ?? []) as LinkedEvent[];
   const producerRunIds = useMemo(
     () =>
-      new Set(
-        selected?.references?.map((reference) => reference.runId) ?? [],
-      ),
+      new Set(selected?.references?.map((reference) => reference.runId) ?? []),
     [selected],
   );
   const consumers = useMemo(
