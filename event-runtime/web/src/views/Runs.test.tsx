@@ -6,6 +6,7 @@ import { Runs, statesForRunTab } from "./Runs";
 import {
   changeInput,
   createAgentsFixture,
+  createEventFixture,
   createLifecycleEventFixture,
   createProposalFixture,
   createRunSpecFixture,
@@ -1385,6 +1386,157 @@ describe("Runs in-flight row height (WM-725)", () => {
         expect(calmRemaining.textContent).toMatch(/\b9m\b/);
         expect(calmRemaining.textContent).not.toContain("lease");
         expect(cellFor(r, "run_calm", "State").textContent).toBe("RUNNING");
+      },
+    );
+  });
+});
+
+// One-hop causation on the row (WM-702): `↳` when the run's own origin event
+// was emitted by another run, `→ N` for the events it emitted, both landing on
+// the chain trace with this run already selected. The chain key lives on the
+// origin event, so the view has to read the event list to address the chain.
+describe("Runs causation glyphs and hover card (WM-702)", () => {
+  const triggered = stubListItem("run_chained", "COMPLETED", {
+    eventSource: "github",
+    eventId: "evt_origin",
+  });
+
+  const chainEvents = [
+    createEventFixture({
+      source: "github",
+      eventId: "evt_origin",
+      correlationId: "corr_1001",
+      causationId: "run_parent",
+    }),
+    createEventFixture({
+      source: "factory",
+      eventId: "evt_emitted_a",
+      correlationId: "corr_1001",
+      causationId: "run_chained",
+    }),
+    createEventFixture({
+      source: "factory",
+      eventId: "evt_emitted_b",
+      correlationId: "corr_1001",
+      causationId: "run_chained",
+    }),
+  ];
+
+  function runCell(container: HTMLElement, runId: string): HTMLElement {
+    const cell = container.querySelector<HTMLElement>(`td[title="${runId}"]`);
+    if (!cell) throw new Error(`no Run cell for ${runId}`);
+    return cell;
+  }
+
+  test("a triggered run links into its origin event's chain, preselected", async () => {
+    const onSelectRun = mock(() => {});
+    await withApi(
+      {
+        runs: async () => ({ runs: [triggered] }),
+        events: async () => ({ events: chainEvents }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ onSelectRun });
+
+        const link = await waitFor(() => {
+          const el = runCell(r.container, "run_chained").querySelector("a");
+          if (!el) throw new Error("no causation link in the Run cell");
+          return el;
+        });
+
+        // The chain key is the origin event's correlation id, not the run id.
+        expect(link.getAttribute("href")).toBe(
+          "#/chain/corr_1001/run%3Arun_chained",
+        );
+        expect(link.textContent).toContain("↳");
+        expect(link.textContent).toContain("→ 2");
+
+        fireEvent.click(link);
+        expect(onSelectRun).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  // Almost every run names an origin event, so "was triggered by an event"
+  // would put an arrow on every row and tell an operator nothing.
+  test("a run at the head of its chain gets the fan-out arrow but no downstream one", async () => {
+    const rootEvents = [
+      createEventFixture({
+        source: "github",
+        eventId: "evt_root",
+        correlationId: "corr_2002",
+        causationId: null,
+      }),
+      createEventFixture({
+        source: "factory",
+        eventId: "evt_from_root",
+        correlationId: "corr_2002",
+        causationId: "run_root",
+      }),
+    ];
+    await withApi(
+      {
+        runs: async () => ({
+          runs: [
+            stubListItem("run_root", "COMPLETED", {
+              eventSource: "github",
+              eventId: "evt_root",
+            }),
+          ],
+        }),
+        events: async () => ({ events: rootEvents }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        // The fan-out arrow proves the event list reached the row.
+        await waitFor(() =>
+          expect(runCell(r.container, "run_root").textContent).toContain("→ 1"),
+        );
+        expect(runCell(r.container, "run_root").textContent).not.toContain("↳");
+      },
+    );
+  });
+
+  test("a run with no origin event and no emissions gets no glyph", async () => {
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem("run_bare", "COMPLETED")] }),
+        events: async () => ({ events: [] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        await waitFor(() => runCell(r.container, "run_bare"));
+        expect(runCell(r.container, "run_bare").querySelector("a")).toBeNull();
+      },
+    );
+  });
+
+  test("hovering the run id opens the run hover card", async () => {
+    await withApi(
+      {
+        runs: async () => ({ runs: [triggered] }),
+        events: async () => ({ events: chainEvents }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns();
+        const cell = await waitFor(() => runCell(r.container, "run_chained"));
+
+        const trigger = cell.querySelector<HTMLElement>(
+          "[aria-haspopup='dialog']",
+        );
+        expect(trigger).toBeTruthy();
+        fireEvent.mouseEnter(trigger!);
+
+        await waitFor(() => {
+          const card = r.getByRole("dialog");
+          expect(card.getAttribute("aria-label")).toBe("Run run_chained");
+          expect(card.textContent).toContain("triage-scan");
+          expect(card.textContent).toContain("COMPLETED");
+        });
       },
     );
   });

@@ -27,6 +27,12 @@ import {
 } from "../displayOptions";
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
+import {
+  CausationGlyphs,
+  EventHoverCard,
+  chainHref,
+} from "../components/EventHoverCard";
+import { chainKeyOfEvent, eventNodeId } from "../graph/chainModel";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
 import type {
@@ -288,6 +294,22 @@ export function decisionText(d: EventDecision | null): string {
   return `${d.outcome}${status}${reason ? ` · ${reason}` : ""}`;
 }
 
+/**
+ * The sentence the row's `↳` / `→ N` arrows stand for (WM-702). The glyphs are
+ * the only thing narrow enough for the Event column; the tooltip is where they
+ * say what they mean, to a screen reader as much as to a pointer.
+ */
+export function eventCausationTitle(
+  causedBy: string | null,
+  fanOut: number,
+): string {
+  const parts: string[] = [];
+  if (causedBy) parts.push(`Emitted by run ${shortId(causedBy)}`);
+  if (fanOut > 0)
+    parts.push(`${fanOut} run${fanOut === 1 ? "" : "s"} planned from it`);
+  return `${parts.join(" · ")} — open the chain`;
+}
+
 function isStatusTab(value: string | undefined): value is StatusTab {
   return !!value && (STATUS_TABS as readonly string[]).includes(value);
 }
@@ -444,8 +466,16 @@ export function Events({
       if (!prev || prev.created_at < p.created_at) byEvent.set(k, p);
     }
     const runsById = new Map<string, RunListItem>();
-    for (const r of runsQ.data?.runs ?? []) runsById.set(r.runId, r);
-    return { byId, byEvent, runsById };
+    // Causation fan-out (WM-702): the runs an event went on to plan are the
+    // event's children in the chain DAG, one hop down.
+    const runsByEvent = new Map<string, number>();
+    for (const r of runsQ.data?.runs ?? []) {
+      runsById.set(r.runId, r);
+      if (!r.eventSource || !r.eventId) continue;
+      const k = `${r.eventSource}:${r.eventId}`;
+      runsByEvent.set(k, (runsByEvent.get(k) ?? 0) + 1);
+    }
+    return { byId, byEvent, runsById, runsByEvent };
   }, [proposalsQ.data, runsQ.data]);
   const decisionFor = (e: AdmittedEvent) =>
     decisionOf(e, decisions.byId, decisions.byEvent, decisions.runsById);
@@ -1125,6 +1155,10 @@ export function Events({
                 const decision = decisionFor(e);
                 const decisionTitle = decisionText(decision);
                 const isSelected = keyOf(e) === selectedKey;
+                const causedBy = e.causationId ?? null;
+                const fanOut = decisions.runsByEvent.get(keyOf(e)) ?? 0;
+                const chainId = chainKeyOfEvent(e);
+                const nodeId = eventNodeId(e.source, e.eventId);
                 return (
                   <tr
                     key={keyOf(e)}
@@ -1133,10 +1167,31 @@ export function Events({
                     className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(e.status)} ${isSelected ? "row-selected" : ""}`}
                   >
                     <td
-                      className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                      className="mono max-w-28 overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
                       title={e.eventId}
                     >
-                      {shortId(e.eventId)}
+                      <span className="flex min-w-0 items-center gap-1">
+                        <EventHoverCard
+                          event={e}
+                          className="min-w-0"
+                          onJumpChain={onJumpChain}
+                          onJumpEvent={onSelectEvent}
+                          onJumpRun={onJumpRun}
+                        >
+                          <span className="truncate">{shortId(e.eventId)}</span>
+                        </EventHoverCard>
+                        <CausationGlyphs
+                          causedBy={causedBy}
+                          fanOut={fanOut}
+                          href={chainHref(chainId, nodeId)}
+                          title={eventCausationTitle(causedBy, fanOut)}
+                          onJump={
+                            onJumpChain
+                              ? () => onJumpChain(chainId, nodeId)
+                              : undefined
+                          }
+                        />
+                      </span>
                     </td>
                     {show.has("source") && (
                       <td

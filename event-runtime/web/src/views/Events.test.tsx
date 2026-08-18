@@ -1170,3 +1170,113 @@ describe("Events long-list window (WM-563)", () => {
     );
   });
 });
+
+// One-hop causation, read off the row itself (WM-702): `↳` for the run that
+// emitted this event, `→ N` for the runs it went on to plan, both landing on
+// the chain trace with this event already selected.
+describe("Events causation glyphs and hover card (WM-702)", () => {
+  const derived = stubEvent("evt_derived", "planned", {
+    correlationId: "corr_1001",
+    causationId: "run_parent",
+  });
+
+  const plannedRuns = [
+    createRunListItemFixture({
+      runId: "run_child_a",
+      eventSource: "github",
+      eventId: "evt_derived",
+    }),
+    createRunListItemFixture({
+      runId: "run_child_b",
+      eventSource: "github",
+      eventId: "evt_derived",
+    }),
+  ];
+
+  function eventCell(container: HTMLElement, eventId: string): HTMLElement {
+    const cell = container.querySelector<HTMLElement>(`td[title="${eventId}"]`);
+    if (!cell) throw new Error(`no Event cell for ${eventId}`);
+    return cell;
+  }
+
+  test("an emitted event carries a causation link into its chain, preselected", async () => {
+    const onSelectEvent = mock(() => {});
+    await withApi(
+      {
+        events: async () => ({ events: [derived] }),
+        runs: async () => ({ runs: plannedRuns }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({ onSelectEvent });
+
+        const link = await waitFor(() => {
+          const el = eventCell(r.container, "evt_derived").querySelector("a");
+          if (!el) throw new Error("no causation link in the Event cell");
+          return el;
+        });
+
+        expect(link.getAttribute("href")).toBe(
+          "#/chain/corr_1001/event%3Agithub%3Aevt_derived",
+        );
+        expect(link.textContent).toContain("↳");
+        // Two runs were planned from this event — the fan-out the chain shows.
+        await waitFor(() => expect(link.textContent).toContain("→ 2"));
+
+        // Following the chain must not also select the row underneath it.
+        fireEvent.click(link);
+        expect(onSelectEvent).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  test("an origin event with no fan-out gets no glyph at all", async () => {
+    const origin = stubEvent("evt_origin", "admitted", {
+      correlationId: "corr_2002",
+      causationId: null,
+    });
+    await withApi(
+      {
+        events: async () => ({ events: [origin] }),
+        runs: async () => ({ runs: [] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents();
+        await waitFor(() => eventCell(r.container, "evt_origin"));
+        expect(
+          eventCell(r.container, "evt_origin").querySelector("a"),
+        ).toBeNull();
+        expect(eventCell(r.container, "evt_origin").textContent).not.toContain(
+          "↳",
+        );
+      },
+    );
+  });
+
+  test("hovering the event id opens the event hover card", async () => {
+    await withApi(
+      {
+        events: async () => ({ events: [derived] }),
+        runs: async () => ({ runs: plannedRuns }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents();
+        const cell = await waitFor(() => eventCell(r.container, "evt_derived"));
+
+        const trigger = cell.querySelector<HTMLElement>(
+          "[aria-haspopup='dialog']",
+        );
+        expect(trigger).toBeTruthy();
+        fireEvent.mouseEnter(trigger!);
+
+        await waitFor(() => {
+          const card = r.getByRole("dialog");
+          expect(card.getAttribute("aria-label")).toBe("Event evt_derived");
+          expect(card.textContent).toContain("pull_request.opened");
+        });
+      },
+    );
+  });
+});

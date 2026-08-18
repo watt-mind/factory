@@ -34,6 +34,9 @@ import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
 import { AgentHoverCard } from "../components/AgentHoverCard";
+import { CausationGlyphs, chainHref } from "../components/EventHoverCard";
+import { RunHoverCard } from "../components/RunHoverCard";
+import { chainKeyOfEvent, runNodeId } from "../graph/chainModel";
 import {
   ApprovalRiskDetails,
   useProposalAgent,
@@ -56,7 +59,7 @@ import {
   parseFilterQuery,
 } from "../filterQuery";
 import { decideRevealFilters, formatRevealNotification } from "../reveal";
-import type { Proposal, RunListItem, RunState } from "../types";
+import type { AdmittedEvent, Proposal, RunListItem, RunState } from "../types";
 import { EMPTY, formatDuration, formatRelative } from "../format";
 import {
   Button,
@@ -360,6 +363,68 @@ function RemainingCell({ r, now }: { r: RunListItem; now: number }) {
   );
 }
 
+/**
+ * The sentence the row's `↳` / `→ N` arrows stand for (WM-702). The Run column
+ * has room for the glyphs and nothing else; this is where they say what they
+ * mean, to a screen reader as much as to a pointer.
+ *
+ * `↳` marks a run whose *origin event was itself emitted by a run* — not
+ * merely one that names an origin event. Almost every run does the latter, and
+ * an arrow on every row is a decoration, not a signal.
+ */
+export function runCausationTitle(
+  parentRunId: string | null,
+  fanOut: number,
+): string {
+  const parts: string[] = [];
+  if (parentRunId) parts.push(`Downstream of run ${shortId(parentRunId)}`);
+  if (fanOut > 0)
+    parts.push(`${fanOut} event${fanOut === 1 ? "" : "s"} emitted`);
+  return `${parts.join(" · ")} — open the chain`;
+}
+
+/**
+ * The Run column: the id, its hover card, and the causation glyphs (WM-702).
+ * Kept a component rather than inline JSX so the row stays a concise arrow —
+ * `causationOf(r)` needs somewhere to land, and a `const` in the row body
+ * would reindent every cell below it for no change in behaviour.
+ */
+function RunIdCell({
+  run,
+  causation,
+  onJumpEvent,
+  onJumpRun,
+}: {
+  run: RunListItem;
+  causation: {
+    chainId: string | null;
+    parentRun: string | null;
+    fanOut: number;
+  };
+  onJumpEvent?: (source: string, eventId: string) => void;
+  onJumpRun?: (runId: string) => void;
+}) {
+  return (
+    <span className="flex min-w-0 items-center gap-1">
+      <RunHoverCard
+        run={run}
+        chainId={causation.chainId}
+        className="min-w-0"
+        onJumpEvent={onJumpEvent}
+        onJumpRun={onJumpRun}
+      >
+        <span className="truncate">{shortId(run.runId)}</span>
+      </RunHoverCard>
+      <CausationGlyphs
+        causedBy={causation.parentRun}
+        fanOut={causation.fanOut}
+        href={chainHref(causation.chainId, runNodeId(run.runId))}
+        title={runCausationTitle(causation.parentRun, causation.fanOut)}
+      />
+    </span>
+  );
+}
+
 const rowWash = (s: string) =>
   s === "FAILED" || s === "TIMED_OUT"
     ? "row-wash-err"
@@ -444,6 +509,50 @@ export function Runs({
     queryFn: api.status,
     ...refetchIntervals.fast,
   });
+  // Causation needs the events on either side of a run (WM-702): the origin
+  // event is the only thing carrying the chain's correlation id, and the
+  // events a run emitted are its fan-out. Same cache key as the Events view.
+  const eventsQ = useQuery({
+    queryKey: ["events", "all"],
+    queryFn: () => api.events(),
+    ...refetchIntervals.secondary,
+  });
+  const causation = useMemo(() => {
+    const originByKey = new Map<string, AdmittedEvent>();
+    const emittedCount = new Map<string, number>();
+    const emittedFirst = new Map<string, AdmittedEvent>();
+    for (const e of eventsQ.data?.events ?? []) {
+      originByKey.set(`${e.source}:${e.eventId}`, e);
+      if (!e.causationId) continue;
+      emittedCount.set(
+        e.causationId,
+        (emittedCount.get(e.causationId) ?? 0) + 1,
+      );
+      if (!emittedFirst.has(e.causationId)) emittedFirst.set(e.causationId, e);
+    }
+    return { originByKey, emittedCount, emittedFirst };
+  }, [eventsQ.data]);
+  /**
+   * Where a run sits in its chain. The chain key comes off the origin event; a
+   * run whose origin is outside the loaded page is still placed by any event
+   * it emitted, because those carry the same correlation id.
+   */
+  const causationOf = (r: RunListItem) => {
+    const origin =
+      r.eventSource && r.eventId
+        ? causation.originByKey.get(`${r.eventSource}:${r.eventId}`)
+        : undefined;
+    const emitted = causation.emittedFirst.get(r.runId);
+    return {
+      chainId: origin
+        ? chainKeyOfEvent(origin)
+        : emitted
+          ? chainKeyOfEvent(emitted)
+          : null,
+      parentRun: origin?.causationId ?? null,
+      fanOut: causation.emittedCount.get(r.runId) ?? 0,
+    };
+  };
   const rows = list.data?.runs ?? [];
   const scoped = useMemo(
     () =>
@@ -1064,10 +1173,15 @@ export function Runs({
                   className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
                 >
                   <td
-                    className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                    className="mono max-w-28 overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
                     title={r.runId}
                   >
-                    {shortId(r.runId)}
+                    <RunIdCell
+                      run={r}
+                      causation={causationOf(r)}
+                      onJumpEvent={onJumpEvent}
+                      onJumpRun={onOpenFull}
+                    />
                   </td>
                   {/*
                     State cell carries no `max-w-*`/`truncate` (WM-505): its content is a
