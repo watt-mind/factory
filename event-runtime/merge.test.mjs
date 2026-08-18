@@ -1658,6 +1658,68 @@ describe("policy approval and global merge barrier", () => {
     ).toBe(2);
   });
 
+  test("a scan that re-emits round 1 after round 1 executed is accepted as the next durable round; REFUSED runs do not spend rounds", () => {
+    const db = openDb(":memory:");
+    const payload = (round) => ({
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 90,
+      headSha: SHA,
+      baseSha: BASE_SHA,
+      headRef: "feat/WM-590",
+      ticket: "WM-590",
+      finding: `mechanical round ${round}`,
+      findingHash: FINDING_HASH,
+      round,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["event-runtime/merge.test.mjs"],
+    });
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-fix.requested", payload(1), "fix90-1"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    // Round 1 executed; the model does not see run history and emits round 1 again.
+    db.query(
+      `UPDATE runs SET state='COMPLETED' WHERE json_extract(spec_json,'$.agent')='merge-fix@1' AND json_extract(spec_json,'$.input.pr')=90`,
+    ).run();
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-fix.requested", payload(1), "fix90-1-again"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(
+      openProposals(db, {}).find((p) => p.event_id === "fix90-1-again"),
+    ).toBeUndefined();
+    // Mark that second run REFUSED (execute-time refusal): it must not spend the budget.
+    db.query(
+      `UPDATE runs SET state='REFUSED' WHERE json_extract(spec_json,'$.agent')='merge-fix@1' AND json_extract(spec_json,'$.input.pr')=90 AND state='QUEUED'`,
+    ).run();
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-fix.requested", payload(2), "fix90-2"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(
+      openProposals(db, {}).find((p) => p.event_id === "fix90-2"),
+    ).toBeUndefined();
+    // Two executed (COMPLETED + QUEUED) → a further emission is exhausted.
+    admitEvent(
+      db,
+      registry,
+      envelope("factory.merge-fix.requested", payload(2), "fix90-3"),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+    expect(
+      openProposals(db, {}).find((p) => p.event_id === "fix90-3").reason,
+    ).toContain("merge_fix_round_not_durable");
+  });
+
   test("mechanical fix rounds are bounded and exhausted rounds fail schema/policy closed", () => {
     const schema = registry.agents.get("merge-fix@1").inputSchema;
     expect(schema.properties.round.maximum).toBe(2);

@@ -537,14 +537,14 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
 
 function durableFixRoundReason(db, candidate, input, policy) {
   const cap = policy.maxFixRounds ?? 0;
-  // Count only rounds that were actually admitted to run (a proposal decided
-  // "run" that produced a run). Every merge-scan tick re-emits the current
-  // round's fix request for a PR that is still red; counting those refused or
-  // superseded emissions exhausted max_fix_rounds before any fix executed and
-  // parked every PR as fix-round-exhausted (2026-08-18).
+  // A fix round is "spent" only when a merge-fix run for this PR actually
+  // executed (or is executing). Emitted-but-never-run events (merge-scan
+  // re-emits every tick), REFUSED execute-time refusals (pr moved, ticket
+  // state) and CANCELLED stale-pinned runs do not consume the budget
+  // (2026-08-18: counting them exhausted max_fix_rounds before any fix ran).
   const rows = db
     .query(
-      `SELECT e.event_id, e.envelope_json FROM events e
+      `SELECT e.event_id, e.envelope_json, r.state FROM events e
        JOIN proposals p ON p.event_id = e.event_id AND p.event_source = e.source
        JOIN runs r ON r.run_id = p.run_id
        WHERE e.source = 'chain'
@@ -554,7 +554,7 @@ function durableFixRoundReason(db, candidate, input, policy) {
          AND e.event_id != ?`,
     )
     .all(candidate.event_id);
-  const priorRounds = [];
+  let executed = 0;
   for (const row of rows) {
     let payload;
     try {
@@ -569,11 +569,20 @@ function durableFixRoundReason(db, candidate, input, policy) {
     ) {
       if (!Number.isInteger(payload.round) || payload.round < 1)
         return "merge_fix_history_invalid";
-      priorRounds.push(payload.round);
+      executed += 1;
     }
   }
-  const durableRound = (priorRounds.length ? Math.max(...priorRounds) : 0) + 1;
-  if (durableRound > cap || input.round !== durableRound)
+  // The durable round is the count of executed rounds plus one — the runtime,
+  // not the scanning model, is the source of truth. The scan may still say a
+  // lower round (it does not see run history); a higher round than durable is
+  // a replay/skip and is refused.
+  const durableRound = executed + 1;
+  if (durableRound > cap) return "merge_fix_round_not_durable";
+  if (
+    !Number.isInteger(input.round) ||
+    input.round < 1 ||
+    input.round > durableRound
+  )
     return "merge_fix_round_not_durable";
   return null;
 }
