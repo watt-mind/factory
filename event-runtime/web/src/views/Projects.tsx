@@ -27,6 +27,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 import {
+  BranchBadge,
   Button,
   CopyActions,
   DetailPane,
@@ -44,6 +45,7 @@ import {
   copyText,
   notify,
 } from "../components/ui";
+
 
 const projectTarget = (repo: RepoItem) =>
   repo.project || repo.github || repo.path;
@@ -661,9 +663,17 @@ export function Projects({
                       </span>
                     </td>
                     <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
-                      {r.base}
-                      {r.deployBranch ? ` → ${r.deployBranch}` : ""}
+                      <span className="inline-flex items-center gap-1.5">
+                        <BranchBadge branch={r.base} />
+                        {r.deployBranch && (
+                          <>
+                            <span className="text-(--text-faint)">→</span>
+                            <BranchBadge branch={r.deployBranch} />
+                          </>
+                        )}
+                      </span>
                     </td>
+
                     <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-xs text-(--text-faint)">
                       {worktreeScripts(r) || (
                         <span className="text-(--text-faint)">—</span>
@@ -1188,9 +1198,7 @@ export function Projects({
                                   </span>
                                 )}
                                 {h.branch && (
-                                  <span className="rounded bg-(--surface-2) px-1 py-0.2 text-[11px] text-(--text-faint)">
-                                    {h.branch}
-                                  </span>
+                                  <BranchBadge branch={h.branch} />
                                 )}
                               </div>
                               <div className="mt-0.5 text-[11px] text-(--text-dim)">
@@ -1281,9 +1289,7 @@ export function Projects({
                                   </span>
                                 )}
                                 {h.branch && (
-                                  <span className="rounded bg-(--surface-2) px-1 py-0.2 text-[11px] text-(--text-faint)">
-                                    {h.branch}
-                                  </span>
+                                  <BranchBadge branch={h.branch} />
                                 )}
                               </div>
                               <div className="mt-0.5 text-[11px] text-(--text-dim)">

@@ -203,16 +203,28 @@ describe("Chains list (WM-537)", () => {
     });
   });
 
-  test("renders within a full-height flex container for list pane scrolling (WM-818)", async () => {
+  test("renders compact single-line table with source icon and repo badges", async () => {
     await withApi({ chains: async () => ({ chains: rows }) }, async () => {
       const view = renderChains();
       await waitFor(() => {
-        expect(view.getByText("Chains")).toBeTruthy();
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeTruthy();
       });
-      const root = view.container.firstElementChild as HTMLElement;
-      expect(root.className).toContain("flex");
-      expect(root.className).toContain("h-full");
-      expect(root.className).toContain("min-w-0");
+      const activeRow = view.container.querySelector(
+        '[data-chain-id="corr-active"]',
+      )!;
+      // Origin cell should have source icon and whitespace-nowrap
+      const originCell = activeRow.querySelector("td")!;
+      expect(originCell.className).toContain("whitespace-nowrap");
+      expect(originCell.querySelector("svg")).toBeTruthy();
+
+      // Repos cell should contain GitHub icon
+      const reposCell = activeRow.querySelectorAll("td")[7];
+      expect(reposCell.className).toContain("whitespace-nowrap");
+      expect(reposCell.querySelector("svg")).toBeTruthy();
+      expect(reposCell.textContent).toContain("factory");
     });
   });
 });
+

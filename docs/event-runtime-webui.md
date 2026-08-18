@@ -396,7 +396,8 @@ no shared set. Every rule below is checkable in review.
      | `UpdateIcon`        | catch-up                                                                                                                               |
      | `ArchiveIcon`       | repository                                                                                                                             |
      | `GitHubLogoIcon`    | GitHub                                                                                                                                 |
-     | `CommitIcon`        | base branch, deploy branch                                                                                                             |
+     | `GitBranchIcon`     | base branch, deploy branch, deployment branch, branch                                                                                  |
+
 
      Add to this table in the same PR that adds the registry row.
 

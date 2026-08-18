@@ -5,9 +5,9 @@ import {
   CheckCircledIcon,
   ClockIcon,
   CodeIcon,
-  CommitIcon,
   Component1Icon,
   Crosshair2Icon,
+
   CubeIcon,
   DesktopIcon,
   EnterIcon,
@@ -116,9 +116,117 @@ const REGISTRY: Record<string, () => ReactNode> = {
   // ── projects / repos ──────────────────────────────────────────────────
   repository: () => <ArchiveIcon />,
   github: () => <GitHubLogoIcon />,
-  basebranch: () => <CommitIcon />,
-  deploybranch: () => <CommitIcon />,
+  basebranch: () => <GitBranchIcon />,
+  deploybranch: () => <GitBranchIcon />,
+  deploymentbranch: () => <GitBranchIcon />,
+  branch: () => <GitBranchIcon />,
 };
+
+/**
+ * Standard 15x15 Git Branch SVG glyph matching Radix UI icon metrics.
+ */
+export function GitBranchIcon({
+  className = "size-3.5",
+  ...props
+}: React.ComponentProps<"svg">) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 15 15"
+      fill="currentColor"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M3.5 1a2 2 0 0 0-1 3.732V10.268a2 2 0 1 0 1 0V6.414l3.293 3.293a2 2 0 1 0 .707-.707L4.5 5.999V4.732A2 2 0 0 0 3.5 1Zm0 1a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm0 9a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm6-1a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Resolves an origin / event source string to its registered iconography.
+ */
+export function SourceIcon({
+  source,
+  className = "size-3.5",
+}: {
+  source: string;
+  className?: string;
+}) {
+  const norm = source.toLowerCase();
+  if (norm === "operator" || norm === "human") {
+    return <PersonIcon className={className} aria-label={`Source: ${source}`} />;
+  }
+  if (
+    norm.startsWith("schedule") ||
+    norm.startsWith("cron") ||
+    norm === "loop"
+  ) {
+    return <ClockIcon className={className} aria-label={`Source: ${source}`} />;
+  }
+  if (norm === "github" || norm.startsWith("gh")) {
+    return <GitHubLogoIcon className={className} aria-label={`Source: ${source}`} />;
+  }
+  if (norm === "chain") {
+    return <PaperPlaneIcon className={className} aria-label={`Source: ${source}`} />;
+  }
+  if (norm === "linear") {
+    return <CheckCircledIcon className={className} aria-label={`Source: ${source}`} />;
+  }
+  return <EnterIcon className={className} aria-label={`Source: ${source}`} />;
+}
+
+/**
+ * Subtle repository badge with GitHub glyph.
+ */
+export function RepoBadge({
+  repo,
+  className = "",
+}: {
+  repo: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 mono text-[11px] text-(--text-dim) ${className}`}
+    >
+      <GitHubLogoIcon
+        className="size-3 shrink-0 text-(--text-faint)"
+        aria-hidden="true"
+      />
+      <span>{repo}</span>
+    </span>
+  );
+}
+
+/**
+ * Subtle git branch badge with Git Branch glyph.
+ */
+export function BranchBadge({
+  branch,
+  className = "",
+}: {
+  branch: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 mono text-[11px] text-(--text-dim) ${className}`}
+    >
+      <GitBranchIcon
+        className="size-3 shrink-0 text-(--text-faint)"
+        aria-hidden="true"
+      />
+      <span>{branch}</span>
+    </span>
+  );
+}
 
 export const normalizeAttr = (label: string): string => {
   const base = label.startsWith("input.") ? "input" : label;
@@ -133,3 +241,4 @@ export function attrIcon(label: string): ReactNode {
 
 /** For tests and the doc table: the normalised keys this registry knows. */
 export const ATTR_ICON_KEYS: readonly string[] = Object.keys(REGISTRY);
+

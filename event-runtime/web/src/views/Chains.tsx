@@ -31,12 +31,15 @@ import {
   GroupHeaderRow,
   ListEmpty,
   ListPane,
+  RepoBadge,
   STATE_HUES,
+  SourceIcon,
   StateBadge,
   TableWindowFooter,
   Th,
   shortId,
 } from "../components/ui";
+
 
 const ACTIVE_STATES = new Set<RunState>([
   "QUEUED",
@@ -396,46 +399,44 @@ export function Chains({
                   onClick={() => onOpenChain(chain.correlationId)}
                   className={`cursor-pointer hover:bg-(--surface-1) ${selected ? "row-selected" : ""}`}
                 >
-                  <td className="max-w-56 border-b border-(--border) px-3 py-1.5">
+                  <td className="max-w-56 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     <div
-                      className="truncate text-(--text-dim)"
-                      title={chain.origin.type}
+                      className="inline-flex items-center gap-1.5 truncate text-(--text-dim)"
+                      title={`${chain.origin.type} (${chain.origin.source})`}
                     >
-                      {chain.origin.type}
-                    </div>
-                    <div
-                      className="mono truncate text-xs text-(--text-faint)"
-                      title={chain.origin.source}
-                    >
-                      {chain.origin.source}
+                      <SourceIcon
+                        source={chain.origin.source}
+                        className="size-3.5 shrink-0 text-(--text-faint)"
+                      />
+                      <span className="truncate">{chain.origin.type}</span>
                     </div>
                   </td>
                   {show.has("root") && (
                     <td
-                      className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5"
+                      className="mono max-w-28 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
                       title={chain.origin.eventId}
                     >
                       {shortId(chain.origin.eventId)}
                     </td>
                   )}
                   {show.has("depth") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
                       {chain.maxDepth}
                     </td>
                   )}
                   {show.has("events") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
                       {chain.eventCount}
                     </td>
                   )}
                   {show.has("runs") && (
-                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
+                    <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
                       {chain.runCount}
                     </td>
                   )}
                   {show.has("states") && (
-                    <td className="border-b border-(--border) px-3 py-1.5">
-                      <div className="flex flex-wrap gap-1">
+                    <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
                         {Object.entries(chain.states).map(([state, count]) =>
                           count ? (
                             <StateBadge
@@ -461,15 +462,24 @@ export function Chains({
                   )}
                   {show.has("repos") && (
                     <td
-                      className="mono max-w-36 truncate border-b border-(--border) px-3 py-1.5 text-(--text-faint)"
+                      className="max-w-44 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-faint)"
                       title={chain.repos.join(", ")}
                     >
-                      {chain.repos.join(", ") || "—"}
+                      {chain.repos.length > 0 ? (
+                        <div className="flex items-center gap-1.5">
+                          {chain.repos.map((repo) => (
+                            <RepoBadge key={repo} repo={repo} />
+                          ))}
+                        </div>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                   )}
                   {cols
                     .filter(
                       (column) =>
+
                         column.isCustom || column.key.startsWith("custom:"),
                     )
                     .map((column) => (

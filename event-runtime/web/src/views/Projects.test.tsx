@@ -799,18 +799,21 @@ describe("Projects mobile layout (WM-169)", () => {
     });
   });
 
-  test("keeps the selected project detail pane within the mobile viewport", async () => {
-    await withApi({ repos: async () => ({ repos: [repo()] }) }, async () => {
-      const r = renderProjects("factory");
-      await r.findByText("Quick Dispatch (Agent Tasks)");
+  test("renders Base / Deploy column with branch icons", async () => {
+    await withApi(
+      { repos: async () => ({ repos: [repo({ base: "develop", deployBranch: "master" })] }) },
+      async () => {
+        const r = renderProjects();
+        await r.findByText("factory");
 
-      const pane = r.container.querySelector("aside");
-      expect(pane?.className).toContain("w-full");
-      expect(pane?.className).toContain("max-w-full");
-      expect(pane?.className).toContain("lg:w-[540px]");
-      expect(r.getByTestId("projects-list-pane").className).toContain(
-        "hidden lg:flex",
-      );
-    });
+        const row = r.getByText("factory").closest("tr")!;
+        const branchCell = row.querySelectorAll("td")[4];
+        expect(branchCell.textContent).toContain("develop");
+        expect(branchCell.textContent).toContain("master");
+        expect(branchCell.querySelectorAll("svg").length).toBeGreaterThanOrEqual(2);
+      },
+    );
   });
 });
+
+

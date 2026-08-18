@@ -14,7 +14,10 @@ import {
   useState,
 } from "react";
 import { attrIcon } from "./attrIcons";
+export { GitBranchIcon, SourceIcon, RepoBadge, BranchBadge } from "./attrIcons";
 import { createPortal } from "react-dom";
+
+
 import { ChevronRightIcon } from "@radix-ui/react-icons";
 import { modal, useFocusReturn, useNow } from "../hooks";
 import type { Section, SortDir } from "../displayOptions";

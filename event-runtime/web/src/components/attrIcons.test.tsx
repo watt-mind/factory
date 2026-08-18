@@ -39,6 +39,13 @@ describe("attribute icon registry (§5.2 tier 4, WM-483)", () => {
     }
   });
 
+  test("git branch attributes resolve to the branch glyph", () => {
+    expect(svg("baseBranch")).toBe(svg("deployBranch"));
+    expect(svg("baseBranch")).toBe(svg("deploymentBranch"));
+    expect(svg("branch")).toBe(svg("baseBranch"));
+    expect(svg("baseBranch")).not.toBe(svg("repository"));
+  });
+
   test("every registered glyph is a currentColor svg (hue stays with the label)", () => {
     for (const key of ATTR_ICON_KEYS) {
       const out = svg(key);
@@ -47,3 +54,4 @@ describe("attribute icon registry (§5.2 tier 4, WM-483)", () => {
     }
   });
 });
+
