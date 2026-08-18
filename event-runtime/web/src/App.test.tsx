@@ -536,6 +536,94 @@ describe("health connection chrome (WM-724)", () => {
   });
 });
 
+describe("env chip click affordance (WM-728)", () => {
+  const originalClipboard = navigator.clipboard;
+  const stubClipboard = () => {
+    let written = "";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (text: string) => {
+          written = text;
+          return Promise.resolve();
+        },
+      },
+    });
+    return {
+      get written() {
+        return written;
+      },
+    };
+  };
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: originalClipboard,
+    });
+  });
+
+  test("a disconnected chip retries health instead of a no-op", async () => {
+    healthMode = "error";
+    Object.assign(refetchIntervals.primary, {
+      refetchInterval: () => false,
+    });
+    const clip = stubClipboard();
+    const utils = renderApp();
+    await waitFor(() => {
+      expect(utils.sidebar.getByText("disconnected")).toBeTruthy();
+    });
+
+    const chip = utils.sidebar.getByText("disconnected");
+    expect(chip.getAttribute("title")).toMatch(/retry|reconnect/i);
+    expect(chip.getAttribute("title")).not.toMatch(/copy/i);
+
+    const before = healthCalls;
+    fireEvent.click(chip);
+    expect(healthCalls).toBe(before + 1);
+    expect(clip.written).toBe("");
+  });
+
+  test("a connecting chip does not copy home", async () => {
+    healthMode = "pending";
+    const clip = stubClipboard();
+    const utils = renderApp();
+    await waitFor(() => {
+      expect(
+        utils.sidebar.getByRole("button", { name: "Proposals" }).textContent,
+      ).toContain("9");
+    });
+
+    const chip = utils.sidebar.getByText("connecting");
+    expect(chip.getAttribute("title")).toMatch(/retry|reconnect/i);
+    expect(chip.getAttribute("title")).not.toMatch(/copy/i);
+
+    // The first /health is still in flight; refetch joins it rather than
+    // minting a second request. The contract here is: pending never copies.
+    const before = healthCalls;
+    fireEvent.click(chip);
+    expect(clip.written).toBe("");
+    expect(healthCalls).toBe(before);
+  });
+
+  test("a connected chip copies env.home and does not refetch", async () => {
+    const clip = stubClipboard();
+    const utils = renderApp();
+    await waitFor(() => {
+      expect(utils.sidebar.getByText("dev")).toBeTruthy();
+    });
+
+    const chip = utils.sidebar.getByText("dev");
+    expect(chip.getAttribute("title")).toMatch(/copy/i);
+    expect(chip.getAttribute("title")).not.toMatch(/retry|reconnect/i);
+
+    const before = healthCalls;
+    fireEvent.click(chip);
+    expect(clip.written).toBe("/tmp/factory");
+    expect(healthCalls).toBe(before);
+  });
+});
+
 describe("Proposals approval tooltip health wiring (WM-738)", () => {
   // The tooltip sits on the wrapper span around the Approve button, because a
   // disabled button does not fire hover events (Proposals.tsx).

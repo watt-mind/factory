@@ -749,17 +749,21 @@ export function App() {
                 type="button"
                 className="rounded px-1.5 py-0.5 text-[11px] font-semibold tracking-wide uppercase"
                 title={
-                  env
+                  env?.home
                     ? `${env.home} · policy ${health.data?.policyVersion} — click to copy home`
                     : healthPending
-                      ? "connecting to the runtime…"
-                      : "runtime unreachable"
+                      ? "connecting to the runtime… — click to retry"
+                      : "runtime unreachable — click to retry"
                 }
                 style={{
                   color: envHue,
                   background: `color-mix(in oklch, ${envHue} 15%, transparent)`,
                 }}
-                onClick={() => env?.home && copyText(env.home, "runtime home")}
+                onClick={() =>
+                  env?.home
+                    ? copyText(env.home, "runtime home")
+                    : health.refetch()
+                }
               >
                 {envLabel}
               </PrimitiveButton>
