@@ -355,8 +355,8 @@ describe("HoverCard", () => {
     const listKeys = mock((_e: KeyboardEvent) => {});
     window.addEventListener("keydown", listKeys);
     try {
-      fireEvent.keyDown(action, { key: "ArrowDown" });
-      fireEvent.keyDown(action, { key: "ArrowUp" });
+      expect(fireEvent.keyDown(action, { key: "ArrowDown" })).toBe(true);
+      expect(fireEvent.keyDown(action, { key: "ArrowUp" })).toBe(true);
       expect(listKeys).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener("keydown", listKeys);
