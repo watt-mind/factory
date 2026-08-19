@@ -125,17 +125,21 @@ case "$cmd" in
   down)         exec bash "$ROOT/bin/live-stack.sh" down "$@" ;;
   tail)         exec bash "$ROOT/bin/live-stack.sh" tail "$@" ;;
   demo)
-    _down=0
-    for _a in "$@"; do
-      if [[ "$_a" == "--down" ]]; then _down=1; break; fi
-    done
-    if [[ "$_down" -eq 1 ]]; then
-      _args=()
-      for _a in "$@"; do [[ "$_a" != "--down" ]] && _args+=("$_a"); done
-      exec bash "$ROOT/bin/worktree-down.sh" --here "${_args[@]}"
-    else
-      exec bash "$ROOT/bin/worktree-up.sh" --here "$@"
-    fi
+    # Isolated event-runtime env (OPS-217) stays available behind --here /
+    # --down so existing worktree-up sessions keep working. Bare `factory demo`
+    # is the OSS quickstart (WM-799): one ticket against demo/repo/.
+    case "${1:-}" in
+      --down)
+        shift
+        exec bash "$ROOT/bin/worktree-down.sh" --here "$@"
+        ;;
+      --here | --reseed | --no-seed | --live | --checkout-only)
+        exec bash "$ROOT/bin/worktree-up.sh" --here "$@"
+        ;;
+      *)
+        exec bun "$ROOT/demo/run.mjs" "$@"
+        ;;
+    esac
     ;;
   run)          run_sh runners/run-agent.sh "$@" ;;
   notify)
@@ -281,7 +285,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   up            start live event-runtime stack (API 7381, live worker, and Web UI 7382)
   down          stop live event-runtime stack
   tail          tail live daemon logs (~/.factory/run/{serve,worker,web}.log)
-  demo          provision & run isolated seeded demo env (use --down to stop)
+  demo          run the bundled starter ticket (WM-799); --dry for CI.
+                Isolated event-runtime env: demo --here / demo --down
   run           runners/run-agent.sh
   notify        durable human inbox + notify.py projection (direct fallback when serve is offline)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)

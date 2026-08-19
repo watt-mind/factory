@@ -154,6 +154,11 @@ jobs:
         # Explicit liveness bounds declared by individual tests still win.
         run: bun test --timeout 20000 --max-concurrency=4 event-runtime/lib
 
+      - name: OSS quickstart dry-run
+        # WM-799: the 15-minute path must stay green without Linear/GitHub/model
+        # credentials. --dry validates the bundled demo repo and prints the plan.
+        run: bin/factory demo --dry
+
       - name: Sweep stale shared-host temp directories
         if: always()
         shell: bash
@@ -326,12 +331,15 @@ jobs:
         # regenerate — never to edit the generated file.
         run: bun build/emit.mjs --check
 
+      - name: OSS quickstart dry-run
+        run: bin/factory demo --dry
+
       - name: Schedule renders match deploy/launchd
         run: bun deploy/gen.mjs && git diff --exit-code deploy/launchd/
 
       - name: Shell syntax check
         run: |
-          for f in bin/*.sh bin/factory; do
+          for f in bin/*.sh bin/factory demo/repo/bin/*.sh; do
             bash -n "$f" || exit 1
           done
 

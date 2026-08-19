@@ -1,0 +1,9 @@
+{
+  "name": "factory-demo-repo",
+  "private": true,
+  "type": "module",
+  "description": "Bundled starter repo for `factory demo` (WM-799). Not a published package.",
+  "scripts": {
+    "test": "bun test src/greet.test.mjs"
+  }
+}
