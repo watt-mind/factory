@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Ship plan",
+  "summary": "/summary",
+  "status": {
+    "path": "/recommendation",
+    "tone": { "SHIP": "ok", "NOOP": "muted" }
+  },
+  "sections": [
+    {
+      "path": "/changelog",
+      "as": "table",
+      "label": "Changelog",
+      "columns": ["sha", "subject", "ticket"],
+      "formats": { "sha": "sha", "ticket": "issue" }
+    },
+    {
+      "path": "/plan",
+      "as": "table",
+      "label": "Plan",
+      "columns": ["action", "title"],
+      "formats": { "url": "url", "smokeDeadlineSeconds": "count" },
+      "expand": [
+        "body",
+        "url",
+        "smokeBranch",
+        "revisionField",
+        "smokeDeadlineSeconds"
+      ]
+    },
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Release",
+      "keys": [
+        "repo",
+        "github",
+        "base",
+        "deployBranch",
+        "headSha",
+        "deployHeadSha",
+        "noopReason"
+      ],
+      "formats": {
+        "repo": "repo",
+        "headSha": "sha",
+        "deployHeadSha": "sha"
+      },
+      "tone": {
+        "noopReason": {
+          "not_ahead": "muted",
+          "diverged": "error",
+          "ci_red": "error",
+          "ci_pending": "warn",
+          "no_checks": "warn",
+          "no_deploy_config": "warn"
+        }
+      }
+    }
+  ]
+}
