@@ -58,6 +58,9 @@ function fixtureRoot() {
       "    standard: pi/model",
       "unknown_private_block:",
       "  token: never-publish-this",
+      "notify:",
+      "  command: echo",
+      "  webhookToken: leaked-notify-token",
       "",
     ].join("\n"),
   );
@@ -205,6 +208,12 @@ describe("GET /config view", () => {
     ).toBe(false);
     expect(wire).not.toContain("never-publish-this");
     expect(wire).not.toContain("super-secret-value");
+    expect(wire).not.toContain("leaked-notify-token");
+    const notify = policy.entries.find((entry) => entry.key === "notify");
+    expect(notify.value).toEqual({
+      command: "echo",
+      webhookToken: "[redacted]",
+    });
     expect(
       nodes.entries.find((entry) => entry.key === "lab.env.keys").value,
     ).toEqual(["API_TOKEN", "FACTORY_EVENT_PORT"]);
@@ -346,6 +355,24 @@ describe("GET /config view", () => {
       "hello",
     );
     expect(JSON.stringify(view)).not.toContain("shh");
+  });
+
+  test("GET /config redacts secret-looking keys in the policy section, not only extension values", () => {
+    const view = configView({
+      root: fixtureRoot(),
+      registry: registry(),
+      repos: () => new Map(),
+      policyVersion: "git:test",
+      now: 0,
+    });
+    const policy = view.sections.find((section) => section.id === "policy");
+    expect(
+      policy.entries.find((entry) => entry.key === "notify").value,
+    ).toEqual({
+      command: "echo",
+      webhookToken: "[redacted]",
+    });
+    expect(JSON.stringify(view)).not.toContain("leaked-notify-token");
   });
 
   test("redactSecrets masks token/secret/key/password keys at any depth and leaves the rest", () => {

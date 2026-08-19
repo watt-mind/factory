@@ -57,7 +57,7 @@ function entriesForRepos(repos) {
 function entriesForPolicy(policy) {
   return POLICY_KEYS.filter((key) => Object.hasOwn(policy, key)).map((key) => ({
     key,
-    value: policy[key],
+    value: redactSecrets(policy[key]),
     reload: key === "models" ? "restart" : "hot",
   }));
 }

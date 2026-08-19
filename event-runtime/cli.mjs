@@ -23,7 +23,7 @@ const USAGE = BASE_USAGE.replace(
 )
   .replace(
     "  agents                         registered agent definitions and event routing",
-    "  agents                         registered agent definitions and event routing\n  adapters                       registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts\n  extensions validate <path>     validate a factory-extension.json without loading it",
+    "  agents                         registered agent definitions and event routing\n  adapters                       registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts, config namespace\n  extensions validate <path>     validate a factory-extension.json without loading it",
   )
   .concat(
     "\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
@@ -175,9 +175,10 @@ export async function adaptersCommand(args = []) {
 
 /**
  * `extensions list` — the allow-listed extensions the loader accepts (WM-838),
- * with their contribution counts; faults print as anomalies on stderr, exactly
- * as /status would report them, and the command still exits 0 because a
- * broken third-party extension is a configuration anomaly, not a CLI failure.
+ * with their contribution counts and `contributes.config` namespace; faults
+ * print as anomalies on stderr, exactly as /status would report them, and the
+ * command still exits 0 because a broken third-party extension is a
+ * configuration anomaly, not a CLI failure.
  * `extensions validate <path>` — validate one manifest (schema, path
  * existence, adapter names) without loading a pack or importing an adapter;
  * exit 1 when it does not validate. Both are local — no serve needed.
@@ -199,8 +200,14 @@ export async function extensionsCommand(args = []) {
     const contributes = out.manifest.contributes ?? {};
     const packs = (contributes.packs ?? []).length;
     const adapters = Object.keys(contributes.adapters ?? {}).length;
+    const namespace = contributes.config?.namespace;
+    const counts = `${packs} pack${packs === 1 ? "" : "s"}, ${adapters} adapter${adapters === 1 ? "" : "s"}`;
+    const configBit =
+      typeof namespace === "string" && namespace !== ""
+        ? `, config namespace ${namespace}`
+        : "";
     console.log(
-      `${out.manifest.name}@${out.manifest.version}: valid (${packs} pack${packs === 1 ? "" : "s"}, ${adapters} adapter${adapters === 1 ? "" : "s"})`,
+      `${out.manifest.name}@${out.manifest.version}: valid (${counts}${configBit})`,
     );
     return out;
   }
@@ -222,12 +229,19 @@ export async function extensionsCommand(args = []) {
       10,
       ...loaded.extensions.map((ext) => ext.name.length + 2),
     );
+    const nsWidth = Math.max(
+      10,
+      ...loaded.extensions.map(
+        (ext) => (ext.config?.namespace ?? "-").length + 2,
+      ),
+    );
     console.log(
-      `${"EXTENSION".padEnd(width)}${"VERSION".padEnd(10)}${"PACKS".padEnd(7)}${"ADAPTERS".padEnd(10)}PATH`,
+      `${"EXTENSION".padEnd(width)}${"VERSION".padEnd(10)}${"PACKS".padEnd(7)}${"ADAPTERS".padEnd(10)}${"NAMESPACE".padEnd(nsWidth)}PATH`,
     );
     for (const ext of loaded.extensions) {
+      const namespace = ext.config?.namespace ?? "-";
       console.log(
-        `${ext.name.padEnd(width)}${ext.version.padEnd(10)}${String(ext.packs.length).padEnd(7)}${String(ext.adapters.length).padEnd(10)}${ext.path}`,
+        `${ext.name.padEnd(width)}${ext.version.padEnd(10)}${String(ext.packs.length).padEnd(7)}${String(ext.adapters.length).padEnd(10)}${namespace.padEnd(nsWidth)}${ext.path}`,
       );
     }
     return loaded;

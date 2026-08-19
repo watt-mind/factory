@@ -318,9 +318,11 @@ function isPlainObject(value) {
 
 /**
  * Fill `default`s from a schema into a value, recursively through
- * `properties`. A nested object property with no value is only created when
- * a default inside it produces something — an empty object would trip that
- * property's own `required` where absence would not.
+ * `properties` and `items`. A nested object property with no value is only
+ * created when a default inside it produces something — an empty object would
+ * trip that property's own `required` where absence would not. Array elements
+ * are filled from `schema.items` the same way (the array itself is not
+ * invented unless the schema supplies a `default`).
  */
 export function applyConfigDefaults(schema, value) {
   if (!isPlainObject(schema)) return cloneJson(value);
@@ -342,6 +344,9 @@ export function applyConfigDefaults(schema, value) {
       if (isPlainObject(filled) && Object.keys(filled).length === 0) continue;
       out[key] = filled;
     }
+  }
+  if (Array.isArray(out) && isPlainObject(schema.items)) {
+    out = out.map((item) => applyConfigDefaults(schema.items, item));
   }
   return out;
 }

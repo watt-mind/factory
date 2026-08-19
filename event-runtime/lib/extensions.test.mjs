@@ -17,6 +17,7 @@ import {
   EXTENSION_SCHEMA,
   ExtensionError,
   RESERVED_CONTRIBUTIONS,
+  applyConfigDefaults,
   getExtensionConfig,
   loadExtensionRoots,
   loadExtensions,
@@ -555,6 +556,61 @@ describe("extension config (contributes.config)", () => {
     );
   });
 
+  test("applyConfigDefaults fills schema.items defaults on array values", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        servers: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              host: { type: "string" },
+              port: { type: "integer", default: 443 },
+              retries: { type: "integer", default: 2 },
+            },
+          },
+        },
+        tags: {
+          type: "array",
+          default: [{ label: "x" }],
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string" },
+              weight: { type: "integer", default: 1 },
+            },
+          },
+        },
+      },
+    };
+    expect(
+      applyConfigDefaults(schema, {
+        servers: [{ host: "a.example" }, { host: "b.example", port: 8443 }],
+      }),
+    ).toEqual({
+      servers: [
+        { host: "a.example", port: 443, retries: 2 },
+        { host: "b.example", port: 8443, retries: 2 },
+      ],
+      tags: [{ label: "x", weight: 1 }],
+    });
+    // A missing array is not invented when the schema has no default.
+    expect(
+      applyConfigDefaults({ type: "array", items: { default: 1 } }, undefined),
+    ).toBeUndefined();
+    // Existing arrays still walk items even without an object wrapper.
+    expect(
+      applyConfigDefaults(
+        {
+          type: "array",
+          items: { type: "object", properties: { n: { default: 1 } } },
+        },
+        [{}],
+      ),
+    ).toEqual([{ n: 1 }]);
+  });
+
   test("validate refuses a manifest whose config key is malformed", () => {
     const bad = tempExtension((m) => {
       m.contributes.config = { namespace: "Bad Space" };
@@ -791,8 +847,19 @@ describe("cli extensions", () => {
     const ok = run("validate", SAMPLE_EXTENSION);
     expect(ok.exitCode).toBe(0);
     expect(ok.stdout.toString()).toMatch(
-      /factory\/sample@1\.0\.0: valid \(1 pack, 1 adapter\)/,
+      /factory\/sample@1\.0\.0: valid \(1 pack, 1 adapter, config namespace sample\)/,
     );
+
+    const noConfig = tempExtension((m) => {
+      m.name = "factory/plain";
+      delete m.contributes.config;
+    });
+    const plain = run("validate", noConfig);
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout.toString()).toMatch(
+      /factory\/plain@1\.0\.0: valid \(1 pack, 1 adapter\)/,
+    );
+    expect(plain.stdout.toString()).not.toMatch(/config namespace/);
 
     const bad = tempExtension((m) => {
       m.version = "one";
@@ -838,10 +905,12 @@ describe("cli extensions", () => {
     });
     expect(out.exitCode).toBe(0);
     const text = out.stdout.toString();
-    expect(text).toMatch(/EXTENSION\s+VERSION\s+PACKS\s+ADAPTERS\s+PATH/);
+    expect(text).toMatch(
+      /EXTENSION\s+VERSION\s+PACKS\s+ADAPTERS\s+NAMESPACE\s+PATH/,
+    );
     expect(text).toMatch(
       new RegExp(
-        `factory/sample\\s+1\\.0\\.0\\s+1\\s+1\\s+${SAMPLE_EXTENSION}`,
+        `factory/sample\\s+1\\.0\\.0\\s+1\\s+1\\s+sample\\s+${SAMPLE_EXTENSION}`,
       ),
     );
     expect(out.stderr.toString()).toMatch(
@@ -863,6 +932,7 @@ describe("cli extensions", () => {
     });
     const parsed = JSON.parse(json.stdout.toString());
     expect(parsed.extensions[0].name).toBe("factory/sample");
+    expect(parsed.extensions[0].config.namespace).toBe("sample");
     expect(parsed.anomalies).toHaveLength(1);
   });
 });
