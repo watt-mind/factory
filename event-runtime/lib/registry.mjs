@@ -13,6 +13,7 @@ import path from "node:path";
 import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
+import { MEMO_KINDS, SUBJECT_TYPES } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validateArtifactView } from "./artifact-view.mjs";
 import { PANELS_DIR, loadPanelDir, mergePanels } from "./panel-view.mjs";
@@ -614,7 +615,123 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     writable: true,
     configurable: true,
   });
+  if (def.memos !== undefined) {
+    validateMemosDeclaration(def.memos, {
+      source,
+      inputSchema: loaded.inputSchema,
+    });
+  }
   return loaded;
+}
+
+const MEMO_INPUT_PATH =
+  /^\$\.input\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)$/;
+const MEMO_DECL_KEYS = new Set(["subject", "kinds", "max"]);
+const MEMO_SUBJECT_KEYS = new Set(["type", "id"]);
+
+/**
+ * Does `dotted` (e.g. `ticket` or `runPin.transcript`) resolve against a JSON
+ * Schema the way §4.1 requires: a load error, not a runtime surprise.
+ * `additionalProperties: false` is closed; an object schema that allows extra
+ * properties accepts any remaining segment.
+ */
+export function inputSchemaHasPath(schema, dotted) {
+  if (typeof dotted !== "string" || dotted.length === 0) return false;
+  const keys = dotted.split(".");
+  let current = schema;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return false;
+    }
+    if (current.properties && Object.hasOwn(current.properties, key)) {
+      current = current.properties[key];
+      continue;
+    }
+    if (current.additionalProperties === false) return false;
+    if (
+      typeof current.additionalProperties === "object" &&
+      current.additionalProperties !== null
+    ) {
+      current = current.additionalProperties;
+      continue;
+    }
+    return true;
+  }
+  return true;
+}
+
+/**
+ * Validate the optional definition `memos` block (docs/event-runtime-memos.md
+ * §4.1). Unknown kinds, subject types, fields, or input paths that the input
+ * schema cannot name fail at load.
+ */
+export function validateMemosDeclaration(memos, { source, inputSchema } = {}) {
+  const at = source ? `${source}: "memos"` : `"memos"`;
+  if (!Array.isArray(memos)) {
+    throw new RegistryError(`${at} must be an array of subject declarations`);
+  }
+  for (const [index, entry] of memos.entries()) {
+    const entryAt = `${at}[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new RegistryError(`${entryAt} must be an object`);
+    }
+    for (const key of Object.keys(entry)) {
+      if (!MEMO_DECL_KEYS.has(key)) {
+        throw new RegistryError(`${entryAt}: unknown field "${key}"`);
+      }
+    }
+    const subject = entry.subject;
+    if (!subject || typeof subject !== "object" || Array.isArray(subject)) {
+      throw new RegistryError(`${entryAt}.subject must be { type, id }`);
+    }
+    for (const key of Object.keys(subject)) {
+      if (!MEMO_SUBJECT_KEYS.has(key)) {
+        throw new RegistryError(`${entryAt}.subject: unknown field "${key}"`);
+      }
+    }
+    if (!SUBJECT_TYPES.includes(subject.type)) {
+      throw new RegistryError(
+        `${entryAt}.subject.type must be one of ${SUBJECT_TYPES.join(", ")} (got ${JSON.stringify(subject.type)})`,
+      );
+    }
+    const pathMatch =
+      typeof subject.id === "string" ? MEMO_INPUT_PATH.exec(subject.id) : null;
+    if (!pathMatch) {
+      throw new RegistryError(
+        `${entryAt}.subject.id must be a $.input.<path> reference (got ${JSON.stringify(subject.id)})`,
+      );
+    }
+    if (inputSchema && !inputSchemaHasPath(inputSchema, pathMatch[1])) {
+      throw new RegistryError(
+        `${entryAt}.subject.id "${subject.id}" does not resolve against the input schema`,
+      );
+    }
+    if (entry.kinds !== undefined) {
+      if (
+        !Array.isArray(entry.kinds) ||
+        entry.kinds.length === 0 ||
+        !entry.kinds.every((kind) => typeof kind === "string")
+      ) {
+        throw new RegistryError(
+          `${entryAt}.kinds must be a non-empty array of kind names`,
+        );
+      }
+      for (const kind of entry.kinds) {
+        if (!MEMO_KINDS.includes(kind)) {
+          throw new RegistryError(
+            `${entryAt}.kinds: unknown kind ${JSON.stringify(kind)} — must be one of ${MEMO_KINDS.join(", ")}`,
+          );
+        }
+      }
+    }
+    if (entry.max !== undefined) {
+      if (!Number.isInteger(entry.max) || entry.max < 1) {
+        throw new RegistryError(
+          `${entryAt}.max must be a positive integer (got ${JSON.stringify(entry.max)})`,
+        );
+      }
+    }
+  }
 }
 
 /**

@@ -27,6 +27,7 @@ import { budgetExhausted } from "../../lib/spend.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import { listMemos } from "./memos.mjs";
 import {
   artifactsRoot,
   DEAD_LETTER_AFTER,
@@ -98,6 +99,75 @@ export function repoNotAllowed(def, payload) {
     return null;
   if (def.repos.includes(payload.repo)) return null;
   return `repo_not_allowed: ${def.ref} may not run over ${payload.repo} (allowed: ${def.repos.join(", ")})`;
+}
+
+function pinEntryFromRow(row) {
+  return {
+    sha256: row.sha256,
+    subject: row.subject,
+    kind: row.kind,
+    runId: row.runId,
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * Fold every declared memo subject into `payload.memoPin` (docs/event-runtime-memos.md
+ * §4.2). Empty fold → empty `entries`. When the payload already carries a pin
+ * whose entries match this fold, keep `foldedAt` so a TTL re-plan does not
+ * churn `inputHash`; a new live memo changes entries and re-admits work.
+ */
+export function pinMemos(
+  db,
+  def,
+  payload,
+  { now = Date.now(), descriptionHash, headSha } = {},
+) {
+  const declarations = def?.memos;
+  if (!Array.isArray(declarations) || declarations.length === 0) return payload;
+  const seen = new Set();
+  const entries = [];
+  for (const decl of declarations) {
+    let id;
+    try {
+      id = resolveInputRef(payload, decl.subject.id);
+    } catch {
+      // Optional input path absent this run: skip the subject, do not fail.
+      continue;
+    }
+    const folded = listMemos(
+      db,
+      { type: decl.subject.type, id },
+      {
+        kinds: decl.kinds,
+        max: decl.max,
+        now,
+        descriptionHash:
+          decl.subject.type === "ticket" ? descriptionHash : undefined,
+        headSha: decl.subject.type === "repo" ? headSha : undefined,
+      },
+    );
+    for (const row of folded) {
+      if (seen.has(row.sha256)) continue;
+      seen.add(row.sha256);
+      entries.push(pinEntryFromRow(row));
+    }
+  }
+  const existing = payload?.memoPin;
+  if (
+    existing &&
+    typeof existing === "object" &&
+    canonicalJson(existing.entries ?? null) === canonicalJson(entries)
+  ) {
+    return payload;
+  }
+  return {
+    ...payload,
+    memoPin: {
+      foldedAt: new Date(now).toISOString(),
+      entries,
+    },
+  };
 }
 
 /**
@@ -1409,6 +1479,27 @@ export function planEvent(
           db,
           event,
           `repo_pin_failed: ${err.message}`,
+          at,
+          ttlSeconds,
+        );
+      }
+    }
+    // Declared memos fold at plan time into memoPin (docs/event-runtime-memos.md
+    // §4.2). The pin is part of the payload, so it is in inputHash and the
+    // receipt. An empty fold is empty entries, never human_needed.
+    if (Array.isArray(def.memos) && def.memos.length > 0) {
+      try {
+        payload = pinMemos(db, def, payload, {
+          now,
+          descriptionHash:
+            worktreeEligibility?.evidence?.ticket?.descriptionHash,
+          headSha: payload.repoPin?.sha ?? null,
+        });
+      } catch (err) {
+        return humanNeeded(
+          db,
+          event,
+          `memo_pin_failed: ${err.message}`,
           at,
           ttlSeconds,
         );

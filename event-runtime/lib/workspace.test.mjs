@@ -10,11 +10,14 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { Database } from "bun:sqlite";
+import { canonicalJson, sha256Hex } from "./canonical.mjs";
+import { MEMO_SCHEMA_VERSION, memoDigest, withProvenance } from "./memos.mjs";
 import {
   assertSandboxWorkspaceSupported,
   PathViolation,
   WorktreeSandboxUnsupportedError,
   WorktreeError,
+  MEMOS_JSON_NOTICE,
   createWorkspace,
   destroyWorkspace,
   detectWorktreeOwnershipConflict,
@@ -594,5 +597,126 @@ describe("worktree workspaces (WM-108)", () => {
         workspace: { type: "worktree" },
       }),
     ).toThrow(/input.repo and input.ticket/);
+  });
+});
+
+function storeMemo(document, storeRoot) {
+  mkdirSync(storeRoot, { recursive: true });
+  const full = document.provenance
+    ? document
+    : withProvenance(document, {
+        runId: "run_producer",
+        agent: "run-postmortem@2",
+        createdAt: "2026-08-18T14:02:11.000Z",
+      });
+  const bytes = canonicalJson(full);
+  const sha256 = sha256Hex(bytes);
+  writeFileSync(path.join(storeRoot, sha256), bytes);
+  return { document: full, sha256 };
+}
+
+describe("memos.json materialization (WM-810)", () => {
+  test("writes memos.json from store bytes for an artifacts workspace with memoPin", () => {
+    const storeRoot = tmpDir("evrt-memo-store-");
+    const { document, sha256 } = storeMemo(
+      {
+        schemaVersion: MEMO_SCHEMA_VERSION,
+        subject: { type: "ticket", id: "WM-810" },
+        kind: "postmortem",
+        body: "Run the scoped command, not the full suite.",
+        bindings: { descriptionHash: `sha256:${"a".repeat(64)}` },
+      },
+      storeRoot,
+    );
+    expect(sha256).toBe(memoDigest(document));
+    const created = createWorkspace({
+      root: tmpRoot(),
+      runId: "run_memo_ws",
+      attempt: 1,
+      input: {
+        ticket: "WM-810",
+        memoPin: {
+          foldedAt: "2026-08-18T14:10:00.000Z",
+          entries: [
+            {
+              sha256,
+              subject: { type: "ticket", id: "WM-810" },
+              kind: "postmortem",
+              runId: "run_producer",
+              createdAt: "2026-08-18T14:02:11.000Z",
+            },
+          ],
+        },
+      },
+      workspace: { type: "artifacts", inputs: [] },
+      artifactStore: storeRoot,
+    });
+    const written = JSON.parse(
+      readFileSync(path.join(created.dir, "memos.json"), "utf8"),
+    );
+    expect(written.notice).toBe(MEMOS_JSON_NOTICE);
+    expect(written.memos).toEqual([
+      {
+        sha256,
+        subject: { type: "ticket", id: "WM-810" },
+        kind: "postmortem",
+        precedentOnly: false,
+        provenance: document.provenance,
+        bindings: document.bindings,
+        body: document.body,
+      },
+    ]);
+    expect(
+      created.materialized.some((entry) => entry.as === "memos.json"),
+    ).toBe(true);
+  });
+
+  test("empty entries still write memos.json with the notice", () => {
+    const created = createWorkspace({
+      root: tmpRoot(),
+      runId: "run_memo_empty",
+      attempt: 1,
+      input: {
+        memoPin: { foldedAt: "2026-08-18T14:10:00.000Z", entries: [] },
+      },
+      workspace: { type: "artifacts", inputs: [] },
+      artifactStore: tmpDir("evrt-memo-store-empty-"),
+    });
+    expect(
+      JSON.parse(readFileSync(path.join(created.dir, "memos.json"), "utf8")),
+    ).toEqual({
+      notice: MEMOS_JSON_NOTICE,
+      memos: [],
+    });
+  });
+
+  test("a memo hash missing from the store fails closed", () => {
+    expect(() =>
+      createWorkspace({
+        root: tmpRoot(),
+        runId: "run_memo_missing",
+        attempt: 1,
+        input: {
+          memoPin: {
+            foldedAt: "2026-08-18T14:10:00.000Z",
+            entries: [{ sha256: "a".repeat(64) }],
+          },
+        },
+        workspace: { type: "artifacts", inputs: [] },
+        artifactStore: tmpDir("evrt-memo-store-missing-"),
+      }),
+    ).toThrow(/not in the store/);
+  });
+
+  test("no memoPin means no memos.json", () => {
+    const created = createWorkspace({
+      root: tmpRoot(),
+      runId: "run_memo_absent",
+      attempt: 1,
+      input: { ticket: "WM-810" },
+      workspace: { type: "artifacts", inputs: [] },
+      artifactStore: tmpDir("evrt-memo-store-absent-"),
+    });
+    expect(existsSync(path.join(created.dir, "memos.json"))).toBe(false);
   });
 });

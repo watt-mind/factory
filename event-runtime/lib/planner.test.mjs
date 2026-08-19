@@ -11,13 +11,24 @@ import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
 import {
   buildRunSpec,
   idempotencyKeyFor,
+  pinMemos,
   planAdmittedEvents,
   planEvent,
   policyMaxConcurrentMerges,
   worktreeDispatchAutoEligibility,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
-import { loadRegistry } from "./registry.mjs";
+import {
+  RegistryError,
+  loadRegistry,
+  validateMemosDeclaration,
+} from "./registry.mjs";
+import {
+  MEMO_SCHEMA_VERSION,
+  memoDigest,
+  registerMemos,
+  withProvenance,
+} from "./memos.mjs";
 
 const registry = loadRegistry();
 const NOW = Date.parse("2026-08-12T10:30:02Z");
@@ -1848,5 +1859,330 @@ describe("planAdmittedEvents", () => {
     expect(replannedSpec.input.runPin).toEqual(originalSpec.input.runPin);
     expect(hashJson(replannedSpec)).toBe(outcome.proposal.spec_hash);
     expect(replannedSpec.idempotencyKey).toBe(originalSpec.idempotencyKey);
+  });
+});
+
+const TICKET_REPO_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ticket: { type: "string" },
+    repo: { type: "string" },
+    runPin: {
+      type: "object",
+      properties: { transcript: { type: "string" } },
+    },
+  },
+};
+
+function memoDoc(overrides = {}) {
+  const { provenance, ...rest } = overrides;
+  return withProvenance(
+    {
+      schemaVersion: MEMO_SCHEMA_VERSION,
+      subject: { type: "ticket", id: "WM-810" },
+      kind: "postmortem",
+      body: "Run the scoped command, not the full suite.",
+      ...rest,
+    },
+    provenance ?? {
+      runId: "run_producer",
+      agent: "run-postmortem@2",
+      createdAt: "2026-08-18T14:02:11.000Z",
+    },
+  );
+}
+
+function acceptMemo(document) {
+  const sha256 = memoDigest(document);
+  return {
+    sha256,
+    result: { memos: [{ sha256, document }] },
+  };
+}
+
+function memoReaderRegistry() {
+  const synthetic = {
+    ...registry,
+    agents: new Map(registry.agents),
+    eventTypes: { ...registry.eventTypes },
+  };
+  synthetic.eventTypes["test.memo.requested"] = {
+    agent: "memo-reader@1",
+    adapter: "fake",
+    idempotencyScope: ["inputHash"],
+  };
+  synthetic.agents.set("memo-reader@1", {
+    id: "memo-reader",
+    version: 1,
+    ref: "memo-reader@1",
+    output_contract: "factory.test/v1",
+    workspace: { type: "artifacts", inputs: [] },
+    capabilities: { services: [] },
+    limits: { timeout_seconds: 60, attempts: 1 },
+    mutating: false,
+    inputSchema: {
+      type: "object",
+      required: ["ticket", "repo"],
+      additionalProperties: false,
+      properties: {
+        ticket: { type: "string" },
+        repo: { type: "string" },
+        memoPin: { type: "object" },
+      },
+    },
+    memos: [
+      {
+        subject: { type: "ticket", id: "$.input.ticket" },
+        kinds: ["postmortem", "decision"],
+        max: 10,
+      },
+      {
+        subject: { type: "repo", id: "$.input.repo" },
+        kinds: ["repo-note"],
+      },
+    ],
+  });
+  return synthetic;
+}
+
+function admitMemo(db, memoRegistry, overrides = {}, now = NOW) {
+  const result = admitEvent(
+    db,
+    memoRegistry,
+    {
+      schemaVersion: "factory.event/v1",
+      eventId: "memo-1",
+      type: "test.memo.requested",
+      source: "operator-webhook",
+      subject: "factory",
+      occurredAt: "2026-08-12T10:30:00Z",
+      correlationId: "memo-line",
+      causationId: null,
+      ...overrides,
+      payload: {
+        ticket: "WM-810",
+        repo: "factory",
+        ...(overrides.payload ?? {}),
+      },
+    },
+    { now },
+  );
+  expect(result.admitted).toBe(true);
+  return { source: result.event.source, eventId: result.event.event_id };
+}
+
+describe("validateMemosDeclaration (WM-810)", () => {
+  const ok = [
+    {
+      subject: { type: "ticket", id: "$.input.ticket" },
+      kinds: ["postmortem"],
+      max: 10,
+    },
+  ];
+
+  test("accepts a well-formed declaration against the input schema", () => {
+    expect(() =>
+      validateMemosDeclaration(ok, {
+        source: "agents/x.json",
+        inputSchema: TICKET_REPO_SCHEMA,
+      }),
+    ).not.toThrow();
+  });
+
+  test("unknown kinds, subject types, and fields fail at load", () => {
+    expect(() =>
+      validateMemosDeclaration(
+        [{ subject: { type: "board", id: "$.input.ticket" } }],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(RegistryError);
+    expect(() =>
+      validateMemosDeclaration(
+        [
+          {
+            subject: { type: "ticket", id: "$.input.ticket" },
+            kinds: ["gossip"],
+          },
+        ],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(/unknown kind/);
+    expect(() =>
+      validateMemosDeclaration(
+        [
+          {
+            subject: { type: "ticket", id: "$.input.ticket" },
+            extra: true,
+          },
+        ],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(/unknown field/);
+  });
+
+  test("paths that do not resolve against the input schema fail at load", () => {
+    expect(() =>
+      validateMemosDeclaration(
+        [{ subject: { type: "ticket", id: "$.input.missing" } }],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(/does not resolve against the input schema/);
+    expect(() =>
+      validateMemosDeclaration(
+        [{ subject: { type: "ticket", id: "ticket" } }],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(/\$\.input\.<path>/);
+    expect(() =>
+      validateMemosDeclaration(
+        [
+          {
+            subject: { type: "ticket", id: "$.input.runPin.transcript" },
+          },
+        ],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).not.toThrow();
+  });
+
+  test("empty kinds and non-positive max fail at load", () => {
+    expect(() =>
+      validateMemosDeclaration(
+        [{ subject: { type: "ticket", id: "$.input.ticket" }, kinds: [] }],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(/kinds must be a non-empty array/);
+    expect(() =>
+      validateMemosDeclaration(
+        [{ subject: { type: "ticket", id: "$.input.ticket" }, max: 0 }],
+        { source: "agents/x.json", inputSchema: TICKET_REPO_SCHEMA },
+      ),
+    ).toThrow(/positive integer/);
+  });
+});
+
+describe("planEvent memoPin (WM-810)", () => {
+  test("empty fold is empty entries, never human_needed", () => {
+    const db = openDb(":memory:");
+    const memoRegistry = memoReaderRegistry();
+    const ref = admitMemo(db, memoRegistry);
+    const outcome = planEvent(db, memoRegistry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.input.memoPin).toEqual({
+      foldedAt: new Date(NOW).toISOString(),
+      entries: [],
+    });
+  });
+
+  test("folds live memos into memoPin with hashes and provenance headers", () => {
+    const db = openDb(":memory:");
+    const document = memoDoc();
+    const { sha256, result } = acceptMemo(document);
+    registerMemos(db, "run_producer", result, {
+      now: Date.parse(document.provenance.createdAt),
+    });
+    const memoRegistry = memoReaderRegistry();
+    const ref = admitMemo(db, memoRegistry);
+    const outcome = planEvent(db, memoRegistry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.input.memoPin.entries).toEqual([
+      {
+        sha256,
+        subject: { type: "ticket", id: "WM-810" },
+        kind: "postmortem",
+        runId: "run_producer",
+        createdAt: document.provenance.createdAt,
+      },
+    ]);
+  });
+
+  test("kinds filter and max cap the fold; a new memo re-admits work", () => {
+    const db = openDb(":memory:");
+    const note = memoDoc({
+      subject: { type: "repo", id: "factory" },
+      kind: "repo-note",
+      claim: { kind: "howto", text: "Use the scoped lib suite." },
+      evidence: "Root suite 6m40s; scoped 41s clean.",
+      body: "Use the scoped lib suite.",
+    });
+    registerMemos(db, "run_note", acceptMemo(note).result, {
+      now: Date.parse(note.provenance.createdAt),
+    });
+    const def = memoReaderRegistry().agents.get("memo-reader@1");
+    const payload = { ticket: "WM-810", repo: "factory" };
+    const first = pinMemos(db, def, payload, { now: NOW });
+    expect(first.memoPin.entries.map((e) => e.kind)).toEqual(["repo-note"]);
+
+    const later = memoDoc({
+      body: "attempt 2 — do not rerun the full suite",
+      provenance: {
+        runId: "run_producer_2",
+        agent: "run-postmortem@2",
+        createdAt: "2026-08-18T15:00:00.000Z",
+      },
+    });
+    registerMemos(db, "run_producer_2", acceptMemo(later).result, {
+      now: Date.parse(later.provenance.createdAt),
+    });
+    const second = pinMemos(db, def, first, { now: NOW + 1000 });
+    expect(second.memoPin.entries.map((e) => e.kind).sort()).toEqual([
+      "postmortem",
+      "repo-note",
+    ]);
+    expect(second.memoPin.foldedAt).not.toBe(first.memoPin.foldedAt);
+    expect(hashJson(second)).not.toBe(hashJson(first));
+  });
+
+  test("TTL re-plan preserves foldedAt when the live fold is unchanged", () => {
+    const db = openDb(":memory:");
+    const document = memoDoc();
+    registerMemos(db, "run_producer", acceptMemo(document).result, {
+      now: Date.parse(document.provenance.createdAt),
+    });
+    const def = memoReaderRegistry().agents.get("memo-reader@1");
+    const first = pinMemos(
+      db,
+      def,
+      { ticket: "WM-810", repo: "factory" },
+      { now: NOW },
+    );
+    const again = pinMemos(db, def, first, { now: NOW + 3600 * 1000 });
+    expect(again.memoPin).toEqual(first.memoPin);
+  });
+
+  test("a new memo on a later event is a new run by inputHash", () => {
+    const db = openDb(":memory:");
+    const memoRegistry = memoReaderRegistry();
+    const firstRef = admitMemo(db, memoRegistry, { eventId: "memo-a" });
+    const first = planEvent(db, memoRegistry, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(first.decision).toBe("run");
+    const firstHash = JSON.parse(first.proposal.spec_json).inputHash;
+
+    const document = memoDoc();
+    registerMemos(db, "run_producer", acceptMemo(document).result, {
+      now: Date.parse(document.provenance.createdAt),
+    });
+    const secondRef = admitMemo(db, memoRegistry, { eventId: "memo-b" });
+    const second = planEvent(db, memoRegistry, secondRef, {
+      now: NOW + 1000,
+      policyVersion: "git:test",
+    });
+    expect(second.decision).toBe("run");
+    expect(second.runId).not.toBe(first.runId);
+    const secondSpec = JSON.parse(second.proposal.spec_json);
+    expect(secondSpec.inputHash).not.toBe(firstHash);
+    expect(secondSpec.input.memoPin.entries).toHaveLength(1);
   });
 });
