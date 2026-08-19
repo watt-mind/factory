@@ -42,7 +42,7 @@ The deploy branch usually auto-deploys, so the merge is not the finish line:
 
 - Watch the post-merge run on master to completion (`gh run watch <run> --exit-status`).
 - Where the repo has a prod smoke check or `smoke_url`, confirm it's green/responding after the deploy settles.
-- **Red master CI or red smoke = live outage**: revert the release merge (`git revert -m 1 <merge-sha>` on master, push), notify immediately (`SMOKE RED` / `CI RED` via `python3 ~/Develop/hdkiller/scripts/notify.py`), and file the cause to Linear. Don't leave a broken deploy standing while investigating.
+- **Red master CI or red smoke = live outage**: revert the release merge (`git revert -m 1 <merge-sha>` on master, push), notify immediately (`SMOKE RED` / `CI RED` via `factory notify`), and file the cause to Linear. Don't leave a broken deploy standing while investigating.
 
 ## 6. Report
 

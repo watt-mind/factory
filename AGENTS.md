@@ -14,7 +14,7 @@
 
 ## Agent operating floor
 
-Non-negotiable for every agent in this repo, in any harness. Full protocol: `~/Develop/hdkiller/docs/orgs/linear.md`. If that path doesn't exist where you're running (a cloud sandbox, someone else's machine), this block is the whole contract — follow it as written and don't infer the rest.
+Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FACTORY_ROOT/docs/protocol.md`. If that path doesn't exist where you're running (a cloud sandbox, someone else's machine), this block is the whole contract — follow it as written and don't infer the rest.
 
 **Work comes from Linear, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
@@ -167,7 +167,7 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 
 **Don't re-read what you have already read.** 285 duplicate reads of an identical path inside a single run were measured. If you read a file, it is still in your context — scroll back rather than re-reading. For a large file, `offset`/`limit` the part you need instead of pulling all of it.
 
-**This floor is the protocol.** Do not `cat` `~/Develop/hdkiller/docs/orgs/linear.md` for something answered above — it is 645 lines, and it was re-read 156 times across 96 runs for rules already written here. Go to it only for the reference tables (project/area labels, saved views, GraphQL recipes), and read the specific section, not the file.
+**This floor is the protocol.** Do not `cat` `$FACTORY_ROOT/docs/protocol.md` for something answered above — it was re-read 156 times across 96 runs for rules already written here. Go to it only for the reference tables (routing, labels, the five-section template, adapter verbs), and read the specific section, not the file.
 
 **Batch tool loading.** When tools must be loaded before use, request every tool the task needs in **one** call (`select:a,b,c`). Each extra call is a full round trip that re-sends the whole context.
 

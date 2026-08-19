@@ -24,7 +24,7 @@ Same bar as `docs/friction-log.md` — only two things:
 
 ## 4. Search before filing
 
-Search Linear (`factory linear` or `linear.md` §13) for:
+Search Linear (`factory linear` or `docs/protocol.md` §13) for:
 
 - Existing `FIP:` issues describing the same shape
 - Prior issues whose body contains `## Session friction` with the same **Shape**

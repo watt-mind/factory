@@ -1,10 +1,21 @@
 # Control plane protocol
 
-Tracker-neutral contract for the factory's ticket adapter (`lib/control-plane/`, WM-797). Implementations exist for Linear (v1), an in-memory fake (tests / offline demo), and GitHub Issues (`lib/control-plane/github.mjs`, WM-798).
+Tracker-neutral operating contract for factory agents. A public clone of this
+repository does not need any operator-private path; this file is the protocol.
+The ticket adapter lives in `lib/control-plane/` (WM-797). Implementations
+exist for Linear (v1), an in-memory fake (tests / offline demo), and GitHub
+Issues (`lib/control-plane/github.mjs`, WM-798).
 
-This file is the **adapter contract**, not the full agent operating protocol. Dispatchable predicates, Owned Paths, heartbeats, and harness packaging still live in the operator's `linear.md` until WM-795 copies them here. What this document freezes is the vocabulary everything outside `lib/control-plane/` is allowed to speak.
+The floor (`shared/floor.md`, spliced into each repo's `AGENTS.md`) is the
+short form agents already have in context. **Read this file only for the
+reference tables and the sections the floor points at** — routing, the
+five-section template, the filing bar, adapter verbs — never instead of the
+floor, and never the whole file when one section answers the question.
 
-Call `loadControlPlane({ root })` for Linear/memory. The GitHub Issues adapter is `githubControlPlane()` in `lib/control-plane/github.mjs` (wiring `kind: github` into `loadControlPlane()` is a follow-up so this ticket stays inside Owned Paths). Selection is `config/policy.yaml`:
+Call `loadControlPlane({ root })` for Linear/memory. The GitHub Issues adapter
+is `githubControlPlane()` in `lib/control-plane/github.mjs` (wiring
+`kind: github` into `loadControlPlane()` is a follow-up so WM-798 stayed
+inside its Owned Paths). Selection is `config/policy.yaml`:
 
 ```yaml
 controlPlane:
@@ -18,7 +29,9 @@ controlPlane:
   #   statusField: Status
 ```
 
-`factory init --control-plane github` writes those GitHub defaults (see `config/policy.example.yaml`). An unknown kind is a configuration error. A tracker the factory cannot reach must never be silently read as "no tickets".
+`factory init --control-plane github` writes those GitHub defaults (see
+`config/policy.example.yaml`). An unknown kind is a configuration error. A
+tracker the factory cannot reach must never be silently read as "no tickets".
 
 ## GitHub Issues binding
 
@@ -28,14 +41,200 @@ controlPlane:
 | `team`       | Repository, via `controlPlane.github.teams` (or a key that already looks like `owner/name`)   |
 | `labels`     | Issue labels of the **same spelling**. Writes send the complete resulting set, never a delta. |
 | `assignee`   | Issue assignee. `claim` assigns the `gh` viewer, then **reads the assignee back**.            |
-| `state`      | Projects v2 single-select (`project` / `statusField`). Options must match the names below.    |
+| `state`      | Projects v2 single-select (`project` / `statusField`). Options must match the names in §4.    |
 | `raw`        | GraphQL via `gh api graphql`, or a REST path when the query string starts with `/`.           |
 
-Production talks to GitHub through `gh api` — the same CLI the forge already requires. No Octokit, no Linear token. `gh auth login` is the quickstart credential.
+Production talks to GitHub through `gh api` — the same CLI the forge already
+requires. No Octokit, no Linear token. `gh auth login` is the quickstart
+credential.
 
-## Ticket shape
+---
 
-Every verb returns this object (or a list of them). Labels are a flat array — never a GraphQL `{ nodes }` wrapper.
+## 1. Routing — repo → team
+
+The factory does not carry a hardcoded team table. Each entry in
+`config/repos.yaml` names the tracker team that owns that repo:
+
+```yaml
+repos:
+  - name: example
+    team: ENG # tracker team key (Linear team key today)
+    project: Example app # optional; omit when the team has one project
+```
+
+Resolve the team from the repo you are in: match `path` (with `~` expanded)
+against cwd, or take `--repo` / `$ARGUMENTS` when a command names one.
+`factory linear queue --repo <name>` already does this. Do not invent a team
+key, and do not copy another workspace's vocabulary (`WM` / `OPS` / `CLNT`,
+or anyone else's) into a repo that does not use it.
+
+A workspace may add a repo-local issue-management guide. Follow that guide
+inside that repo; do not import another team's labels or projects into it.
+
+## 2. Projects
+
+`project` on a `config/repos.yaml` entry is the tracker project name for
+that repo. When the command takes a project as `$ARGUMENTS`, that wins.
+When neither is set, file against the team with no project rather than
+guessing.
+
+`area:*` labels are per-team. Copy an existing ticket in the same project
+rather than inventing an area.
+
+## 3. Labels
+
+These names are part of the protocol, not tracker branding. An adapter binds
+them to native labels of the same spelling.
+
+| Label             | Meaning                                                                               |
+| :---------------- | :------------------------------------------------------------------------------------ |
+| `ai:agent-ready`  | Waiting to be picked up. Dispatchable only in `Todo` with this label and no assignee. |
+| `ai:in-progress`  | An agent holds the claim.                                                             |
+| `ai:needs-review` | PR is up; merge stage owns it.                                                        |
+| `ai:blocked`      | Waiting on a human.                                                                   |
+| `ai:escalated`    | Security-relevant (or intent-changing) diff; a human must merge.                      |
+| `agent:<harness>` | Which harness holds the claim. CLI `claude` maps to `agent:claude-code`.              |
+| `type:*`          | `bug` `feature` `ui-ux` `security` `performance` `maintenance` `docs` `a11y`          |
+| `source:*`        | `agent` `human` `sentry` `client-support`                                             |
+| `area:*`          | Free-form, workspace-defined.                                                         |
+
+`type:chore` is invalid. Adapters reject it locally rather than as an opaque
+API error. Every new issue carries exactly one `source:*`.
+
+**Labels are replaced wholesale, never merged.** Always go through `--add` /
+`--remove` (`factory linear state` / `claim`, or `setLabels` on the adapter).
+A mutation that passes only the labels you want added silently drops every
+other label on the ticket.
+
+## 4. States
+
+The factory's lifecycle, as names. Adapters map these onto tracker-native
+columns / labels / project status.
+
+`Triage` → `Todo` → `In Progress` → `In Review` → `Done`
+
+- **`Triage`** — raw or underspecified. Not a queue to pull implementation
+  from. Specify it or hold it; do not start coding.
+- **`Todo`** — specified. Dispatchable only with `ai:agent-ready` and no
+  assignee.
+- **`In Progress`** — an agent holds the claim (`ai:in-progress`).
+- **`In Review`** — PR is up (`ai:needs-review`). Merge stage owns it.
+- **`Done`** — merged **and** running: base-branch CI green after the merge,
+  and the post-deploy smoke check green where the repo has one.
+- **`Blocked`** — a question the agent cannot answer (`ai:blocked`). Never
+  leave a stalled ticket in `In Progress`.
+
+**Canceled** and **Duplicate** are tracker-native close states. They keep the
+ticket recoverable; an actual delete does not. Retire obsolete work with a
+comment citing evidence and a state transition — never a delete/archive
+mutation. Adapters do not invent Canceled as a factory lifecycle state.
+
+## 5. Ticket template
+
+A ticket is dispatchable only when it carries all five sections:
+
+1. **Problem & Context** — what is wrong or missing, and why it matters.
+2. **Acceptance Criteria** — observable, falsifiable checks.
+3. **Source File Pointers** — where to start reading. Every path must exist
+   on `origin/<base>`.
+4. **Owned Paths** — glob set the implementing agent may modify. This is the
+   concurrency key: the dispatcher refuses to run two tickets whose sets
+   intersect. Tight globs beat convenient ones. Generated outputs must be
+   owned with their source (`shared/` implies `dist/**` and `plugins/**` in
+   this repo).
+5. **Verification Command** — a command that actually runs in this repo.
+   For non-code work, an evidence line replaces it.
+
+A ticket missing a load-bearing section (`Owned Paths` or `Verification
+Command`) is demoted to `Triage`; do not dispatch it. `factory label-guard`
+checks those two mechanically.
+
+## 6. Bundles
+
+Bundling several tickets into one worktree is the **human's** call, never
+an agent's. When the human explicitly asks for a set of tickets to be done
+together, they share one worktree, one branch (named after the lead ticket)
+and one PR: claim every ticket in the bundle and heartbeat all of them, keep
+one commit per ticket, scope the work to the union of their Owned Paths, and
+give the PR body a `Fixes <ISSUE-ID>` line per ticket. If one of them turns
+out to be bigger than it looked or gets blocked, unassign it back to `Todo`
+and ship the rest.
+
+Absent that explicit instruction it is one ticket, one worktree. Noticing
+that two tickets are related is a reason to say so, not to merge them.
+
+The dispatched path (`/factory-ticket`, `tick.mjs`) is always exactly one
+ticket; bundles never arrive there.
+
+## 7. Execution
+
+**Work comes from the tracker, and only when it's ready.** Dispatchable
+means `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are
+not queues to pull from.
+
+**Claim before you code.** Assign yourself, move to `In Progress`, add
+`ai:in-progress` + `agent:<harness>`, drop `ai:agent-ready`, then **re-read
+the assignee**. If it isn't you, another agent won the race; take the next
+ticket. This read-back is the entire concurrency control.
+
+**One ticket, one worktree.** Never share a checkout between concurrent
+tickets. If the repo ships `bin/worktree-up.sh` (or equivalent), it is
+mandatory — git isolates branches, not ports or databases.
+
+**Stay inside Owned Paths.** Work discovered outside the set becomes a new
+`Triage` issue (§8) — it never expands the current ticket.
+
+**Heartbeat** at each phase change (claimed → implemented → verified → PR
+open) and at least every 20 minutes, saying what changed. After 45 minutes
+of silence the ticket is reclaimed.
+
+**Verification is a gate.** Run the ticket's exact Verification Command.
+Never advance state, open a PR, or report success on failing output. Never
+weaken a test to get green.
+
+**Mandatory `## Handoff` comment** before moving to `In Review`:
+
+```
+## Handoff
+- PR: <url>
+- Verification: `<the ticket's exact command>` — pass, <one-line result>
+- UX critique: required — SHIP | required — FIX-FIRST resolved in <n> round(s) | skipped — <reason>
+- Files: <n> changed, all within Owned Paths
+- Risks: <reviewer focus, or "none known">
+```
+
+Then `In Review` + `ai:needs-review`, remove `ai:in-progress`. The
+implementing agent never merges.
+
+**Never auto-merge** diffs that change auth/authz, payments, secrets,
+destructive migrations, production infra, or security behavior. Add
+`ai:escalated` and notify (§10, §14). `master`/`main` always goes through a
+human.
+
+## 8. Filing bar
+
+File **meaningful, trackable work**: a code/config change, a deployment, a
+deliverable, or an investigation with an operational finding. Do not file
+an ordinary question, a read-only lookup with no actionable finding, or an
+inconsequential edit.
+
+Search for duplicates first (`factory linear`, or the tracker's search).
+Comment on the existing ticket with new evidence rather than filing a
+second issue.
+
+Discovered work starts in `Triage` unless it already meets the full §5
+template. File follow-ups **before** writing summary or Handoff comments
+that name them — the identifier does not exist until the tracker returns it.
+
+## 9. Adapter — ticket shape and verbs
+
+What this section freezes is the vocabulary everything outside
+`lib/control-plane/` is allowed to speak.
+
+### Ticket shape
+
+Every verb returns this object (or a list of them). Labels are a flat array
+— never a GraphQL `{ nodes }` wrapper.
 
 | Field         | Meaning                                                              |
 | :------------ | :------------------------------------------------------------------- |
@@ -44,38 +243,13 @@ Every verb returns this object (or a list of them). Labels are a flat array — 
 | `title`       |                                                                      |
 | `description` | Markdown body                                                        |
 | `url`         |                                                                      |
-| `state`       | `{ id?, name, type? }` — names below                                 |
+| `state`       | `{ id?, name, type? }` — names in §4                                 |
 | `assignee`    | `{ id, name? }` or `null`                                            |
 | `team`        | `{ key }` (Linear team key; GitHub will bind this to a repo/project) |
 | `project`     | `{ name }` or `null`                                                 |
 | `labels`      | `[{ id?, name }]`                                                    |
 
-## States
-
-The factory's lifecycle, as names. Adapters map these onto tracker-native columns / labels / project status.
-
-`Triage` → `Todo` → `In Progress` → `In Review` → `Done`
-
-`Blocked` is the holding state for a question the agent cannot answer. Canceled is a tracker-native close; adapters do not invent it as a factory state.
-
-## Labels the loops depend on
-
-These names are part of the protocol, not Linear branding. A GitHub Issues adapter binds them to issue labels of the same spelling.
-
-| Label             | Meaning                                                                               |
-| :---------------- | :------------------------------------------------------------------------------------ |
-| `ai:agent-ready`  | Waiting to be picked up. Dispatchable only in `Todo` with this label and no assignee. |
-| `ai:in-progress`  | An agent holds the claim.                                                             |
-| `ai:needs-review` | PR is up; merge stage owns it.                                                        |
-| `ai:blocked`      | Waiting on a human.                                                                   |
-| `agent:<harness>` | Which harness holds the claim. CLI `claude` maps to `agent:claude-code`.              |
-| `type:*`          | `bug` `feature` `ui-ux` `security` `performance` `maintenance` `docs` `a11y`          |
-| `source:*`        | `agent` `human` `sentry` `client-support`                                             |
-| `area:*`          | Free-form, workspace-defined.                                                         |
-
-`type:chore` is invalid. Adapters reject it locally rather than as an opaque API error.
-
-## Verbs
+### Verbs
 
 | Verb                                               | Contract                                                                                                                                                                                                                                                                                                                                           |
 | :------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -90,8 +264,83 @@ These names are part of the protocol, not Linear branding. A GitHub Issues adapt
 | `appendDetail(id, markdown)`                       | Idempotent description append. `{ appended: false }` if the text is already present.                                                                                                                                                                                                                                                               |
 | `raw(query, variables?)`                           | Escape hatch. Linear GraphQL; GitHub GraphQL via `gh api graphql` (REST when `query` starts with `/`). Grows only when a call site cannot be expressed with the verbs above.                                                                                                                                                                       |
 
-Every method returns the parsed answer or throws `ControlPlaneError`. `claim` returning `{ ok: false }` is the one protocol outcome that is not an error.
+Every method returns the parsed answer or throws `ControlPlaneError`.
+`claim` returning `{ ok: false }` is the one protocol outcome that is not
+an error.
 
-## What is not in this file yet
+## 10. Notify
 
-The agent-facing operating protocol — one process per ticket, Owned Paths as the concurrency key, heartbeat cadence, the five-section ticket template, harness packaging — is still the operator's `linear.md`. WM-795 moves that text into this path so a public clone does not depend on `~/Develop/hdkiller`. Until then, do not treat this file as a replacement for it.
+"Notify" means the configured interrupt channel. A tracker comment, a
+`Blocked` state change, or a line in a run report does not reach the human
+in real time.
+
+```bash
+factory notify "<EVENT> <TICKET/PR>: <one answerable sentence>"
+```
+
+The transport is **not** a hardcoded private script. `lib/notify.mjs`
+resolves it from, in order:
+
+1. `FACTORY_NOTIFY_CMD` (or `FACTORY_NOTIFY_SCRIPT` / `FACTORY_EVENT_NOTIFY_CMD`)
+2. `config/policy.yaml` `notify.command`
+
+There is no in-tree default. A clone that has not set a command is silent
+on this channel until the operator configures one. `~` in the policy value
+expands to `$HOME`.
+
+Event prefix is one of `BLOCKED`, `ESCALATED`, `CI RED`, `SMOKE RED`,
+`CIRCUIT BREAKER`, `RC READY`. Notify only for those six; routine progress
+(claims, PRs opened, clean merges) goes to the tracker and the run report.
+
+If `factory notify` exits non-zero, post the same text as a tracker comment
+and flag the failed push in the report.
+
+## 11. Checkout freshness
+
+Code evidence cites a ref, not a path. Compare against `origin/<base>` by
+name — never `@{upstream}`. The tree is trustworthy only when it is not
+behind, not ahead, and not dirty. On failure, freshness is **unknown**;
+read `origin/<base>` rather than trusting the working copy. Dispatch is
+exempt: `worktree-up.sh` branches from `origin/<base>`.
+
+## 12. Handoff and UX critique
+
+The Handoff comment in §7 is mandatory before `In Review`. A user-facing
+change that introduces or materially changes a completable flow runs a UX
+critique (`factory-ux-critic`) after verification and before the PR; skip
+it for isolated styling, copy-only edits, static content, icons/assets, and
+internal/admin-only surfaces unless the ticket identifies UX risk. `SHIP`
+and `FIX-FIRST` require an exercised journey plus at least one observed
+page URL or screenshot path.
+
+## 13. Tracker access
+
+**Use `factory linear` — not a tracker MCP, and not a standalone tracker
+CLI.** The factory tool is in git, has this protocol's guardrails built in,
+and its `claim` verb performs the read-back that _is_ the concurrency
+control.
+
+```bash
+factory linear get CLNT-616
+factory linear claim CLNT-616 --agent claude
+factory linear comment CLNT-616 "..."
+factory linear state CLNT-616 "In Review" --add ai:needs-review
+factory linear file --team CLNT --title "..." --body "..." --type bug
+factory linear queue --team CLNT
+```
+
+`claim` exits non-zero when another agent won the race — that is not a
+retry. For anything the verbs do not cover, `raw '<query>' --var k=v`
+beats inventing a new flag. Fallback when the CLI is missing:
+`bun "$FACTORY_ROOT/tools/linear.mjs"`.
+
+## 14. Loops
+
+The factory commands (`/factory-work`, `/factory-merge`, `/factory-ship`,
+and the rest under `shared/commands/`) are the loops. Notify during a run
+only for the six events in §10. A ticket blocked, a PR escalated, base CI
+or smoke red, or the circuit breaker tripping is an interrupt; a clean
+claim, PR, or merge is not.
+
+`Done` is merged and running, not "PR opened". The implementing agent
+stops at `In Review`; the merge stage lands the PR.

@@ -1,6 +1,6 @@
 Audit a repository against the conventions baseline in `~/Develop/hdkiller/docs/guides/project-conventions.md` and turn the gaps into tracked work.
 
-Default target is the repo I'm currently in. Interpret $ARGUMENTS as a different repo path, specific check IDs to run in isolation, or `all` (every repo in the [linear.md §1](file:///Users/hdkiller/Develop/hdkiller/docs/orgs/linear.md) team mapping that exists locally — audit each and report a matrix).
+Default target is the repo I'm currently in. Interpret $ARGUMENTS as a different repo path, specific check IDs to run in isolation, or `all` (every repo in `config/repos.yaml` that exists locally — audit each and report a matrix).
 
 ## 1. Grade every check
 
@@ -24,7 +24,7 @@ Sort failures by what they cost: a check that lets broken code reach production 
 
 ## 3. File the gaps
 
-Every FAIL becomes a Linear issue in `Triage` per [linear.md §8](file:///Users/hdkiller/Develop/hdkiller/docs/orgs/linear.md): correct team/project from the §1 mapping, `type:maintenance` (or `type:security` where that's the real nature), the matching `area:*`, `source:agent`, priority from the severity column, and the check ID plus observed evidence in the description. Search first — a repeat audit must update or skip an existing ticket, never file a duplicate.
+Every FAIL becomes a Linear issue in `Triage` per `docs/protocol.md` §8: correct team/project from `config/repos.yaml` (§1), `type:maintenance` (or `type:security` where that's the real nature), the matching `area:*`, `source:agent`, priority from the severity column, and the check ID plus observed evidence in the description. Search first — a repeat audit must update or skip an existing ticket, never file a duplicate.
 
 Where a fix is small, mechanical, and unambiguous (adding `retention-days: 1`, swapping `ubuntu-latest` for the self-hosted label, adding a missing thin `CLAUDE.md`), write the issue to the full §5 AI-ready template, label it `ai:agent-ready`, and move it to `Todo` so the next `/factory-work` run picks it up without further human involvement. Anything needing a decision, a credential, or a plan upgrade stays in `Triage` with the specific question stated.
 

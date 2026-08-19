@@ -894,17 +894,20 @@ same control API the runtime exposes, never directly into the database. That kee
 identical endpoints, with the same audit trail, rather than a reimplementation.
 
 **Push notifications (WM-65).** For the operator who is _not_ watching, the
-serve tick carries a push channel (`lib/notify.mjs`) over the existing
-`notify.py` convention, covering exactly the two states that wait on a human:
+serve tick carries a push channel (`event-runtime/lib/notify.mjs`) over the
+configured notify transport, covering exactly the two states that wait on a
+human:
 an event parked `human_needed` pushes `BLOCKED <event-type> <eventId>:
 <reason>`, and an open watched proposal pushes `DECISION NEEDED proposal <id>
 (<agent>): expires in <n>m` once it crosses 50% of its TTL undecided, plus one
 final `expired undecided` push if it expires. Each push fires once per subject
 — dedup markers persist in the module-owned `notify_log` table, so serve
 restarts never re-notify. The channel is **off by default**: set
-`FACTORY_EVENT_NOTIFY=1` to enable it, and `FACTORY_EVENT_NOTIFY_CMD` to
-replace the transport (default `python3 ~/Develop/hdkiller/scripts/notify.py`;
-the message is appended as the final argument). Deliveries are fire-and-forget
+`FACTORY_EVENT_NOTIFY=1` to enable it, and `FACTORY_EVENT_NOTIFY_CMD` (or
+`config/policy.yaml` `notify.command`, resolved by `lib/notify.mjs`) to
+set the transport. There is no in-tree default path; a clone is silent until
+the operator configures a command. The message is appended as the final
+argument. Deliveries are fire-and-forget
 with a 30s kill timeout; a notifier failure is recorded on `notify_log` and
 the serve log, never thrown — the notify step is an isolated tick subsystem
 like GC and chains (OPS-412). Routine flow (admissions, approvals, clean

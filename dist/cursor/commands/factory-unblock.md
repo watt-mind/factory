@@ -1,4 +1,4 @@
-Re-examine the `ai:blocked` holds for the repository I'm currently in: some blockers resolve without anyone commenting on the ticket — the dependency merged, the credential got documented, the code moved on — and this sweep is what notices. Resolve the team from the repo via the mapping in `~/Develop/hdkiller/docs/orgs/linear.md` §1. Use the Linear MCP; on failure retry once then fall back to `linear_common` GraphQL per the global rule.
+Re-examine the `ai:blocked` holds for the repository I'm currently in: some blockers resolve without anyone commenting on the ticket — the dependency merged, the credential got documented, the code moved on — and this sweep is what notices. Resolve the team from the repo via `config/repos.yaml` (`docs/protocol.md` §1). Use `factory linear`; on failure retry once then fall back to `factory linear raw` per the floor.
 
 Target: every open ticket in `Blocked` or `Triage` carrying `ai:blocked`, **oldest hold first** — the longest-stuck ticket has waited longest for this look. Interpret $ARGUMENTS as specific issue IDs or a max count; default is up to 10.
 
@@ -14,7 +14,7 @@ For each held ticket:
 2. **Hunt for new evidence** — has anything changed since the hold?
    - a blocking/related ticket has since moved to Done, or the referenced PR merged;
    - the answer now exists in the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, or a newer ticket in the same area;
-   - a missing credential/env detail is now in `~/Develop/hdkiller/docs` (servers, applications, guides);
+   - a missing credential/env detail is now in the repo's `docs/` or the operator's runbook;
    - the code moved enough that the premise of the hold is gone (verify in the actual codebase — read-only).
 3. **With evidence: release the hold.** Remove `ai:blocked`, comment one line citing the evidence (link the ticket/PR/doc), then re-run triage's promote-or-hold: promote to `Todo` + `ai:agent-ready` only if the full §5 template is solid against the current code; otherwise leave it in `Triage` for the triage stage to spec. Never promote on a guess — a wrongly released hold hands an implementation agent a question a human was supposed to answer.
 4. **Without evidence: leave silently.** No comment, no label churn, no re-stating the question. A sweep that re-derives the same hold on every run is the exact pathology this pipeline keeps having to un-learn (CLNT-504 collected ten identical hold comments). The ticket stays exactly as it was.

@@ -8,15 +8,15 @@ Turn what just came up in this conversation into a Linear issue. This command **
 
 `$ARGUMENTS` names the finding if given; otherwise scan the conversation so far for the thing worth tracking — a bug, a missing requirement, tech debt, a follow-up idea, an operational finding. If more than one distinct thing surfaced, ask which one, or file each separately — don't merge unrelated findings into one issue.
 
-Confirm it clears the bar in `linear.md` §8 before filing anything: **meaningful, trackable work** (a code/config change, deployment, deliverable, or an investigation with an operational finding) — not an ordinary question, a read-only lookup with no actionable finding, or an inconsequential edit. If it doesn't clear the bar, say so and don't file.
+Confirm it clears the bar in `docs/protocol.md` §8 before filing anything: **meaningful, trackable work** (a code/config change, deployment, deliverable, or an investigation with an operational finding) — not an ordinary question, a read-only lookup with no actionable finding, or an inconsequential edit. If it doesn't clear the bar, say so and don't file.
 
 ## 2. Route it
 
-Repo → team/project mapping, and the full `ai:*`/`source:*`/`type:*`/`area:*` label taxonomy, are in `~/Develop/hdkiller/docs/orgs/linear.md` §1–3 — read it if this session hasn't already. Public CW product repos use the scoped subset at `~/Develop/coach-wattz/docs/04-guides/issue-management.md` instead; don't pull `WM`/`OPS`/`CLNT` vocabulary into that repo's issue.
+Repo → team/project mapping, and the full `ai:*`/`source:*`/`type:*`/`area:*` label taxonomy, are in `$FACTORY_ROOT/docs/protocol.md` §1–3 — read it if this session hasn't already. A repo may carry its own issue-management guide; follow that inside that repo and do not import another team's labels into it.
 
 If the current working directory matches a repo in `config/repos.yaml`, use its `team`/`project`. Otherwise infer team/project from what the conversation was actually about — ask if it's genuinely ambiguous rather than guessing.
 
-**Search for duplicates first** (`list_issues`, or the `linear` CLI per linear.md §13) — don't file a second issue for something already tracked; comment on the existing one with the new evidence instead and report that back, not a new issue.
+**Search for duplicates first** (`factory linear`, per `docs/protocol.md` §13) — don't file a second issue for something already tracked; comment on the existing one with the new evidence instead and report that back, not a new issue.
 
 ## 3. Label and specify
 

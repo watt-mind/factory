@@ -5,7 +5,7 @@ description: Turn a raw Linear Triage ticket into a fully specified ai:agent-rea
 
 # Specifying a ticket
 
-A ticket is dispatchable only when it carries all five sections (linear.md §5). Most of that is **derivable from the codebase, not from the human**: `Source File Pointers`, `Owned Paths`, and `Verification Command` are search-and-read problems. `Acceptance Criteria` is usually the problem restated observably. Only genuine product intent needs a person.
+A ticket is dispatchable only when it carries all five sections (`docs/protocol.md` §5). Most of that is **derivable from the codebase, not from the human**: `Source File Pointers`, `Owned Paths`, and `Verification Command` are search-and-read problems. `Acceptance Criteria` is usually the problem restated observably. Only genuine product intent needs a person.
 
 So the job is not "spec everything" — it's **sorting tickets into three piles** and handling the first two yourself.
 

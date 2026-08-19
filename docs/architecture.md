@@ -169,7 +169,7 @@ GitHub is the second external system the factory depends on (after the tracker),
 
 Linear is the first external system the factory depends on, and until WM-797 every loop talked to it as Linear — GraphQL `nodes` wrappers, `issueUpdate` complete-set labels, team-key prefixes. That coupling is what blocks a GitHub Issues quickstart (WM-798) and an offline demo (WM-799). `lib/control-plane/` is the chokepoint, mirroring `lib/forge/`: `loadControlPlane({ root })` selects the implementation from `config/policy.yaml` (`controlPlane: { kind: linear }`, default `linear` when the stanza is absent), `types.mjs` documents the contract in tracker-neutral vocabulary (`getTicket`, `listDispatchable`, `claim`, `comment`, `transition`, `setLabels`, `file`, `appendDetail`, `raw` as the escape hatch), `linear.mjs` implements it by wrapping the same `gql()` client `tools/linear.mjs` already uses, and `memory.mjs` is the in-process fake for tests and the demo. Tickets come back with a flat `labels` array — no GraphQL `nodes`. `claim` still does Linear's read-back compare-and-swap (`ok: false` is a lost race, not an exception); both implementations honour it. The contract suite in `event-runtime/lib/control-plane.test.mjs` runs the same assertions against memory and against Linear driven by a fake `gql`. Call sites in `orchestrator/`, `tools/`, and `event-runtime/` still speak GraphQL directly; migrating them onto `loadControlPlane()` is a follow-up so this extraction stays inside its Owned Paths. The interface is trimmed to what the loops use — GitHub Issues is a new implementation of the same verbs, not a new vocabulary.
 
-The tracker-neutral verb contract lives in [`protocol.md`](protocol.md). The agent operating protocol (Owned Paths, heartbeats, dispatchable predicate) currently lives in the operator's `linear.md` and lands in-repo via WM-795.
+The tracker-neutral verb contract and the agent operating protocol live in [`protocol.md`](protocol.md).
 
 ---
 
@@ -198,8 +198,7 @@ The tracker-neutral verb contract lives in [`protocol.md`](protocol.md). The age
 
 - [`event-runtime.md`](event-runtime.md) — the isolated, event-driven runtime for structured one-off agents on generic workspaces; implemented and watched, with [`event-runtime-workers.md`](event-runtime-workers.md), [`event-runtime-schedules.md`](event-runtime-schedules.md) and [`event-runtime-webui.md`](event-runtime-webui.md) covering placement, clock events and the web control plane
 - [`event-runtime-repos.md`](event-runtime-repos.md) — node-local repository provisioning, readiness advertisement, toolchain preflight, and disk-pressure cache eviction for remote workers
-- [`protocol.md`](protocol.md) — tracker-neutral ControlPlane adapter contract (WM-797)
+- [`protocol.md`](protocol.md) — tracker-neutral operating protocol and ControlPlane adapter contract
 - [`README.md`](../README.md) — how to run it
 - [`SETUP.md`](../SETUP.md) — first-time setup and known gaps
-- [linear.md](file:///Users/hdkiller/Develop/hdkiller/docs/orgs/linear.md) — the execution protocol (source of truth)
 - [project-conventions.md](file:///Users/hdkiller/Develop/hdkiller/docs/guides/project-conventions.md) — quality baseline, `PC-*` audit, `W-*` worktree spec

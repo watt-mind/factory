@@ -145,6 +145,15 @@ UNSET_KEYS=("-u" "ANTHROPIC_API_KEY" "-u" "GEMINI_API_KEY" "-u" "GOOGLE_API_KEY"
 # it, --strict-mcp-config removes the Linear MCP and leaves no replacement.
 export FACTORY_ROOT="$ROOT"
 
+# WM-795: point `factory notify` at the policy-configured transport so a clone
+# without a private notify.py still uses whatever `notify.command` the operator
+# set. bin/factory currently reads FACTORY_NOTIFY_SCRIPT as a python path;
+# --export-env sets that when the command is `python3 <script>`, and always
+# sets FACTORY_NOTIFY_CMD. Existing env wins (tests, operators, stubs).
+if [[ -z "${FACTORY_NOTIFY_CMD:-}" && -z "${FACTORY_NOTIFY_SCRIPT:-}" ]]; then
+  eval "$(cd "$ROOT" && bun "$ROOT/lib/notify.mjs" --export-env 2>/dev/null || true)"
+fi
+
 if [[ "$USE_API" == "1" ]]; then
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "--use-api given but ANTHROPIC_API_KEY is not set" >&2; exit 2; }
   AUTH_NOTE="ANTHROPIC_API_KEY (billed per token; connectors disabled)"

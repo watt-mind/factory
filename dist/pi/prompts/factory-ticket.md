@@ -4,7 +4,7 @@
 
 Implement **one** ticket: $ARGUMENTS. You are already in its worktree, and the ticket is already claimed for you.
 
-The dispatcher (`orchestrator/tick.mjs`) has done the setup: the ticket is `In Progress`, assigned, labelled `ai:in-progress` + `agent:claude-code`, and this worktree was created by the repo's own `worktree-up.sh` with its own branch, ports and database. **Do not create another worktree, do not claim another ticket, and do not work anything except this one.** This is the dispatched path, so it is always exactly one ticket — the protocol's human-requested ticket bundles (`linear.md` §6) never arrive here.
+The dispatcher (`orchestrator/tick.mjs`) has done the setup: the ticket is `In Progress`, assigned, labelled `ai:in-progress` + `agent:claude-code`, and this worktree was created by the repo's own `worktree-up.sh` with its own branch, ports and database. **Do not create another worktree, do not claim another ticket, and do not work anything except this one.** This is the dispatched path, so it is always exactly one ticket — the protocol's human-requested ticket bundles (`docs/protocol.md` §6) never arrive here.
 
 ## Do
 
