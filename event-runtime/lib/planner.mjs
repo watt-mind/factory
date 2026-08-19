@@ -63,6 +63,15 @@ import {
   autoApproveChains,
   buildChainApprovalPolicy,
 } from "./auto-approval.mjs";
+import {
+  LINEAR_RATE_LIMIT_EXIT,
+  LinearRateLimitError,
+  isLinearRateLimitMessage,
+  isLinearRateLimited,
+} from "../../tools/linear.mjs";
+
+/** In-flight issues list is stable across one scan; 60s is the ticket cap. */
+export const IN_FLIGHT_CACHE_TTL_MS = 60_000;
 
 /**
  * §5.4 idempotency key: agent ref, output contract, then the event type's
@@ -269,6 +278,114 @@ function linearCli() {
   return path.join(FACTORY_ROOT, "tools", "linear.mjs");
 }
 
+function throwIfLinearCliRateLimited(err) {
+  const stderr = String(err?.stderr ?? "");
+  const stdout = String(err?.stdout ?? "");
+  const combined = `${stderr}\n${stdout}`;
+  if (
+    err?.status === LINEAR_RATE_LIMIT_EXIT ||
+    isLinearRateLimitMessage(combined)
+  ) {
+    let resetAt = null;
+    for (const line of combined.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed?.resetAt) resetAt = parsed.resetAt;
+      } catch {
+        // not the rate-limit payload
+      }
+    }
+    throw new LinearRateLimitError(resetAt, err);
+  }
+}
+
+export function createLinearReadCache() {
+  return {
+    tickets: new Map(),
+    inFlight: new Map(),
+    viewer: { value: undefined },
+    rateLimitError: null,
+    rateLimitedUntil: 0,
+    inFlightCalls: 0,
+  };
+}
+
+/**
+ * One planning pass / one scan run: memoize ticket reads for the run and
+ * in-flight lists by team+project for ≤60s. A rate-limit throw is remembered
+ * so later candidates in the same pass do not hit Linear again.
+ */
+export function wrapLinearReads(dispatch = {}, cache, now) {
+  const resolveNow = () => {
+    const clock = now ?? Date.now;
+    return typeof clock === "function" ? clock() : clock;
+  };
+  const throwIfLimited = () => {
+    if (!cache.rateLimitError) return;
+    if (resolveNow() < cache.rateLimitedUntil) throw cache.rateLimitError;
+    cache.rateLimitError = null;
+    cache.rateLimitedUntil = 0;
+  };
+  const remember = (err) => {
+    if (!isLinearRateLimited(err)) return;
+    cache.rateLimitError = err;
+    const resetMs = Date.parse(err.resetAt);
+    cache.rateLimitedUntil = Number.isFinite(resetMs)
+      ? resetMs
+      : resolveNow() + 60_000;
+  };
+
+  const fetchTicket = dispatch.fetchTicket ?? fetchTicketDefault;
+  const fetchViewer = dispatch.fetchViewer ?? fetchViewerDefault;
+  const fetchInFlight = dispatch.fetchInFlight ?? fetchInFlightDefault;
+
+  return {
+    ...dispatch,
+    fetchTicket: (id) => {
+      throwIfLimited();
+      if (cache.tickets.has(id)) return cache.tickets.get(id);
+      try {
+        const value = fetchTicket(id);
+        cache.tickets.set(id, value);
+        return value;
+      } catch (err) {
+        remember(err);
+        throw err;
+      }
+    },
+    fetchViewer: () => {
+      throwIfLimited();
+      if (cache.viewer.value !== undefined) return cache.viewer.value;
+      try {
+        const value = fetchViewer();
+        cache.viewer.value = value;
+        return value;
+      } catch (err) {
+        remember(err);
+        throw err;
+      }
+    },
+    fetchInFlight: (repo) => {
+      throwIfLimited();
+      const key = `${repo?.team ?? ""}::${repo?.project ?? ""}`;
+      const hit = cache.inFlight.get(key);
+      const at = resolveNow();
+      if (hit && at - hit.at < IN_FLIGHT_CACHE_TTL_MS) return hit.value;
+      try {
+        cache.inFlightCalls += 1;
+        const value = fetchInFlight(repo);
+        cache.inFlight.set(key, { value, at });
+        return value;
+      } catch (err) {
+        remember(err);
+        throw err;
+      }
+    },
+  };
+}
+
 function fetchTicketDefault(ticketId) {
   try {
     return JSON.parse(
@@ -278,6 +395,7 @@ function fetchTicketDefault(ticketId) {
       }),
     );
   } catch (err) {
+    throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
     throw new Error(
@@ -299,6 +417,7 @@ function fetchViewerDefault() {
     );
     return JSON.parse(out)?.viewer ?? null;
   } catch (err) {
+    throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     throw new Error(
       `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
@@ -367,6 +486,7 @@ function fetchInFlightDefault(repoConfig) {
     );
     return JSON.parse(out)?.issues?.nodes ?? [];
   } catch (err) {
+    throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     throw new Error(
       `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
@@ -1195,12 +1315,41 @@ export function planEvent(
         typeof preEnvelope.payload?.ticket === "string" &&
         !repoNotAllowed(preDef, preEnvelope.payload)
       ) {
-        worktreeEligibility = worktreeDispatchAutoEligibility(
-          preEnvelope.payload,
-          dispatch,
-        );
+        try {
+          worktreeEligibility = worktreeDispatchAutoEligibility(
+            preEnvelope.payload,
+            dispatch,
+          );
+        } catch (err) {
+          if (!isLinearRateLimited(err)) throw err;
+          worktreeEligibility = {
+            ok: false,
+            rateLimited: true,
+            resetAt: err.resetAt ?? null,
+            refusal: {
+              decision: "retry_later",
+              reason: "linear_rate_limited",
+              detail: err.message,
+            },
+          };
+        }
       }
     }
+  }
+  if (worktreeEligibility?.rateLimited) {
+    const detail = worktreeEligibility.refusal?.detail ?? "linear_rate_limited";
+    try {
+      db.query(
+        `UPDATE events SET last_plan_error = ? WHERE source = ? AND event_id = ?`,
+      ).run(detail, source, eventId);
+    } catch (err) {
+      if (!isBusyError(err)) throw err;
+    }
+    return {
+      decision: "refused",
+      reason: "linear_rate_limited",
+      resetAt: worktreeEligibility.resetAt ?? null,
+    };
   }
   return txImmediate(db, () => {
     const event = db
@@ -1574,10 +1723,9 @@ export function planEvent(
         approvalPolicy?.mode === "auto" &&
         envelope.type === "factory.dispatch.requested"
       ) {
-        const result = worktreeDispatchAutoEligibility(
-          pinnedEnvelope.payload,
-          dispatch,
-        );
+        const result = worktreeEligibility?.ok
+          ? worktreeEligibility
+          : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, dispatch);
         if (!result?.ok) {
           return humanNeeded(
             db,
@@ -1748,15 +1896,29 @@ export function planAdmittedEvents(db, registry, opts = {}) {
       `SELECT source, event_id FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
     )
     .all();
+  const cache = opts.linearReadCache ?? createLinearReadCache();
+  const dispatch = wrapLinearReads(opts.dispatch ?? {}, cache, opts.now);
+  const planOpts = { ...opts, dispatch };
   let planned = 0;
   let failed = 0;
   let deadLettered = 0;
   for (const { source, event_id: eventId } of rows) {
     try {
-      planEvent(db, registry, { source, eventId }, opts);
+      const outcome = planEvent(db, registry, { source, eventId }, planOpts);
+      if (outcome?.reason === "linear_rate_limited") continue;
       planned += 1;
     } catch (err) {
       if (isBusyError(err)) {
+        continue;
+      }
+      if (isLinearRateLimited(err)) {
+        try {
+          db.query(
+            `UPDATE events SET last_plan_error = ? WHERE source = ? AND event_id = ?`,
+          ).run(String(err.message), source, eventId);
+        } catch (innerErr) {
+          if (!isBusyError(innerErr)) throw innerErr;
+        }
         continue;
       }
       failed += 1;
@@ -1796,7 +1958,7 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     now: opts.now ?? Date.now(),
     policyVersion: opts.policyVersion ?? "unknown",
     dispatchEligibility: worktreeDispatchAutoEligibility,
-    dispatch: opts.dispatch ?? {},
+    dispatch,
   });
   return { planned, failed, deadLettered };
 }

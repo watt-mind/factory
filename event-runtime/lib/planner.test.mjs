@@ -10,6 +10,7 @@ import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
 import {
   buildRunSpec,
+  createLinearReadCache,
   idempotencyKeyFor,
   pinMemos,
   planAdmittedEvents,
@@ -29,6 +30,7 @@ import {
   registerMemos,
   withProvenance,
 } from "./memos.mjs";
+import { LinearRateLimitError } from "../../tools/linear.mjs";
 
 const registry = loadRegistry();
 const NOW = Date.parse("2026-08-12T10:30:02Z");
@@ -2184,5 +2186,116 @@ describe("planEvent memoPin (WM-810)", () => {
     const secondSpec = JSON.parse(second.proposal.spec_json);
     expect(secondSpec.inputHash).not.toBe(firstHash);
     expect(secondSpec.input.memoPin.entries).toHaveLength(1);
+  });
+});
+
+describe("Linear rate limit (WM-878)", () => {
+  function withReposRoot(yaml, fn) {
+    const root = tmpDir("evrt-plan-rl-");
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  }
+
+  const gatedYaml =
+    `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+    `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+    `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`;
+
+  const readyTicket = (id) => ({
+    identifier: id,
+    state: { name: "Todo" },
+    assignee: null,
+    labels: { nodes: [{ name: "ai:agent-ready" }] },
+    description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+  });
+
+  test("a simulated Linear 400 rate-limit refuses linear_rate_limited, leaves the event admitted, and does not dead-letter", () => {
+    withReposRoot(gatedYaml, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "rate-limit-1",
+        correlationId: "rate-limit-1",
+        payload: { repo: "gated", ticket: "WM-878" },
+      });
+      const resetAt = "2026-08-19T13:00:00.000Z";
+      const counts = planAdmittedEvents(db, registry, {
+        now: NOW,
+        policyVersion: "git:test",
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => {
+            throw new LinearRateLimitError(resetAt);
+          },
+          fetchInFlight: () => {
+            throw new Error("in-flight must not run after a rate-limit");
+          },
+        },
+      });
+      expect(counts).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      const event = db
+        .query(`SELECT * FROM events WHERE event_id = ?`)
+        .get(ref.eventId);
+      expect(event.status).toBe("admitted");
+      expect(event.plan_failures).toBe(0);
+      expect(event.last_plan_error).toMatch(/^linear_rate_limited:/);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+      expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(0);
+
+      const direct = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => {
+            throw new LinearRateLimitError(resetAt);
+          },
+        },
+      });
+      expect(direct).toMatchObject({
+        decision: "refused",
+        reason: "linear_rate_limited",
+        resetAt,
+      });
+    });
+  });
+
+  test("one planning pass over 10 candidates makes at most 3 in-flight queries", () => {
+    withReposRoot(gatedYaml, () => {
+      const db = openDb(":memory:");
+      for (let i = 1; i <= 10; i++) {
+        admit(db, {
+          type: "factory.dispatch.requested",
+          eventId: `rl-cand-${i}`,
+          correlationId: `rl-cand-${i}`,
+          payload: { repo: "gated", ticket: `WM-${800 + i}` },
+        });
+      }
+      const cache = createLinearReadCache();
+      const counts = planAdmittedEvents(db, registry, {
+        now: NOW,
+        policyVersion: "git:test",
+        linearReadCache: cache,
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: (id) => readyTicket(id),
+          fetchInFlight: () => [],
+        },
+      });
+      expect(counts.failed).toBe(0);
+      expect(counts.deadLettered).toBe(0);
+      expect(cache.inFlightCalls).toBeLessThanOrEqual(3);
+      expect(cache.inFlightCalls).toBeGreaterThan(0);
+    });
   });
 });

@@ -307,10 +307,13 @@ the same run.
 
 Allowed terminal states begin small: `completed`, `refused`, `failed`,
 `timed_out`, and `cancelled`. Refusal is not failure: it carries a typed reason
-such as `missing_input`, `permission_denied`, `needs_human`, or
-`unsupported_capability`. Unknown fields, unknown terminal states, bad hashes,
-and schema violations fail closed. Downstream consumers read only accepted
-results, never free-form final messages or transcripts.
+such as `missing_input`, `permission_denied`, `needs_human`,
+`unsupported_capability`, or `linear_rate_limited` (Linear's 2500 req/h budget
+is exhausted — retry-later, never an inbox escalation; see
+[event-runtime-dispatch.md](event-runtime-dispatch.md) §2). Unknown fields,
+unknown terminal states, bad hashes, and schema violations fail closed.
+Downstream consumers read only accepted results, never free-form final
+messages or transcripts.
 
 ### 5.4 Idempotency key derivation
 

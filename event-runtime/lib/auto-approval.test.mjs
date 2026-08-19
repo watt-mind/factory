@@ -16,6 +16,7 @@ import { planAdmittedEvents } from "./planner.mjs";
 import { lifecycleOf, runState } from "./lifecycle.mjs";
 import { openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
+import { LinearRateLimitError } from "../../tools/linear.mjs";
 
 const registry = loadRegistry();
 const now = Date.parse("2026-08-19T12:00:00.000Z");
@@ -1721,5 +1722,44 @@ describe("chain auto approval (WM-357)", () => {
     const second = auto(db, { runtimeGuard: () => null });
     expect(runState(db, later.runId)).toBe("QUEUED");
     return Promise.all([pending, second]);
+  });
+
+  test("a Linear rate-limit throw defers the recheck instead of failing it (WM-878)", async () => {
+    const db = openDb(":memory:");
+    const first = dispatchSeed(db, "rl-first", { ticket: "WM-878" });
+    const second = dispatchSeed(db, "rl-second", { ticket: "WM-879" });
+    let calls = 0;
+    const dispatchEligibility = () => {
+      calls += 1;
+      throw new LinearRateLimitError("2026-08-19T13:00:00.000Z");
+    };
+    const result = await auto(db, {
+      dispatchEligibility,
+      runtimeGuard: () => null,
+    });
+    expect(result.approved).toEqual([]);
+    expect(reasonOf(db, first.id)).toBe(
+      "auto_approval_ineligible:dispatch_recheck_deferred",
+    );
+    expect(reasonOf(db, second.id)).toBe(
+      "auto_approval_ineligible:dispatch_recheck_deferred",
+    );
+    expect(runState(db, first.runId)).toBe("PROPOSED");
+    expect(calls).toBe(1);
+  });
+
+  test("any other dispatch recheck throw records dispatch_recheck_failed:<message> (WM-878)", async () => {
+    const db = openDb(":memory:");
+    const row = dispatchSeed(db, "rl-fail", { ticket: "WM-880" });
+    const result = await auto(db, {
+      dispatchEligibility: () => {
+        throw new Error("linear_read_failed: HTTP 503 upstream");
+      },
+      runtimeGuard: () => null,
+    });
+    expect(result.approved).toEqual([]);
+    expect(reasonOf(db, row.id)).toBe(
+      "auto_approval_ineligible:dispatch_recheck_failed:linear_read_failed: HTTP 503 upstream",
+    );
   });
 });

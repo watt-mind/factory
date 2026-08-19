@@ -362,3 +362,39 @@ describe("piChromeDevtoolsCheck", () => {
     ).toBe("fail");
   });
 });
+
+describe("Linear budget line (WM-878)", () => {
+  test("formats remaining/limit and UTC reset clock, and warns below 300", async () => {
+    const {
+      formatLinearBudgetLine,
+      linearBudgetStatus,
+      parseRateLimitHeaders,
+      LINEAR_BUDGET_WARN_REMAINING,
+    } = await import("../tools/linear.mjs");
+    expect(formatLinearBudgetLine(null)).toBe(
+      "Linear budget: unknown (no recent API call)",
+    );
+    expect(
+      formatLinearBudgetLine({
+        remaining: 1842,
+        limit: 2500,
+        resetAt: "2026-08-19T15:07:00.000Z",
+      }),
+    ).toBe("Linear budget: 1842/2500 remaining, resets 15:07");
+    expect(
+      linearBudgetStatus({ remaining: LINEAR_BUDGET_WARN_REMAINING }),
+    ).toBe("pass");
+    expect(
+      linearBudgetStatus({ remaining: LINEAR_BUDGET_WARN_REMAINING - 1 }),
+    ).toBe("warn");
+    const headers = new Headers({
+      "X-RateLimit-Requests-Remaining": "12",
+      "X-RateLimit-Requests-Limit": "2500",
+      "X-RateLimit-Requests-Reset": "1787150400",
+    });
+    const parsed = parseRateLimitHeaders(headers);
+    expect(parsed.remaining).toBe(12);
+    expect(parsed.limit).toBe(2500);
+    expect(parsed.resetAt).toBe(new Date(1787150400 * 1000).toISOString());
+  });
+});

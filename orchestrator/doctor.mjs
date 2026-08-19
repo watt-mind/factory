@@ -31,8 +31,15 @@ import {
   browserLaunchCheck,
   piChromeDevtoolsCheck,
 } from "./doctor-browser.mjs";
+import {
+  formatLinearBudgetLine,
+  installLinearBudgetCapture,
+  linearBudgetStatus,
+  loadLinearBudget,
+} from "../tools/linear.mjs";
 
 const ROOT = factoryRoot();
+installLinearBudgetCapture();
 const argv = process.argv.slice(2);
 const val = (f) => {
   const i = argv.indexOf(f);
@@ -411,6 +418,19 @@ for (const repo of repos) {
     repo.smoke_workflow
       ? null
       : "without one, Done means merged rather than running",
+  );
+}
+
+{
+  const budget = loadLinearBudget();
+  const status = linearBudgetStatus(budget);
+  check(
+    status === "pass" ? true : "warn",
+    formatLinearBudgetLine(budget),
+    "",
+    status === "warn" && budget?.remaining != null
+      ? "Linear is near its 2500 req/h cap — dispatch retries later instead of escalating"
+      : null,
   );
 }
 

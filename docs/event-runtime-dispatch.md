@@ -109,6 +109,36 @@ invalid ticket label safe. As with definition tiers, a valid label whose tier
 has no mapping for the routed adapter fails closed rather than falling back to
 an adapter default.
 
+### Linear API budget (WM-878)
+
+Linear allows 2500 requests per hour. The factory used to treat a 400/429
+`Rate limit exceeded` as `needs_human` and then _amplify_ the outage: every
+open chain-dispatch proposal re-ran `fetchTicket` + `fetchViewer` +
+`fetchInFlight` on every tick. Rate-limited outcomes are **retry-later**:
+
+- `tools/linear.mjs` records `X-RateLimit-Requests-*` (falling back to the
+  complexity headers), exposes `factory linear budget`, and exits 3 with
+  `{rateLimited:true, resetAt}` instead of a generic failure.
+- One planning pass memoizes in-flight issues by team+project for ≤60s and
+  per-ticket reads for the run, so ten candidates in one repo do not issue
+  ten 250-issue queries.
+- A rate-limited dispatch plan leaves the event `admitted` with
+  `reason: linear_rate_limited`; `plan_failures` is not incremented, the
+  ticket is not labelled `ai:escalated`, and no inbox item is opened. The
+  next tick (or `resetAt`) retries.
+- Auto-approval rechecks that throw a rate-limit error stay open as
+  `dispatch_recheck_deferred` (the thrown message is logged; any other throw
+  is `dispatch_recheck_failed:<message>`). Rechecks in the same pass back off
+  until `resetAt`.
+- `factory doctor` prints `Linear budget: N/2500 remaining, resets HH:MM`
+  and warns when remaining < 300.
+
+The dispatch agent's prompt still names `needs_human` for an unreachable
+Linear API; a follow-up re-pin of `dispatch@1` plus `verify.mjs`
+`REFUSAL_REASONS` is required before the agent result itself can carry
+`linear_rate_limited` without a contract violation. The planner and
+auto-approval path above is what stops the inbox escalation.
+
 ---
 
 ## 3. Capacity: one budget, checked at plan and again at execute

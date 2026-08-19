@@ -13,6 +13,7 @@
  *   bun tools/linear.mjs state CLNT-616 "In Review" --add ai:needs-review
  *   bun tools/linear.mjs file --team CLNT --title "..." --body "..." --type bug
  *   bun tools/linear.mjs queue --repo bj29
+ *   bun tools/linear.mjs budget
  *   bun tools/linear.mjs raw '<graphql>' --var key=value
  *
  * WHY THIS EXISTS, given a perfectly good Linear MCP.
@@ -47,7 +48,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
-import { gql } from "../orchestrator/reaper.mjs";
+import { gql as gqlRaw } from "../orchestrator/reaper.mjs";
 import {
   parseOwnedPaths,
   ownedPathsClosureGaps,
@@ -64,6 +65,198 @@ import {
 // below) does nothing here since no verb calls allLabels() twice in one run.
 const CACHE_DIR = path.join(homedir(), ".factory/cache/linear");
 const CACHE_TTL_MS = 15 * 60 * 1000;
+const BUDGET_FILE = "budget.json";
+const LINEAR_API_HOST = "api.linear.app";
+
+/** Distinct from generic CLI failure (exit 1) so planners can retry-later. */
+export const LINEAR_RATE_LIMIT_EXIT = 3;
+export const LINEAR_REQUESTS_LIMIT = 2500;
+export const LINEAR_BUDGET_WARN_REMAINING = 300;
+
+export class LinearRateLimitError extends Error {
+  constructor(resetAt, cause) {
+    super(`linear_rate_limited: resetAt=${resetAt ?? "unknown"}`);
+    this.name = "LinearRateLimitError";
+    this.rateLimited = true;
+    this.resetAt = resetAt ?? null;
+    if (cause) this.cause = cause;
+  }
+}
+
+export function isLinearRateLimitMessage(text) {
+  const s = String(text ?? "");
+  return (
+    /rate limit exceeded/i.test(s) ||
+    /RATELIMITED/i.test(s) ||
+    /HTTP 429\b/.test(s) ||
+    /"rateLimited"\s*:\s*true/.test(s)
+  );
+}
+
+export function isLinearRateLimited(err) {
+  if (!err) return false;
+  if (err instanceof LinearRateLimitError || err.rateLimited === true)
+    return true;
+  return String(err.message ?? "").startsWith("linear_rate_limited:");
+}
+
+function parseHeaderNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Linear's reset header is a unix timestamp; Retry-After is a small delta.
+ * ISO-8601 strings pass through Date.parse.
+ */
+export function parseRateLimitReset(value, now = Date.now()) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) {
+    if (n < 1e9) return new Date(now + n * 1000).toISOString();
+    const ms = n < 1e12 ? n * 1000 : n;
+    return new Date(ms).toISOString();
+  }
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+export function parseRateLimitHeaders(headers, now = Date.now()) {
+  if (!headers || typeof headers.get !== "function") return null;
+  const remaining = parseHeaderNumber(
+    headers.get("x-ratelimit-requests-remaining"),
+  );
+  const limit = parseHeaderNumber(headers.get("x-ratelimit-requests-limit"));
+  const resetAt = parseRateLimitReset(
+    headers.get("x-ratelimit-requests-reset") ?? headers.get("retry-after"),
+    now,
+  );
+  const complexityRemaining = parseHeaderNumber(
+    headers.get("x-ratelimit-complexity-remaining"),
+  );
+  const complexityLimit = parseHeaderNumber(
+    headers.get("x-ratelimit-complexity-limit"),
+  );
+  const complexityResetAt = parseRateLimitReset(
+    headers.get("x-ratelimit-complexity-reset"),
+    now,
+  );
+  if (
+    remaining == null &&
+    limit == null &&
+    resetAt == null &&
+    complexityRemaining == null &&
+    complexityLimit == null &&
+    complexityResetAt == null
+  ) {
+    return null;
+  }
+  return {
+    remaining: remaining ?? complexityRemaining,
+    limit: limit ?? complexityLimit ?? LINEAR_REQUESTS_LIMIT,
+    resetAt: resetAt ?? complexityResetAt,
+  };
+}
+
+export function linearCacheDir() {
+  return process.env.LINEAR_CACHE_DIR || CACHE_DIR;
+}
+
+export function loadLinearBudget() {
+  try {
+    return JSON.parse(
+      readFileSync(path.join(linearCacheDir(), BUDGET_FILE), "utf8"),
+    );
+  } catch {
+    return null;
+  }
+}
+
+export function saveLinearBudget(budget) {
+  try {
+    mkdirSync(linearCacheDir(), { recursive: true });
+    writeFileSync(
+      path.join(linearCacheDir(), BUDGET_FILE),
+      JSON.stringify({ ...budget, capturedAt: new Date().toISOString() }),
+    );
+  } catch {
+    // Budget is an optimization / doctor line, never a dependency.
+  }
+}
+
+function formatResetClock(resetAt) {
+  if (!resetAt) return "unknown";
+  const d = new Date(resetAt);
+  if (Number.isNaN(d.getTime())) return "unknown";
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+export function formatLinearBudgetLine(budget) {
+  if (!budget || budget.remaining == null) {
+    return "Linear budget: unknown (no recent API call)";
+  }
+  const limit = budget.limit ?? LINEAR_REQUESTS_LIMIT;
+  return `Linear budget: ${budget.remaining}/${limit} remaining, resets ${formatResetClock(budget.resetAt)}`;
+}
+
+export function linearBudgetStatus(budget) {
+  if (!budget || budget.remaining == null) return "unknown";
+  if (budget.remaining < LINEAR_BUDGET_WARN_REMAINING) return "warn";
+  return "pass";
+}
+
+function recordLinearBudgetFromResponse(res) {
+  const parsed = parseRateLimitHeaders(res.headers);
+  if (!parsed && res.status !== 400 && res.status !== 429) return;
+  const prior = loadLinearBudget() ?? {};
+  const rateLimited =
+    res.status === 429 ||
+    (res.status === 400 && parsed?.remaining === 0) ||
+    parsed?.remaining === 0;
+  saveLinearBudget({
+    remaining:
+      parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null)),
+    limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
+    resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
+    rateLimited: Boolean(rateLimited || prior.rateLimited),
+    status: res.status,
+  });
+}
+
+let fetchHookInstalled = false;
+
+export function installLinearBudgetCapture() {
+  if (fetchHookInstalled) return;
+  const originalFetch = globalThis.fetch.bind(globalThis);
+  fetchHookInstalled = true;
+  globalThis.fetch = async function linearBudgetFetch(input, init) {
+    const url = String(input?.url ?? input);
+    const res = await originalFetch(input, init);
+    if (url.includes(LINEAR_API_HOST)) recordLinearBudgetFromResponse(res);
+    return res;
+  };
+}
+
+async function gql(query, variables = {}, retries) {
+  try {
+    return await gqlRaw(query, variables, retries);
+  } catch (err) {
+    if (isLinearRateLimitMessage(err?.message)) {
+      const budget = loadLinearBudget() ?? {};
+      const resetAt =
+        budget.resetAt ?? new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      saveLinearBudget({
+        remaining: 0,
+        limit: budget.limit ?? LINEAR_REQUESTS_LIMIT,
+        resetAt,
+        rateLimited: true,
+      });
+      throw new LinearRateLimitError(resetAt, err);
+    }
+    throw err;
+  }
+}
 
 function cacheGet(key) {
   if (process.env.LINEAR_NO_CACHE) return null;
@@ -708,6 +901,18 @@ const VERBS = {
     );
   },
 
+  async budget() {
+    const budget = loadLinearBudget();
+    out(
+      budget ?? {
+        remaining: null,
+        limit: LINEAR_REQUESTS_LIMIT,
+        resetAt: null,
+      },
+      formatLinearBudgetLine(budget),
+    );
+  },
+
   async raw() {
     const vars = Object.fromEntries(
       flagAll("var").map((kv) => {
@@ -720,6 +925,7 @@ const VERBS = {
 };
 
 if (import.meta.main) {
+  installLinearBudgetCapture();
   if (!verb || has("help") || !VERBS[verb]) {
     console.log(`verbs: ${Object.keys(VERBS).join(", ")}\n`);
     console.log(
@@ -730,6 +936,13 @@ if (import.meta.main) {
   try {
     await VERBS[verb]();
   } catch (e) {
+    if (isLinearRateLimited(e) || isLinearRateLimitMessage(e.message)) {
+      const budget = loadLinearBudget() ?? {};
+      const resetAt = e.resetAt ?? budget.resetAt ?? null;
+      const payload = { rateLimited: true, resetAt };
+      console.error(JSON.stringify(payload));
+      process.exit(LINEAR_RATE_LIMIT_EXIT);
+    }
     console.error(`linear ${verb}: ${e.message}`);
     process.exit(1);
   }

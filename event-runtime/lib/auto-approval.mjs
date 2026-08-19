@@ -15,6 +15,10 @@ import { approveProposal } from "./proposals.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
+import {
+  isLinearRateLimited,
+  isLinearRateLimitMessage,
+} from "../../tools/linear.mjs";
 
 export const CHAIN_APPROVAL_SOURCE = "chain";
 export const CHAIN_APPROVAL_MODE_AUTO = "auto";
@@ -301,6 +305,13 @@ function proposalIntegrity(candidate, mapping, envelope) {
   return null;
 }
 
+function clipReason(message, max = 180) {
+  return String(message ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
 function dispatchSafe(
   envelope,
   approvalPolicy,
@@ -311,11 +322,34 @@ function dispatchSafe(
   if (typeof dispatchEligibility !== "function")
     return "dispatch_recheck_unavailable";
 
+  const nowMs =
+    typeof hookCtx?.now === "number" && Number.isFinite(hookCtx.now)
+      ? hookCtx.now
+      : Date.now();
+  if (
+    dispatch &&
+    Number.isFinite(dispatch.linearRateLimitedUntil) &&
+    nowMs < dispatch.linearRateLimitedUntil
+  ) {
+    return "dispatch_recheck_deferred";
+  }
+
   let result;
   try {
     result = dispatchEligibility(envelope.payload, dispatch);
-  } catch {
-    return "dispatch_recheck_failed";
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    console.error(`dispatch_recheck_failed: ${message}`);
+    if (isLinearRateLimited(err) || isLinearRateLimitMessage(message)) {
+      if (dispatch && typeof dispatch === "object") {
+        const resetMs = Date.parse(err.resetAt);
+        dispatch.linearRateLimitedUntil = Number.isFinite(resetMs)
+          ? resetMs
+          : nowMs + 60_000;
+      }
+      return "dispatch_recheck_deferred";
+    }
+    return `dispatch_recheck_failed:${clipReason(message)}`;
   }
 
   if (!result?.ok)
