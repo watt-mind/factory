@@ -521,8 +521,17 @@ describe("serve PID lock (OPS-458)", () => {
 
   test("concurrent duplicate serve on same home fails second instance and releasing first allows next", async () => {
     const home = tmpDir("evrt-lock-cli-");
-    const port1 = String(59500 + (process.pid % 200));
-    const port2 = String(59700 + (process.pid % 200));
+    // Ask the OS for genuinely free ports instead of pid-modulo arithmetic:
+    // 59500/59700 + pid % 200 collides on a busy CI host and fails at listen
+    // before the lock assertion runs (WM-740). Hold both listeners until both
+    // ports are known so the same call never returns duplicates. Serve rejects
+    // --port 0, so the probes are released before spawn.
+    const probes = [
+      Bun.serve({ port: 0, fetch: () => new Response("") }),
+      Bun.serve({ port: 0, fetch: () => new Response("") }),
+    ];
+    const [port1, port2] = probes.map((p) => String(p.port));
+    for (const p of probes) p.stop(true);
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
 
     const serve1 = spawnTracked("bun", [CLI, "serve", "--port", port1], {
