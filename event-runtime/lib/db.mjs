@@ -379,6 +379,42 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 12,
+    name: "merge_reviews_key_head",
+    up(db) {
+      db.exec(`
+        CREATE TABLE merge_reviews_v12 (
+          github         TEXT NOT NULL,
+          pr             INTEGER NOT NULL,
+          head_sha       TEXT NOT NULL,
+          base_sha       TEXT NOT NULL,
+          verdict        TEXT NOT NULL,
+          findings_json  TEXT NOT NULL,
+          fix_json       TEXT,
+          plan_json      TEXT,
+          policy_version TEXT,
+          run_id         TEXT,
+          reviewed_at    TEXT NOT NULL,
+          PRIMARY KEY (github, pr, head_sha)
+        );
+        INSERT INTO merge_reviews_v12 (
+          github, pr, head_sha, base_sha, verdict, findings_json, fix_json,
+          plan_json, policy_version, run_id, reviewed_at
+        )
+        SELECT github, pr, head_sha, base_sha, verdict, findings_json, fix_json,
+               plan_json, policy_version, run_id, reviewed_at
+          FROM merge_reviews
+         WHERE rowid IN (
+           SELECT MAX(rowid) FROM merge_reviews GROUP BY github, pr, head_sha
+         );
+        DROP TABLE merge_reviews;
+        ALTER TABLE merge_reviews_v12 RENAME TO merge_reviews;
+        CREATE INDEX IF NOT EXISTS idx_merge_reviews_github_pr
+          ON merge_reviews (github, pr, reviewed_at DESC);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

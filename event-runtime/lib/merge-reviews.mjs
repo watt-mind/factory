@@ -1,15 +1,18 @@
 /**
- * Merge-review ledger and scan enumerator (WM-907).
+ * Merge-review ledger and scan enumerator (WM-907 / WM-936).
  *
- * `merge_reviews` is keyed (github, pr, head_sha, base_sha). A moved head is
- * a miss: the next enumerator tick emits `factory.merge-review.requested`
- * for that SHA pair only. Completing `merge-review@1` persists the row from
- * the accepted result (worker hook). `merge-scan@2` is the deterministic
- * enumerator that reads this table and fans out reviews for misses.
+ * `merge_reviews` is keyed (github, pr, head_sha). `base_sha` is recorded,
+ * not part of the key: a moved base with an unchanged head is a hit. A moved
+ * head is a miss — the next enumerator tick emits `factory.merge-review.requested`
+ * for that head only. Completing `merge-review@1` persists the row from the
+ * accepted result (worker hook). `merge-scan@2` is the deterministic enumerator
+ * that reads this table, fans out reviews for misses, and emits operational
+ * `rebase_onto_base` fix items for hits that are CONFLICTING/BEHIND.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { loadForge, ForgeError } from "../../lib/forge/index.mjs";
+import { sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { getRepo, loadRepos, RepoError } from "./repos.mjs";
 
@@ -31,8 +34,19 @@ const PR_LIST_FIELDS = [
   "headRefName",
   "baseRefName",
   "title",
+  "mergeable",
+  "mergeStateStatus",
 ];
 const PR_VIEW_FIELDS = PR_LIST_FIELDS;
+const REBASE_FINDING = "rebase_onto_base";
+const IN_FLIGHT_RUN_STATES = [
+  "PROPOSED",
+  "APPROVED",
+  "QUEUED",
+  "LEASED",
+  "RUNNING",
+  "VERIFYING",
+];
 
 function iso(now = Date.now()) {
   return new Date(now).toISOString();
@@ -67,8 +81,8 @@ function parseJsonColumn(raw, fallback) {
   }
 }
 
-/** Look up a review by the exact SHA pair. A moved head is a miss. */
-export function lookupMergeReview(db, { github, pr, headSha, baseSha }) {
+/** Look up a review by (github, pr, headSha). A moved head is a miss. */
+export function lookupMergeReview(db, { github, pr, headSha }) {
   const row = db
     .query(
       `SELECT github, pr, head_sha AS headSha, base_sha AS baseSha,
@@ -76,9 +90,9 @@ export function lookupMergeReview(db, { github, pr, headSha, baseSha }) {
               plan_json AS planJson, policy_version AS policyVersion,
               run_id AS runId, reviewed_at AS reviewedAt
          FROM merge_reviews
-        WHERE github = ? AND pr = ? AND head_sha = ? AND base_sha = ?`,
+        WHERE github = ? AND pr = ? AND head_sha = ?`,
     )
-    .get(github, pr, headSha, baseSha);
+    .get(github, pr, headSha);
   if (!row) return null;
   return {
     github: row.github,
@@ -126,8 +140,9 @@ export function upsertMergeReview(
     `INSERT INTO merge_reviews (
        github, pr, head_sha, base_sha, verdict, findings_json, fix_json,
        plan_json, policy_version, run_id, reviewed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (github, pr, head_sha, base_sha) DO UPDATE SET
+     )      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (github, pr, head_sha) DO UPDATE SET
+       base_sha = excluded.base_sha,
        verdict = excluded.verdict,
        findings_json = excluded.findings_json,
        fix_json = excluded.fix_json,
@@ -153,7 +168,8 @@ export function upsertMergeReview(
 /**
  * Worker COMPLETED hook. No-op unless this run is merge-review@1 with a
  * schema-valid completed artifact. Never throws out of a missing optional
- * field — refuse to persist rather than write a partial key.
+ * field — refuse to persist rather than write a partial key. `baseSha` is
+ * required as a recorded column; it is not part of the lookup key.
  */
 export function persistMergeReviewFromResult(
   db,
@@ -218,6 +234,12 @@ function normalizeListedPr(raw, baseSha) {
     headRef: typeof raw.headRefName === "string" ? raw.headRefName : null,
     baseRefName: typeof raw.baseRefName === "string" ? raw.baseRefName : null,
     ticket: ticketFromRef(raw.headRefName, raw.title),
+    mergeable:
+      typeof raw.mergeable === "string" ? raw.mergeable.toUpperCase() : "",
+    mergeStateStatus:
+      typeof raw.mergeStateStatus === "string"
+        ? raw.mergeStateStatus.toUpperCase()
+        : "",
   };
 }
 
@@ -245,18 +267,97 @@ function lowestMergePlan(candidates) {
   return [mergeable[0].plan];
 }
 
-function recommendationOf({ reviews, plan, escalate }) {
+function recommendationOf({ reviews, plan, fix, escalate }) {
   if (escalate.length > 0) return "ESCALATE";
   if (plan.length > 0) return "MERGE";
   if (reviews.length > 0) return "REVIEW";
+  if (fix.length > 0) return "FIX";
   return "NOOP";
 }
 
-function noopReasonOf({ reviews, plan, escalate, listedCount }) {
-  if (escalate.length > 0 || plan.length > 0 || reviews.length > 0)
+function noopReasonOf({ reviews, plan, fix, escalate, listedCount }) {
+  if (
+    escalate.length > 0 ||
+    plan.length > 0 ||
+    reviews.length > 0 ||
+    fix.length > 0
+  )
     return undefined;
   if (listedCount === 0) return "no_open_prs";
   return "all_prs_held";
+}
+
+function isBehindOrConflicting(pr, hit) {
+  if (pr.mergeable === "CONFLICTING") return true;
+  if (pr.mergeStateStatus === "BEHIND") return true;
+  return Boolean(hit?.baseSha && pr.baseSha && hit.baseSha !== pr.baseSha);
+}
+
+function ownedPathsFrom(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => typeof item === "string" && item.length > 0);
+}
+
+function rebaseFixItem(pr, hit, { forge, github }) {
+  const headRef = pr.headRef;
+  const ticket = pr.ticket;
+  if (!headRef || !ticket) return null;
+  const previous = hit.fix && typeof hit.fix === "object" ? hit.fix : null;
+  let ownedPaths = ownedPathsFrom(previous?.ownedPaths);
+  if (ownedPaths.length === 0 && forge) {
+    try {
+      ownedPaths = ownedPathsFrom(forge.prDiffFiles(github, pr.number));
+    } catch {
+      ownedPaths = [];
+    }
+  }
+  if (ownedPaths.length === 0) return null;
+  const round =
+    Number.isInteger(previous?.round) && previous.round >= 1
+      ? previous.round
+      : 1;
+  return {
+    pr: pr.number,
+    headSha: pr.headSha,
+    baseSha: pr.baseSha,
+    headRef,
+    ticket,
+    finding: REBASE_FINDING,
+    findingHash: sha256Hex(REBASE_FINDING),
+    round,
+    mechanical: true,
+    withinOwnedPaths: true,
+    ownedPaths,
+  };
+}
+
+function hasInFlightAgent(db, agent, { github, pr, headSha }) {
+  if (!db) return false;
+  const runPlaceholders = IN_FLIGHT_RUN_STATES.map(() => "?").join(", ");
+  const run = db
+    .query(
+      `SELECT 1 AS ok FROM runs
+        WHERE json_extract(spec_json, '$.agent') = ?
+          AND json_extract(spec_json, '$.input.pr') = ?
+          AND json_extract(spec_json, '$.input.headSha') = ?
+          AND json_extract(spec_json, '$.input.github') = ?
+          AND state IN (${runPlaceholders})
+        LIMIT 1`,
+    )
+    .get(agent, pr, headSha, github, ...IN_FLIGHT_RUN_STATES);
+  if (run) return true;
+  const proposal = db
+    .query(
+      `SELECT 1 AS ok FROM proposals
+        WHERE status = 'open'
+          AND json_extract(spec_json, '$.agent') = ?
+          AND json_extract(spec_json, '$.input.pr') = ?
+          AND json_extract(spec_json, '$.input.headSha') = ?
+          AND json_extract(spec_json, '$.input.github') = ?
+        LIMIT 1`,
+    )
+    .get(agent, pr, headSha, github);
+  return Boolean(proposal);
 }
 
 /**
@@ -369,6 +470,7 @@ export function enumerateMergeScan({
       base,
       deployBranch,
       db,
+      forge,
       targets,
       forceReview: true,
       listedCount: targets.length,
@@ -389,6 +491,7 @@ export function enumerateMergeScan({
     base,
     deployBranch,
     db,
+    forge,
     targets,
     forceReview: false,
     listedCount: targets.length,
@@ -402,21 +505,45 @@ function assemble({
   base,
   deployBranch,
   db,
+  forge,
   targets,
   forceReview,
   listedCount,
 }) {
   const reviews = [];
   const mergeHits = [];
+  const fix = [];
   for (const pr of targets) {
     const hit = lookupMergeReview(db, {
       github,
       pr: pr.number,
       headSha: pr.headSha,
-      baseSha: pr.baseSha,
     });
     if (!hit || forceReview) {
+      if (
+        hasInFlightAgent(db, MERGE_REVIEW_AGENT, {
+          github,
+          pr: pr.number,
+          headSha: pr.headSha,
+        })
+      ) {
+        continue;
+      }
       reviews.push(reviewItemFromPr(pr));
+      continue;
+    }
+    if (isBehindOrConflicting(pr, hit)) {
+      if (
+        hasInFlightAgent(db, "merge-fix@1", {
+          github,
+          pr: pr.number,
+          headSha: pr.headSha,
+        })
+      ) {
+        continue;
+      }
+      const item = rebaseFixItem(pr, hit, { forge, github });
+      if (item) fix.push(item);
       continue;
     }
     if (hit.verdict === "MERGE") mergeHits.push(hit);
@@ -424,18 +551,19 @@ function assemble({
   const plan = lowestMergePlan(mergeHits);
   const escalate = [];
   const artifact = {
-    recommendation: recommendationOf({ reviews, plan, escalate }),
+    recommendation: recommendationOf({ reviews, plan, fix, escalate }),
     repo,
     github,
     base,
     deployBranch,
     reviews,
     plan,
-    fix: [],
+    fix,
     escalate,
     summary: summaryFor({
       reviews,
       plan,
+      fix,
       listedCount,
       forceReview,
     }),
@@ -443,6 +571,7 @@ function assemble({
   const noopReason = noopReasonOf({
     reviews,
     plan,
+    fix,
     escalate,
     listedCount,
   });
@@ -450,11 +579,12 @@ function assemble({
   return completed(artifact);
 }
 
-function summaryFor({ reviews, plan, listedCount, forceReview }) {
+function summaryFor({ reviews, plan, fix, listedCount, forceReview }) {
   const bits = [];
   if (forceReview) bits.push(`selected scan of ${listedCount} PR(s)`);
   else bits.push(`${listedCount} open base-targeting PR(s)`);
   bits.push(`${reviews.length} review(s) to run`);
+  if (fix.length > 0) bits.push(`${fix.length} rebase fix(es)`);
   if (plan.length > 0) bits.push(`lowest MERGE candidate is #${plan[0].pr}`);
   return bits.join("; ") + ".";
 }

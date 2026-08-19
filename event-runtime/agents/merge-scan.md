@@ -8,11 +8,18 @@ bun {factoryRoot}/event-runtime/lib/merge-reviews.mjs scan
 ```
 
 The command reads `./input.json` and writes `./result.json`. It lists open PRs
-via the forge, looks each `(github, pr, headSha, baseSha)` up in the
-`merge_reviews` ledger, and emits `reviews[]` only for misses. A selected scan
-(`prNumbers`) forces a review even on a ledger hit. The stub `plan[]` is today's
-single lowest MERGE candidate already in the ledger so the lane still lands one
-PR per cycle until merge-lane v3 part 2 batches landing.
+via the forge, looks each `(github, pr, headSha)` up in the `merge_reviews`
+ledger (`baseSha` is recorded, not part of the key), and emits `reviews[]` only
+for misses — a moved head. A moved base with the same head is a hit. A selected
+scan (`prNumbers`) forces a review even on a ledger hit. For a hit whose live
+state is CONFLICTING or BEHIND (or whose recorded `baseSha` differs from the
+live base tip), emit an operational `rebase_onto_base` item in `fix[]` with
+`mechanical: true`, `withinOwnedPaths: true`, and `round` from the ledger; do
+not start a review run. Do not emit a review item when an open, queued, or
+running `merge-review@1` proposal or run already exists at the same
+`(pr, headSha)`. The stub `plan[]` is today's single lowest MERGE candidate
+already in the ledger that is still mergeable, so the lane still lands one PR
+per cycle until merge-lane v3 part 2 batches landing.
 
 When `prNumbers` is absent, enumerate **all** open PRs and consider every
 base-targeting, non-draft PR. When `prNumbers` is present, review exactly those
