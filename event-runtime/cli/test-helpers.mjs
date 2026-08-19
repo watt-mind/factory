@@ -1,12 +1,6 @@
 import { afterAll, expect } from "bun:test";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { policyVersion } from "../lib/config.mjs";
@@ -162,7 +156,9 @@ export async function spawnLiveServe({
   } catch (error) {
     const tail = box.out.slice(-800) || "(empty)";
     child.kill("SIGKILL");
-    throw new Error(`${error.message}\n--- serve output tail ---\n${tail}`);
+    throw new Error(`${error.message}\n--- serve output tail ---\n${tail}`, {
+      cause: error,
+    });
   }
   return box;
 }
@@ -336,7 +332,9 @@ export async function waitFor(box, needle, timeoutMs = 15_000) {
     );
   } catch (error) {
     const tail = String(box.out ?? "").slice(-800) || "(empty)";
-    throw new Error(`${error.message}\n--- output tail ---\n${tail}`);
+    throw new Error(`${error.message}\n--- output tail ---\n${tail}`, {
+      cause: error,
+    });
   }
   return true;
 }

@@ -1,34 +1,16 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-status-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
 import {
   CLI,
   DEAD_PORT,
-  assertHealthyLiveServe,
-  editStampRoot,
-  exitOf,
-  killPool,
   loadAdjustedTimeout,
-  makeStampRoot,
-  poolSize,
   runCli,
-  runNotifierDeliveryCase,
-  seedRun,
   spawnLiveServe,
-  spawnTracked,
-  spawnSupervisor,
-  spawnWorker,
   throwawayRunDir,
-  waitFor,
   registerCliTmpCleanup,
 } from "./test-helpers.mjs";
 
