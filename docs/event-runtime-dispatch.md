@@ -168,6 +168,16 @@ parseable `Owned Paths` owns everything (dispatchable, but alone), and
 ambiguous glob overlap errs toward collision — a false positive serializes
 two tickets, a false negative puts two agents in one file.
 
+**Section format.** `parseOwnedPaths` reads the `## Owned Paths` section as
+bullets, fenced code, or indented code, strips a trailing `(new)`-style
+annotation, and keeps only entries with no whitespace that look like a path
+(`/`, `*`, or an extension). One path or glob per line. A bullet like
+`- a.mjs, b.mjs, c.mjs` contains spaces and is dropped whole, so a ticket
+written that way parses to fewer paths than its author intended — or to none,
+which the planner reports as `owned_paths_unknown`. The orchestrator hit both
+on 2026-08-19 (WM-907 dispatched with a narrowed scope and blocked; WM-918
+refused outright) before rewriting the sections one path per bullet.
+
 **Collision mode (WM-677).** `config/policy.yaml` `dispatch.owned_paths_collision`
 selects what a collision _does_:
 

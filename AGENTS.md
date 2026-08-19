@@ -36,7 +36,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `~/D
 - Restore working state: `git checkout HEAD -- <path>`
 - Save work in progress: save a patch via `git diff > /tmp/<ISSUE-ID>.patch` (restore with `git apply /tmp/<ISSUE-ID>.patch`) or create a temporary WIP commit on the branch (`git commit -m "wip"`, undo later with `git reset HEAD~1`).
 
-**Stay inside `Owned Paths`.** That glob set is what makes parallel work safe; the dispatcher refuses to run two tickets whose sets intersect. Work discovered outside it becomes a new `Triage` issue — it never expands the current ticket.
+**Stay inside `Owned Paths`.** That glob set is what makes parallel work safe; the dispatcher refuses to run two tickets whose sets intersect. Work discovered outside it becomes a new `Triage` issue — it never expands the current ticket. Write the section as **one path or glob per bullet** (`- event-runtime/lib/foo.mjs`); the planner's parser (`orchestrator/owned-paths.mjs`) keeps only bullets that look like a path and contain no spaces, so a comma-separated list on one bullet is silently dropped — the ticket then either fails to dispatch (`owned_paths_unknown`) or, worse, dispatches with a narrower scope than you wrote and the agent blocks on "Owned Paths omit …".
 
 **Heartbeat** at each phase change (claimed → implemented → verified → PR open) and at least every 20 minutes, saying what changed. After 45 minutes of silence the ticket is reclaimed.
 
