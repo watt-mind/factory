@@ -1,0 +1,77 @@
+{
+  "title": "factory.memo/v1 — verified cross-run memory (docs/event-runtime-memos.md §2)",
+  "type": "object",
+  "required": ["schemaVersion", "subject", "kind", "body"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "factory.memo/v1" },
+    "subject": {
+      "type": "object",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["repo", "ticket", "pr", "workflow", "run"]
+        },
+        "id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "kind": {
+      "enum": ["repo-note", "postmortem", "decision", "flake", "handoff"]
+    },
+    "claim": {
+      "type": "object",
+      "required": ["kind", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["howto", "pitfall", "fact"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 }
+      }
+    },
+    "evidence": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "body": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "descriptionHash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "expiresAt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "supersedes": {
+      "type": ["string", "null"],
+      "pattern": "^([0-9a-f]{64}|sha256:[0-9a-f]{64})$"
+    },
+    "refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{64}|sha256:[0-9a-f]{64})$"
+          }
+        },
+        "inboxItemId": { "type": "string", "minLength": 1 },
+        "pr": { "type": "string", "minLength": 1 },
+        "runId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["agent", "createdAt"],
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "type": ["string", "null"] },
+        "agent": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "precedentOnly": { "type": "boolean" }
+  }
+}

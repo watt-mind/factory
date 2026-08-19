@@ -16,6 +16,7 @@ import path from "node:path";
 import { globToRegExp } from "../../orchestrator/owned-paths.mjs";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { validateDecisionRequest } from "./decision.mjs";
+import { processResultMemos } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 import { PathViolation, safeJoin } from "./workspace.mjs";
@@ -1088,6 +1089,17 @@ function verifyCompleted({
   }
   if (violations.length > 0) throw new ContractViolation(violations);
 
+  const memoOutcome = processResultMemos({
+    candidate,
+    spec,
+    def,
+    workspaceDir,
+    collected,
+  });
+  if (memoOutcome.errors.length > 0) {
+    throw new ContractViolation(memoOutcome.errors);
+  }
+
   const artifactHash = hashJson(candidate.artifact);
 
   const { evidence, evidenceSetHash } = retainedEvidence(candidate);
@@ -1115,9 +1127,12 @@ function verifyCompleted({
           ? ["evidence_recomputed"]
           : []),
         ...handoffChecks,
+        ...memoOutcome.checks,
       ],
     },
     artifacts: collected,
+    ...(memoOutcome.memos.length > 0 ? { memos: memoOutcome.memos } : {}),
+    ...(memoOutcome.usedMemos ? { usedMemos: memoOutcome.usedMemos } : {}),
   };
   const receipt = {
     runId: spec.runId,

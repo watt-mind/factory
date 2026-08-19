@@ -280,6 +280,39 @@ export const MIGRATIONS = [
       }
     },
   },
+  {
+    version: 8,
+    name: "memo_ledger",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memos (
+          sha256           TEXT PRIMARY KEY,
+          subject_type     TEXT NOT NULL,
+          subject_id       TEXT NOT NULL,
+          kind             TEXT NOT NULL,
+          run_id           TEXT,
+          inbox_item_id    TEXT,
+          created_at       INTEGER NOT NULL,
+          expires_at       INTEGER,
+          description_hash TEXT,
+          head_sha         TEXT,
+          superseded_by    TEXT,
+          retired_at       INTEGER,
+          retired_reason   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS memos_subject
+          ON memos (subject_type, subject_id, kind, created_at DESC);
+        CREATE TABLE IF NOT EXISTS memo_uses (
+          sha256    TEXT NOT NULL,
+          run_id    TEXT NOT NULL,
+          verdict   TEXT,
+          run_state TEXT NOT NULL,
+          at        INTEGER NOT NULL,
+          PRIMARY KEY (sha256, run_id)
+        );
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
@@ -298,6 +331,8 @@ export const CORE_TABLES = [
   "attempt_trace",
   "run_usage",
   "inbox_items",
+  "memos",
+  "memo_uses",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */

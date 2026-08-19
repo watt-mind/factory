@@ -284,6 +284,11 @@ export function referencedHashes(db) {
       if (sha256) hashes.add(sha256);
     }
   }
+  // Ledger rows keep memo bytes alive even when no result references them
+  // (runtime-authored decisions; retired memos still cited in receipts).
+  for (const row of db.query(`SELECT sha256 FROM memos`).all()) {
+    if (HEX64.test(row.sha256 ?? "")) hashes.add(row.sha256);
+  }
   return hashes;
 }
 
