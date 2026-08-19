@@ -1,0 +1,23 @@
+# Example ControlPlane selection for a GitHub Issues factory (WM-798).
+#
+# Copy this stanza into config/policy.yaml, or run:
+#   factory init --control-plane github [--root DIR] [--repo owner/name]
+#
+# Requires `gh auth login` — the same credential the forge already uses.
+# No Linear account. Create a GitHub Project named "Factory" whose Status
+# field has options: Triage, Todo, In Progress, In Review, Done, Blocked.
+# Protocol labels keep Linear's spelling (ai:agent-ready, type:*, …).
+
+controlPlane:
+  kind: github
+  github:
+    # Default repository when a team key is not in `teams`.
+    repo: OWNER/REPO
+    # Linear-style team key → GitHub repository. `file` and
+    # `listDispatchable` resolve `team` through this map; a key that already
+    # looks like owner/name is used as-is.
+    teams:
+      DEMO: OWNER/REPO
+    # Projects v2 board whose Status single-select is the factory lifecycle.
+    project: Factory
+    statusField: Status
