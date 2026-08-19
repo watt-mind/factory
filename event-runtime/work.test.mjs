@@ -476,6 +476,19 @@ describe("work-scan registration (WM-110)", () => {
       "merge-scan@2",
       "triage-scan@1",
     ]);
+    // dispatch@1 rides cursor (Grok 4.6) since 2026-08-19 — operator decision to
+    // spare codex quota; cursor-smoke rides cursor by definition.
+    expect([...byAdapter.cursor].sort()).toEqual([
+      "cursor-smoke@1",
+      "dispatch@1",
+    ]);
+    expect(
+      resolveModel(
+        registry.agents.get("dispatch@1"),
+        "cursor",
+        registry.modelTiers,
+      ),
+    ).toBe(registry.modelTiers.cursor.standard);
     for (const ref of ["merge-fix@1", "merge-scan@2", "triage-scan@1"]) {
       const resolved = resolveModel(
         registry.agents.get(ref),
