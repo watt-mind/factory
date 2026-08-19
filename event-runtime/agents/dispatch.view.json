@@ -1,6 +1,17 @@
 {
   "schemaVersion": "factory.artifact-view/v1",
+  "title": "Dispatch result",
   "subject": "Dispatch {/ticket} · {/repo} · {model}",
+  "summary": "/summary",
+  "status": {
+    "path": "/outcome",
+    "tone": {
+      "PR_OPEN": "ok",
+      "BLOCKED": "warn",
+      "FAILED": "error",
+      "NOT_CLAIMED": "muted"
+    }
+  },
   "input": {
     "sections": [
       {
@@ -14,5 +25,48 @@
         }
       }
     ]
-  }
+  },
+  "sections": [
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Dispatch",
+      "keys": ["repo", "ticket", "prUrl", "prNumber"],
+      "formats": {
+        "repo": "repo",
+        "ticket": "issue",
+        "prUrl": "url",
+        "prNumber": "pr"
+      }
+    },
+    {
+      "path": "/verification",
+      "as": "keyvalue",
+      "label": "Verification",
+      "keys": ["command", "passed", "output"],
+      "tone": {
+        "passed": { "true": "ok", "false": "error" }
+      }
+    },
+    {
+      "path": "/uxCritique",
+      "as": "keyvalue",
+      "label": "UX critique",
+      "keys": ["status", "verdict", "rounds", "prReady", "evidence"],
+      "tone": {
+        "status": {
+          "required": "neutral",
+          "skipped": "muted",
+          "blocked": "warn"
+        },
+        "verdict": {
+          "SHIP": "ok",
+          "FIX-FIRST": "warn",
+          "NOT-ASSESSED": "muted",
+          "BLOCKED": "error"
+        },
+        "prReady": { "true": "ok", "false": "warn" }
+      }
+    }
+  ]
 }

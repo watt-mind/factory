@@ -823,6 +823,14 @@ describe("registry", () => {
     expect(dispatch.view.subject).toBe(
       "Dispatch {/ticket} · {/repo} · {model}",
     );
+    expect(dispatch.view.summary).toBe("/summary");
+    expect(dispatch.view.status.path).toBe("/outcome");
+    expect(dispatch.view.status.tone.PR_OPEN).toBe("ok");
+    expect(dispatch.view.sections.map((s) => s.path)).toEqual([
+      "",
+      "/verification",
+      "/uxCritique",
+    ]);
     const reconcile = getArtifactView(registry, "reconcile@1");
     expect(reconcile.source).toBe("contract");
     expect(reconcile.file).toBe(

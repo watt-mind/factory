@@ -372,6 +372,13 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
       expect(dispatch.outputView.input.sections[0].formats.ticket).toBe(
         "issue",
       );
+      expect(dispatch.outputView.summary).toBe("/summary");
+      expect(dispatch.outputView.status.path).toBe("/outcome");
+      expect(dispatch.outputView.sections.map((s) => s.path)).toEqual([
+        "",
+        "/verification",
+        "/uxCritique",
+      ]);
       const command = defs.find((d) => d.ref === "reconcile@1");
       expect(command.view).toEqual({ source: "contract" });
       expect(command.outputViewFile).toBe(

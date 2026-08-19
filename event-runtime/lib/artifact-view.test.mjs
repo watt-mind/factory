@@ -543,16 +543,47 @@ describe("input view + subject (WM-897)", () => {
     ).toBe(false);
   });
 
-  test("dispatch.view.json is the worked example: input + subject only", () => {
+  test("dispatch.view.json keeps input+subject and adds output sections (WM-915)", () => {
     const view = JSON.parse(
       readFileSync(
         path.join(RUNTIME_ROOT, "agents", "dispatch.view.json"),
         "utf8",
       ),
     );
-    expect(view.sections).toBeUndefined();
     expect(view.subject).toBe("Dispatch {/ticket} · {/repo} · {model}");
     expect(view.input.sections[0].formats.ticket).toBe("issue");
+    expect(view.summary).toBe("/summary");
+    expect(view.status).toEqual({
+      path: "/outcome",
+      tone: {
+        PR_OPEN: "ok",
+        BLOCKED: "warn",
+        FAILED: "error",
+        NOT_CLAIMED: "muted",
+      },
+    });
+    const identity = view.sections.find((s) => s.label === "Dispatch");
+    expect(identity).toMatchObject({
+      path: "",
+      as: "keyvalue",
+      keys: ["repo", "ticket", "prUrl", "prNumber"],
+      formats: {
+        repo: "repo",
+        ticket: "issue",
+        prUrl: "url",
+        prNumber: "pr",
+      },
+    });
+    expect(view.sections.find((s) => s.path === "/verification")).toMatchObject(
+      {
+        as: "keyvalue",
+        keys: ["command", "passed", "output"],
+      },
+    );
+    expect(view.sections.find((s) => s.path === "/uxCritique")).toMatchObject({
+      as: "keyvalue",
+      keys: ["status", "verdict", "rounds", "prReady", "evidence"],
+    });
     const def = JSON.parse(
       readFileSync(path.join(RUNTIME_ROOT, "agents", "dispatch.json"), "utf8"),
     );

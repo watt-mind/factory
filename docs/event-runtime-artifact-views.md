@@ -179,13 +179,25 @@ Tables in a terminal are not worth it yet.
 
 `triage-scan` and `merge-scan` ship output views with the contract: they are
 the two artifacts the operator reads most and the two that are hardest to
-read as JSON. `dispatch` ships an **input + subject** sidecar (no output
-sections — those come with WM-898):
+read as JSON. `dispatch` ships the combined sidecar (WM-897 input + subject,
+WM-915 output sections against `schemas/dispatch.output.json` — there is no
+refusal-reason field):
 
 ```json
 {
   "schemaVersion": "factory.artifact-view/v1",
+  "title": "Dispatch result",
   "subject": "Dispatch {/ticket} · {/repo} · {model}",
+  "summary": "/summary",
+  "status": {
+    "path": "/outcome",
+    "tone": {
+      "PR_OPEN": "ok",
+      "BLOCKED": "warn",
+      "FAILED": "error",
+      "NOT_CLAIMED": "muted"
+    }
+  },
   "input": {
     "sections": [
       {
@@ -196,7 +208,34 @@ sections — those come with WM-898):
         "formats": { "repo": "repo", "ticket": "issue" }
       }
     ]
-  }
+  },
+  "sections": [
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Dispatch",
+      "keys": ["repo", "ticket", "prUrl", "prNumber"],
+      "formats": {
+        "repo": "repo",
+        "ticket": "issue",
+        "prUrl": "url",
+        "prNumber": "pr"
+      }
+    },
+    {
+      "path": "/verification",
+      "as": "keyvalue",
+      "label": "Verification",
+      "keys": ["command", "passed", "output"],
+      "tone": { "passed": { "true": "ok", "false": "error" } }
+    },
+    {
+      "path": "/uxCritique",
+      "as": "keyvalue",
+      "label": "UX critique",
+      "keys": ["status", "verdict", "rounds", "prReady", "evidence"]
+    }
+  ]
 }
 ```
 
@@ -486,4 +525,5 @@ surface.
 | WM-455 | §2.4                 | `web/src/components/ArtifactView.tsx`, `web/src/lib/artifactView.ts` (+ tests), `RunDetailBlocks.tsx` + `views/Artifacts.tsx` integration, Raw toggle, `types.ts`/`api.ts`, `cli.mjs inspect` summary line                                                            |
 | WM-456 | §3.1–3.3             | `schemas/factory.presentation.v1.json`, `lib/presentation.mjs` (validator + `$ref` resolution, + test), `schemas/factory.agent-result.v1.json` `presentation`, `lib/verify.mjs` tolerant path (+ test)                                                                |
 | WM-457 | §3.4–3.6             | `web/src/components/BlockRenderer.tsx` (+ test), `lib/presentation-text.mjs` (+ test), `cli.mjs inspect`, shared brief section, `agents/triage-scan.md`+`.json` pilot, one-week comparison recorded on the ticket                                                     |
-| WM-458 | §2.5, §3.4 (Backlog) | `agents/{dispatch,work-scan,run-postmortem}.view.json`; retarget `DecisionCard.context` and the Telegram projection onto blocks after WM-392                                                                                                                          |
+| WM-458 | §2.5, §3.4 (Backlog) | `agents/{work-scan,run-postmortem}.view.json`; retarget `DecisionCard.context` and the Telegram projection onto blocks after WM-392                                                                                                                                    |
+| WM-915 | §2.5                 | `agents/dispatch.view.json` output sections (`summary` `/summary`, `status` on `/outcome`, keyvalue for identity / verification / uxCritique) on the WM-897 input+subject sidecar                                                                                     |
