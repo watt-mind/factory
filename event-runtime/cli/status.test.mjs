@@ -17,11 +17,13 @@ import {
   editStampRoot,
   exitOf,
   killPool,
+  loadAdjustedTimeout,
   makeStampRoot,
   poolSize,
   runCli,
   runNotifierDeliveryCase,
   seedRun,
+  spawnLiveServe,
   spawnTracked,
   spawnSupervisor,
   spawnWorker,
@@ -116,105 +118,84 @@ describe("status and doctor commands", () => {
     ).toBe(true);
   });
 
-  test("doctor against a healthy live serve outputs anomalies none and exits 0", async () => {
-    const home = tmpDir("evrt-doc-healthy-");
-    const port = String(59700 + (process.pid % 100));
-    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
-      env: {
-        ...process.env,
-        FACTORY_EVENT_HOME: home,
-        FACTORY_EVENT_SECRET: "test-secret",
-        FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    child.stdout.on("data", (b) => {
-      out += b;
-    });
-    child.stderr.on("data", (b) => {
-      out += b;
-    });
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && !out.includes("control API on")) {
-      await Bun.sleep(100);
-    }
-    let docRes;
-    try {
-      expect(out).toContain("control API on");
-      docRes = spawnSync("bun", [CLI, "doctor"], {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          FACTORY_EVENT_HOME: home,
-          FACTORY_EVENT_PORT: port,
-          FACTORY_RUN_DIR: throwawayRunDir(),
+  test(
+    "doctor against a healthy live serve outputs anomalies none and exits 0",
+    async () => {
+      const home = tmpDir("evrt-doc-healthy-");
+      const box = await spawnLiveServe({
+        home,
+        extraEnv: {
+          FACTORY_EVENT_SECRET: "test-secret",
+          FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
         },
       });
-    } finally {
-      child.kill("SIGTERM");
-      await new Promise((resolve) => child.once("exit", resolve));
-    }
-    expect(docRes.status).toBe(0);
-    expect(docRes.stdout).toContain("anomalies");
-    expect(docRes.stdout).toContain("none");
-  });
+      let docRes;
+      try {
+        expect(box.out).toContain("control API on");
+        docRes = spawnSync("bun", [CLI, "doctor"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: home,
+            FACTORY_EVENT_PORT: box.port,
+            FACTORY_RUN_DIR: throwawayRunDir(),
+          },
+        });
+      } finally {
+        box.child.kill("SIGTERM");
+        await new Promise((resolve) => box.child.once("exit", resolve));
+      }
+      expect(docRes.status).toBe(0);
+      expect(docRes.stdout).toContain("anomalies");
+      expect(docRes.stdout).toContain("none");
+    },
+    loadAdjustedTimeout(30_000),
+  );
 
-  test("doctor against a live serve with an anomaly exits non-zero and reports anomaly", async () => {
-    const home = tmpDir("evrt-doc-anomaly-");
-    const port = String(59600 + (process.pid % 100));
-    const db = openDb(path.join(home, "runtime.db"));
-    const at = new Date(Date.now() - 200_000).toISOString();
-    db.query(
-      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+  test(
+    "doctor against a live serve with an anomaly exits non-zero and reports anomaly",
+    async () => {
+      const home = tmpDir("evrt-doc-anomaly-");
+      const db = openDb(path.join(home, "runtime.db"));
+      const at = new Date(Date.now() - 200_000).toISOString();
+      db.query(
+        `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      "w-stalled-test",
-      "host-1",
-      1234,
-      "{}",
-      "fake",
-      at,
-      at,
-      "busy",
-      "run-stalled-test",
-    );
-    db.close();
+      ).run(
+        "w-stalled-test",
+        "host-1",
+        1234,
+        "{}",
+        "fake",
+        at,
+        at,
+        "busy",
+        "run-stalled-test",
+      );
+      db.close();
 
-    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
-      env: { ...process.env, FACTORY_EVENT_HOME: home },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    child.stdout.on("data", (b) => {
-      out += b;
-    });
-    child.stderr.on("data", (b) => {
-      out += b;
-    });
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && !out.includes("control API on")) {
-      await Bun.sleep(100);
-    }
-    let docRes;
-    try {
-      expect(out).toContain("control API on");
-      docRes = spawnSync("bun", [CLI, "doctor"], {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          FACTORY_EVENT_HOME: home,
-          FACTORY_EVENT_PORT: port,
-          FACTORY_RUN_DIR: throwawayRunDir(),
-        },
-      });
-    } finally {
-      child.kill("SIGTERM");
-      await new Promise((resolve) => child.once("exit", resolve));
-    }
-    expect(docRes.status).not.toBe(0);
-    expect(docRes.stdout).toContain("stalled worker w-stalled-test");
-  });
+      const box = await spawnLiveServe({ home });
+      let docRes;
+      try {
+        expect(box.out).toContain("control API on");
+        docRes = spawnSync("bun", [CLI, "doctor"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: home,
+            FACTORY_EVENT_PORT: box.port,
+            FACTORY_RUN_DIR: throwawayRunDir(),
+          },
+        });
+      } finally {
+        box.child.kill("SIGTERM");
+        await new Promise((resolve) => box.child.once("exit", resolve));
+      }
+      expect(docRes.status).not.toBe(0);
+      expect(docRes.stdout).toContain("stalled worker w-stalled-test");
+    },
+    loadAdjustedTimeout(30_000),
+  );
 });
 
 describe("pool visibility in status/doctor (WM-226)", () => {

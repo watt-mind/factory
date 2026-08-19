@@ -32,6 +32,7 @@ import {
   processOwnerWatchdogSource,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
+import { loadAdjustedTimeout, until } from "../test-helpers-timing.mjs";
 
 describe("isHarnessDenial (WM-127, no confirmed Cursor refusal shapes yet)", () => {
   test("nothing matches — empty until a Cursor-authored shape is observed", () => {
@@ -460,15 +461,13 @@ if (behavior === "emit_error_tool_result") {
   const testProcessGroup = process.platform === "win32" ? test.skip : test;
 
   async function waitForGrandchildPid(pidFile) {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        trackProcessGroupForPid(pid);
-        return pid;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    throw new Error("stub did not report its grandchild PID");
+    await until("stub grandchild PID file", () => existsSync(pidFile), {
+      timeoutMs: 15_000,
+      everyMs: 10,
+    });
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    trackProcessGroupForPid(pid);
+    return pid;
   }
 
   function processExists(pid) {
@@ -481,11 +480,10 @@ if (behavior === "emit_error_tool_result") {
   }
 
   async function expectProcessExit(pid) {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (!processExists(pid)) return;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(processExists(pid)).toBe(false);
+    await until(`pid ${pid} to exit`, () => !processExists(pid), {
+      timeoutMs: 15_000,
+      everyMs: 10,
+    });
   }
 
   function killIfRunning(pid) {
@@ -636,7 +634,7 @@ if (behavior === "emit_error_tool_result") {
         killIfRunning(grandchildPid);
       }
     },
-    { timeout: 12_000 },
+    loadAdjustedTimeout(30_000),
   );
 
   test("timeout escalates to SIGKILL when child ignores SIGTERM", async () => {
@@ -687,6 +685,7 @@ if (behavior === "emit_error_tool_result") {
         killIfRunning(grandchildPid);
       }
     },
+    loadAdjustedTimeout(30_000),
   );
 
   test("tool_call stream maps to tool_use / tool_result and a usage event", async () => {

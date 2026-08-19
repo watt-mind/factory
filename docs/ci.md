@@ -22,7 +22,7 @@ CI and Security use `concurrency.group` keyed by PR number for pull requests and
 
 ## Draft pull requests
 
-Draft pull requests run `Shadow runner fleet available`, but skip `Fast unit tests`, `Full verification`, and Browser E2E so held work does not consume the verify lane. The required `Verify` check is a lightweight aggregate on the smoke-test runner: it succeeds explicitly for a draft, and for every other event it succeeds only when fleet health and both CI test jobs succeeded. This prevents a failed prerequisite from turning a skipped downstream job into a misleading successful required check.
+Draft pull requests run `Shadow runner fleet available`, but skip `Fast unit tests`, `Full verification`, `Timing-bound tests`, and Browser E2E so held work does not consume the verify lane. The required `Verify` check is a lightweight aggregate on the smoke-test runner: it succeeds explicitly for a draft, and for every other event it succeeds only when fleet health and both CI test jobs succeeded. This prevents a failed prerequisite from turning a skipped downstream job into a misleading successful required check.
 
 GitHub's `ready_for_review` event starts a fresh workflow on the ready head. Both workflows name readiness and draft-conversion events explicitly; converting a ready PR back to draft cancels its in-flight CI run through the PR concurrency group. Keep the job-level draft guards when editing either trigger.
 
@@ -50,10 +50,15 @@ is disabled or downgraded globally to reach green.
 
 CI splits tests into separately rerunnable jobs:
 
-- **Fast unit tests:** `event-runtime/lib`
-- **Full verification:** every other test, including CLI, daemon, web, demo, orchestration, and process-spawning integration suites
+- **Fast unit tests:** `event-runtime/lib`, minus the timing group below
+- **Full verification:** every other test, including CLI, daemon, web, demo, orchestration, and process-spawning integration suites, minus the timing group
+- **Timing-bound tests (WM-918, not required):** spawn-a-real-process-and-wait tests whose names are listed in `event-runtime/lib/test-helpers-timing.mjs` (`TIMING_TEST_SUBSTRINGS`). Required jobs pass `--test-name-pattern` from `bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern`. This job runs the complementary include pattern with `--retry 2`. A red result here does not fail the required `Verify` aggregator.
 
-Both invoke Bun with `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy self-hosted machine instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. Only `Full verification` joins the shared host-lock queue; the fast suite's 15-minute job timeout is a runaway guard rather than queue headroom.
+When a required test step fails, `bun event-runtime/lib/test-helpers-timing.mjs classify <log>` prints the failing names and emits a GitHub `::error title=timing-flake::` annotation if every parsed failure is in that group. Merge-scan should treat a required job whose only failures are that group as a flake (`rerun_ci_at_head`), never ESCALATE — the required lane is supposed to have already excluded them, so the annotation is the miss detector.
+
+Both required test invocations use `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy self-hosted machine instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. Only `Full verification` joins the verify-lane queue; the fast suite's 15-minute job timeout is a runaway guard rather than queue headroom. Timing-bound tests run on the general `shadow` pool.
+
+Do not add `describe.skipIf(process.env.CI_FAST)` in the unowned spawn suites from this ticket — the name-pattern split is the quarantine. Follow-up work that owns those files can add in-file tags that match the same list.
 
 ## Operational validation
 

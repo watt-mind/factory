@@ -22,22 +22,19 @@ export {
   trackProcessGroupsMatching,
 } from "../lib/test-helpers-process.mjs";
 import { spawnTracked, trackProcess } from "../lib/test-helpers-process.mjs";
+export {
+  CI_LOAD_FACTOR,
+  freePort,
+  loadAdjustedTimeout,
+  until,
+} from "../lib/test-helpers-timing.mjs";
+import {
+  freePort,
+  loadAdjustedTimeout,
+  until,
+} from "../lib/test-helpers-timing.mjs";
 
 export const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
-
-const parsedLoadFactor = Number.parseFloat(process.env.CI_LOAD_FACTOR ?? "1");
-
-/**
- * Stretch only liveness ceilings when CI reports shared-host contention.
- * Assertions still wait on observable state; this is not a fixed delay.
- */
-export const CI_LOAD_FACTOR =
-  Number.isFinite(parsedLoadFactor) && parsedLoadFactor >= 1
-    ? Math.min(parsedLoadFactor, 4)
-    : 1;
-
-export const loadAdjustedTimeout = (timeoutMs) =>
-  Math.ceil(timeoutMs * CI_LOAD_FACTOR);
 
 /** A loopback port nothing in these tests ever listens on. */
 export const DEAD_PORT = "59987";
@@ -121,44 +118,79 @@ export function writeGatedNotifier(dir, { exitCode = 0 } = {}) {
   return { outFile, pidFile, startedFile, releaseFile, stub };
 }
 
-export async function assertHealthyLiveServe() {
-  const home = tmpDir("evrt-doc-healthy-");
-  const port = String(59700 + (process.pid % 100));
-  const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
+/**
+ * Spawn `serve` on an OS-assigned port and wait until /health answers.
+ * Callers own cleanup (`box.child.kill`).
+ */
+export async function spawnLiveServe({
+  home,
+  extraEnv = {},
+  args = [],
+  timeoutMs = 20_000,
+} = {}) {
+  if (!home) throw new Error("spawnLiveServe requires home");
+  const port = freePort();
+  const child = spawnTracked("bun", [CLI, "serve", "--port", port, ...args], {
     env: {
       ...process.env,
       FACTORY_EVENT_HOME: home,
-      FACTORY_EVENT_SECRET: "test-secret",
-      FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  let out = "";
+  const box = { out: "", child, port };
   child.stdout.on("data", (b) => {
-    out += b;
+    box.out += b;
   });
   child.stderr.on("data", (b) => {
-    out += b;
+    box.out += b;
   });
-  const deadline = Date.now() + loadAdjustedTimeout(8000);
-  while (Date.now() < deadline && !out.includes("control API on")) {
-    await Bun.sleep(10);
+  try {
+    await until(
+      `serve control API on :${port}`,
+      async () => {
+        if (!box.out.includes("control API on")) return false;
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/health`);
+          return res.ok;
+        } catch {
+          return false;
+        }
+      },
+      { timeoutMs, everyMs: 20 },
+    );
+  } catch (error) {
+    const tail = box.out.slice(-800) || "(empty)";
+    child.kill("SIGKILL");
+    throw new Error(`${error.message}\n--- serve output tail ---\n${tail}`);
   }
+  return box;
+}
+
+export async function assertHealthyLiveServe() {
+  const home = tmpDir("evrt-doc-healthy-");
+  const box = await spawnLiveServe({
+    home,
+    extraEnv: {
+      FACTORY_EVENT_SECRET: "test-secret",
+      FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
+    },
+  });
   let docRes;
   try {
-    expect(out).toContain("control API on");
+    expect(box.out).toContain("control API on");
     docRes = spawnSync("bun", [CLI, "doctor"], {
       encoding: "utf8",
       env: {
         ...process.env,
         FACTORY_EVENT_HOME: home,
-        FACTORY_EVENT_PORT: port,
+        FACTORY_EVENT_PORT: box.port,
         FACTORY_RUN_DIR: throwawayRunDir(),
       },
     });
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", resolve));
+    box.child.kill("SIGTERM");
+    await new Promise((resolve) => box.child.once("exit", resolve));
   }
   expect(docRes.status).toBe(0);
   expect(docRes.stdout).toContain("anomalies");
@@ -296,40 +328,40 @@ export function spawnWorker(args, env) {
 }
 
 export async function waitFor(box, needle, timeoutMs = 15_000) {
-  timeoutMs = loadAdjustedTimeout(timeoutMs);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline && !box.out.includes(needle))
-    await Bun.sleep(50);
-  return box.out.includes(needle);
+  try {
+    await until(
+      `output to contain ${JSON.stringify(needle)}`,
+      () => box.out.includes(needle),
+      { timeoutMs, everyMs: 10 },
+    );
+  } catch (error) {
+    const tail = String(box.out ?? "").slice(-800) || "(empty)";
+    throw new Error(`${error.message}\n--- output tail ---\n${tail}`);
+  }
+  return true;
 }
 
-export function exitOf(child) {
+export async function exitOf(child, timeoutMs = 30_000) {
   // Resolve immediately if the child already exited (a drain-signalled
   // worker can finish before the test awaits it — WM-689). Use loose
   // null checks: Bun's ChildProcess reports `signalCode` as undefined (not
   // null) while the process is still running, and a strict `!== null` test
   // made this fire on live children, which broke demo/seed.test.mjs.
   if (child.exitCode != null || child.signalCode != null) {
-    return Promise.resolve({
+    return {
       code: child.exitCode,
       signal: child.signalCode ?? null,
-    });
-  }
-  return new Promise((resolve) => {
-    let resolved = false;
-    const done = (code, signal) => {
-      if (resolved) return;
-      resolved = true;
-      resolve({
-        code: code ?? child.exitCode,
-        signal: signal ?? child.signalCode,
-      });
     };
-    child.once("close", (code, signal) => done(code, signal));
-    child.once("exit", (code, signal) => {
-      setTimeout(() => done(code, signal), 50);
-    });
-  });
+  }
+  await until(
+    `pid ${child.pid} to exit`,
+    () => child.exitCode != null || child.signalCode != null,
+    { timeoutMs, everyMs: 20 },
+  );
+  return {
+    code: child.exitCode,
+    signal: child.signalCode ?? null,
+  };
 }
 
 /** A QUEUED run in `home`'s database, straight through the real lifecycle. */
