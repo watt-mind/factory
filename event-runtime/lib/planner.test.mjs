@@ -31,6 +31,12 @@ import {
   withProvenance,
 } from "./memos.mjs";
 import { LinearRateLimitError } from "../../tools/linear.mjs";
+import {
+  KIND_AGENT,
+  KIND_EVENT_TYPE,
+  deleteOverride,
+  putOverride,
+} from "./runtime-overrides.mjs";
 
 const registry = loadRegistry();
 const NOW = Date.parse("2026-08-12T10:30:02Z");
@@ -1620,6 +1626,100 @@ describe("buildRunSpec", () => {
     });
     expect(overridden.adapter).toBe("pi");
     expect(overridden.idempotencyKey).toBe(a.idempotencyKey);
+  });
+});
+
+describe("planEvent runtime overlay (WM-887)", () => {
+  test("an event-type adapter overlay pins that adapter and resolves the model via its policy map", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db);
+    putOverride(db, {
+      kind: KIND_EVENT_TYPE,
+      key: "factory.status-report.requested",
+      patch: { adapter: "cursor" },
+    });
+    const outcome = planEvent(db, registry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.adapter).toBe("cursor");
+    expect(spec.modelTier).toBe("standard");
+    expect(spec.model).toBe("cursor-grok-4.6-high");
+  });
+
+  test("deleting the overlay returns the next plan to the git adapter; the first spec is unchanged", () => {
+    const db = openDb(":memory:");
+    const firstRef = admit(db, {
+      eventId: "overlay-first",
+      correlationId: "c1",
+    });
+    putOverride(db, {
+      kind: KIND_EVENT_TYPE,
+      key: "factory.status-report.requested",
+      patch: { adapter: "cursor" },
+    });
+    const first = planEvent(db, registry, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    const firstSpec = JSON.parse(first.proposal.spec_json);
+    expect(firstSpec.adapter).toBe("cursor");
+    deleteOverride(db, {
+      kind: KIND_EVENT_TYPE,
+      key: "factory.status-report.requested",
+    });
+    const secondRef = admit(db, {
+      eventId: "overlay-second",
+      correlationId: "c2",
+    });
+    const second = planEvent(db, registry, secondRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(JSON.parse(second.proposal.spec_json).adapter).toBe("pi");
+    expect(
+      JSON.parse(
+        db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(first.runId)
+          .spec_json,
+      ).adapter,
+    ).toBe("cursor");
+  });
+
+  test("an agent model_tier overlay pins the resolved model; payload.modelTier still wins on dispatch", () => {
+    const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_AGENT,
+      key: "factory-status-report@1",
+      patch: { modelTier: "light" },
+    });
+    const ref = admit(db, { eventId: "tier-overlay", correlationId: "tier-c" });
+    const outcome = planEvent(db, registry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec.modelTier).toBe("light");
+    expect(spec.model).toBe("openai-codex/gpt-5.6-luna");
+  });
+
+  test("a stale overlay adapter parks human_needed instead of planning", () => {
+    const db = openDb(":memory:");
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES ('eventType', 'factory.status-report.requested', '{"adapter":"nope"}', 't', 'x')`,
+    ).run();
+    const ref = admit(db, {
+      eventId: "stale-overlay",
+      correlationId: "stale-c",
+    });
+    const outcome = planEvent(db, registry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("human_needed");
+    expect(outcome.reason).toBe("overlay_unknown_adapter:nope");
   });
 });
 

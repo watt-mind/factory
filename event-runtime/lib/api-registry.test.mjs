@@ -65,6 +65,8 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
       const commandDef = defs.find((d) => d.ref === "reconcile@1");
       expect(commandDef.modelTier).toBeNull();
       expect(commandDef.eventTypes[0].resolvedModel).toBeNull();
+      expect(def.declaredModelTier).toBe("standard");
+      expect(def.eventTypes[0].declaredAdapter).toBe("pi");
       expect(
         contracts["factory.agent-result/v1"].properties.terminalState.enum,
       ).toContain("refused");
@@ -373,5 +375,82 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
     expect(apply).toContain("--apply");
     expect(apply).not.toContain("--force");
     expect(apply.filter((a) => a === "--apply")).toHaveLength(1);
+  });
+});
+
+describe("runtime overlay API (WM-887)", () => {
+  const eventTypesFile = path.resolve(import.meta.dir, "../event-types.json");
+
+  test("PUT/GET/DELETE event-type overlay; git file bytes are unchanged", async () => {
+    const before = readFileSync(eventTypesFile);
+    const { server, port, close } = await makeServer();
+    try {
+      const type = encodeURIComponent("factory.status-report.requested");
+      const put = await fetch(
+        `http://127.0.0.1:${port}/overrides/event-types/${type}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ adapter: "cursor" }),
+        },
+      );
+      expect(put.status).toBe(200);
+      const listed = await fetch(`http://127.0.0.1:${port}/overrides`);
+      const body = await listed.json();
+      expect(body.eventTypes["factory.status-report.requested"]).toEqual({
+        adapter: "cursor",
+      });
+      const agents = await fetch(`http://127.0.0.1:${port}/agents`);
+      const view = await agents.json();
+      const def = view.agents.find((d) => d.ref === "factory-status-report@1");
+      expect(def.eventTypes[0].declaredAdapter).toBe("pi");
+      expect(def.eventTypes[0].adapter).toBe("cursor");
+      expect(def.eventTypes[0].resolvedModel).toBe("cursor-grok-4.6-high");
+      const del = await fetch(
+        `http://127.0.0.1:${port}/overrides/event-types/${type}`,
+        { method: "DELETE" },
+      );
+      expect((await del.json()).deleted).toBe(true);
+      expect(readFileSync(eventTypesFile).equals(before)).toBe(true);
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
+  test("unknown adapter is 422; agent overlay updates GET /agents effective tier", async () => {
+    const { server, port, close } = await makeServer();
+    try {
+      const type = encodeURIComponent("factory.status-report.requested");
+      const bad = await fetch(
+        `http://127.0.0.1:${port}/overrides/event-types/${type}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ adapter: "nope" }),
+        },
+      );
+      expect(bad.status).toBe(422);
+      const ref = encodeURIComponent("factory-status-report@1");
+      const put = await fetch(
+        `http://127.0.0.1:${port}/overrides/agents/${ref}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ modelTier: "light" }),
+        },
+      );
+      expect(put.status).toBe(200);
+      const view = await (
+        await fetch(`http://127.0.0.1:${port}/agents`)
+      ).json();
+      const def = view.agents.find((d) => d.ref === "factory-status-report@1");
+      expect(def.declaredModelTier).toBe("standard");
+      expect(def.modelTier).toBe("light");
+      expect(def.eventTypes[0].resolvedModel).toBe("openai-codex/gpt-5.6-luna");
+    } finally {
+      close();
+      server.close();
+    }
   });
 });

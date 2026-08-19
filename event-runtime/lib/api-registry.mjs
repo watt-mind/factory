@@ -2,60 +2,97 @@
 import { readFileSync } from "node:fs";
 import { getArtifactView, resolveModel } from "./registry.mjs";
 import { RepoError, reposView } from "./repos.mjs";
+import {
+  KIND_AGENT,
+  KIND_EVENT_TYPE,
+  OverlayError,
+  deleteOverride,
+  emptyOverrides,
+  knownAdapters,
+  listOverrideJournal,
+  listOverrides,
+  mergeAgentPatch,
+  overlayForAgent,
+  overlayForEventType,
+  plannedDef,
+  putOverride,
+  validateAgentPatch,
+  validateEventTypePatch,
+} from "./runtime-overrides.mjs";
 
-export function agentsView(registry) {
+export function agentsView(registry, { overrides = emptyOverrides() } = {}) {
+  const adapters = [...knownAdapters(registry)].sort();
   return {
-    agents: [...registry.agents.values()].map((def) => ({
-      ref: def.ref,
-      id: def.id,
-      version: def.version,
-      outputContract: def.output_contract,
-      workspace: def.workspace,
-      capabilities: def.capabilities,
-      limits: def.limits,
-      mutating: def.mutating,
-      promptFile: def.prompt,
-      prompt: readFileSync(def.promptPath, "utf8"),
-      inputSchemaFile: def.input_schema,
-      inputSchema: def.inputSchema,
-      outputSchemaFile: def.output_schema,
-      outputSchema: def.outputSchema,
-      // Artifact-view sidecar (WM-454 / WM-897): null when the agent has
-      // none or its view failed the drift check (then /status names the
-      // anomaly). `view.source` says whether the agent file or the
-      // contract-keyed fallback applied.
-      outputViewFile: getArtifactView(registry, def.ref).file,
-      outputView: getArtifactView(registry, def.ref).view,
-      view: (() => {
-        const source = getArtifactView(registry, def.ref).source;
-        return source ? { source } : null;
-      })(),
-      pins: def.pins,
-      command: def.command ?? null,
-      actionRegistry: def.actionRegistry ?? null,
-      hosts: def.hosts ? Object.keys(def.hosts) : null,
-      repos: def.repos ?? null,
-      modelTier: def.model_tier ?? null,
-      model: def.model ?? null,
-      eventTypes: Object.entries(registry.eventTypes)
-        .filter(([, mapping]) => mapping.agent === def.ref)
-        .map(([type, mapping]) => ({
-          type,
-          adapter: mapping.adapter,
-          idempotencyScope: mapping.idempotencyScope,
-          proposalTtlSeconds: mapping.proposalTtlSeconds ?? null,
-          resolvedModel: resolveModel(
-            def,
-            mapping.adapter,
-            registry.modelTiers,
-          ),
-        })),
-    })),
+    adapters,
+    agents: [...registry.agents.values()].map((def) => {
+      const agentPatch = overlayForAgent(overrides, def.ref) ?? {};
+      const modelTierOverride = Object.hasOwn(agentPatch, "modelTier")
+        ? agentPatch.modelTier
+        : undefined;
+      const modelOverride = Object.hasOwn(agentPatch, "model")
+        ? agentPatch.model
+        : undefined;
+      const planned = plannedDef(def, { modelTierOverride, modelOverride });
+      return {
+        ref: def.ref,
+        id: def.id,
+        version: def.version,
+        outputContract: def.output_contract,
+        workspace: def.workspace,
+        capabilities: def.capabilities,
+        limits: def.limits,
+        mutating: def.mutating,
+        promptFile: def.prompt,
+        prompt: readFileSync(def.promptPath, "utf8"),
+        inputSchemaFile: def.input_schema,
+        inputSchema: def.inputSchema,
+        outputSchemaFile: def.output_schema,
+        outputSchema: def.outputSchema,
+        // Artifact-view sidecar (WM-454 / WM-897): null when the agent has
+        // none or its view failed the drift check (then /status names the
+        // anomaly). `view.source` says whether the agent file or the
+        // contract-keyed fallback applied.
+        outputViewFile: getArtifactView(registry, def.ref).file,
+        outputView: getArtifactView(registry, def.ref).view,
+        view: (() => {
+          const source = getArtifactView(registry, def.ref).source;
+          return source ? { source } : null;
+        })(),
+        pins: def.pins,
+        command: def.command ?? null,
+        actionRegistry: def.actionRegistry ?? null,
+        hosts: def.hosts ? Object.keys(def.hosts) : null,
+        repos: def.repos ?? null,
+        declaredModelTier: def.model_tier ?? null,
+        modelTier: planned.model_tier ?? null,
+        declaredModel: def.model ?? null,
+        model: planned.model ?? null,
+        eventTypes: Object.entries(registry.eventTypes)
+          .filter(([, mapping]) => mapping.agent === def.ref)
+          .map(([type, mapping]) => {
+            const adapter =
+              overlayForEventType(overrides, type)?.adapter ?? mapping.adapter;
+            return {
+              type,
+              declaredAdapter: mapping.adapter,
+              adapter,
+              idempotencyScope: mapping.idempotencyScope,
+              proposalTtlSeconds: mapping.proposalTtlSeconds ?? null,
+              resolvedModel: resolveModel(
+                planned,
+                adapter,
+                registry.modelTiers,
+              ),
+            };
+          }),
+      };
+    }),
     edges: registry.edges ?? {},
     eventTypes: Object.entries(registry.eventTypes).map(([type, mapping]) => ({
       type,
       agent: mapping.agent,
-      adapter: mapping.adapter,
+      declaredAdapter: mapping.adapter,
+      adapter: overlayForEventType(overrides, type)?.adapter ?? mapping.adapter,
       idempotencyScope: mapping.idempotencyScope,
       proposalTtlSeconds: mapping.proposalTtlSeconds ?? null,
     })),
@@ -63,7 +100,14 @@ export function agentsView(registry) {
       "factory.event/v1": registry.schemas.envelope,
       "factory.agent-result/v1": registry.schemas.agentResult,
     },
+    overrides,
   };
+}
+
+function sendOverlayError(send, err) {
+  if (err instanceof OverlayError)
+    return send(err.status, { error: err.message });
+  throw err;
 }
 
 export async function handleRegistryApiRoute({
@@ -77,8 +121,89 @@ export async function handleRegistryApiRoute({
   repos,
   janitor,
   actor,
+  db,
+  nowMs,
 }) {
-  if (route === "GET /agents") return send(200, agentsView(registry));
+  if (route === "GET /agents") {
+    const overrides = db ? listOverrides(db) : emptyOverrides();
+    return send(200, agentsView(registry, { overrides }));
+  }
+
+  if (route === "GET /overrides") {
+    return send(200, {
+      ...listOverrides(db),
+      journal: listOverrideJournal(db),
+    });
+  }
+
+  const eventTypePath = url.pathname.match(/^\/overrides\/event-types\/(.+)$/);
+  if (eventTypePath && (req.method === "PUT" || req.method === "DELETE")) {
+    const type = decodeURIComponent(eventTypePath[1]);
+    try {
+      if (req.method === "DELETE") {
+        return send(
+          200,
+          deleteOverride(db, {
+            kind: KIND_EVENT_TYPE,
+            key: type,
+            actor,
+            now: nowMs,
+          }),
+        );
+      }
+      const parsed = parseJson(await readBody(req));
+      if (parsed.error) return send(422, { error: parsed.error });
+      const patch = validateEventTypePatch(registry, type, parsed.value);
+      return send(
+        200,
+        putOverride(db, {
+          kind: KIND_EVENT_TYPE,
+          key: type,
+          patch,
+          actor,
+          now: nowMs,
+        }),
+      );
+    } catch (err) {
+      return sendOverlayError(send, err);
+    }
+  }
+
+  const agentPath = url.pathname.match(/^\/overrides\/agents\/(.+)$/);
+  if (agentPath && (req.method === "PUT" || req.method === "DELETE")) {
+    const ref = decodeURIComponent(agentPath[1]);
+    try {
+      if (req.method === "DELETE") {
+        return send(
+          200,
+          deleteOverride(db, { kind: KIND_AGENT, key: ref, actor, now: nowMs }),
+        );
+      }
+      const parsed = parseJson(await readBody(req));
+      if (parsed.error) return send(422, { error: parsed.error });
+      const incoming = validateAgentPatch(registry, ref, parsed.value);
+      const existing = overlayForAgent(listOverrides(db), ref);
+      const patch = mergeAgentPatch(existing, incoming);
+      if (!patch) {
+        return send(
+          200,
+          deleteOverride(db, { kind: KIND_AGENT, key: ref, actor, now: nowMs }),
+        );
+      }
+      return send(
+        200,
+        putOverride(db, {
+          kind: KIND_AGENT,
+          key: ref,
+          patch,
+          actor,
+          now: nowMs,
+        }),
+      );
+    } catch (err) {
+      return sendOverlayError(send, err);
+    }
+  }
 
   if (route === "GET /repos") {
     try {

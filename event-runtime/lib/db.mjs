@@ -352,6 +352,33 @@ export const MIGRATIONS = [
       }
     },
   },
+  {
+    version: 11,
+    name: "runtime_overrides",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS runtime_overrides (
+          kind       TEXT NOT NULL,
+          key        TEXT NOT NULL,
+          patch_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          updated_by TEXT NOT NULL,
+          PRIMARY KEY (kind, key)
+        );
+        CREATE TABLE IF NOT EXISTS runtime_override_journal (
+          seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind       TEXT NOT NULL,
+          key        TEXT NOT NULL,
+          before_json TEXT,
+          after_json  TEXT,
+          actor      TEXT NOT NULL,
+          at         TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_override_journal_at
+          ON runtime_override_journal (at, seq);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
@@ -373,6 +400,8 @@ export const CORE_TABLES = [
   "memos",
   "memo_uses",
   "merge_reviews",
+  "runtime_overrides",
+  "runtime_override_journal",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */

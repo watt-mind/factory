@@ -53,6 +53,7 @@ const COLLECTION_PATHS = new Set([
   "/proposals",
   "/workers",
   "/agents",
+  "/overrides",
   "/status",
   "/repos",
   "/artifacts",

@@ -73,3 +73,21 @@ an opt-in `run-e2e` label until proven stable on self-hosted runners.
 Decided 2026-08-18. Telegram notifications remain outbound-only deep links to the Web UI
 over Tailscale. No inbound Telegram bot webhook endpoint or long-polling write path will
 be introduced into `serve`, preserving the loopback-only security confinement (OPS-408, WM-61).
+
+## Operational overlay (WM-887)
+
+Decided 2026-08-19. Swift harness / model changes are a **machine-local overlay**
+in `runtime.db`, applied at plan time. They do not write
+`event-types.json`, `agents/*.json`, or `config/policy.yaml`. Packs cannot
+shadow built-ins (WM-470 duplicate keys fail closed); WM-479 apply is a
+different write path (whole resources into an API-managed pack) and stays
+out of this loop.
+
+Precedence, highest first: envelope / ticket per-run fields (WM-694,
+WM-488) → overlay → git. In-flight RunSpecs are immutable. Process-wide
+`--adapter-override` remains execution substitution and does not change
+model resolution; the overlay changes `mapping.adapter` so the model follows
+the effective adapter's `policy.yaml` `models:` map.
+
+The fleet default still moves by PR. Promoting an overlay into git is WM-889.
+The global `models:` map itself is WM-888. Agents UI on this store is WM-884.

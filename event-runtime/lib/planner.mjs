@@ -48,6 +48,13 @@ import {
   MODEL_TIERS,
   resolveModel,
 } from "./registry.mjs";
+import {
+  knownAdapters,
+  listOverrides,
+  overlayForAgent,
+  overlayForEventType,
+  plannedDef,
+} from "./runtime-overrides.mjs";
 import { pinRepo } from "./repository.mjs";
 import {
   RepoError,
@@ -194,9 +201,11 @@ export function buildRunSpec(
     now = Date.now(),
     approvalPolicy = null,
     modelTierOverride,
+    modelOverride,
   } = {},
 ) {
   const def = getAgent(registry, mapping.agent);
+  const planned = plannedDef(def, { modelTierOverride, modelOverride });
   let payload = envelope.payload;
   if (def.workspace?.type === "repository" && payload?.repo) {
     try {
@@ -241,22 +250,17 @@ export function buildRunSpec(
     // proposal, receipt, and inspect output all name the exact model. Fields
     // appear only when the definition declares intent — an undeclared
     // definition's spec is byte-identical to before (regression contract).
-    // Resolution keys off the REGISTERED adapter (mapping.adapter), not the
-    // override: `--adapter-override fake` substitutes execution, and the fake
-    // ignores the model; the spec still records what was routed. A null model
-    // means the routed adapter takes none (not applicable).
+    // Resolution keys off mapping.adapter. Process-wide `--adapter-override`
+    // substitutes execution only (fake still pins the registered route's
+    // model). A runtime overlay (WM-887) changes mapping.adapter itself so
+    // the model follows the effective harness. A null model means the routed
+    // adapter takes none (not applicable).
     ...(modelTierOverride !== undefined ||
-    def.model_tier !== undefined ||
-    def.model !== undefined
+    planned.model_tier !== undefined ||
+    planned.model !== undefined
       ? {
-          modelTier: modelTierOverride ?? def.model_tier ?? null,
-          model: resolveModel(
-            modelTierOverride === undefined
-              ? def
-              : { ...def, model_tier: modelTierOverride },
-            mapping.adapter,
-            registry.modelTiers,
-          ),
+          modelTier: modelTierOverride ?? planned.model_tier ?? null,
+          model: resolveModel(planned, mapping.adapter, registry.modelTiers),
         }
       : {}),
     timeoutSeconds: def.limits.timeout_seconds,
@@ -1361,8 +1365,8 @@ export function planEvent(
     const envelope = JSON.parse(event.envelope_json);
     const at = new Date(now).toISOString();
 
-    const mapping = getEventType(registry, envelope.type);
-    if (!mapping)
+    const gitMapping = getEventType(registry, envelope.type);
+    if (!gitMapping)
       return humanNeeded(
         db,
         event,
@@ -1370,6 +1374,23 @@ export function planEvent(
         at,
         DEFAULT_PROPOSAL_TTL_SECONDS,
       );
+    const overrides = listOverrides(db);
+    const overlayAdapter = overlayForEventType(
+      overrides,
+      envelope.type,
+    )?.adapter;
+    if (overlayAdapter && !knownAdapters(registry).has(overlayAdapter)) {
+      return humanNeeded(
+        db,
+        event,
+        `overlay_unknown_adapter:${overlayAdapter}`,
+        at,
+        gitMapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS,
+      );
+    }
+    const mapping = overlayAdapter
+      ? { ...gitMapping, adapter: overlayAdapter }
+      : gitMapping;
     const ttlSeconds =
       mapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS;
 
@@ -1745,14 +1766,20 @@ export function planEvent(
 
     // Per-ticket routing applies only to factory dispatch. The payload is
     // already schema-validated above; ticket labels were validated by the
-    // dispatch gate. Passing no override preserves every other event's spec,
-    // and dispatches with neither source retain the definition-only behavior.
+    // dispatch gate. Overlay (WM-887) sits below those and above git.
+    const agentPatch = overlayForAgent(overrides, mapping.agent) ?? {};
+    const overlayTier = Object.hasOwn(agentPatch, "modelTier")
+      ? agentPatch.modelTier
+      : undefined;
+    const overlayModel = Object.hasOwn(agentPatch, "model")
+      ? agentPatch.model
+      : undefined;
     const modelTierOverride =
       envelope.type === "factory.dispatch.requested"
         ? (payload.modelTier ??
           dispatchEvidence?.ticket?.modelTier ??
-          undefined)
-        : undefined;
+          overlayTier)
+        : overlayTier;
 
     const spec = {
       ...buildRunSpec(registry, pinnedEnvelope, mapping, {
@@ -1762,6 +1789,7 @@ export function planEvent(
         now,
         approvalPolicy,
         modelTierOverride,
+        modelOverride: overlayModel,
       }),
       idempotencyKey,
     };

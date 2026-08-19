@@ -262,6 +262,39 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     upgraded.close();
   });
 
+  test("runtime_overrides migrate onto an existing v7 database (WM-887)", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    migrateDb(db, { targetVersion: 7 });
+    expect(getSchemaVersion(db)).toBe(7);
+    expect(
+      db
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_overrides'",
+        )
+        .get(),
+    ).toBeNull();
+    db.close();
+
+    const upgraded = openDb(file);
+    expect(getSchemaVersion(upgraded)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(
+      upgraded
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_overrides'",
+        )
+        .get()?.name,
+    ).toBe("runtime_overrides");
+    expect(
+      upgraded
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_override_journal'",
+        )
+        .get()?.name,
+    ).toBe("runtime_override_journal");
+    upgraded.close();
+  });
+
   test("a database at a newer user_version refuses to open loudly with a clear message", () => {
     const file = freshFile();
     const db = openDb(file);

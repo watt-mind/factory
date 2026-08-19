@@ -401,7 +401,13 @@ resolves tier → model at plan time and pins the result into the RunSpec**
 (`modelTier` + `model`, the same pattern as `repoPin`), so the proposal the
 operator approves, the stored run, and `inspect`/receipt output all name the
 exact model; `GET /agents` and `cli.mjs agents` show the declared tier and the
-per-route resolved value. Resolution order: per-definition `"model"` override
+per-route resolved value. A machine-local **operational overlay** (WM-887) may
+repoint an event type's adapter or an agent's `model_tier` / `model` without
+touching those files: it lives in `runtime.db` (`GET`/`PUT`/`DELETE /overrides`),
+is applied at plan time, and `GET /agents` reports both declared (git) and
+effective (next plan) values. Precedence: envelope/ticket per-run fields →
+overlay → git. Process-wide `--adapter-override` is still execution-only.
+Resolution order: per-definition `"model"` override
 (the one escape hatch for an exact id — both fields may coexist, the override
 wins) > tier map > adapter default (absent fields = no spec fields = today's
 behavior). Repository dispatches can additionally select a per-ticket tier;

@@ -239,6 +239,7 @@ describe("Host and Origin header security confinement (OPS-408)", () => {
       "/proposals",
       "/workers",
       "/agents",
+      "/overrides",
       "/status",
       "/repos",
       "/artifacts",
