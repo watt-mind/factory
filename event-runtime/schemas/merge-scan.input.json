@@ -41,6 +41,51 @@
       "description": "Optional explicit PR numbers for a manual scan. When omitted, review all open PRs targeting the configured base.",
       "items": { "type": "integer", "minimum": 1 }
     },
+    "memoPin": {
+      "type": "object",
+      "required": ["foldedAt", "entries"],
+      "additionalProperties": false,
+      "description": "Planner-injected fold of declared decision memos at plan time (docs/event-runtime-memos.md §4.2); empty entries is the normal case",
+      "properties": {
+        "foldedAt": { "type": "string", "minLength": 1 },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["sha256", "subject", "kind", "createdAt"],
+            "additionalProperties": false,
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "subject": {
+                "type": "object",
+                "required": ["type", "id"],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "enum": ["repo", "ticket", "pr", "workflow", "run"]
+                  },
+                  "id": { "type": "string", "minLength": 1 }
+                }
+              },
+              "kind": {
+                "enum": [
+                  "repo-note",
+                  "postmortem",
+                  "decision",
+                  "flake",
+                  "handoff"
+                ]
+              },
+              "runId": { "type": ["string", "null"] },
+              "createdAt": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
     "loop": { "type": "string", "minLength": 1 },
     "slot": { "type": "string", "minLength": 1 },
     "cadenceSeconds": { "type": "integer", "minimum": 1 },

@@ -158,7 +158,10 @@ function authorise(db, item, response, option, { linear, planner, now }) {
       `dispatch admission failed: ${(admitted?.errors ?? ["no outcome"]).join("; ")}`,
     );
   }
-  return { detail: admitted.duplicate ? "already_admitted" : "dispatched" };
+  return {
+    detail: admitted.duplicate ? "already_admitted" : "dispatched",
+    descriptionHash: authorisation.descriptionHash,
+  };
 }
 
 /**
@@ -189,14 +192,18 @@ export function applyDecisionEffect(
   try {
     let detail;
     let newProposalId;
+    let descriptionHash;
     switch (kind) {
-      case "authorise":
-        detail = authorise(db, item, response, option, {
+      case "authorise": {
+        const authorised = authorise(db, item, response, option, {
           linear,
           planner,
           now: at,
-        }).detail;
+        });
+        detail = authorised.detail;
+        descriptionHash = authorised.descriptionHash;
         break;
+      }
       case "send_to_triage": {
         const text =
           textFields(item, response) ||
@@ -263,6 +270,7 @@ export function applyDecisionEffect(
       outcome: "applied",
       ...(detail ? { detail } : {}),
       ...(newProposalId ? { newProposalId } : {}),
+      ...(descriptionHash ? { descriptionHash } : {}),
     };
   } catch (err) {
     return {

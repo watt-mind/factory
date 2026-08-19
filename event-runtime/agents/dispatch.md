@@ -159,6 +159,14 @@ ticket's Owned Paths), and quote the authorisation's inbox item id and
 request whose `context` says the ticket changed after approval; never reuse an
 authorisation for a different ticket description.
 
+If `memos.json` holds a `decision` memo on this subject, the operator has
+ruled on a related question before. **Cite it** — item id, decided-at,
+option — in the `context` of any new decision request, so the operator sees
+the precedent and can answer faster. A decision memo never lets you proceed:
+only `humanDecision.authorisation` in your input does that (inbox §5), and
+only for the ticket description it is bound to. Quote a cited memo's `sha256`
+prefix in the Handoff `Risks` line so the reviewer sees what the run knew.
+
 ## 3. When it goes wrong
 
 Do not open a PR on a guess. Comment the ticket with the specific decision,

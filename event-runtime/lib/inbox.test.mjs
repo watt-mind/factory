@@ -1,4 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-inbox-test-mjs";
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
   INBOX_KINDS,
@@ -18,6 +21,7 @@ import {
 } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
 import { templateFor } from "./decision-templates.mjs";
+import { listMemos, MEMO_SCHEMA_VERSION, memoDigest } from "./memos.mjs";
 
 function decision(
   options = [{ id: "dismiss", label: "Not now", effect: "dismiss" }],
@@ -228,6 +232,7 @@ describe("human inbox ledger (WM-285)", () => {
     const retried = retryInboxDecision(db, item.id, {
       now: 3000,
       applyEffect: () => ({ kind: "send_to_triage", outcome: "applied" }),
+      artifactStore: null,
     });
     expect(retried.item.resolvedBy).toBe("operator:send_to_triage");
     expect(retried.item.resolvedAt).toBe(new Date(3000).toISOString());
@@ -885,5 +890,241 @@ describe("approving an expired proposal retargets its item (WM-714)", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
     // Supersession does not lose the retarget the operator already paid for.
     expect(again.responseHistory).toHaveLength(1);
+  });
+});
+
+describe("inbox decisions register precedent memos (WM-812)", () => {
+  const NOW = Date.parse("2026-08-16T12:00:00.000Z");
+
+  function decideDismiss(db, { id, refs, now = NOW, artifactStore, fields }) {
+    const request = decision();
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "decide",
+        refs,
+        decision: request,
+      },
+      { id },
+    );
+    return decideInboxItem(
+      db,
+      id,
+      {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "dismiss",
+        fields: fields ?? {},
+      },
+      { now, artifactStore },
+    );
+  }
+
+  test("applied decisions register a precedentOnly memo per issue/repo/pr subject and store the bytes", () => {
+    const db = openDb(":memory:");
+    const store = tmpDir("evrt-inbox-decision-store-");
+    const decided = decideDismiss(db, {
+      id: "inbox_812",
+      refs: { issue: "wm-313", repo: "factory", pr: "612" },
+      artifactStore: store,
+    });
+    expect(decided.effect.outcome).toBe("applied");
+    expect(decided.memos).toHaveLength(3);
+    expect(decided.memos.every((row) => row.inserted)).toBe(true);
+
+    const ticket = listMemos(
+      db,
+      { type: "ticket", id: "WM-313" },
+      { now: NOW },
+    );
+    const repo = listMemos(db, { type: "repo", id: "factory" }, { now: NOW });
+    const pr = listMemos(db, { type: "pr", id: "factory#612" }, { now: NOW });
+    expect(ticket).toHaveLength(1);
+    expect(repo).toHaveLength(1);
+    expect(pr).toHaveLength(1);
+    expect(ticket[0].kind).toBe("decision");
+    expect(ticket[0].runId).toBeNull();
+    expect(ticket[0].inboxItemId).toBe("inbox_812");
+
+    for (const row of decided.memos) {
+      const file = path.join(store, row.sha256);
+      expect(existsSync(file)).toBe(true);
+      const document = JSON.parse(readFileSync(file, "utf8"));
+      expect(document).toMatchObject({
+        schemaVersion: MEMO_SCHEMA_VERSION,
+        kind: "decision",
+        precedentOnly: true,
+        refs: { inboxItemId: "inbox_812" },
+        provenance: { agent: "runtime:inbox", runId: null },
+      });
+      expect(document.body).toBe("Operator chose `dismiss` on 2026-08-16.");
+      expect(memoDigest(document)).toBe(row.sha256);
+    }
+    db.close();
+  });
+
+  test("failed and unsupported effects do not register; a successful retry does", () => {
+    const db = openDb(":memory:");
+    const store = tmpDir("evrt-inbox-decision-retry-store-");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "retry memo",
+        refs: { issue: "WM-812" },
+        decision: request,
+      },
+      { id: "retry_memo" },
+    );
+    const failed = decideInboxItem(
+      db,
+      "retry_memo",
+      {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "triage",
+        fields: {},
+      },
+      {
+        now: NOW,
+        artifactStore: store,
+        applyEffect: () => ({ outcome: "failed", error: "Linear unavailable" }),
+      },
+    );
+    expect(failed.effect.outcome).toBe("failed");
+    expect(failed.memos).toEqual([]);
+    expect(
+      listMemos(db, { type: "ticket", id: "WM-812" }, { now: NOW }),
+    ).toEqual([]);
+
+    const retried = retryInboxDecision(db, "retry_memo", {
+      now: NOW + 1000,
+      artifactStore: store,
+      applyEffect: () => ({ kind: "send_to_triage", outcome: "applied" }),
+    });
+    expect(retried.effect.outcome).toBe("applied");
+    expect(retried.memos).toHaveLength(1);
+    expect(
+      listMemos(db, { type: "ticket", id: "WM-812" }, { now: NOW + 1000 }),
+    ).toHaveLength(1);
+    db.close();
+  });
+
+  test("a proposal re-plan does not register a decision memo", () => {
+    const db = openDb(":memory:");
+    insertProposal(db, { id: "prop-old" });
+    const refs = {
+      proposalId: "prop-old",
+      eventSource: "test",
+      eventId: "evt",
+    };
+    const request = templateFor("proposal_expired", {
+      producer: "proposal",
+      refs,
+    });
+    createInboxItem(
+      db,
+      {
+        kind: "proposal_expired",
+        title: "retarget",
+        refs,
+        source: "serve:notify",
+        decision: request,
+        dedupeKey: "proposal_expired:prop-old",
+      },
+      { id: "no_memo_replan" },
+    );
+    const decided = decideInboxItem(
+      db,
+      "no_memo_replan",
+      {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "approve",
+        fields: {},
+      },
+      {
+        now: NOW,
+        artifactStore: tmpDir("evrt-inbox-decision-replan-"),
+        applyEffect: () => ({
+          outcome: "applied",
+          detail: "replanned_awaiting_approval",
+          newProposalId: "prop-fresh",
+        }),
+      },
+    );
+    expect(decided.effect.detail).toBe("replanned_awaiting_approval");
+    expect(decided.memos).toBeUndefined();
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
+    db.close();
+  });
+
+  test("authorise descriptionHash binds only the ticket-subject memo", () => {
+    const db = openDb(":memory:");
+    const store = tmpDir("evrt-inbox-decision-bind-");
+    const request = decision([
+      {
+        id: "authorise",
+        label: "Authorise",
+        effect: "authorise",
+        scope: { paths: ["pi"], summary: "Use the file secret" },
+      },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "authorise",
+        refs: { issue: "WM-812", repo: "factory", runId: "run_refused" },
+        decision: request,
+      },
+      { id: "bind_hash" },
+    );
+    const descriptionHash = `sha256:${"ab".repeat(32)}`;
+    const decided = decideInboxItem(
+      db,
+      "bind_hash",
+      {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "authorise",
+        fields: {},
+      },
+      {
+        now: NOW,
+        artifactStore: store,
+        applyEffect: () => ({
+          kind: "authorise",
+          outcome: "applied",
+          descriptionHash,
+        }),
+      },
+    );
+    expect(decided.memos).toHaveLength(2);
+    const ticketDoc = JSON.parse(
+      readFileSync(
+        path.join(
+          store,
+          decided.memos.find((row) => row.subject.type === "ticket").sha256,
+        ),
+        "utf8",
+      ),
+    );
+    const repoDoc = JSON.parse(
+      readFileSync(
+        path.join(
+          store,
+          decided.memos.find((row) => row.subject.type === "repo").sha256,
+        ),
+        "utf8",
+      ),
+    );
+    expect(ticketDoc.bindings).toEqual({ descriptionHash });
+    expect(repoDoc.bindings).toBeUndefined();
+    db.close();
   });
 });
