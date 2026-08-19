@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Work plan",
+  "summary": "/summary",
+  "status": {
+    "path": "/recommendation",
+    "tone": { "DISPATCH": "ok", "LOW_SUPPLY": "warn", "NOOP": "muted" }
+  },
+  "sections": [
+    {
+      "path": "/plan",
+      "as": "table",
+      "label": "Plan",
+      "columns": ["ticket", "reason"],
+      "formats": { "ticket": "issue" },
+      "expand": ["ownedPaths"]
+    },
+    {
+      "path": "/deferred",
+      "as": "table",
+      "label": "Deferred",
+      "columns": ["ticket", "reason"],
+      "formats": { "ticket": "issue" },
+      "tone": {
+        "reason": { "cap_full": "warn", "owned_paths_overlap": "muted" }
+      }
+    },
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Queue",
+      "keys": [
+        "repo",
+        "ticket",
+        "readyCandidates",
+        "triageBacklog",
+        "noopReason"
+      ],
+      "formats": {
+        "repo": "repo",
+        "ticket": "issue",
+        "readyCandidates": "count",
+        "triageBacklog": "count"
+      },
+      "tone": {
+        "noopReason": {
+          "queue_empty": "muted",
+          "cap_full": "warn",
+          "all_overlapping": "warn"
+        }
+      }
+    }
+  ]
+}
