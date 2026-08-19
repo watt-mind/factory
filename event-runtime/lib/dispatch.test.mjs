@@ -486,7 +486,13 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
       checkoutDir: "repo",
       retainOnFailure: true,
     });
-    expect(proposal.spec.input).toEqual({ repo: "wt29", ticket: "WM-501" });
+    // WM-810 (#724): the planner folds declared memos into input.memoPin on
+    // every dispatch spec; with no memos declared the pin is empty but present.
+    expect(proposal.spec.input).toEqual({
+      repo: "wt29",
+      ticket: "WM-501",
+      memoPin: { entries: [], foldedAt: expect.any(String) },
+    });
     expect(calls()).not.toContain("up WM-501"); // claim → worktree → spawn: nothing before approval
 
     const approved = approveProposal(db, registry, proposal.id, {
