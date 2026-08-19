@@ -77,7 +77,11 @@ const fixture: ConfigView = {
       entries: [
         {
           key: "mobile",
-          value: { simulator: "iPhone-16", apiToken: "[redacted]" },
+          value: {
+            simulator: "iPhone-16",
+            apiToken: { set: true, source: "env" },
+            pollEvery: "30s",
+          },
           reload: "restart",
           note: "wattmind/mobile@1.0.0",
         },
@@ -98,11 +102,29 @@ const fixture: ConfigView = {
           schema: {
             type: "object",
             properties: {
-              simulator: { type: "string", description: "simulator name" },
-              apiToken: { type: "string" },
+              simulator: {
+                type: "string",
+                title: "Simulator",
+                description: "simulator name",
+              },
+              apiToken: {
+                type: "string",
+                format: "secret",
+                title: "API token",
+                description: "operator credential",
+              },
+              pollEvery: {
+                type: "string",
+                format: "duration",
+                title: "Poll interval",
+              },
             },
           },
-          values: { simulator: "iPhone-16", apiToken: "[redacted]" },
+          values: {
+            simulator: "iPhone-16",
+            apiToken: { set: true, source: "env" },
+            pollEvery: "30s",
+          },
           anomaly: null,
         },
         {
@@ -220,23 +242,26 @@ describe("Settings", () => {
         .getAttribute("aria-current"),
     ).toBe("page");
 
-    // A loaded extension: name, namespace, and its redacted effective values.
+    // A loaded extension: name, namespace, titles, and typed widgets.
     expect(view.getByText("wattmind/mobile")).toBeTruthy();
     expect(view.getByText("mobile")).toBeTruthy();
-    expect(view.getByText("simulator")).toBeTruthy();
+    expect(view.getByText("Simulator")).toBeTruthy();
     expect(view.getByText("iPhone-16")).toBeTruthy();
-    expect(view.getByText("[redacted]")).toBeTruthy();
+    expect(view.getByText("FACTORY_EXT_MOBILE_API_TOKEN")).toBeTruthy();
+    expect(view.queryByText("[redacted]")).toBeNull();
     expect(view.getByText("simulator name")).toBeTruthy();
+    expect(view.getByText("30 seconds")).toBeTruthy();
     expect(view.getAllByText("restart").length).toBeGreaterThan(0);
 
-    // A disabled one: its anomaly, and no values table.
+    // A disabled one: its anomaly replaces the form.
     const disabled = view.getByText(/disabled/);
     expect(disabled.textContent).toContain("$.maxParallel: above maximum 4");
     expect(view.queryByText("wattmind/broken")).toBeTruthy();
-    // Nothing is editable: read-only inventory.
-    expect(
-      view.container.querySelectorAll("input, select, textarea").length,
-    ).toBe(1);
+    // Nothing is editable: search is the only enabled control.
+    const enabled = [
+      ...view.container.querySelectorAll("input, select, textarea"),
+    ].filter((el) => !(el as HTMLInputElement).disabled);
+    expect(enabled.length).toBe(1);
   });
 
   test("searches extension values like any other section", async () => {
@@ -253,6 +278,23 @@ describe("Settings", () => {
       expect(view.getByRole("heading", { name: "Extensions" })).toBeTruthy(),
     );
     expect(view.getByText("iPhone-16")).toBeTruthy();
+    expect(view.queryByText("wattmind/broken")).toBeNull();
+  });
+
+  test("searches extension property titles and descriptions", async () => {
+    stubConfig();
+    const view = renderWithClient(<StatefulSettings initial="repos" />);
+    await view.findByText("factory.tools.base");
+    act(() =>
+      changeInput(
+        view.getByRole("combobox", { name: "Search settings" }),
+        "operator credential",
+      ),
+    );
+    await waitFor(() =>
+      expect(view.getByRole("heading", { name: "Extensions" })).toBeTruthy(),
+    );
+    expect(view.getByText("wattmind/mobile")).toBeTruthy();
     expect(view.queryByText("wattmind/broken")).toBeNull();
   });
 });

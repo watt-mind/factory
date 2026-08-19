@@ -8,6 +8,11 @@ import {
   type ConfigSection,
 } from "../api";
 import { FilterInput } from "../components/ui";
+import {
+  SchemaForm,
+  schemaSearchText,
+  type JsonSchema,
+} from "../components/SchemaForm";
 import { EMPTY } from "../format";
 import { refetchIntervals } from "../hooks";
 
@@ -104,18 +109,14 @@ function extensionKey(ext: ConfigExtension): string {
   return ext.namespace ?? ext.name ?? ext.path;
 }
 
-function schemaDescriptions(
-  schema: ConfigExtension["schema"],
-): Record<string, string> {
-  const properties = (schema?.properties ?? {}) as Record<
-    string,
-    { description?: unknown }
-  >;
-  return Object.fromEntries(
-    Object.entries(properties).flatMap(([key, prop]) =>
-      typeof prop?.description === "string" ? [[key, prop.description]] : [],
-    ),
-  );
+function extensionHaystack(ext: ConfigExtension): string {
+  return [
+    ext.name ?? "",
+    ext.namespace ?? "",
+    ext.path,
+    ext.anomaly ?? "",
+    schemaSearchText(ext.schema as JsonSchema | null),
+  ].join("\n");
 }
 
 /**
@@ -130,8 +131,6 @@ function ExtensionRow({
   section: ConfigSection;
   ext: ConfigExtension;
 }) {
-  const descriptions = schemaDescriptions(ext.schema);
-  const values = ext.values ? Object.entries(ext.values) : [];
   return (
     <div className="border-b border-(--border) last:border-b-0">
       <div className="flex min-w-0 flex-wrap items-center gap-2 px-3 py-2.5">
@@ -183,37 +182,11 @@ function ExtensionRow({
       ) : (
         <>
           <div className="mx-3 mb-2 overflow-hidden rounded border border-(--border) bg-(--surface-1)">
-            {values.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-(--text-faint)">
-                No values set and the schema declares no defaults.
-              </div>
-            ) : (
-              values.map(([key, value]) => {
-                const shown = displayValue(value);
-                return (
-                  <div
-                    key={key}
-                    className="grid min-w-0 gap-2 border-b border-(--border) px-3 py-2 last:border-b-0 md:grid-cols-[minmax(10rem,0.8fr)_minmax(12rem,1.4fr)]"
-                  >
-                    <div className="mono min-w-0 break-words text-[12px] text-(--text)">
-                      {key}
-                    </div>
-                    <div className="min-w-0 overflow-x-auto">
-                      <pre
-                        className={`mono w-max min-w-full whitespace-pre text-[12px] ${shown === EMPTY ? "text-(--text-faint)" : "text-(--text-dim)"}`}
-                      >
-                        {shown}
-                      </pre>
-                      {descriptions[key] && (
-                        <div className="mt-1 text-xs text-(--text-faint)">
-                          {descriptions[key]}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
+            <SchemaForm
+              schema={ext.schema as JsonSchema | null}
+              values={ext.values}
+              namespace={ext.namespace}
+            />
           </div>
           {ext.schema && (
             <details className="mx-3 mb-2.5 text-xs text-(--text-faint)">
@@ -264,11 +237,15 @@ export function Settings({
       .map((section) => ({
         ...section,
         entries: needle
-          ? section.entries.filter((entry) =>
-              `${entry.key}\n${displayValue(entry.value)}`
+          ? section.entries.filter((entry) => {
+              const ext = section.extensions?.find(
+                (item) => extensionKey(item) === entry.key,
+              );
+              const extra = ext ? extensionHaystack(ext) : "";
+              return `${entry.key}\n${displayValue(entry.value)}\n${extra}`
                 .toLowerCase()
-                .includes(needle),
-            )
+                .includes(needle);
+            })
           : section.entries,
       }))
       .filter((section) => !needle || section.entries.length > 0);

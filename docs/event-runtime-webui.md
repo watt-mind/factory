@@ -1486,3 +1486,13 @@ keys but never values, schedule jobs publish only name/cadence/harness, and
 the registry publishes counts, event adapters, and summaries. A newly added
 config key therefore remains private until the API allow-list deliberately
 adds it. Nothing here writes any config file; Settings is visibility only.
+
+The **Extensions** section (WM-841, WM-920) is schema-driven: each extension
+row is a read-only `SchemaForm` (`web/src/components/SchemaForm.tsx`) over
+the published `schema` + `values`. `title` is the label, `description` is
+help, `format` selects the widget (`secret` / `uri` / `channel-id` /
+`ticket` / `duration` / `multiline` / `email`), and `enum` / `type` /
+bounds / `default` drive the control. Search indexes every property's
+`title` and `description` as well as keys and values. Secret properties
+publish `{ set, source }` and never a value. Anomaly replaces the form.
+Built-in sections should migrate onto the same schema shape (WM-924).

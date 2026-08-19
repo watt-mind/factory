@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { validate } from "./schema.mjs";
+import { SCHEMA_FORMATS, validate } from "./schema.mjs";
 
 describe("validate", () => {
   test("accepts a conforming object", () => {
@@ -58,6 +58,66 @@ describe("validate", () => {
     const { valid, errors } = validate({ anyOf: [{ type: "string" }] }, "x");
     expect(valid).toBe(false);
     expect(errors[0]).toContain("unsupported schema keyword");
+  });
+
+  describe("format (WM-920)", () => {
+    test("the closed enum is accepted as a keyword and unknown values fail closed", () => {
+      expect(SCHEMA_FORMATS).toEqual([
+        "secret",
+        "uri",
+        "channel-id",
+        "ticket",
+        "duration",
+        "multiline",
+        "email",
+      ]);
+      for (const format of SCHEMA_FORMATS) {
+        expect(validate({ type: "string", format }, "ok").valid).toBe(
+          format === "uri" || format === "duration" ? false : true,
+        );
+      }
+      const { valid, errors } = validate(
+        { type: "string", format: "uuid" },
+        "x",
+      );
+      expect(valid).toBe(false);
+      expect(errors[0]).toContain("unsupported format");
+      expect(validate({ type: "string", format: 1 }, "x").errors[0]).toContain(
+        "unsupported format",
+      );
+    });
+
+    test("uri must parse; other formats are hints except duration", () => {
+      expect(
+        validate({ type: "string", format: "uri" }, "https://example.test/x")
+          .valid,
+      ).toBe(true);
+      const badUri = validate({ type: "string", format: "uri" }, "not a url");
+      expect(badUri.valid).toBe(false);
+      expect(badUri.errors[0]).toContain("valid URI");
+      expect(
+        validate({ type: "string", format: "duration" }, "30s").valid,
+      ).toBe(true);
+      expect(validate({ type: "string", format: "duration" }, "2h").valid).toBe(
+        true,
+      );
+      expect(
+        validate({ type: "string", format: "duration" }, "15ms").valid,
+      ).toBe(true);
+      const badDur = validate(
+        { type: "string", format: "duration" },
+        "30 seconds",
+      );
+      expect(badDur.valid).toBe(false);
+      expect(badDur.errors[0]).toContain("duration");
+      expect(
+        validate({ type: "string", format: "email" }, "not-an-email").valid,
+      ).toBe(true);
+      expect(
+        validate({ type: "string", format: "secret" }, "sk-live-anything")
+          .valid,
+      ).toBe(true);
+    });
   });
 
   test("nested errors carry a path", () => {

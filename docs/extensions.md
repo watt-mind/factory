@@ -313,28 +313,47 @@ directory):
   "properties": {
     "simulator": {
       "type": "string",
+      "title": "Simulator",
       "default": "iPhone-16",
       "description": "booted before each run"
     },
     "maxParallel": {
       "type": "integer",
+      "title": "Max parallel",
       "minimum": 1,
       "maximum": 4,
       "default": 1
     },
-    "apiToken": { "type": "string", "description": "masked in /config" }
+    "apiToken": {
+      "type": "string",
+      "format": "secret",
+      "title": "API token",
+      "description": "resolved from FACTORY_EXT_MOBILE_API_TOKEN"
+    }
   }
 }
 ```
 
-Values (`config/policy.yaml`):
+Values (`config/policy.yaml`) — non-secret settings only:
 
 ```yaml
 extensions:
   - path: ~/.factory/extensions/wattmind-mobile
     config:
       maxParallel: 2
-      apiToken: sk-live-…
+```
+
+Secrets are **not** written in `policy.yaml`. A property with
+`format: "secret"` is resolved from `process.env.FACTORY_EXT_<NAMESPACE>_<KEY>`
+(upper-snake of the config namespace and property path) or, if that is unset,
+from `~/.factory/secrets.env` (dotenv, mode `0600`, loaded once at start;
+`FACTORY_EVENT_SECRETS_FILE` overrides the path). A secret given in
+`policy.yaml` is a configuration anomaly: the extension is disabled and the
+message names the key and the env var to use.
+
+```bash
+# ~/.factory/secrets.env (chmod 600)
+FACTORY_EXT_MOBILE_API_TOKEN=…
 ```
 
 What the loader does with them, in order:
@@ -343,14 +362,22 @@ What the loader does with them, in order:
    (`extensions validate` checks this too) and valid JSON. The keyword subset
    is `event-runtime/lib/schema.mjs`'s — `type`, `enum`, `const`, `required`,
    `properties`, `additionalProperties`, `items`, `min/max*`, `pattern`,
-   `description` — plus `default`. Anything else (`anyOf`, `$ref`, …) fails
-   closed like every other contract in the runtime.
+   `description`, `title`, `format` — plus `default`. `format` is a closed
+   enum: `secret`, `uri`, `channel-id`, `ticket`, `duration`, `multiline`,
+   `email`. Unknown keywords and unknown `format` values fail closed like
+   every other contract in the runtime. `format` is a UI hint except `uri`
+   (the string must parse as a URI) and `duration` (`^\d+(ms|s|m|h|d)$`).
 2. **Applies defaults.** Every `default` under `properties`, recursively, is
    filled in where the operator gave nothing; a nested object property is only
    created when a default inside it produces something. With no `config:` in
    the policy at all the effective object is _just_ the defaults, so an
    extension whose every setting has a default needs no operator input.
-3. **Validates the effective object** with `schema.mjs validate`. A violation
+   `format: "secret"` properties never take a default from the schema or a
+   value from `policy.yaml`.
+3. **Resolves secrets.** Each `format: "secret"` property is filled from
+   `FACTORY_EXT_<NAMESPACE>_<KEY>` as above. The extension's own code sees
+   the resolved string via `getExtensionConfig()`.
+4. **Validates the effective object** with `schema.mjs validate`. A violation
    is a configuration anomaly that **disables the extension whole** — nothing
    of it is registered, its adapters are not even imported — with a message
    naming the failing path:
@@ -368,7 +395,8 @@ The extension's own code reads the result by name:
 
 ```js
 import { getExtensionConfig } from "../../lib/extensions.mjs";
-const cfg = getExtensionConfig("wattmind/mobile"); // { simulator: "iPhone-16", maxParallel: 2, apiToken: "sk-live-…" }
+const cfg = getExtensionConfig("wattmind/mobile");
+// { simulator: "iPhone-16", maxParallel: 2, apiToken: "…" }
 ```
 
 `getExtensionConfig` returns the effective object — defaults applied,
@@ -383,7 +411,7 @@ one item per extension the loader saw:
 
 ```json
 { "name": "wattmind/mobile", "version": "1.0.0", "path": "…", "namespace": "mobile",
-  "reload": "restart", "schema": { … }, "values": { "simulator": "iPhone-16", "maxParallel": 2, "apiToken": "[redacted]" },
+  "reload": "restart", "schema": { … }, "values": { "simulator": "iPhone-16", "maxParallel": 2, "apiToken": { "set": true, "source": "env" } },
   "anomaly": null }
 ```
 
@@ -391,18 +419,39 @@ A disabled extension appears with `values: null` and its `anomaly`; an
 extension that declares no config appears with `namespace: null`. The
 section's `entries` mirror the same rows (key = namespace) so the Settings
 search covers them. Settings renders it as the **Extensions** section — name,
-namespace, version, path, the effective values with the schema's
-`description`s as notes, a collapsed copy of the schema, and the anomaly in
-place of the values when the extension is disabled. Read-only, like every
-other Settings section: values change in `policy.yaml`, then restart.
+namespace, version, path, a read-only `SchemaForm` of the effective values
+(`title` = label, `description` = help, `format` = widget, `enum` / `type` /
+`minimum` / `maximum` / `default` drive the control), a collapsed copy of the
+schema, and the anomaly in place of the form when the extension is disabled.
+Search also indexes every property's `title` and `description`. Read-only,
+like every other Settings section: values change in `policy.yaml` or env,
+then restart. Built-in sections (Policy, Nodes, …) should migrate onto the
+same schema shape — [WM-924](https://linear.app/watt-mind/issue/WM-924).
 
-**Redaction rule.** Before publishing, every value whose key matches
+**UI hints.** `title` is the field label (the property name is the fallback),
+`description` is help text, `format` selects the widget:
+
+| `format`     | Widget (read-only)                                      |
+| :----------- | :------------------------------------------------------ |
+| `secret`     | "set via env `FACTORY_EXT_…`" / "unset" — never a value |
+| `uri`        | link                                                    |
+| `channel-id` | mono chip                                               |
+| `ticket`     | mono chip with `TicketHoverCard`                        |
+| `duration`   | humanised (`30s` → "30 seconds")                        |
+| `multiline`  | `<pre>`                                                 |
+| `email`      | text                                                    |
+
+Booleans render as a disabled toggle, enums as a disabled select, integers
+with bounds as the number plus a range hint. A value equal to `default` is
+marked.
+
+**Redaction rule.** `format: "secret"` properties publish
+`{ set: true|false, source: "env"|"secrets.env"|null }` instead of a value.
+For schemas that predate `format`, every remaining value whose key matches
 `/token|secret|key|password/i` — at any depth of the effective object — is
 replaced by `"[redacted]"` (`redactSecrets` in `lib/api-config.mjs`). Empty
-and `null` values are left as they are so "unset" stays visible. The schema is
-published as written; do not put a real secret in a `default`. The masking is
-by key name only: name secret settings so the rule catches them (`apiToken`,
-not `credential`).
+and `null` values are left as they are so "unset" stays visible. The schema
+is published as written; do not put a real secret in a `default`.
 
 ## Hooks
 

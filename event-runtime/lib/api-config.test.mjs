@@ -323,13 +323,52 @@ describe("GET /config view", () => {
     expect(JSON.stringify(view)).not.toContain("super-secret-value");
   });
 
+  test("publishes format: secret as { set, source } and never the resolved value", () => {
+    const view = configView({
+      root: fixtureRoot(),
+      registry: registry(),
+      repos: () => new Map(),
+      policyVersion: "git:test",
+      now: 0,
+      extensions: {
+        extensions: [
+          {
+            name: "factory/sample",
+            version: "1.0.0",
+            path: "/ext/sample",
+            config: {
+              namespace: "sample",
+              schema: "./config.schema.json",
+              schemaJson: {
+                type: "object",
+                properties: {
+                  greeting: { type: "string" },
+                  apiToken: { type: "string", format: "secret" },
+                },
+              },
+              values: { greeting: "hello", apiToken: "super-secret-value" },
+              secretMeta: { apiToken: { set: true, source: "env" } },
+            },
+          },
+        ],
+        disabled: [],
+      },
+    });
+    const section = view.sections.find((s) => s.id === "extensions");
+    expect(section.extensions[0].values).toEqual({
+      greeting: "hello",
+      apiToken: { set: true, source: "env" },
+    });
+    expect(JSON.stringify(view)).not.toContain("super-secret-value");
+  });
+
   test("defaults to the extensions the process loaded (lib/extensions.mjs snapshot)", async () => {
     await loadExtensions({
       policy: {
         extensions: [
           {
             path: SAMPLE_EXTENSION,
-            config: { apiToken: "shh", greeting: "yo" },
+            config: { greeting: "yo" },
           },
         ],
       },
@@ -348,13 +387,15 @@ describe("GET /config view", () => {
     expect(section.extensions[0].values).toEqual({
       greeting: "yo",
       maxParallel: 1,
-      apiToken: "[redacted]",
+      apiToken: { set: false, source: null },
       limits: { timeoutSeconds: 30 },
     });
     expect(section.extensions[0].schema.properties.greeting.default).toBe(
       "hello",
     );
-    expect(JSON.stringify(view)).not.toContain("shh");
+    expect(section.extensions[0].schema.properties.apiToken.format).toBe(
+      "secret",
+    );
   });
 
   test("GET /config redacts secret-looking keys in the policy section, not only extension values", () => {

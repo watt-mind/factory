@@ -29,13 +29,16 @@
  *      proves they exist inside the extension, and lib/registry.mjs loads
  *      and validates the panels themselves (a bad panel is skipped alone,
  *      never the extension).
- *   4. **Config is declared, validated, defaulted (WM-841).** An extension
- *      may declare `contributes.config: { namespace, schema }`; the operator's
- *      values live on the policy entry (`extensions[].config`). At load the
- *      schema is read, `default`s are applied, and the effective object is
- *      validated with lib/schema.mjs — a violation disables the extension
- *      (misconfigured code must not run). `getExtensionConfig(name)` hands the
- *      effective object to that extension's adapters/hooks/panels, and
+ *   4. **Config is declared, validated, defaulted (WM-841), with UI-hint
+ *      `format` and env-backed secrets (WM-920).** An extension may declare
+ *      `contributes.config: { namespace, schema }`; the operator's values live
+ *      on the policy entry (`extensions[].config`). At load the schema is
+ *      read, `default`s are applied, `format: "secret"` properties resolve
+ *      from `FACTORY_EXT_<NAMESPACE>_<KEY>` (process env, then
+ *      `~/.factory/secrets.env`) — never from `policy.yaml` — and the
+ *      effective object is validated with lib/schema.mjs. A violation
+ *      disables the extension. `getExtensionConfig(name)` hands the
+ *      effective object (secrets included) to adapters/hooks/panels;
  *      `loadedExtensions()` is the snapshot `GET /config` publishes.
  *   5. **Hooks are registered, built-ins first (WM-842).** `contributes.hooks`
  *      maps a hook point to a module; each is imported and contract-checked
@@ -62,6 +65,7 @@
  * given.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -383,17 +387,151 @@ function withoutDefaults(schema) {
   return out;
 }
 
+/** camelCase / kebab path segment → UPPER_SNAKE for FACTORY_EXT_* names. */
+export function upperSnake(value) {
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+/** `FACTORY_EXT_<NAMESPACE>_<KEY>` for a secret property path. */
+export function extensionSecretEnvVar(namespace, keyPath) {
+  const parts = [namespace, ...(Array.isArray(keyPath) ? keyPath : [keyPath])]
+    .map(upperSnake)
+    .filter(Boolean);
+  return `FACTORY_EXT_${parts.join("_")}`;
+}
+
+/**
+ * Every `format: "secret"` property in a config schema, depth-first, with
+ * the path used for env names and published `{ set, source }` overlays.
+ */
+export function collectSecretFields(schema, path = []) {
+  if (!isPlainObject(schema) || !isPlainObject(schema.properties)) return [];
+  const out = [];
+  for (const [key, sub] of Object.entries(schema.properties)) {
+    const next = [...path, key];
+    if (isPlainObject(sub) && sub.format === "secret")
+      out.push({ path: next, key });
+    else out.push(...collectSecretFields(sub, next));
+  }
+  return out;
+}
+
+function hasAt(obj, keyPath) {
+  let node = obj;
+  for (const key of keyPath) {
+    if (!isPlainObject(node) || !Object.hasOwn(node, key)) return false;
+    node = node[key];
+  }
+  return true;
+}
+
+function setAt(obj, keyPath, value) {
+  let node = obj;
+  for (let i = 0; i < keyPath.length - 1; i++) {
+    const key = keyPath[i];
+    if (!isPlainObject(node[key])) node[key] = {};
+    node = node[key];
+  }
+  node[keyPath[keyPath.length - 1]] = value;
+}
+
+function deleteAt(obj, keyPath) {
+  let node = obj;
+  for (let i = 0; i < keyPath.length - 1; i++) {
+    const key = keyPath[i];
+    if (!isPlainObject(node[key])) return;
+    node = node[key];
+  }
+  delete node[keyPath[keyPath.length - 1]];
+}
+
+function parseDotenv(text) {
+  const out = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const line = trimmed.replace(/^export\s+/, "");
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+let secretsFileCache;
+
+/** Drop the cached `~/.factory/secrets.env` parse so a test can reload. */
+export function resetExtensionSecretsCache() {
+  secretsFileCache = undefined;
+}
+
+function secretsFilePath() {
+  return (
+    process.env.FACTORY_EVENT_SECRETS_FILE ||
+    path.join(homedir(), ".factory", "secrets.env")
+  );
+}
+
+/**
+ * Parse `~/.factory/secrets.env` once (dotenv, owner-only mode). A missing
+ * or group/world-readable file contributes nothing — secrets then come only
+ * from `process.env`.
+ */
+function loadSecretsFile() {
+  if (secretsFileCache !== undefined) return secretsFileCache;
+  const file = secretsFilePath();
+  secretsFileCache = {};
+  if (!existsSync(file)) return secretsFileCache;
+  let stat;
+  try {
+    stat = statSync(file);
+  } catch {
+    return secretsFileCache;
+  }
+  if (!stat.isFile() || (stat.mode & 0o077) !== 0) return secretsFileCache;
+  try {
+    secretsFileCache = parseDotenv(readFileSync(file, "utf8"));
+  } catch {
+    secretsFileCache = {};
+  }
+  return secretsFileCache;
+}
+
+function resolveSecretValue(envVar) {
+  const fromEnv = process.env[envVar];
+  if (typeof fromEnv === "string" && fromEnv.length > 0)
+    return { value: fromEnv, source: "env" };
+  const fromFile = loadSecretsFile()[envVar];
+  if (typeof fromFile === "string" && fromFile.length > 0)
+    return { value: fromFile, source: "secrets.env" };
+  return { value: undefined, source: null };
+}
+
 /**
  * Resolve one extension's effective config: read the declared schema, apply
- * its defaults over the operator's values, validate the result. Returns
- * `null` when the manifest declares no config and the policy gives none;
- * throws an ExtensionError naming the fault (and the failing value path)
- * otherwise, which `loadExtensions` turns into a disabling anomaly.
+ * its defaults over the operator's values, pull `format: "secret"` properties
+ * from env / secrets.env, validate the result. Returns `null` when the
+ * manifest declares no config and the policy gives none; throws an
+ * ExtensionError naming the fault (and the failing value path) otherwise,
+ * which `loadExtensions` turns into a disabling anomaly.
  *
  * @param {string} dir - the extension directory
  * @param {object} manifest - a schema-valid manifest
  * @param {object|undefined} values - the policy entry's `config`
- * @returns {{ namespace: string, schema: string, schemaJson: object, values: object }|null}
+ * @returns {{ namespace: string, schema: string, schemaJson: object, values: object, secretMeta: Record<string, { set: boolean, source: "env"|"secrets.env"|null }> }|null}
  */
 export function resolveExtensionConfig(dir, manifest, values) {
   const declared = manifest.contributes?.config;
@@ -414,7 +552,34 @@ export function resolveExtensionConfig(dir, manifest, values) {
       `contributes.config.schema "${declared.schema}" is not valid JSON — ${err.message}`,
     );
   }
-  const effective = applyConfigDefaults(schemaJson, values ?? {});
+  const secrets = collectSecretFields(schemaJson);
+  const operator = cloneJson(values ?? {});
+  const policySecrets = secrets.filter((field) => hasAt(operator, field.path));
+  if (policySecrets.length > 0) {
+    throw new ExtensionError(
+      policySecrets
+        .map((field) => {
+          const envVar = extensionSecretEnvVar(declared.namespace, field.path);
+          return `config.${field.path.join(".")} must not be set in policy.yaml — use env ${envVar}`;
+        })
+        .join("; "),
+    );
+  }
+  for (const field of secrets) deleteAt(operator, field.path);
+  const effective = applyConfigDefaults(schemaJson, operator);
+  const secretMeta = {};
+  for (const field of secrets) {
+    const envVar = extensionSecretEnvVar(declared.namespace, field.path);
+    const resolved = resolveSecretValue(envVar);
+    const key = field.path.join(".");
+    secretMeta[key] = {
+      set: resolved.value !== undefined,
+      source: resolved.source,
+    };
+    deleteAt(effective, field.path);
+    if (resolved.value !== undefined)
+      setAt(effective, field.path, resolved.value);
+  }
   const check = validate(withoutDefaults(schemaJson), effective);
   if (!check.valid) {
     throw new ExtensionError(
@@ -426,7 +591,25 @@ export function resolveExtensionConfig(dir, manifest, values) {
     schema: declared.schema,
     schemaJson,
     values: effective,
+    secretMeta,
   };
+}
+
+/**
+ * Replace every `format: "secret"` property with `{ set, source }` so a
+ * published `/config` payload never carries the resolved value.
+ */
+export function maskExtensionSecrets(values, schemaJson, secretMeta = {}) {
+  const out = cloneJson(values) ?? {};
+  for (const field of collectSecretFields(schemaJson)) {
+    const key = field.path.join(".");
+    const meta = secretMeta[key] ?? { set: false, source: null };
+    setAt(out, field.path, {
+      set: Boolean(meta.set),
+      source: meta.source ?? null,
+    });
+  }
+  return out;
 }
 
 /**
@@ -890,7 +1073,7 @@ export async function loadExtensions({
     }
     for (const warning of checked.warnings) anomalies.push(warning);
     if (config) acceptedNamespaces.set(config.namespace, manifest.name);
-    const { schemaJson, ...publicConfig } = config ?? {};
+    const { schemaJson, secretMeta, ...publicConfig } = config ?? {};
     const extPanelRoots = panelRootsFor(dir, manifest);
     panelRoots.push(...extPanelRoots);
     if (extHarness) {
@@ -918,7 +1101,7 @@ export async function loadExtensions({
       name: manifest.name,
       version: manifest.version,
       path: dir,
-      config: config ? { ...publicConfig, schemaJson } : null,
+      config: config ? { ...publicConfig, schemaJson, secretMeta } : null,
     });
   }
 

@@ -22,8 +22,22 @@ const SUPPORTED = new Set([
   "maximum",
   "description",
   "title",
+  "format",
   "$schema",
 ]);
+
+/** Closed UI/validation hints (WM-920). Unknown values fail closed. */
+export const SCHEMA_FORMATS = Object.freeze([
+  "secret",
+  "uri",
+  "channel-id",
+  "ticket",
+  "duration",
+  "multiline",
+  "email",
+]);
+const FORMAT_SET = new Set(SCHEMA_FORMATS);
+const DURATION_PATTERN = /^\d+(ms|s|m|h|d)$/;
 
 const hasOwn = (obj, key) =>
   obj !== null &&
@@ -64,6 +78,15 @@ function check(schema, value, path, errors) {
     if (!SUPPORTED.has(key)) {
       errors.push(
         `${path}: unsupported schema keyword "${key}" — contracts fail closed`,
+      );
+      return;
+    }
+  }
+
+  if (hasOwn(schema, "format")) {
+    if (typeof schema.format !== "string" || !FORMAT_SET.has(schema.format)) {
+      errors.push(
+        `${path}: unsupported format ${JSON.stringify(schema.format)} — contracts fail closed`,
       );
       return;
     }
@@ -116,6 +139,12 @@ function check(schema, value, path, errors) {
       !new RegExp(schema.pattern).test(value)
     ) {
       errors.push(`${path}: does not match pattern ${schema.pattern}`);
+    }
+    if (schema.format === "uri" && !URL.canParse(value)) {
+      errors.push(`${path}: format "uri" value is not a valid URI`);
+    }
+    if (schema.format === "duration" && !DURATION_PATTERN.test(value)) {
+      errors.push(`${path}: format "duration" must match ${DURATION_PATTERN}`);
     }
   }
 

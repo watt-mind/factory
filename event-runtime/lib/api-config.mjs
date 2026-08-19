@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "./config.mjs";
-import { loadedExtensions } from "./extensions.mjs";
+import { loadedExtensions, maskExtensionSecrets } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
 import { loadNodesConfig, nodesConfigPath } from "./workers-remote.mjs";
 
@@ -138,7 +138,13 @@ function extensionsSection({ extensions = [], disabled = [] } = {}) {
       namespace: ext.config?.namespace ?? null,
       reload: "restart",
       schema: ext.config?.schemaJson ?? null,
-      values: ext.config ? redactSecrets(ext.config.values) : null,
+      values: ext.config
+        ? maskExtensionSecrets(
+            redactSecrets(ext.config.values),
+            ext.config.schemaJson,
+            ext.config.secretMeta,
+          )
+        : null,
       anomaly: null,
     })),
     ...disabled.map((ext) => ({
