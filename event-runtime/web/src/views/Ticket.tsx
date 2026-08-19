@@ -730,10 +730,7 @@ function SpecCommentsPanel({
           id="ticket-comments"
           className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase"
         >
-          Comments
-          <span className="ml-1.5 tabular-nums text-(--text-faint)">
-            {(detail.comments ?? []).length}
-          </span>
+          Comments ({(detail.comments ?? []).length})
         </h3>
         {(detail.comments ?? []).length === 0 ? (
           <p className="mt-3 text-[13px] text-(--text-dim)">No comments yet.</p>
@@ -1135,7 +1132,7 @@ export function Ticket({
   // knows it, show the journey chrome with the live title instead of this
   // empty state.
   const trackerKnown = Boolean(
-    detailQuery.data?.ticket.title || detailQuery.data?.ticket.state,
+    detailQuery.data?.ticket?.title || detailQuery.data?.ticket?.state,
   );
   if (isUnindexedTicket(query.data) && !trackerKnown) {
     if (detailQuery.isPending) {
