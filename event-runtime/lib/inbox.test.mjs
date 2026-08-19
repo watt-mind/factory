@@ -128,6 +128,51 @@ describe("human inbox ledger (WM-285)", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(3);
   });
 
+  test("a dispatch proposal item stores the action-first title and why-line (WM-896)", () => {
+    const db = openDb(":memory:");
+    const refs = {
+      proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+      issue: "WM-862",
+      repo: "factory",
+      eventSource: "test",
+      eventId: "evt",
+    };
+    const spec = {
+      agent: "dispatch@1",
+      model: "cursor-grok-4.6-high",
+      input: { ticket: "WM-862", repo: "factory" },
+    };
+    const created = createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+        refs,
+        source: "serve:notify",
+        decision: templateFor("decision_needed", {
+          producer: "proposal",
+          refs,
+          spec,
+          reason: "auto_approval_ineligible:dispatch_recheck_failed",
+        }),
+        dedupeKey: "decision_needed:prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+      },
+      { id: "inbox_dispatch" },
+    );
+    expect(created.title).toBe(
+      "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+    );
+    expect(created.decision.question).toBe(
+      "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+    );
+    expect(created.decision.context).toContain("Why you're being asked");
+    expect(created.refs).toMatchObject({
+      issue: "WM-862",
+      repo: "factory",
+      proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+    });
+  });
+
   test("a different decision shape on the same caller key still supersedes", () => {
     const db = openDb(":memory:");
     const first = createInboxItem(

@@ -71,10 +71,20 @@ function insertProposal(
     status = "open",
     reason = null,
     agent = "worktree-ticket@1",
+    input,
+    model,
     createdAt,
     ttlSeconds = 1800,
   },
 ) {
+  const spec =
+    decision === "run"
+      ? {
+          agent,
+          ...(input ? { input } : {}),
+          ...(model ? { model } : {}),
+        }
+      : null;
   db.query(
     `INSERT INTO proposals (id, event_source, event_id, run_id, decision, spec_json, spec_hash, status, reason, created_at, ttl_seconds)
      VALUES (?, 'test', ?, ?, ?, ?, 'sha256:x', ?, ?, ?, ?)`,
@@ -83,7 +93,7 @@ function insertProposal(
     eventId,
     decision === "run" ? `run_${id}` : null,
     decision,
-    decision === "run" ? JSON.stringify({ agent }) : null,
+    spec ? JSON.stringify(spec) : null,
     status,
     reason,
     createdAt ?? new Date().toISOString(),
@@ -237,14 +247,16 @@ describe("notify (WM-65)", () => {
 
     const first = sent(now);
     expect(first).toHaveLength(1);
+    expect(first[0].title).toBe("Ci-Doctor");
     expect(first[0].message).toBe(
       "DECISION NEEDED proposal prop-aging (ci-doctor@2): expires in 14m",
     );
     const proposalItem = db
       .query(
-        "SELECT decision_json, dedupe_key FROM inbox_items WHERE kind = 'decision_needed'",
+        "SELECT title, decision_json, dedupe_key FROM inbox_items WHERE kind = 'decision_needed'",
       )
       .get();
+    expect(proposalItem.title).toBe("Ci-Doctor");
     expect(
       JSON.parse(proposalItem.decision_json).options.map(
         (option) => option.effect,
@@ -263,11 +275,70 @@ describe("notify (WM-65)", () => {
     // Past TTL: one final push, then silence.
     const expired = sent(now + 15 * 60_000);
     expect(expired).toHaveLength(1);
+    expect(expired[0].title).toBe("Ci-Doctor");
     expect(expired[0].message).toBe(
       "DECISION NEEDED proposal prop-aging (ci-doctor@2): expired undecided",
     );
     expect(sent(now + 16 * 60_000)).toEqual([]);
     expect(sent(now + 60 * 60_000)).toEqual([]);
+  });
+
+  test("a dispatch proposal inbox title is action-first; Telegram keeps DECISION NEEDED (WM-896)", async () => {
+    const dir = tmp("evrt-notify-dispatch-");
+    const stub = stubNotifier(dir);
+    const db = openDb(":memory:");
+    const now = Date.now();
+    insertEvent(db, { eventId: "evt-dispatch" });
+    insertProposal(db, {
+      id: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+      eventId: "evt-dispatch",
+      agent: "dispatch@1",
+      model: "cursor-grok-4.6-high",
+      input: { ticket: "WM-862", repo: "factory" },
+      reason: "auto_approval_ineligible:dispatch_recheck_failed",
+      createdAt: new Date(now - 16 * 60_000).toISOString(),
+      ttlSeconds: 1800,
+    });
+
+    const out = notifyPending(db, {
+      now,
+      enabled: true,
+      command: stub.bin,
+      webUrl: "http://127.0.0.1:7382",
+    });
+    expect(out.sent).toHaveLength(1);
+    expect(out.sent[0].title).toBe(
+      "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+    );
+    expect(out.sent[0].message).toBe(
+      "DECISION NEEDED proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 14m",
+    );
+    const item = db
+      .query(
+        "SELECT title, refs_json, decision_json FROM inbox_items WHERE kind = 'decision_needed'",
+      )
+      .get();
+    expect(item.title).toBe("Dispatch WM-862 · factory · cursor-grok-4.6-high");
+    expect(JSON.parse(item.refs_json)).toMatchObject({
+      proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+      issue: "WM-862",
+      repo: "factory",
+    });
+    const decision = JSON.parse(item.decision_json);
+    expect(decision.question).toBe(
+      "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+    );
+    expect(decision.context).toContain("Why you're being asked");
+    expect(decision.context).toContain(
+      "Auto-approval re-check failed (see proposal)",
+    );
+    await out.deliveries;
+    expect(stub.pushes()[0]).toBe(
+      "DECISION NEEDED proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 14m",
+    );
+    expect(stub.pushes()[1]).toBe(
+      "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+    );
   });
 
   test("a proposal approved or rejected before the threshold never notifies", () => {

@@ -19,15 +19,17 @@ import {
   inboxActionPrHref,
   inboxAge,
   itemStatus,
+  kindBadgeInRow,
   matchesTab,
   prHref,
+  proposalTtlLabel,
+  sourceRunId,
   waitingCount,
   waitingLabel,
-  sourceRunId,
 } from "./Inbox";
 import { api } from "../api";
 import { clearToasts, ToastContainer } from "../components/ui";
-import type { InboxItem } from "../types";
+import type { InboxItem, Proposal } from "../types";
 import { changeInput } from "../test-render";
 
 afterEach(() => {
@@ -189,6 +191,49 @@ describe("inbox pure helpers", () => {
     expect(row.title).toBe("BLOCKED WM-303: expand paths");
   });
 
+  test("displayTitle strips a legacy DECISION NEEDED prefix (WM-896)", () => {
+    expect(
+      displayTitle(
+        item({
+          id: "legacy",
+          kind: "decision_needed",
+          title:
+            "DECISION NEEDED proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 15m",
+        }),
+      ),
+    ).toBe(
+      "proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 15m",
+    );
+    expect(
+      displayTitle(
+        item({
+          id: "dispatch",
+          kind: "decision_needed",
+          title: "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+        }),
+      ),
+    ).toBe("Dispatch WM-862 · factory · cursor-grok-4.6-high");
+  });
+
+  test("kindBadgeInRow hides the badge when the group header already names the group", () => {
+    const decide = item({ id: "d", kind: "decision_needed" });
+    const other = { ...decide, id: "o", kind: "mystery-kind" } as InboxItem;
+    expect(kindBadgeInRow(decide, { groupBy: "attention" })).toBe(false);
+    expect(kindBadgeInRow(decide, { groupBy: "kind" })).toBe(false);
+    expect(kindBadgeInRow(decide, { groupBy: "none" })).toBe(true);
+    expect(kindBadgeInRow(decide, { groupBy: "repo" })).toBe(true);
+    expect(kindBadgeInRow(other, { groupBy: "attention" })).toBe(true);
+  });
+
+  test("proposalTtlLabel is a live countdown and omitted without a TTL", () => {
+    const created = "2026-08-19T12:00:00.000Z";
+    const now = Date.parse("2026-08-19T12:15:00.000Z");
+    expect(proposalTtlLabel(created, 1800, now)).toBe("15m left");
+    expect(proposalTtlLabel(created, 1800, now + 16 * 60_000)).toBe("expired");
+    expect(proposalTtlLabel(undefined, 1800, now)).toBeNull();
+    expect(proposalTtlLabel(created, undefined, now)).toBeNull();
+  });
+
   test("PR refs resolve only with an absolute URL or a known repository", () => {
     expect(
       prHref(
@@ -255,6 +300,7 @@ describe("inbox pure helpers", () => {
 const origInbox = api.inbox;
 const origAck = api.ackInbox;
 const origResolve = api.resolveInbox;
+const origProposals = api.proposals;
 
 let ledger: InboxItem[] = [];
 
@@ -295,6 +341,7 @@ beforeEach(() => {
     }),
   ];
   api.inbox = mock(async () => ({ items: ledger }));
+  api.proposals = mock(async () => ({ proposals: [] }));
   api.ackInbox = mock(async (id: string) => {
     ledger = ledger.map((it) => (it.id === id ? { ...it, ackedAt: T2 } : it));
     return { item: ledger.find((it) => it.id === id)! };
@@ -318,6 +365,7 @@ afterEach(() => {
   api.inbox = origInbox;
   api.ackInbox = origAck;
   api.resolveInbox = origResolve;
+  api.proposals = origProposals;
 });
 
 function renderInbox(props: Partial<React.ComponentProps<typeof Inbox>> = {}) {
@@ -361,6 +409,48 @@ describe("Inbox view", () => {
     // Group headers in triage order.
     expect(view.getByText("Decide")).toBeTruthy();
     expect(view.getByText("Red")).toBeTruthy();
+    // Group headers already identify Decide/Red — the kind badge stays off.
+    expect(view.queryByText("BLOCKED")).toBeNull();
+    expect(view.queryByText("CI RED")).toBeNull();
+  });
+
+  test("proposal rows show a live right-aligned TTL and hide it without one", async () => {
+    ledger = [
+      item({
+        id: "inbox_dispatch",
+        kind: "decision_needed",
+        title: "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+        refs: { proposalId: "prop_aging", issue: "WM-862", repo: "factory" },
+        decision: {
+          schemaVersion: "factory.decision-request/v1",
+          question:
+            "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+          context:
+            "**Why you're being asked.** Auto-approval re-check failed (see proposal)",
+          options: [
+            { id: "approve", label: "Approve proposal", effect: "dismiss" },
+            { id: "dismiss", label: "Not now", effect: "dismiss" },
+          ],
+        },
+      }),
+    ];
+    api.proposals = mock(async () => ({
+      proposals: [
+        {
+          id: "prop_aging",
+          created_at: new Date(Date.now() - 16 * 60_000).toISOString(),
+          ttl_seconds: 1800,
+        } as Proposal,
+      ],
+    }));
+    const { view } = renderInbox();
+    await waitFor(() =>
+      view.getByText("Dispatch WM-862 · factory · cursor-grok-4.6-high"),
+    );
+    expect(view.getByLabelText(/Time left/).textContent).toMatch(
+      /(?:\d+m left|expired)/,
+    );
+    expect(view.queryByText("decision_needed")).toBeNull();
   });
 
   test("list and detail show how many runs wait on one answer", async () => {

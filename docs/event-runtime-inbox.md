@@ -365,8 +365,16 @@ configuration faults that show as anomalies, not questions for a person.
   `dismiss` — never `authorise` (§1, out of scope: nothing merges from here).
 - **Proposals.** `decision_needed` / `proposal_expired` items get the
   `proposal` default (`approve_proposal` / `reject_proposal` + required
-  `text` gated on reject). This replaces WM-287's hardcoded approve/reject
-  buttons with the same behaviour expressed as a template.
+  `text` gated on reject). The inbox title is action-first from
+  `proposalSubject(spec)` (dispatch: `Dispatch <ticket> · <repo> · <model>`;
+  other agents: `<Agent verb> <primary input>`). Expiry is a live countdown
+  on the row, never baked into the title. Telegram still uses
+  `DECISION NEEDED proposal <id> (<agent>): …`. The decision card question
+  names the run (`Run dispatch@1 for WM-862 (factory) on <model>?`), a
+  **Why you're being asked** line renders `proposals.reason` in plain
+  English, and the Linear ticket + proposal links sit on the card. This
+  replaces WM-287's hardcoded approve/reject buttons with the same
+  behaviour expressed as a template.
 
 ### 4.3 Default templates
 

@@ -32,6 +32,7 @@ import path from "node:path";
 import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
 import { txImmediate } from "./db.mjs";
 import { templateFor } from "./decision-templates.mjs";
+import { proposalSubject } from "./proposal-subject.mjs";
 
 export const DEFAULT_NOTIFY_CMD = `python3 ${path.join(homedir(), "Develop", "hdkiller", "scripts", "notify.py")}`;
 
@@ -97,15 +98,16 @@ function alreadyNotified(db, kind, target) {
  *   - every `human_needed` event not yet notified —
  *     `BLOCKED <event-type> <eventId>: <reason>`
  *   - every open watched 'run' proposal past 50% of its TTL —
+ *     inbox title from `proposalSubject(spec)`; Telegram
  *     `DECISION NEEDED proposal <id> (<agent>): expires in <n>m`
  *   - every open watched 'run' proposal past its full TTL, once more —
- *     `DECISION NEEDED proposal <id> (<agent>): expired undecided`
+ *     same inbox title; Telegram `… expired undecided`
  *
  * A proposal decided before the 50% threshold is no longer `status = 'open'`
  * and never appears here. Scheduled auto-approved proposals are decided
  * within a tick of creation, so they never age into either threshold.
  *
- * @returns {Array<{ kind: string, dedupKind?: string, target: string, title: string, refs: object, source: string }>}
+ * @returns {Array<{ kind: string, dedupKind?: string, target: string, title: string, message?: string, refs: object, source: string }>}
  */
 export function pendingNotifications(db, { now = Date.now() } = {}) {
   ensureNotifyLog(db);
@@ -131,6 +133,7 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
       dedupKind: KIND_HUMAN_NEEDED,
       target,
       title: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
+      message: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
       refs: { eventSource: e.source, eventId: e.eventId },
       source: "serve:notify",
       decision: templateFor("BLOCKED", {
@@ -152,26 +155,36 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
     if (ageMs < ttlMs / 2) continue;
     const spec = p.spec_json ? JSON.parse(p.spec_json) : null;
     const agent = spec?.agent ?? "?";
+    const title = proposalSubject(spec);
+    const issue =
+      typeof spec?.input?.ticket === "string" ? spec.input.ticket : null;
+    const repo = typeof spec?.input?.repo === "string" ? spec.input.repo : null;
+    const refs = {
+      proposalId: p.id,
+      eventSource: p.event_source,
+      eventId: p.event_id,
+      ...(issue ? { issue } : {}),
+      ...(repo ? { repo } : {}),
+    };
+    const decision = templateFor(
+      ageMs > ttlMs ? KIND_PROPOSAL_EXPIRED : KIND_DECISION_NEEDED,
+      {
+        producer: "proposal",
+        refs,
+        spec,
+        reason: p.reason,
+      },
+    );
     if (ageMs > ttlMs) {
       if (!alreadyNotified(db, KIND_PROPOSAL_EXPIRED, p.id)) {
         pending.push({
           kind: KIND_PROPOSAL_EXPIRED,
           target: p.id,
-          title: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
-          refs: {
-            proposalId: p.id,
-            eventSource: p.event_source,
-            eventId: p.event_id,
-          },
+          title,
+          message: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
+          refs,
           source: "serve:notify",
-          decision: templateFor(KIND_PROPOSAL_EXPIRED, {
-            producer: "proposal",
-            refs: {
-              proposalId: p.id,
-              eventSource: p.event_source,
-              eventId: p.event_id,
-            },
-          }),
+          decision,
           dedupeKey: `${KIND_PROPOSAL_EXPIRED}:${p.id}`,
         });
       }
@@ -181,21 +194,11 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
         kind: KIND_DECISION_NEEDED,
         dedupKind: DEDUP_PROPOSAL_TTL,
         target: p.id,
-        title: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
-        refs: {
-          proposalId: p.id,
-          eventSource: p.event_source,
-          eventId: p.event_id,
-        },
+        title,
+        message: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
+        refs,
         source: "serve:notify",
-        decision: templateFor(KIND_DECISION_NEEDED, {
-          producer: "proposal",
-          refs: {
-            proposalId: p.id,
-            eventSource: p.event_source,
-            eventId: p.event_id,
-          },
-        }),
+        decision,
         dedupeKey: `${KIND_DECISION_NEEDED}:${p.id}`,
       });
     }
@@ -296,33 +299,48 @@ export function notifyPending(
       // create a row for one referent.
       if (alreadyNotified(db, dedupKind, n.target)) return null;
       const item = createInboxItem(db, n, { now });
+      const pushMessage = n.message ?? n.title;
       db.query(
         `INSERT INTO notify_log (kind, target, message, sent_at, inbox_item_id)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run(dedupKind, n.target, n.title, at, item.id);
+      ).run(dedupKind, n.target, pushMessage, at, item.id);
       return item;
     });
     if (!created) continue;
-    const notification = { ...n, message: n.title, inboxItemId: created.id };
+    const pushMessage = n.message ?? n.title;
+    const notification = {
+      ...n,
+      message: pushMessage,
+      inboxItemId: created.id,
+    };
     log(`inbox ${n.kind} ${n.target}: ${n.title}`);
     if (!enabled) continue;
     sent.push(notification);
-    log(`notify ${n.kind} ${n.target}: ${n.title}`);
+    log(`notify ${n.kind} ${n.target}: ${pushMessage}`);
     deliveries.push(
-      deliverInboxItem(db, created.id, { command, send, webUrl, now }).then(
-        (outcome) => {
-          try {
-            db.query(
-              `UPDATE notify_log SET exit_code = ?, error = ? WHERE kind = ? AND target = ?`,
-            ).run(outcome.exitCode, outcome.error, dedupKind, n.target);
-          } catch {
-            // db already closed (shutdown mid-delivery) — the log line below is the record
+      deliverInboxItem(db, created.id, {
+        command,
+        send: (cmd, content) => {
+          const lines = String(content).split("\n");
+          if (lines[0] === created.title && pushMessage !== created.title) {
+            lines[0] = pushMessage;
           }
-          if (!outcome.ok)
-            log(`notify ${n.kind} ${n.target} failed: ${outcome.error}`);
-          return { ...notification, ...outcome };
+          return send(cmd, lines.join("\n"));
         },
-      ),
+        webUrl,
+        now,
+      }).then((outcome) => {
+        try {
+          db.query(
+            `UPDATE notify_log SET exit_code = ?, error = ? WHERE kind = ? AND target = ?`,
+          ).run(outcome.exitCode, outcome.error, dedupKind, n.target);
+        } catch {
+          // db already closed (shutdown mid-delivery) — the log line below is the record
+        }
+        if (!outcome.ok)
+          log(`notify ${n.kind} ${n.target} failed: ${outcome.error}`);
+        return { ...notification, ...outcome };
+      }),
     );
   }
   return { sent, deliveries: Promise.all(deliveries) };

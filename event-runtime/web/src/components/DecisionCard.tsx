@@ -13,6 +13,7 @@ import type {
   DecisionResponseInput,
   InboxDecisionResponse,
   InboxItem,
+  InboxRefs,
 } from "../types";
 import {
   applicableFields,
@@ -22,12 +23,16 @@ import {
 } from "../lib/decisionForm";
 import { decisionRequestHash } from "../lib/decision";
 import { MarkdownView } from "./RunTrace";
-import { Button } from "./ui";
+import { Button, JumpLink, shortId } from "./ui";
+
+const LINEAR_ISSUE_URL = "https://linear.app/watt-mind/issue/";
 
 export interface DecisionCardProps {
   itemId: string;
   request: DecisionRequest;
   response?: InboxDecisionResponse | null;
+  refs?: InboxRefs;
+  onJumpProposal?: (id: string) => void;
   connected?: boolean;
   onItemChange?: (item: InboxItem) => void;
   apiCalls?: {
@@ -39,6 +44,41 @@ export interface DecisionCardProps {
 
 const controlClass =
   "w-full rounded-md border border-(--border-strong) bg-(--surface-0) px-2.5 py-1.5 text-[12px] text-(--text) outline-none placeholder:text-(--text-faint) focus:border-(--accent)";
+
+function DecisionCardRefs({
+  refs,
+  onJumpProposal,
+}: {
+  refs: InboxRefs;
+  onJumpProposal?: (id: string) => void;
+}) {
+  if (!refs.issue && !refs.proposalId) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+      {refs.issue && (
+        <JumpLink
+          href={`${LINEAR_ISSUE_URL}${encodeURIComponent(refs.issue)}`}
+          title="Open in Linear"
+        >
+          {refs.issue}
+        </JumpLink>
+      )}
+      {refs.proposalId &&
+        (onJumpProposal ? (
+          <JumpLink
+            onClick={() => onJumpProposal(refs.proposalId!)}
+            title={`Open proposal ${refs.proposalId}`}
+          >
+            {shortId(refs.proposalId)}
+          </JumpLink>
+        ) : (
+          <span className="mono text-(--text-dim)" title={refs.proposalId}>
+            {shortId(refs.proposalId)}
+          </span>
+        ))}
+    </div>
+  );
+}
 
 function responseFields(
   request: DecisionRequest,
@@ -83,6 +123,8 @@ export function DecisionCard({
   itemId,
   request,
   response = null,
+  refs = {},
+  onJumpProposal,
   connected = true,
   onItemChange,
   apiCalls = {
@@ -261,6 +303,7 @@ export function DecisionCard({
           <h2 className="text-[14px] font-semibold text-(--text)">
             {currentRequest.question}
           </h2>
+          <DecisionCardRefs refs={refs} onJumpProposal={onJumpProposal} />
           <div className="mt-3 rounded-md bg-(--surface-1) p-3 text-[12px]">
             <div className="font-semibold text-(--text)">
               This question no longer needs an answer.
@@ -298,6 +341,7 @@ export function DecisionCard({
         <h2 className="text-[14px] font-semibold text-(--text)">
           {currentRequest.question}
         </h2>
+        <DecisionCardRefs refs={refs} onJumpProposal={onJumpProposal} />
         <div className="mt-3 rounded-md bg-(--surface-1) p-3 text-[12px]">
           <div className="font-semibold text-(--text)">
             {option?.label ?? currentResponse.optionId}
@@ -359,6 +403,7 @@ export function DecisionCard({
       <h2 className="text-[14px] font-semibold text-(--text)">
         {currentRequest.question}
       </h2>
+      <DecisionCardRefs refs={refs} onJumpProposal={onJumpProposal} />
       {currentRequest.context && (
         <MarkdownView
           text={currentRequest.context}

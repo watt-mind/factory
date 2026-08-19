@@ -158,6 +158,55 @@ describe("DecisionCard", () => {
     ).toBeTruthy();
   });
 
+  test("proposal cards show ticket and proposal links on the card (WM-896)", () => {
+    const onJumpProposal = mock(() => {});
+    const view = render(
+      <DecisionCard
+        itemId="inbox_dispatch"
+        request={{
+          schemaVersion: "factory.decision-request/v1",
+          question:
+            "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+          context:
+            "**Why you're being asked.** Auto-approval re-check failed (see proposal)",
+          options: [
+            {
+              id: "approve",
+              label: "Approve proposal",
+              effect: "approve_proposal",
+              tone: "primary",
+            },
+            { id: "dismiss", label: "Not now", effect: "dismiss" },
+          ],
+        }}
+        refs={{
+          issue: "WM-862",
+          repo: "factory",
+          proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+        }}
+        onJumpProposal={onJumpProposal}
+        apiCalls={apiCalls}
+      />,
+    );
+    expect(
+      view.getByText(
+        "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+      ),
+    ).toBeTruthy();
+    expect(view.getByText(/Why you're being asked/)).toBeTruthy();
+    expect(
+      view.getByText(/Auto-approval re-check failed \(see proposal\)/),
+    ).toBeTruthy();
+    const ticket = view.getByRole("link", { name: "WM-862" });
+    expect(ticket.getAttribute("href")).toBe(
+      "https://linear.app/watt-mind/issue/WM-862",
+    );
+    fireEvent.click(view.getByText(/prop_2dda/));
+    expect(onJumpProposal).toHaveBeenCalledWith(
+      "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+    );
+  });
+
   test("keeps submit disabled until confirmation and at least one path are chosen", () => {
     const view = render(
       <DecisionCard

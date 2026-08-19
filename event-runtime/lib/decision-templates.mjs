@@ -1,4 +1,8 @@
 /** Default, schema-valid decision requests for runtime inbox producers. */
+import {
+  proposalDecisionContext,
+  proposalQuestion,
+} from "./proposal-subject.mjs";
 
 const dismiss = () => ({
   id: "dismiss",
@@ -122,7 +126,7 @@ function mergeEscalation(refs) {
   };
 }
 
-function proposal(refs) {
+function proposal(refs, { spec, reason } = {}) {
   const options = [];
   if (refs.proposalId) {
     options.push({
@@ -139,11 +143,11 @@ function proposal(refs) {
     });
   }
   options.push(dismiss());
+  const context = proposalDecisionContext(reason);
   return {
     schemaVersion: "factory.decision-request/v1",
-    question: refs.proposalId
-      ? `Decide proposal ${refs.proposalId}`
-      : "Should this proposal notification be dismissed?",
+    question: proposalQuestion(spec, { proposalId: refs.proposalId }),
+    ...(context ? { context } : {}),
     options,
     fields: refs.proposalId
       ? [
@@ -182,12 +186,16 @@ export function replannedProposalContext(previousProposalId, proposalId) {
  * template when several producers share a kind. `context` is the optional §2.1
  * free-text preamble; omitted rather than serialised when absent.
  */
-export function templateFor(kind, { producer, refs = {}, context } = {}) {
+export function templateFor(
+  kind,
+  { producer, refs = {}, context, spec, reason } = {},
+) {
   const selected = producer ?? String(kind ?? "").toLowerCase();
   const builder = BUILDERS[selected];
   if (!builder)
     throw new Error(`unknown decision template producer: ${selected}`);
-  const request = builder(refs);
+  const request =
+    selected === "proposal" ? proposal(refs, { spec, reason }) : builder(refs);
   if (context !== undefined) {
     if (typeof context !== "string" || context.trim() === "") {
       throw new Error("decision template context must be a non-empty string");

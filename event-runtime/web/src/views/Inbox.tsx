@@ -346,6 +346,9 @@ function refPrefixIsVisible(prefix: string, item: InboxItem): boolean {
 /** Keep the row focused on the action by removing labels already shown beside it. */
 export function displayTitle(item: InboxItem): string {
   let title = item.title.trimStart();
+  if (/^DECISION NEEDED\s+/i.test(title)) {
+    title = title.replace(/^DECISION NEEDED\s+/i, "");
+  }
   const knownKinds = [
     ...new Set([item.kind, ...INBOX_GROUPS.flatMap((group) => group.kinds)]),
   ].sort((a, b) => b.length - a.length);
@@ -371,6 +374,37 @@ export function displayTitle(item: InboxItem): string {
   if (refPrefix && refPrefixIsVisible(refPrefix[1], item))
     title = title.slice(refPrefix[0].length);
   return title || item.title;
+}
+
+/**
+ * Kind badge in the list row is redundant when a group header already names
+ * the group. Other (unknown kinds) still needs the badge; so does an
+ * ungrouped table, or grouping by a field that is not kind/attention.
+ */
+export function kindBadgeInRow(
+  item: InboxItem,
+  display: { groupBy: string },
+): boolean {
+  if (groupOf(item.kind).id === "other") return true;
+  if (display.groupBy === "attention" || display.groupBy === "kind")
+    return false;
+  return true;
+}
+
+/** Live TTL remaining from proposal `created_at + ttl_seconds`. */
+export function proposalTtlLabel(
+  createdAt: string | undefined,
+  ttlSeconds: number | undefined,
+  now: number,
+): string | null {
+  if (!createdAt || ttlSeconds == null || ttlSeconds <= 0) return null;
+  const expiry = new Date(createdAt).getTime() + ttlSeconds * 1000;
+  if (!Number.isFinite(expiry)) return null;
+  const leftMs = expiry - now;
+  if (leftMs <= 0) return "expired";
+  const minutes = Math.max(1, Math.ceil(leftMs / 60_000));
+  if (minutes >= 60) return `${Math.ceil(minutes / 60)}h left`;
+  return `${minutes}m left`;
 }
 
 /** WM-559 will move this precision into shared `Ago`; keep the Inbox local until then. */
@@ -425,6 +459,7 @@ export function NeedsYouRow({
   children,
 }: NeedsYouRowProps) {
   const hues = hue ? { ...INBOX_KIND_HUES, [kind]: hue } : INBOX_KIND_HUES;
+  const showKind = groupOf(kind).id === "other";
   const open = () => onOpen?.();
   return (
     <div
@@ -443,7 +478,7 @@ export function NeedsYouRow({
           : ""
       } ${selected ? "row-selected" : ""}`}
     >
-      <StateBadge state={kind} hues={hues} dot={false} />
+      {showKind && <StateBadge state={kind} hues={hues} dot={false} />}
       <span
         className="min-w-0 flex-1 truncate text-[12px] text-(--text)"
         title={tooltip ?? title}
@@ -694,6 +729,18 @@ export function Inbox({
     ...refetchIntervals.primary,
   });
   const items = query.data?.items ?? [];
+  const proposalsQuery = useQuery({
+    queryKey: ["proposals"],
+    queryFn: api.proposals,
+    ...refetchIntervals.primary,
+  });
+  const proposalsById = useMemo(() => {
+    const map = new Map<string, { created_at: string; ttl_seconds: number }>();
+    for (const proposal of proposalsQuery.data?.proposals ?? []) {
+      map.set(proposal.id, proposal);
+    }
+    return map;
+  }, [proposalsQuery.data]);
 
   const [tab, setTab] = useState<InboxTab>("open");
   const [filter, setFilter] = useState("");
@@ -1284,6 +1331,16 @@ export function Inbox({
                 {(() => {
                   const renderRow = (item: InboxItem) => {
                     const delivery = deliveryState(item);
+                    const proposal = item.refs.proposalId
+                      ? proposalsById.get(item.refs.proposalId)
+                      : undefined;
+                    const ttl = proposalTtlLabel(
+                      proposal?.created_at,
+                      proposal?.ttl_seconds,
+                      now,
+                    );
+                    const showKind =
+                      show.has("kind") && kindBadgeInRow(item, display);
                     return (
                       <tr
                         key={item.id}
@@ -1315,30 +1372,42 @@ export function Inbox({
                         )}
                         {show.has("kind") && (
                           <td className={`${tdCls} w-32`}>
-                            <StateBadge
-                              state={item.kind}
-                              hues={INBOX_KIND_HUES}
-                              dot={false}
-                            />
+                            {showKind && (
+                              <StateBadge
+                                state={item.kind}
+                                hues={INBOX_KIND_HUES}
+                                dot={false}
+                              />
+                            )}
                           </td>
                         )}
                         {show.has("title") && (
                           <td className={`${tdCls} min-w-40 max-w-0`}>
-                            <div
-                              className="truncate text-(--text)"
-                              title={item.title}
-                            >
-                              {item.decision && !item.response && (
+                            <div className="flex min-w-0 items-center gap-2">
+                              <div
+                                className="min-w-0 flex-1 truncate text-(--text)"
+                                title={item.title}
+                              >
+                                {item.decision && !item.response && (
+                                  <span
+                                    className="mono mr-1.5 text-(--hue-warn)"
+                                    aria-label="Decision required"
+                                  >
+                                    ?
+                                  </span>
+                                )}
+                                {displayTitle(item)}
+                              </div>
+                              {ttl && (
                                 <span
-                                  className="mono mr-1.5 text-(--hue-warn)"
-                                  aria-label="Decision required"
+                                  className="mono shrink-0 text-[11px] text-(--text-faint)"
+                                  aria-label={`Time left ${ttl}`}
                                 >
-                                  ?
+                                  {ttl}
                                 </span>
                               )}
-                              {displayTitle(item)}
                               {waitingLabel(waitingCount(item)) && (
-                                <span className="ml-1.5 text-(--text-faint)">
+                                <span className="ml-1.5 shrink-0 text-(--text-faint)">
                                   {waitingCount(item)} waiting
                                 </span>
                               )}
@@ -1463,11 +1532,13 @@ export function Inbox({
                 className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
                 aria-current="page"
               >
-                <StateBadge
-                  state={sel.kind}
-                  hues={INBOX_KIND_HUES}
-                  dot={false}
-                />
+                {groupOf(sel.kind).id === "other" && (
+                  <StateBadge
+                    state={sel.kind}
+                    hues={INBOX_KIND_HUES}
+                    dot={false}
+                  />
+                )}
                 <span className="mono truncate" title={sel.id}>
                   {shortId(sel.id)}
                 </span>
@@ -1587,6 +1658,8 @@ export function Inbox({
                 itemId={sel.id}
                 request={sel.decision}
                 response={sel.response}
+                refs={sel.refs}
+                onJumpProposal={onJumpProposal}
                 connected={connected}
                 onItemChange={invalidate}
               />

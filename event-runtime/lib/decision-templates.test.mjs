@@ -43,6 +43,35 @@ describe("default decision templates (WM-390)", () => {
     );
   });
 
+  test("a dispatch proposal names the ticket, repo, model, and why-line (WM-896)", () => {
+    const refs = {
+      proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
+      issue: "WM-862",
+      repo: "factory",
+    };
+    const spec = {
+      agent: "dispatch@1",
+      model: "cursor-grok-4.6-high",
+      input: { ticket: "WM-862", repo: "factory" },
+    };
+    const request = templateFor("decision_needed", {
+      producer: "proposal",
+      refs,
+      spec,
+      reason: "auto_approval_ineligible:dispatch_recheck_failed",
+    });
+    expect(validateDecisionRequest(request, { refs })).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(request.question).toBe(
+      "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
+    );
+    expect(request.context).toBe(
+      "**Why you're being asked.** Auto-approval re-check failed (see proposal)",
+    );
+  });
+
   test("a re-planned proposal reuses the proposal template with a re-review context (WM-714)", () => {
     const refs = { proposalId: "prop_2" };
     const context = replannedProposalContext("prop_1", "prop_2");
