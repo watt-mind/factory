@@ -228,7 +228,11 @@ case "$cmd" in
     fi
 
     # Unreachable runtime (or an unstructured legacy message): preserve the
-    # old argv/stdin transport exactly.
+    # old argv/stdin transport exactly. WM-795 gave `factory notify`'s callers
+    # (runners/run-agent.sh) a policy-configurable command via lib/notify.mjs,
+    # but this direct fallback still hardcodes the operator's private
+    # notify.py path; WM-879 owns dropping it in favour of the same
+    # config/policy.yaml resolution.
     if [[ "$_notify_stdin" -eq 1 ]]; then
       printf '%s' "$_notify_message" | exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" -
     else

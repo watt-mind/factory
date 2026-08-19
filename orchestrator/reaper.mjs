@@ -12,7 +12,7 @@
  * crashed agent this exists to clean up.
  *
  * A claim is stale when the newest of {last comment, startedAt} is older than the
- * threshold. The protocol in docs/orgs/linear.md requires a heartbeat at every phase
+ * threshold. The protocol in docs/protocol.md requires a heartbeat at every phase
  * change and at least every 20 minutes, so 45 minutes of silence means the agent is
  * gone.
  *
@@ -409,7 +409,7 @@ export async function reclaim(
       : `Its \`ai:in-progress\` marker was cleared; state and assignee are unchanged.`) +
     `\n\n` +
     `If the agent is still working, it must re-claim the ticket before ` +
-    `continuing — see the claim protocol in \`docs/orgs/linear.md\`.`;
+    `continuing — see the claim protocol in \`docs/protocol.md\`.`;
 
   await gql(
     `

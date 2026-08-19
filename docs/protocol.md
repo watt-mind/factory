@@ -141,7 +141,11 @@ A ticket is dispatchable only when it carries all five sections:
    concurrency key: the dispatcher refuses to run two tickets whose sets
    intersect. Tight globs beat convenient ones. Generated outputs must be
    owned with their source (`shared/` implies `dist/**` and `plugins/**` in
-   this repo).
+   this repo). Write the section as **one path or glob per bullet**
+   (`- event-runtime/lib/foo.mjs`) — the planner's parser keeps only bullets
+   that look like a path and contain no spaces, so a comma-separated list on
+   one bullet is silently dropped and the ticket either fails to dispatch
+   (`owned_paths_unknown`) or dispatches with a narrower scope than written.
 5. **Verification Command** — a command that actually runs in this repo.
    For non-code work, an evidence line replaces it.
 

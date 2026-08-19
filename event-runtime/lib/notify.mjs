@@ -9,6 +9,12 @@
  * completions) never notifies: the channel is only for things awaiting a
  * human, or it gets muted.
  *
+ * WM-795 gave the rest of the factory (`lib/notify.mjs`, `factory notify`) a
+ * policy-configurable transport with no in-tree default; this module's
+ * `DEFAULT_NOTIFY_CMD` still hardcodes the operator's private `notify.py`
+ * path pending WM-879, which owns dropping that default here (and in
+ * `bin/factory`) in favour of the same `config/policy.yaml` resolution.
+ *
  * Design (ticket WM-65):
  *   - Off by default; FACTORY_EVENT_NOTIFY=1 enables, FACTORY_EVENT_NOTIFY_CMD
  *     replaces the transport (tests point it at a stub binary).
