@@ -62,6 +62,30 @@ export interface Proposal {
   repos: string[];
 }
 
+/**
+ * One persisted `approve.before` hook decision — oldest first on
+ * `GET /proposals/:id` as `hookDecisions` (WM-842 / WM-864).
+ */
+export interface HookDecision {
+  id: number;
+  at: string;
+  point: string;
+  hookId: string;
+  source: string;
+  proposalId: string | null;
+  runId: string | null;
+  decision: string;
+  reason: string | null;
+  durationMs: number;
+  error: string | null;
+}
+
+/** `GET /proposals/:id` — the list row plus every hook that voted on it. */
+export interface ProposalDetail {
+  proposal: Proposal;
+  hookDecisions: HookDecision[];
+}
+
 export interface AdmittedEvent {
   source: string;
   eventId: string;

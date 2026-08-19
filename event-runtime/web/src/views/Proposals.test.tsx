@@ -24,6 +24,32 @@ afterEach(() => {
   cleanup();
   restoreApi();
   localStorage.clear();
+  globalThis.fetch = realFetch;
+});
+
+const realFetch = globalThis.fetch;
+
+function stubProposalDetailFetch(
+  hookDecisions: unknown[] = [],
+  proposalId?: string,
+) {
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!/\/api\/proposals\/[^/?]+\/?$/.test(url)) {
+      return realFetch(input as RequestInfo);
+    }
+    return new Response(
+      JSON.stringify({
+        proposal: { id: proposalId ?? "prop" },
+        hookDecisions,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+}
+
+beforeEach(() => {
+  stubProposalDetailFetch();
 });
 
 const noop = () => {};
@@ -1803,6 +1829,80 @@ describe("Proposals detail pane width (WM-685)", () => {
           view.container.querySelector("aside")?.className ?? "";
         expect(className).toContain("w-[440px]");
         expect(className).not.toContain("w-[460px]");
+      },
+    );
+  });
+});
+
+describe("Proposals hook decisions (WM-864)", () => {
+  test("detail pane lists hook id, decision, and reason for each hook", async () => {
+    stubProposalDetailFetch([
+      {
+        id: 1,
+        at: NOW,
+        point: "approve.before",
+        hookId: "factory:escalation-labels",
+        source: "builtin",
+        proposalId: "prop_hooks",
+        runId: "run_hooks",
+        decision: "allow",
+        reason: null,
+        durationMs: 2,
+        error: null,
+      },
+      {
+        id: 2,
+        at: NOW,
+        point: "approve.before",
+        hookId: "acme/x:gate",
+        source: "extension:acme/x",
+        proposalId: "prop_hooks",
+        runId: "run_hooks",
+        decision: "deny",
+        reason: "repo_gated",
+        durationMs: 4,
+        error: null,
+      },
+    ]);
+    const proposal = stubProposal("prop_hooks", "open", {
+      agent: "dispatch@1",
+      reason: "auto_approval_ineligible:dispatch_ineligible:repo_gated",
+    });
+
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [proposal] }),
+        status: async () => createStatusFixture(),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const r = renderProposals({ focusProposalId: "prop_hooks" });
+        await waitFor(() => r.getByText("factory:escalation-labels"));
+        expect(r.getByText("acme/x:gate")).toBeTruthy();
+        expect(r.getByText("allow")).toBeTruthy();
+        expect(r.getByText("deny")).toBeTruthy();
+        expect(r.getByText("repo_gated")).toBeTruthy();
+        expect(r.getByText("Hook decisions")).toBeTruthy();
+      },
+    );
+  });
+
+  test("empty hookDecisions still names the section so the operator knows none ran", async () => {
+    stubProposalDetailFetch([]);
+    const proposal = stubProposal("prop_hooks_empty", "open");
+
+    await withApi(
+      {
+        proposals: async () => ({ proposals: [proposal] }),
+        status: async () => createStatusFixture(),
+        runs: async () => ({ runs: [] }),
+        events: async () => ({ events: [] }),
+      },
+      async () => {
+        const r = renderProposals({ focusProposalId: "prop_hooks_empty" });
+        await waitFor(() => r.getByText("Hook decisions"));
+        expect(r.getByText("No hook ran for this proposal.")).toBeTruthy();
       },
     );
   });
