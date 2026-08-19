@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Sweep applied",
+  "sections": [
+    {
+      "path": "/applied",
+      "as": "table",
+      "label": "Applied",
+      "columns": ["issueId", "action"],
+      "formats": { "issueId": "issue" }
+    },
+    {
+      "path": "/repo",
+      "as": "keyvalue",
+      "label": "Repo",
+      "formats": { "": "repo" }
+    }
+  ]
+}
