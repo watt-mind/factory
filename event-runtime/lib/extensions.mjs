@@ -487,8 +487,10 @@ function secretsFilePath() {
 
 /**
  * Parse `~/.factory/secrets.env` once (dotenv, owner-only mode). A missing
- * or group/world-readable file contributes nothing — secrets then come only
- * from `process.env`.
+ * file contributes nothing; a group/world-readable file also contributes
+ * nothing — secrets then come only from `process.env` — but is not silent
+ * about it: a one-line warning names the file and its mode so an operator
+ * can `chmod 600` it, without failing the load.
  */
 function loadSecretsFile() {
   if (secretsFileCache !== undefined) return secretsFileCache;
@@ -501,7 +503,13 @@ function loadSecretsFile() {
   } catch {
     return secretsFileCache;
   }
-  if (!stat.isFile() || (stat.mode & 0o077) !== 0) return secretsFileCache;
+  if (!stat.isFile()) return secretsFileCache;
+  if ((stat.mode & 0o077) !== 0) {
+    console.warn(
+      `${file}: mode ${(stat.mode & 0o777).toString(8)} is group/world-readable — ignoring it for secrets (chmod 600 ${file})`,
+    );
+    return secretsFileCache;
+  }
   try {
     secretsFileCache = parseDotenv(readFileSync(file, "utf8"));
   } catch {

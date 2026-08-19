@@ -8,7 +8,11 @@ import path from "node:path";
 import { configView, redactSecrets } from "./api-config.mjs";
 import { makeServer as makeApiServer } from "./api-test-helpers.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
-import { loadExtensions } from "./extensions.mjs";
+import {
+  extensionSecretEnvVar,
+  loadExtensions,
+  resetExtensionSecretsCache,
+} from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
 
 const SAMPLE_EXTENSION = path.join(
@@ -396,6 +400,41 @@ describe("GET /config view", () => {
     expect(section.extensions[0].schema.properties.apiToken.format).toBe(
       "secret",
     );
+  });
+
+  test("GET /config over real HTTP: an env-backed secret value never appears in the response body, only { set, source }", async () => {
+    const SECRET_LITERAL = "raw-secret-should-never-leak-9f31a2";
+    const envVar = extensionSecretEnvVar("sample", "apiToken");
+    expect(envVar).toBe("FACTORY_EXT_SAMPLE_API_TOKEN");
+    const prevEnv = process.env[envVar];
+    process.env[envVar] = SECRET_LITERAL;
+    resetExtensionSecretsCache();
+    let apiServer;
+    try {
+      await loadExtensions({
+        policy: {
+          extensions: [{ path: SAMPLE_EXTENSION, config: { greeting: "hi" } }],
+        },
+        packRoots: [],
+      });
+      apiServer = await makeServer({ configRoot: fixtureRoot() });
+      const response = await fetch(apiServer.url("/config"));
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      // Grep the raw response text, not just the parsed value, for the literal.
+      expect(text).not.toContain(SECRET_LITERAL);
+      const body = JSON.parse(text);
+      const section = body.sections.find((s) => s.id === "extensions");
+      const sample = section.extensions.find(
+        (ext) => ext.name === "factory/sample",
+      );
+      expect(sample.values.apiToken).toEqual({ set: true, source: "env" });
+    } finally {
+      apiServer?.close();
+      if (prevEnv === undefined) delete process.env[envVar];
+      else process.env[envVar] = prevEnv;
+      resetExtensionSecretsCache();
+    }
   });
 
   test("GET /config redacts secret-looking keys in the policy section, not only extension values", () => {
