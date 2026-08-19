@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "CI doctor",
+  "summary": "/summary",
+  "status": {
+    "path": "/verdict",
+    "tone": { "TICKET": "warn", "ENV": "error", "FLAKE": "muted" }
+  },
+  "sections": [
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Diagnosis",
+      "keys": ["culprit", "suggestedFix"]
+    },
+    {
+      "path": "/evidenceLines",
+      "as": "list",
+      "label": "Evidence"
+    }
+  ]
+}
