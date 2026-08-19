@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Sweep plan",
+  "summary": "/summary",
+  "status": {
+    "path": "/recommendation",
+    "tone": { "SWEEP": "ok", "NOOP": "muted" }
+  },
+  "sections": [
+    {
+      "path": "/plan",
+      "as": "table",
+      "label": "Plan",
+      "columns": ["issueId", "action", "reason"],
+      "groupBy": "action",
+      "formats": { "issueId": "issue" },
+      "tone": {
+        "action": {
+          "retire-shipped": "ok",
+          "mark-duplicate": "muted",
+          "comment-evidence": "neutral"
+        }
+      }
+    },
+    {
+      "path": "/repo",
+      "as": "keyvalue",
+      "label": "Repo",
+      "formats": { "": "repo" }
+    }
+  ]
+}
