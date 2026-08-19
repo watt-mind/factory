@@ -159,7 +159,7 @@ describe("registry", () => {
     // Regenerated (WM-907 follow-up): merge-review.md defines
     // fix.withinOwnedPaths (operational fixes are always true); re-pinned.
     const expected =
-      "sha256:PLACEHOLDER";
+      "sha256:e25fa469ba29d08dcabf8b3e2288382c10b995a367faf7e11f597bf7da7dde36";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
