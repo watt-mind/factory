@@ -349,9 +349,9 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
         loopEntry("factory.ship.requested", repo, "7d"),
       );
     }
-    // WM-576: the Factory full-set merge sweep runs every 15m as the fallback behind per-PR scoped scans.
+    // WM-576: the Factory full-set merge sweep runs every 4h as the fallback behind per-PR scoped scans.
     expect(registry.schedules["merge-factory"]).toEqual(
-      loopEntry("factory.merge.requested", "factory", "15m", {
+      loopEntry("factory.merge.requested", "factory", "4h", {
         approval: "auto",
         enabled: true,
       }),
@@ -435,7 +435,7 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
   });
 
   test("the shipped clock fires only Factory merge discovery and triage discovery", () => {
-    // triage-factory's 8h cadence and merge-factory's 15m cadence both have
+    // triage-factory's 8h cadence and merge-factory's 4h cadence both have
     // a due slot at their first tick (no prior admitted slot yet), so a
     // clock started fresh fires both once.
     const db = openDb(":memory:");

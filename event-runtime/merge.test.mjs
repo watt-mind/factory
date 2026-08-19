@@ -492,7 +492,7 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
     expect(schedules.map(([name]) => name)).toEqual(["merge-factory"]);
     for (const [, schedule] of schedules) {
       expect(schedule).toMatchObject({
-        every: "15m",
+        every: "4h",
         eventType: "factory.merge.requested",
         singleton: true,
         approval: "auto",
