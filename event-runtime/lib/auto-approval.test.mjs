@@ -1133,6 +1133,28 @@ describe("chain auto approval (WM-357)", () => {
     expect(runState(db, escalation.runId)).toBe("QUEUED");
   });
 
+  test("a sibling edge declared via `also` is a registered edge (dispatch PR_OPEN → merge.requested)", async () => {
+    const db = openDb(":memory:");
+    // dispatch@1 PR_OPEN maps to work.requested and fans out to
+    // merge.requested via `also: ["PR_OPEN_MERGE"]`; the merge-scan proposal
+    // must auto-approve instead of waiting as chain_edge_not_registered.
+    const merge = seed(db, {
+      id: "dispatch-also-merge",
+      type: "factory.merge.requested",
+      input: { repo: "factory", prNumbers: [777] },
+      predecessorAgent: "dispatch@1",
+      predecessorArtifact: {
+        outcome: "PR_OPEN",
+        repo: "factory",
+        prNumber: 777,
+      },
+      predecessorInput: { repo: "factory", ticket: "WM-777" },
+    });
+    const result = await auto(db, { runtimeGuard: () => null });
+    expect(result.approved.map((a) => a.proposalId)).toContain(merge.id);
+    expect(runState(db, merge.runId)).toBe("QUEUED");
+  });
+
   test("a non-independent array sibling remains watched", async () => {
     const db = openDb(":memory:");
     const mergeInput = {

@@ -525,6 +525,15 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
     : undefined;
   const declaredEdge =
     rule?.independent === true ? undefined : rule?.edges?.[recommendation];
+  // A declared edge may fan out to sibling edges via `also` (e.g. dispatch@1
+  // PR_OPEN → work.requested also PR_OPEN_MERGE → merge.requested). Those
+  // siblings are registered edges too; without this every dispatch-chained
+  // merge-scan sat as chain_edge_not_registered until an operator approved it.
+  const alsoEdgeTypes = Array.isArray(declaredEdge?.also)
+    ? declaredEdge.also
+        .map((key) => rule?.edges?.[key]?.eventType)
+        .filter((type) => typeof type === "string")
+    : [];
   const independentEdge = independentlySelectedEdge(
     rule,
     spec,
@@ -537,6 +546,7 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
   );
   if (
     declaredEdge?.eventType !== envelope.type &&
+    !alsoEdgeTypes.includes(envelope.type) &&
     !independentEdge &&
     !commandEdge
   )
