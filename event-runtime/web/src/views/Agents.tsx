@@ -420,9 +420,13 @@ export function Agents({
             </>
           }
         >
-          <Table className="w-full border-separate border-spacing-0">
-            <thead>
-              <tr className="text-left">
+          <Table
+            role="grid"
+            aria-label="Agents registry"
+            className="w-full border-separate border-spacing-0"
+          >
+            <thead role="rowgroup">
+              <tr role="row" className="text-left">
                 {cols.map((c) => {
                   const sort = AGENTS_DISPLAY.sorts.find(
                     (s) => s.column === c.key,
@@ -459,11 +463,12 @@ export function Agents({
                 })}
               </tr>
             </thead>
-            <tbody>
+            <tbody role="rowgroup">
               {(() => {
                 const renderRow = (a: AgentDef) => (
                   <tr
                     key={a.ref}
+                    role="row"
                     data-agent-ref={a.ref}
                     tabIndex={0}
                     onClick={() => onSelectAgent(a.ref)}
@@ -508,21 +513,33 @@ export function Agents({
                     aria-selected={a.ref === selectedRef}
                     className={`cursor-pointer hover:bg-(--surface-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent) ${a.ref === selectedRef ? "row-selected" : ""}`}
                   >
-                    <td className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                    <td
+                      role="gridcell"
+                      className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                    >
                       {a.ref}
                     </td>
                     {show.has("contract") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 text-(--text-dim) whitespace-nowrap">
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 text-(--text-dim) whitespace-nowrap"
+                      >
                         {a.outputContract}
                       </td>
                     )}
                     {show.has("adapter") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
+                      >
                         {adapterText(a)}
                       </td>
                     )}
                     {show.has("tier") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)"
+                      >
                         {tierText(a)}
                         {a.model && a.modelTier && (
                           <span
@@ -535,7 +552,10 @@ export function Agents({
                       </td>
                     )}
                     {show.has("model") && (
-                      <td className="max-w-56 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <td
+                        role="gridcell"
+                        className="max-w-56 border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                      >
                         <ModelCell
                           model={modelText(a)}
                           className={
@@ -547,17 +567,26 @@ export function Agents({
                       </td>
                     )}
                     {show.has("mutating") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                      >
                         <AgentMutationBadge mutating={a.mutating} />
                       </td>
                     )}
                     {show.has("capabilities") && (
-                      <td className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim) whitespace-nowrap">
+                      <td
+                        role="gridcell"
+                        className="max-w-64 truncate border-b border-(--border) px-3 py-1.5 text-(--text-dim) whitespace-nowrap"
+                      >
                         {caps(a)}
                       </td>
                     )}
                     {show.has("timeout") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap"
+                      >
                         <span
                           title={
                             a.limits.timeout_seconds != null
@@ -570,7 +599,10 @@ export function Agents({
                       </td>
                     )}
                     {show.has("attempts") && (
-                      <td className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap">
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim) whitespace-nowrap"
+                      >
                         {a.limits.attempts ?? EMPTY}
                       </td>
                     )}

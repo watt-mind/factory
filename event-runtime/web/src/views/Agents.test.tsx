@@ -1,6 +1,12 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import {
@@ -256,6 +262,39 @@ describe("Agents table columns (WM-211)", () => {
       );
       expect(headers.filter((t) => /claude1/.test(t))).toHaveLength(1);
       expect(headers.filter((t) => /command1/.test(t))).toHaveLength(1);
+    });
+  });
+});
+
+describe("Agents table accessible selection (WM-754)", () => {
+  test("the selected agent row is exposed as selected in the accessibility tree", async () => {
+    const agents = [stubAgent("alpha"), stubAgent("beta")];
+    await withAgents(agents, async () => {
+      const r = renderWithClient(<SelectableAgents />);
+      const grid = await r.findByRole("grid", { name: "Agents registry" });
+      expect(within(grid).getAllByRole("rowgroup")).toHaveLength(2);
+
+      const alpha = r.getByRole("row", { name: "alpha@1" });
+      const beta = r.getByRole("row", { name: "beta@1" });
+      expect(alpha.getAttribute("role")).toBe("row");
+      expect(within(alpha).getAllByRole("gridcell").length).toBeGreaterThan(0);
+      expect(r.queryByRole("row", { selected: true })).toBeNull();
+
+      alpha.focus();
+      fireEvent.keyDown(alpha, { key: "Enter" });
+      expect(r.getByRole("row", { selected: true, name: "alpha@1" })).toBe(
+        alpha,
+      );
+      expect(r.getByRole("row", { selected: false, name: "beta@1" })).toBe(
+        beta,
+      );
+
+      fireEvent.keyDown(alpha, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(beta);
+      expect(r.getByRole("row", { selected: true, name: "beta@1" })).toBe(beta);
+      expect(
+        r.queryByRole("row", { selected: true, name: "alpha@1" }),
+      ).toBeNull();
     });
   });
 });
