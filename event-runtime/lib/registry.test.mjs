@@ -151,7 +151,7 @@ describe("registry", () => {
     // Regenerated (WM-907): merge-scan@2 is the command enumerator; merge-review@1 is the per-PR agy reviewer;
     // factory.merge-review.requested + REVIEW fan-out + merge_reviews ledger.
     const expected =
-      "sha256:b42aabdc99deade3796d81aaa436ecac8487092290aba7f91794898a7c60b6c5";
+      "sha256:4bfa2303906bea9ccb90fef3443e2ac8a863e19f248dc8ef82d0982174ba132d";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
