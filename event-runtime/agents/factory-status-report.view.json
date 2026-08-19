@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Status report",
+  "status": {
+    "path": "/recommendedAction",
+    "tone": {
+      "dispatch": "ok",
+      "triage": "warn",
+      "merge": "ok",
+      "unblock": "warn",
+      "wait": "muted"
+    }
+  },
+  "sections": [
+    {
+      "path": "/repos",
+      "as": "table",
+      "label": "Repos",
+      "columns": ["name", "triage", "agentReady", "inProgress", "blocked"],
+      "formats": {
+        "name": "repo",
+        "triage": "count",
+        "agentReady": "count",
+        "inProgress": "count",
+        "blocked": "count"
+      }
+    }
+  ]
+}
