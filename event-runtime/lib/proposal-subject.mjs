@@ -75,8 +75,7 @@ function dispatchTicketTitle(spec) {
 }
 
 function dispatchFallback(spec) {
-  const input =
-    spec?.input && typeof spec.input === "object" ? spec.input : {};
+  const input = spec?.input && typeof spec.input === "object" ? spec.input : {};
   const ticket = typeof input.ticket === "string" ? input.ticket : "?";
   const repo = typeof input.repo === "string" ? input.repo : "?";
   const model =
