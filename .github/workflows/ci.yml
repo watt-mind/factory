@@ -10,14 +10,12 @@ on:
 permissions:
   contents: read
 
-# One live run per PR: a newer synchronize cancels the superseded PR run.
-# Push events are keyed by SHA so back-to-back develop merges each finish
-# Full verification — canceling the earlier SHA made its aggregate check
-# report RED (WM-866). WM-773 item 6 coalesced by ref; that is no longer
-# the policy.
+# One live run per PR, and one per pushed branch: a newer push to develop
+# supersedes the older develop run (WM-773 item 6) — a stale develop SHA green
+# proves nothing and used to cost a full lane hold per merge.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   shadow-runner-health:
