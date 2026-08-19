@@ -385,7 +385,7 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
         "agents/views/factory.command-result.v1.view.json",
       );
       expect(command.outputView.title).toBe("Command");
-      const bare = defs.find((d) => d.ref === "ship-scan@1");
+      const bare = defs.find((d) => d.ref === "disk-diagnose@1");
       expect(bare.outputView).toBeNull();
       expect(bare.outputViewFile).toBeNull();
       expect(bare.view).toBeNull();

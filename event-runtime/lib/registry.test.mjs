@@ -847,7 +847,7 @@ describe("registry", () => {
       "agents/views/factory.command-result.v1.view.json",
     );
     expect(reconcile.view.title).toBe("Command");
-    expect(getArtifactView(registry, "ship-scan@1")).toEqual({
+    expect(getArtifactView(registry, "disk-diagnose@1")).toEqual({
       file: null,
       view: null,
       source: null,
