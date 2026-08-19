@@ -45,6 +45,16 @@
  *      A module that fails the contract, or an id already registered, disables
  *      the extension. Each load replaces the extension hooks of the registry
  *      it is given, so the registry always mirrors the last accepted set.
+ *   6. **Harness content is pack data, namespaced at emit (WM-849).**
+ *      `contributes.harness = { floor?, commands?, skills?, subagents? }`
+ *      lists markdown the emit pipeline packages for Claude/Codex/Gemini/
+ *      Cursor/Pi. Paths are checked here (exist, stay inside the extension);
+ *      `build/emit.mjs` is the consumer. `shared/` is the built-in
+ *      `factory/core` pack and is not policy-listed — `collectHarnessRoots`
+ *      always puts it first so `plugins/core/**` and `dist/**` stay
+ *      byte-identical. Every other contributing root emits under its
+ *      `publisher-extension` slug; a non-core pack may not take plugin name
+ *      `core` or reuse another pack's slug (the later extension is skipped).
  *
  * Ordering matters for callers: `adapterRegistry.toMap()` is a snapshot, so
  * `loadExtensions` must run before a CLI takes the map it hands to
@@ -69,6 +79,15 @@ import { expandHome, reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 
 export const EXTENSION_MANIFEST = "factory-extension.json";
+
+/** Plugin directory of the built-in core harness pack (`plugins/core`). */
+export const CORE_HARNESS_PLUGIN = "core";
+
+/** Manifest `name` of `shared/factory-extension.json`. */
+export const CORE_HARNESS_NAME = "factory/core";
+
+const HARNESS_FILE_KEYS = ["floor"];
+const HARNESS_DIR_KEYS = ["commands", "skills", "subagents"];
 
 export const EXTENSION_SCHEMA = JSON.parse(
   readFileSync(
@@ -304,6 +323,7 @@ export function validateExtensionManifest(dir) {
     }
   }
   errors.push(...panelDirErrors(root, file, contributes.panels));
+  errors.push(...harnessPathErrors(root, file, contributes.harness));
   return result(manifest);
 }
 
@@ -475,6 +495,158 @@ function panelRootsFor(dir, manifest) {
   }));
 }
 
+function harnessPathErrors(root, file, harness) {
+  if (!harness) return [];
+  const errors = [];
+  for (const key of HARNESS_FILE_KEYS) {
+    if (!Object.hasOwn(harness, key)) continue;
+    errors.push(
+      ...harnessEntryError(root, file, key, harness[key], { file: true }),
+    );
+  }
+  for (const key of HARNESS_DIR_KEYS) {
+    if (!Object.hasOwn(harness, key)) continue;
+    errors.push(
+      ...harnessEntryError(root, file, key, harness[key], { file: false }),
+    );
+  }
+  return errors;
+}
+
+function harnessEntryError(root, file, key, rel, { file: wantFile }) {
+  const abs = path.resolve(root, rel);
+  if (!isInside(root, abs)) {
+    return [
+      `${file}: contributes.harness.${key} "${rel}" escapes the extension directory`,
+    ];
+  }
+  if (
+    !existsSync(abs) ||
+    (wantFile ? !statSync(abs).isFile() : !statSync(abs).isDirectory())
+  ) {
+    return [
+      `${file}: contributes.harness.${key} "${rel}" is not a ${wantFile ? "file" : "directory"} (${abs})`,
+    ];
+  }
+  return [];
+}
+
+/** Plugin directory name a harness pack emits into (`plugins/<plugin>/`). */
+export function harnessPluginName(manifestName, { builtin = false } = {}) {
+  if (builtin) return CORE_HARNESS_PLUGIN;
+  return String(manifestName).replaceAll("/", "-");
+}
+
+/**
+ * Resolve `contributes.harness` to absolute paths. `null` when the manifest
+ * declares none (or an empty object).
+ */
+export function harnessRootFor(dir, manifest, { builtin = false } = {}) {
+  const declared = manifest?.contributes?.harness;
+  if (!declared) return null;
+  if (
+    !declared.floor &&
+    !declared.commands &&
+    !declared.skills &&
+    !declared.subagents
+  )
+    return null;
+  return {
+    dir: path.resolve(dir),
+    name: manifest.name,
+    version: manifest.version,
+    builtin,
+    origin: builtin ? "builtin" : `extension:${manifest.name}`,
+    plugin: harnessPluginName(manifest.name, { builtin }),
+    prefix: builtin ? null : harnessPluginName(manifest.name),
+    floor: declared.floor ? path.resolve(dir, declared.floor) : null,
+    commands: declared.commands ? path.resolve(dir, declared.commands) : null,
+    skills: declared.skills ? path.resolve(dir, declared.skills) : null,
+    subagents: declared.subagents
+      ? path.resolve(dir, declared.subagents)
+      : null,
+  };
+}
+
+/**
+ * Built-in `shared/` first, then every policy-listed extension that
+ * contributes harness content. A broken third-party manifest is an anomaly
+ * (emit still writes the core pack); a broken builtin throws — that is our
+ * own pack and emit must not invent it.
+ *
+ * @param {object} [options]
+ * @param {string} [options.root] - checkout supplying `config/policy.yaml`
+ * @param {string} [options.builtin] - absolute path of `shared/` (required for emit)
+ * @param {object} [options.policy] - already-parsed policy; when given, policy.yaml is not read
+ * @returns {{ roots: Array<object>, anomalies: string[] }}
+ */
+export function collectHarnessRoots({
+  root = reposRoot(),
+  builtin,
+  policy,
+} = {}) {
+  const roots = [];
+  const anomalies = [];
+  const seenPaths = new Set();
+  const seenNames = new Set();
+  const seenPlugins = new Set();
+
+  const add = (dir, { builtin: isBuiltin = false } = {}) => {
+    const resolved = path.resolve(dir);
+    if (seenPaths.has(resolved)) return;
+    const checked = validateExtensionManifest(resolved);
+    if (!checked.valid) {
+      const reason = checked.errors.join("; ");
+      if (isBuiltin) {
+        throw new ExtensionError(
+          `built-in harness pack ${resolved}: ${reason}`,
+        );
+      }
+      anomalies.push(`extension ${resolved}: ${reason} (harness skipped)`);
+      return;
+    }
+    const pack = harnessRootFor(resolved, checked.manifest, {
+      builtin: isBuiltin,
+    });
+    if (!pack) {
+      if (isBuiltin) {
+        throw new ExtensionError(
+          `built-in harness pack ${resolved}: ${EXTENSION_MANIFEST} declares no contributes.harness`,
+        );
+      }
+      return;
+    }
+    if (!isBuiltin && pack.plugin === CORE_HARNESS_PLUGIN) {
+      anomalies.push(
+        `extension ${resolved}: harness plugin name "${pack.plugin}" is reserved for the built-in core pack (harness skipped)`,
+      );
+      return;
+    }
+    if (seenNames.has(pack.name)) {
+      anomalies.push(
+        `extension ${resolved}: harness name "${pack.name}" is already contributed (harness skipped)`,
+      );
+      return;
+    }
+    if (seenPlugins.has(pack.plugin)) {
+      anomalies.push(
+        `extension ${resolved}: harness plugin "${pack.plugin}" is already contributed (harness skipped)`,
+      );
+      return;
+    }
+    seenPaths.add(resolved);
+    seenNames.add(pack.name);
+    seenPlugins.add(pack.plugin);
+    roots.push(pack);
+  };
+
+  if (builtin) add(builtin, { builtin: true });
+  const loaded = loadExtensionRoots({ root, policy });
+  anomalies.push(...loaded.anomalies);
+  for (const { path: dir } of loaded.roots) add(dir);
+  return { roots, anomalies };
+}
+
 function isInside(root, abs) {
   const rel = path.relative(root, abs);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
@@ -514,14 +686,16 @@ function packRootFor(extensionRoot, rel) {
  * @returns {Promise<{
  *   extensions: Array<{ name: string, version: string, path: string, packs: string[], adapters: string[], hooks: Array<{ point: string, id: string }>, panels: string[], reserved: string[], config: { namespace: string, schema: string, values: object }|null }>,
  *   panelRoots: Array<{ dir: string, origin: string, base: string }>,
+ *   harnessRoots: Array<object>,
  *   packRoots: Array<object>,
- *   panelRoots: Array<{ dir: string, origin: string, base: string }>,
  *   anomalies: string[],
  *   disabled: Array<{ name: string|null, version: string|null, path: string, namespace: string|null, reason: string }>,
  * }>} `packRoots` is the full list — policy packs first, then every accepted
  *   extension pack in policy order — ready to hand to `loadRegistry`;
  *   `panelRoots` is every accepted extension's `contributes.panels`
  *   directories, in the same order, for `loadRegistry({ panelRoots })`.
+ *   `harnessRoots` is every accepted extension's `contributes.harness`
+ *   (WM-849), for `loadRegistry({ harnessRoots })` and `build/emit.mjs`.
  *   `disabled` lists every extension an anomaly skipped, for `/config`.
  */
 export async function loadExtensions({
@@ -543,10 +717,13 @@ export async function loadExtensions({
   const { roots, anomalies } = loadExtensionRoots({ root, policy });
   const extensions = [];
   const panelRoots = [];
+  const harnessRoots = [];
   const accepted = [...basePackRoots];
   const acceptedPackNames = new Set(basePackRoots.map((p) => p.name));
   const acceptedAdapterNames = new Set();
   const acceptedNamespaces = new Map();
+  const acceptedHarnessPlugins = new Set();
+  const acceptedHarnessNames = new Set();
   const disabled = [];
   const loaded = [];
   const dryLoad = (candidates) =>
@@ -676,6 +853,28 @@ export async function loadExtensions({
       continue;
     }
 
+    const extHarness = harnessRootFor(dir, manifest);
+    if (extHarness) {
+      if (extHarness.plugin === CORE_HARNESS_PLUGIN) {
+        skip(
+          `${label}: harness plugin name "${extHarness.plugin}" is reserved for the built-in core pack`,
+        );
+        continue;
+      }
+      if (acceptedHarnessNames.has(extHarness.name)) {
+        skip(
+          `${label}: harness name "${extHarness.name}" is already contributed`,
+        );
+        continue;
+      }
+      if (acceptedHarnessPlugins.has(extHarness.plugin)) {
+        skip(
+          `${label}: harness plugin "${extHarness.plugin}" is already contributed`,
+        );
+        continue;
+      }
+    }
+
     // Accept: commit packs, register adapters, record the reserved keys.
     accepted.push(...extPackRoots);
     for (const pack of extPackRoots) acceptedPackNames.add(pack.name);
@@ -694,6 +893,11 @@ export async function loadExtensions({
     const { schemaJson, ...publicConfig } = config ?? {};
     const extPanelRoots = panelRootsFor(dir, manifest);
     panelRoots.push(...extPanelRoots);
+    if (extHarness) {
+      harnessRoots.push(extHarness);
+      acceptedHarnessPlugins.add(extHarness.plugin);
+      acceptedHarnessNames.add(extHarness.name);
+    }
     extensions.push({
       name: manifest.name,
       version: manifest.version,
@@ -706,6 +910,9 @@ export async function loadExtensions({
         Object.hasOwn(contributes, key),
       ),
       config: config ? publicConfig : null,
+      ...(extHarness
+        ? { harness: { plugin: extHarness.plugin, prefix: extHarness.prefix } }
+        : {}),
     });
     loaded.push({
       name: manifest.name,
@@ -716,5 +923,12 @@ export async function loadExtensions({
   }
 
   LOADED = { extensions: loaded, disabled };
-  return { extensions, packRoots: accepted, panelRoots, anomalies, disabled };
+  return {
+    extensions,
+    packRoots: accepted,
+    panelRoots,
+    harnessRoots,
+    anomalies,
+    disabled,
+  };
 }

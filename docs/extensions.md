@@ -29,7 +29,10 @@ Today an extension can contribute:
 - **panels** — declarative `factory.panel-view/v1` Overview tiles
   ([`event-runtime-artifact-views.md` §2.6](event-runtime-artifact-views.md#26-panels--factorypanel-viewv1-wm-840));
   data only, drawn by the web's existing artifact-view renderer, bound to an
-  allow-listed loopback API endpoint (§Panels below).
+  allow-listed loopback API endpoint (§Panels below);
+- **harness** — floor markdown, slash commands, skills and subagents that
+  `build/emit.mjs` packages for Claude Code, Codex, Gemini, Cursor and Pi
+  (§Harness below). `shared/` is the built-in `factory/core` pack.
 
 The manifest also **reserves** `connectors` and `views` for the tickets that
 land them. A
@@ -55,6 +58,11 @@ Implementation: `event-runtime/lib/extensions.mjs`, schema
   config.schema.json          # the shape of the extension's operator config (§Config)
   panels/
     blocked-tickets.panel.json  # a factory.panel-view/v1 panel
+  harness/
+    floor.md                    # optional AGENTS.md floor block
+    commands/                   # slash-command markdown
+    skills/                     # skill folders (SKILL.md)
+    agents/                     # custom-agent markdown (manifest key: subagents)
 ```
 
 Nothing about the layout is fixed except the manifest's name and place: every
@@ -74,7 +82,13 @@ directory, and must stay inside it.
     "adapters": { "argent": "./adapters/argent.mjs" },
     "config": { "namespace": "mobile", "schema": "./config.schema.json" },
     "hooks": { "approve.before": "./hooks/no-infra-merges.mjs" },
-    "panels": ["./panels"]
+    "panels": ["./panels"],
+    "harness": {
+      "floor": "./harness/floor.md",
+      "commands": "./harness/commands",
+      "skills": "./harness/skills",
+      "subagents": "./harness/agents"
+    }
   }
 }
 ```
@@ -90,6 +104,7 @@ directory, and must stay inside it.
 | `contributes.config`               | no       | Object `{ namespace, schema }`: the name the extension's operator values are published under (`^[a-z][a-z0-9-]*$`, unique across loaded extensions) and the relative path of the JSON-schema those values must satisfy. See § Config.                        |
 | `contributes.hooks`                | no       | Object `hook point → relative .mjs path`. The only point today is `approve.before`; an unknown key is a schema violation. The module must export a string `id` and a default `(ctx) => decision` function. See § Hooks.                                      |
 | `contributes.panels`               | no       | Array of relative directories; every `*.panel.json` directly inside is a `factory.panel-view/v1` panel (§Panels). The manifest check proves the directories exist inside the extension; the registry validates each panel at load and skips a bad one alone. |
+| `contributes.harness`              | no       | Object `{ floor?, commands?, skills?, subagents? }`: relative file/directory of harness-neutral markdown emit packages (§Harness). The built-in pack is `shared/` (`factory/core`).                                                                          |
 | `contributes.connectors`, `.views` | no       | **Reserved.** Accepted by the schema, ignored by the loader, reported as a configuration anomaly `contributes.<key> is not supported yet`.                                                                                                                   |
 
 Unknown top-level keys and unknown `contributes` keys are schema violations.
@@ -111,16 +126,18 @@ panel documents are validated by the registry at load (an invalid one is a
 
 There are two kinds of contribution, and the difference is what runs.
 
-- **Data-only packs and panels.** A pack is JSON and prose: definitions,
-  schemas, prompts, routing maps. A panel is JSON too — an endpoint the
-  runtime already serves, a pointer and rendering hints; the web loads no
-  code for it and fetches only endpoints the runtime allow-lists. Loading
-  either executes nothing. The kernel then holds it to the
-  configured-pack rules — its own namespace, no shadowing of built-ins, pinned
-  prompts and schemas, no `mutating: true` — so a pack can add agents but
-  cannot widen what an agent may do. This is the surface an _agent_ may author
-  (a dispatched ticket producing a pack is ordinary data), and it is why the
-  fixture pack is a copy of `test-support/packs/sample`.
+- **Data-only packs, panels and harness markdown.** A pack is JSON and prose:
+  definitions, schemas, prompts, routing maps. A panel is JSON too — an
+  endpoint the runtime already serves, a pointer and rendering hints; the
+  web loads no code for it and fetches only endpoints the runtime
+  allow-lists. Harness content is markdown (floor, commands, skills,
+  subagents) that `build/emit.mjs` packages; loading it executes nothing.
+  The kernel then holds packs to the configured-pack rules — its own
+  namespace, no shadowing of built-ins, pinned prompts and schemas, no
+  `mutating: true` — so a pack can add agents but cannot widen what an
+  agent may do. This is the surface an _agent_ may author (a dispatched
+  ticket producing a pack or a harness command is ordinary data), and it
+  is why the fixture pack is a copy of `test-support/packs/sample`.
 - **Operator-installed code.** An adapter is an ES module the worker imports
   and calls; a hook is an ES module `serve` imports and calls inside the
   approval pass. Enabling an extension that contributes either is running that
@@ -197,7 +214,9 @@ message naming both packs; fix the pack (or the order) and restart.
    `event-runtime/test-support/extensions/sample/hooks/approve-before.mjs`.
 6. Add panels as `panels/<slug>.panel.json` (§Panels); the fixture's
    `panels/open-proposals.panel.json` is a complete one.
-7. `bun event-runtime/cli.mjs extensions validate <dir>` until it is clean,
+7. Add harness content as `contributes.harness` (§Harness) when the
+   extension ships slash commands, skills, subagents or a floor block.
+8. `bun event-runtime/cli.mjs extensions validate <dir>` until it is clean,
    enable it, `extensions list`, restart.
 
 The fixture `event-runtime/test-support/extensions/sample/` is a complete,
@@ -505,6 +524,61 @@ allows unless the extension config says `greeting: "deny"` (proving
 files there (`throws.mjs`, `hangs.mjs`, `async-deny.mjs`, `no-id.mjs`,
 `no-default.mjs`) exercise each failure mode in `hooks.test.mjs` and
 `extensions.test.mjs`.
+
+## Harness
+
+_Shipped in WM-849. Implementation: `contributes.harness` on
+`factory-extension.json`; `collectHarnessRoots`, `harnessRootFor` in
+`event-runtime/lib/extensions.mjs`; `build/emit.mjs` emits every loaded
+root; the built-in pack is `shared/factory-extension.json`._
+
+Harness content is markdown the emit pipeline packages for every coding
+agent the factory supports — the AGENTS.md floor, `/factory-*` slash
+commands, skills, and custom subagents. It is **data**, not in-process
+code: loading a harness contribution executes nothing. Enabling it is
+the same allow-list as every other contribution (`policy.yaml
+extensions:`); `shared/` is the exception, the built-in `factory/core`
+pack that emit always includes first so `plugins/core/**` and `dist/**` stay
+byte-identical with the historical layout.
+
+```json
+"contributes": {
+  "harness": {
+    "floor": "./floor.md",
+    "commands": "./commands",
+    "skills": "./skills",
+    "subagents": "./agents"
+  }
+}
+```
+
+Every key is optional. Paths are relative to the manifest and must stay
+inside the extension; `floor` must be a file, the others directories. A
+missing or escaping path is a manifest error and skips the extension
+whole, like any other bad path.
+
+**Emit.** `bun build/emit.mjs` calls `collectHarnessRoots({ builtin: shared/ })`
+then writes each pack:
+
+| Pack                                     | Claude plugin                    | dist/ (Codex, Gemini, Cursor, Pi)                                                                          |
+| :--------------------------------------- | :------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| `factory/core` (`shared/`, always first) | `plugins/core/`                  | historical paths (`dist/codex/skills/ticket-spec/`, …)                                                     |
+| any other contributing extension         | `plugins/<publisher-extension>/` | nested under the same slug (`dist/codex/skills/<slug>/…`); flat Cursor/Pi filenames are prefixed `<slug>-` |
+
+`--sync-floor` still splices only the core floor into configured repos'
+`AGENTS.md`. A third-party floor is emitted as `dist/AGENTS.floor.<slug>.md`
+and is not auto-spliced.
+
+**Collision.** A non-core pack may not take plugin name `core` or reuse
+another pack's slug or `name`. The later contributor's harness is skipped
+(emit records an anomaly and still writes every other pack; `loadExtensions`
+skips that extension whole, same as an adapter name clash). Discovery stays
+allow-listed: dropping a directory into `~/.factory/extensions/` does
+nothing until `policy.yaml` names it.
+
+**Trust.** Harness markdown is the same class as packs — an agent may
+author it — with the operator enablement gate in front. It is not an
+adapter: emit never imports third-party JavaScript.
 
 ## Related
 

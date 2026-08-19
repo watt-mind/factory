@@ -90,6 +90,33 @@
               "description": "evaluated immediately before each chain auto-approval (lib/auto-approval.mjs); a deny keeps the proposal open with reason dispatch_ineligible:<reason> (dispatch) or hook_denied:<reason>"
             }
           }
+        },
+        "harness": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "harness pack content (docs/extensions.md § Harness): floor markdown, slash-command directory, skill directory, subagent directory; relative to the manifest. `shared/` is the built-in `factory/core` pack; emit writes it to plugins/core and dist/ and every other contributing root under its publisher-extension namespace (WM-849)",
+          "properties": {
+            "floor": {
+              "type": "string",
+              "minLength": 1,
+              "description": "relative path to the AGENTS.md floor markdown file"
+            },
+            "commands": {
+              "type": "string",
+              "minLength": 1,
+              "description": "relative directory of slash-command markdown files"
+            },
+            "skills": {
+              "type": "string",
+              "minLength": 1,
+              "description": "relative directory of skill folders (each containing SKILL.md)"
+            },
+            "subagents": {
+              "type": "string",
+              "minLength": 1,
+              "description": "relative directory of custom-agent markdown files"
+            }
+          }
         }
       }
     }

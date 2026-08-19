@@ -1,0 +1,14 @@
+{
+  "name": "factory/core",
+  "version": "0.1.0",
+  "description": "Built-in core harness pack: AGENTS.md floor, /factory-* commands, ticket-spec skill, factory-* subagents.",
+  "factory": { "min": "0.1.0" },
+  "contributes": {
+    "harness": {
+      "floor": "./floor.md",
+      "commands": "./commands",
+      "skills": "./skills",
+      "subagents": "./agents"
+    }
+  }
+}

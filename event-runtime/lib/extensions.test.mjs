@@ -15,10 +15,14 @@ import { openDb } from "./db.mjs";
 import {
   EXTENSION_MANIFEST,
   EXTENSION_SCHEMA,
+  CORE_HARNESS_NAME,
+  CORE_HARNESS_PLUGIN,
   ExtensionError,
   RESERVED_CONTRIBUTIONS,
   applyConfigDefaults,
+  collectHarnessRoots,
   getExtensionConfig,
+  harnessPluginName,
   loadExtensionRoots,
   loadExtensions,
   loadedExtensions,
@@ -109,6 +113,28 @@ describe("factory-extension.json schema", () => {
       };
       expect(validate(EXTENSION_SCHEMA, manifest).valid).toBe(true);
     }
+  });
+
+  test("contributes.harness accepts floor/commands/skills/subagents and rejects extras", () => {
+    const ok = {
+      name: "factory/core",
+      version: "0.1.0",
+      contributes: {
+        harness: {
+          floor: "./floor.md",
+          commands: "./commands",
+          skills: "./skills",
+          subagents: "./agents",
+        },
+      },
+    };
+    expect(validate(EXTENSION_SCHEMA, ok)).toEqual({ valid: true, errors: [] });
+    expect(
+      validate(EXTENSION_SCHEMA, {
+        ...ok,
+        contributes: { harness: { widgets: [] } },
+      }).errors.join(),
+    ).toMatch(/unknown property "widgets"/);
   });
 });
 
@@ -934,5 +960,133 @@ describe("cli extensions", () => {
     expect(parsed.extensions[0].name).toBe("factory/sample");
     expect(parsed.extensions[0].config.namespace).toBe("sample");
     expect(parsed.anomalies).toHaveLength(1);
+  });
+});
+
+function harnessExtension(mutate = () => {}) {
+  const dir = tmpDir("event-harness-");
+  mkdirSync(path.join(dir, "commands"));
+  mkdirSync(path.join(dir, "skills", "demo"), { recursive: true });
+  mkdirSync(path.join(dir, "agents"));
+  writeFileSync(path.join(dir, "floor.md"), "# floor\n");
+  writeFileSync(path.join(dir, "commands", "demo.md"), "# demo\n");
+  writeFileSync(
+    path.join(dir, "skills", "demo", "SKILL.md"),
+    "---\nname: demo\ndescription: demo skill\n---\n",
+  );
+  writeFileSync(
+    path.join(dir, "agents", "demo-agent.md"),
+    "---\nname: demo-agent\ndescription: A demo subagent.\n---\n\nbody\n",
+  );
+  const manifest = {
+    name: "acme/tools",
+    version: "1.0.0",
+    contributes: {
+      harness: {
+        floor: "./floor.md",
+        commands: "./commands",
+        skills: "./skills",
+        subagents: "./agents",
+      },
+    },
+  };
+  const next = mutate(manifest, dir) ?? manifest;
+  writeFileSync(
+    path.join(dir, EXTENSION_MANIFEST),
+    JSON.stringify(next, null, 2),
+  );
+  return dir;
+}
+
+describe("contributes.harness (WM-849)", () => {
+  const SHARED = path.join(path.dirname(RUNTIME_ROOT), "shared");
+
+  test("the built-in shared/ pack is factory/core and validates", () => {
+    const out = validateExtensionManifest(SHARED);
+    expect(out.valid).toBe(true);
+    expect(out.errors).toEqual([]);
+    expect(out.manifest.name).toBe(CORE_HARNESS_NAME);
+    expect(out.manifest.contributes.harness).toEqual({
+      floor: "./floor.md",
+      commands: "./commands",
+      skills: "./skills",
+      subagents: "./agents",
+    });
+    expect(harnessPluginName(CORE_HARNESS_NAME, { builtin: true })).toBe(
+      CORE_HARNESS_PLUGIN,
+    );
+  });
+
+  test("collectHarnessRoots puts shared/ first and skips policy extensions without harness", () => {
+    const { roots, anomalies } = collectHarnessRoots({
+      builtin: SHARED,
+      policy: { extensions: [{ path: SAMPLE_EXTENSION }] },
+    });
+    expect(anomalies).toEqual([]);
+    expect(roots[0].builtin).toBe(true);
+    expect(roots[0].name).toBe(CORE_HARNESS_NAME);
+    expect(roots[0].plugin).toBe(CORE_HARNESS_PLUGIN);
+    expect(roots[0].prefix).toBeNull();
+    expect(roots).toHaveLength(1);
+  });
+
+  test("a third-party harness pack is namespaced; plugin name core is reserved", async () => {
+    const extra = harnessExtension();
+    const collected = collectHarnessRoots({
+      builtin: SHARED,
+      policy: { extensions: [{ path: extra }] },
+    });
+    expect(collected.anomalies).toEqual([]);
+    expect(collected.roots.map((r) => r.plugin)).toEqual([
+      CORE_HARNESS_PLUGIN,
+      "acme-tools",
+    ]);
+    expect(collected.roots[1].prefix).toBe("acme-tools");
+
+    const stolen = harnessExtension((m) => {
+      m.name = "factory/core";
+    });
+    const clash = collectHarnessRoots({
+      builtin: SHARED,
+      policy: { extensions: [{ path: stolen }] },
+    });
+    expect(clash.roots.map((r) => r.plugin)).toEqual([CORE_HARNESS_PLUGIN]);
+    expect(clash.anomalies.join("\n")).toMatch(
+      /harness name "factory\/core" is already contributed/,
+    );
+
+    const slugA = harnessExtension((m) => {
+      m.name = "foo/bar-baz";
+    });
+    const slugB = harnessExtension((m) => {
+      m.name = "foo-bar/baz";
+    });
+    const slugs = collectHarnessRoots({
+      policy: { extensions: [{ path: slugA }, { path: slugB }] },
+    });
+    expect(slugs.roots.map((r) => r.plugin)).toEqual(["foo-bar-baz"]);
+    expect(slugs.anomalies.join("\n")).toMatch(
+      /harness plugin "foo-bar-baz" is already contributed/,
+    );
+
+    const loaded = await load(policyFor(extra));
+    expect(loaded.anomalies).toEqual([]);
+    expect(loaded.harnessRoots).toHaveLength(1);
+    expect(loaded.harnessRoots[0].plugin).toBe("acme-tools");
+    expect(loaded.extensions[0].harness).toEqual({
+      plugin: "acme-tools",
+      prefix: "acme-tools",
+    });
+  });
+
+  test("harness paths must exist and stay inside the extension", () => {
+    const dir = harnessExtension((m) => {
+      m.contributes.harness.floor = "./missing.md";
+      m.contributes.harness.commands = "../escape";
+    });
+    const out = validateExtensionManifest(dir);
+    expect(out.valid).toBe(false);
+    expect(out.errors.join("\n")).toMatch(/harness\.floor .* is not a file/);
+    expect(out.errors.join("\n")).toMatch(/harness\.commands .* escapes/);
   });
 });

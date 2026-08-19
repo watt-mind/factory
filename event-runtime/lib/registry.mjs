@@ -762,6 +762,7 @@ export function loadRegistry({
   root = RUNTIME_ROOT,
   packRoots,
   panelRoots = [],
+  harnessRoots = [],
   modelTiers = loadModelTierMap(),
   loaderFor = defaultLoaderFor,
 } = {}) {
@@ -774,6 +775,8 @@ export function loadRegistry({
     throw new RegistryError("loaderFor must be a function");
   if (!Array.isArray(panelRoots))
     throw new RegistryError("panelRoots must be an array");
+  if (!Array.isArray(harnessRoots))
+    throw new RegistryError("harnessRoots must be an array");
 
   const builtIn = {
     kind: "fs",
@@ -864,6 +867,9 @@ export function loadRegistry({
   // Extension-contributed panel directories (`contributes.panels`,
   // lib/extensions.mjs) load after every pack, so a pack panel outranks an
   // extension panel of the same name exactly as policy order says.
+  // Harness roots (`contributes.harness`, WM-849) are stored for emit /
+  // introspection and are not registry content — markdown skills and
+  // commands are packaged by build/emit.mjs, not loaded as agents.
   for (const { dir, origin, base } of panelRoots) {
     if (typeof dir !== "string" || typeof origin !== "string") {
       throw new RegistryError("panelRoots entries must be { dir, origin }");
@@ -1141,6 +1147,7 @@ export function loadRegistry({
     edges,
     schedules,
     modelTiers,
+    harnessRoots,
   };
 }
 
