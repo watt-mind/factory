@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { DecisionRequest, DecisionResponse } from "../types";
-import { decisionRequestHash, validateDecisionResponse } from "./decision";
+import {
+  checkRequest,
+  decisionRequestHash,
+  validateDecisionResponse,
+} from "./decision";
 
 interface SharedCase {
   name: string;
   request: DecisionRequest;
   hash: string;
+  requestValid?: boolean;
   responses: { name: string; valid: boolean; value: DecisionResponse }[];
 }
 
@@ -23,6 +28,17 @@ describe("browser decision port", () => {
       expect(decisionRequestHash(fixture.request), fixture.name).toBe(
         fixture.hash,
       );
+      if (fixture.requestValid !== undefined) {
+        expect(
+          checkRequest(fixture.request).valid,
+          `${fixture.name}/request`,
+        ).toBe(fixture.requestValid);
+      }
+      if (fixture.name === "answer-without-required-text") {
+        expect(checkRequest(fixture.request).errors).toContain(
+          "option_requires_text:answer",
+        );
+      }
       for (const response of fixture.responses) {
         expect(
           validateDecisionResponse(response.value, fixture.request).valid,
@@ -67,5 +83,67 @@ describe("browser decision port", () => {
         malformed as unknown as DecisionRequest,
       ).valid,
     ).toBe(false);
+  });
+
+  test("answer and reject_proposal require an applicable required text field", () => {
+    for (const effect of ["answer", "reject_proposal"] as const) {
+      const request: DecisionRequest = {
+        schemaVersion: "factory.decision-request/v1",
+        question: "Need a reason",
+        options: [{ id: "choice", label: "Choice", effect }],
+      };
+      expect(checkRequest(request).errors).toContain(
+        "option_requires_text:choice",
+      );
+
+      const withRequiredText: DecisionRequest = {
+        ...request,
+        fields: [
+          {
+            id: "reason",
+            kind: "text",
+            label: "Reason",
+            required: true,
+          },
+        ],
+      };
+      expect(checkRequest(withRequiredText).valid).toBe(true);
+
+      const optionalOnly: DecisionRequest = {
+        ...request,
+        fields: [
+          {
+            id: "reason",
+            kind: "text",
+            label: "Reason",
+            required: false,
+          },
+        ],
+      };
+      expect(checkRequest(optionalOnly).errors).toContain(
+        "option_requires_text:choice",
+      );
+
+      const gatedElsewhere: DecisionRequest = {
+        schemaVersion: "factory.decision-request/v1",
+        question: "Need a reason",
+        options: [
+          { id: "choice", label: "Choice", effect },
+          { id: "other", label: "Other", effect: "dismiss" },
+        ],
+        fields: [
+          {
+            id: "reason",
+            kind: "text",
+            label: "Reason",
+            required: true,
+            whenOption: ["other"],
+          },
+        ],
+      };
+      expect(checkRequest(gatedElsewhere).errors).toContain(
+        "option_requires_text:choice",
+      );
+    }
   });
 });
