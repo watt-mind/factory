@@ -1,13 +1,5 @@
 import "../test-dom";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  mock,
-  setSystemTime,
-  test,
-} from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import {
   filterOpenProposals,
@@ -778,34 +770,43 @@ describe("Proposals selection safety under focus and expiry (WM-547)", () => {
         expect(r.getByText("Approve and queue this run?")).toBeTruthy();
 
         // The armed proposal is decided elsewhere and leaves the open list, so
-        // the dialog unmounts with the detail pane.
-        api.proposals = async () => ({ proposals: [p2] });
-        await act(async () => {
-          await r.queryClient.invalidateQueries({ queryKey: ["proposals"] });
+        // the dialog unmounts with the detail pane. Write the cache and rerender
+        // with the same focus — do not wait for useNow/refetchInterval to paint.
+        act(() => {
+          r.queryClient.setQueryData(["proposals"], { proposals: [p2] });
+          refocus(r, "prop_armed_1");
         });
-        await waitFor(() =>
-          expect(r.queryByText("Approve and queue this run?")).toBeNull(),
-        );
+        expect(r.queryByText("Approve and queue this run?")).toBeNull();
 
         // Selecting another proposal must not re-open an approve dialog the
         // operator never armed — Enter is bound to its confirm button.
         act(() => refocus(r, "prop_armed_2"));
-        await waitFor(() =>
-          expect(r.getAllByText("prop_armed_2").length).toBeGreaterThan(0),
-        );
+        expect(r.getAllByText("prop_armed_2").length).toBeGreaterThan(0);
         expect(r.queryByText("Approve and queue this run?")).toBeNull();
       },
     );
   });
 
   test("a TTL that passes while the row is selected keeps the pane and its expired banner", async () => {
-    const t0 = new Date("2026-03-01T00:00:00Z").getTime();
-    setSystemTime(new Date(t0));
+    const t0 = Date.now();
+    const nowTicks: Array<() => void> = [];
+    const realSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((
+      handler: TimerHandler,
+      ms?: number,
+      ...args: unknown[]
+    ) => {
+      if (typeof handler === "function" && ms === 1000) {
+        nowTicks.push(() => handler(...args));
+      }
+      return realSetInterval(handler, ms, ...args);
+    }) as typeof setInterval;
+
     try {
       const live = stubProposal("prop_ticking", "open", {
         agent: "ticking-agent",
         created_at: new Date(t0).toISOString(),
-        ttl_seconds: 60,
+        ttl_seconds: 1,
         spec: createRunSpecFixture("run_ticking"),
       });
 
@@ -825,26 +826,31 @@ describe("Proposals selection safety under focus and expiry (WM-547)", () => {
           );
           expect(approve.disabled).toBe(false);
 
-          // The TTL passes under the operator, on the next useNow tick.
-          setSystemTime(new Date(t0 + 120_000));
-          await waitFor(
-            () => {
-              const b = r.getByRole("button", {
-                name: /^Approve…/,
-              }) as HTMLButtonElement;
-              expect(b.disabled).toBe(true);
-              expect(b.parentElement?.getAttribute("title")).toBe(
-                "This proposal has expired and can no longer be approved.",
-              );
-            },
-            { timeout: 4000 },
+          // 1s fixture TTL elapses; fire useNow's interval instead of waiting
+          // a real second. Patch Date.now only for that tick — waitFor uses it
+          // as its timeout clock, so a freeze during mount hangs the suite.
+          const realDateNow = Date.now;
+          Date.now = () => t0 + 2_000;
+          try {
+            act(() => {
+              for (const tick of nowTicks) tick();
+            });
+          } finally {
+            Date.now = realDateNow;
+          }
+          const b = r.getByRole("button", {
+            name: /^Approve…/,
+          }) as HTMLButtonElement;
+          expect(b.disabled).toBe(true);
+          expect(b.parentElement?.getAttribute("title")).toBe(
+            "This proposal has expired and can no longer be approved.",
           );
         },
       );
     } finally {
-      setSystemTime();
+      globalThis.setInterval = realSetInterval;
     }
-  }, 15_000);
+  });
 });
 
 describe("Proposals component harness: cross-tab reveal", () => {
