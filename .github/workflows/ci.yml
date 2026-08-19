@@ -244,6 +244,13 @@ jobs:
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
+      # `bun test --test-name-pattern` still loads every test file before
+      # filtering by name, so event-runtime/web/*.test.tsx need their own
+      # node_modules here too (same reason as in Full verification, OPS-384);
+      # without it the job dies on `Cannot find module '@testing-library/react'`.
+      - name: Install event-runtime/web deps
+        run: cd event-runtime/web && bun install --frozen-lockfile
+
       - name: Run timing-group tests
         shell: bash
         run: |
