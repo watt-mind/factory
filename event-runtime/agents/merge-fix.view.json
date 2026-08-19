@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Merge fix",
+  "summary": "/summary",
+  "status": {
+    "path": "/outcome",
+    "tone": { "UPDATED": "ok", "BLOCKED": "error" }
+  },
+  "sections": [
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Fix",
+      "keys": ["repo", "ticket", "pr", "headSha", "round"],
+      "formats": {
+        "repo": "repo",
+        "ticket": "issue",
+        "pr": "pr",
+        "headSha": "sha",
+        "round": "count"
+      }
+    }
+  ]
+}
