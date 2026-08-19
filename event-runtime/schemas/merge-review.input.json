@@ -1,0 +1,38 @@
+{
+  "title": "merge-review input — one PR to cold-review against the pinned repo",
+  "type": "object",
+  "required": ["repo", "github", "base", "pr", "headSha", "baseSha"],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short repo name as configured in config/repos.yaml"
+    },
+    "github": {
+      "type": "string",
+      "pattern": "^[^/\\s]+/[^/\\s]+$"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]+$"
+    },
+    "pr": { "type": "integer", "minimum": 1 },
+    "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+    "repoPin": {
+      "type": "object",
+      "required": ["repo", "sha"],
+      "additionalProperties": false,
+      "description": "Filled by the planner (pinRepo) at plan time — not operator-supplied",
+      "properties": {
+        "repo": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string" },
+        "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "github": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

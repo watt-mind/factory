@@ -9,8 +9,10 @@
  * true` definition into the registry at all (lib/registry.mjs).
  *
  * Exit 0 → writes result.json (factory.agent-result/v1) with the resolved
- * command and captured output as the artifact. Nonzero/timeout → no result;
- * the worker records FAILED with `agent_exit_<code>` as usual.
+ * command and captured output as the artifact, unless the definition sets
+ * `writesResult: true` (WM-907): then the command authors result.json and
+ * this adapter does not overwrite it. Nonzero/timeout → no result; the
+ * worker records FAILED with `agent_exit_<code>` as usual.
  *
  * A definition may add a `sandbox` block (WM-185), which moves execution off
  * the host and into a Gondolin microVM: the workspace is mounted read-write
@@ -81,6 +83,7 @@ function killProcessGroup(child, signal = "SIGTERM") {
  * paths so the two can never drift into producing different artifacts.
  */
 function writeResultJson({ workspaceDir, def, argv, output }) {
+  if (def.writesResult) return;
   const captured = def.captureStdout
     ? [{ kind: def.captureKind ?? "output", path: def.captureStdout }]
     : [];

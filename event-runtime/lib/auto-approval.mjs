@@ -25,6 +25,7 @@ export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
   "factory.triage-apply.requested",
   "factory.dispatch.requested",
   "factory.merge.requested",
+  "factory.merge-review.requested",
   "factory.merge-fix.requested",
   "factory.merge-apply.requested",
   "factory.merge-landed",
@@ -638,6 +639,7 @@ function mergeEligibility(db, registry, candidate, envelope, policy, now) {
 
   if (
     envelope.type === "factory.merge.requested" ||
+    envelope.type === "factory.merge-review.requested" ||
     envelope.type === "factory.merge-escalate.requested"
   ) {
     return null;

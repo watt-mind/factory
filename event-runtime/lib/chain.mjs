@@ -125,6 +125,7 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
               candidate.whenItemsField,
               selectionContext,
             );
+            if (items == null) return false;
             if (!Array.isArray(items)) {
               throw new Error(
                 `independent chain selector "${candidate.whenItemsField}" is not an array`,

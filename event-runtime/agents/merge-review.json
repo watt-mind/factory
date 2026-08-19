@@ -1,0 +1,28 @@
+{
+  "id": "merge-review",
+  "version": 1,
+  "prompt": "agents/merge-review.md",
+  "input_schema": "schemas/merge-review.input.json",
+  "output_schema": "schemas/merge-review.output.json",
+  "output_contract": "factory.merge-review/v1",
+  "model_tier": "standard",
+  "workspace": {
+    "type": "repository",
+    "checkoutDir": "repo",
+    "retainOnFailure": true
+  },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": ["gh:read", "linear:read", "repo:read"]
+  },
+  "limits": {
+    "timeout_seconds": 300,
+    "attempts": 1
+  },
+  "mutating": false,
+  "pins": {
+    "agents/merge-review.md": "sha256:285105f51813a31f81e3dc9af56bb45ad4c97ce91d3f178464d6c79d8362bf89",
+    "schemas/merge-review.input.json": "sha256:e64c8725e8ed715cdfcb261527c67f3424d140faba5d525d9aad20269f5dc0fc",
+    "schemas/merge-review.output.json": "sha256:987433ffbb39d935d42090eb62e63ece917a36b38fc849a6c5bfa27a26c898f8"
+  }
+}

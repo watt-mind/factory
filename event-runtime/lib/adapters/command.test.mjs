@@ -135,6 +135,36 @@ describe("execute", () => {
     expect(result.artifact.command.join(" ")).not.toContain("/tmp/pwn");
   });
 
+  test("writesResult leaves a command-authored result.json in place (WM-907)", async () => {
+    const workspaceDir = ws();
+    const script = `import { writeFileSync } from "node:fs";
+writeFileSync("result.json", JSON.stringify({
+  schemaVersion: "factory.agent-result/v1",
+  terminalState: "completed",
+  reasonCode: "ok",
+  artifact: { recommendation: "NOOP", authored: true }
+}) + "\\n");`;
+    const outcome = await execute({
+      spec: spec({}),
+      def: {
+        ref: "merge-scan@2",
+        writesResult: true,
+        command: ["bun", "-e", script],
+      },
+      workspaceDir,
+      timeoutMs: 5000,
+    });
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    const result = JSON.parse(
+      readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+    );
+    expect(result.artifact).toEqual({
+      recommendation: "NOOP",
+      authored: true,
+    });
+    expect(result.artifact.command).toBeUndefined();
+  });
+
   test("timeout kills the whole process group, leaving no orphaned grandchildren (OPS-411)", async () => {
     const workspaceDir = ws();
     const pidFile = path.join(workspaceDir, "grandchild.pid");

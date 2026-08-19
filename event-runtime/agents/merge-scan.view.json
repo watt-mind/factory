@@ -8,10 +8,24 @@
       "MERGE": "ok",
       "FIX": "warn",
       "ESCALATE": "error",
+      "REVIEW": "warn",
       "NOOP": "neutral"
     }
   },
   "sections": [
+    {
+      "path": "/reviews",
+      "as": "table",
+      "label": "Review",
+      "columns": ["pr", "ticket", "headRef"],
+      "formats": {
+        "pr": "pr",
+        "ticket": "issue",
+        "headSha": "sha",
+        "baseSha": "sha"
+      },
+      "expand": ["headSha", "baseSha"]
+    },
     {
       "path": "/plan",
       "as": "table",

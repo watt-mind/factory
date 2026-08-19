@@ -1,23 +1,24 @@
 {
-  "title": "factory.merge-plan/v2 — cold per-PR verdicts pinned to both head and base",
+  "title": "factory.merge-review/v1 — one-PR cold verdict pinned to both head and base",
   "type": "object",
   "required": [
-    "recommendation",
+    "verdict",
     "repo",
     "github",
     "base",
     "deployBranch",
+    "pr",
+    "headSha",
+    "baseSha",
     "plan",
     "fix",
     "escalate",
-    "reviews",
+    "findings",
     "summary"
   ],
   "additionalProperties": false,
   "properties": {
-    "recommendation": {
-      "enum": ["MERGE", "FIX", "ESCALATE", "REVIEW", "NOOP"]
-    },
+    "verdict": { "enum": ["MERGE", "FIX", "ESCALATE"] },
     "repo": { "type": "string", "minLength": 1 },
     "github": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
     "base": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
@@ -25,6 +26,11 @@
       "type": ["string", "null"],
       "pattern": "^[A-Za-z0-9._/-]+$"
     },
+    "pr": { "type": "integer", "minimum": 1 },
+    "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
     "plan": {
       "type": "array",
       "maxItems": 1,
@@ -69,6 +75,7 @@
     },
     "fix": {
       "type": "array",
+      "maxItems": 1,
       "items": {
         "type": "object",
         "required": [
@@ -106,6 +113,7 @@
     },
     "escalate": {
       "type": "array",
+      "maxItems": 1,
       "items": {
         "type": "object",
         "required": ["pr", "headSha", "ticket", "reason"],
@@ -118,22 +126,10 @@
         }
       }
     },
-    "reviews": {
+    "findings": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["pr", "headSha", "baseSha"],
-        "additionalProperties": false,
-        "properties": {
-          "pr": { "type": "integer", "minimum": 1 },
-          "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-          "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-          "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" }
-        }
-      }
+      "items": { "type": "string", "minLength": 1 }
     },
-    "summary": { "type": "string", "minLength": 1 },
-    "noopReason": { "enum": ["no_open_prs", "all_prs_held"] }
+    "summary": { "type": "string", "minLength": 1 }
   }
 }

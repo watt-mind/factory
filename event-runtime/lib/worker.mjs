@@ -65,6 +65,7 @@ import {
   safeJoin,
 } from "./workspace.mjs";
 import { createInboxItem } from "./inbox.mjs";
+import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
 import { templateFor } from "./decision-templates.mjs";
 
 /**
@@ -2802,6 +2803,12 @@ export async function executeClaimed(
         canonicalJson(receipt),
         iso(currentNow),
       );
+      persistMergeReviewFromResult(db, {
+        spec,
+        result,
+        runId,
+        now: currentNow,
+      });
 
       const origin = originatingEvent(db, runId);
       const envelope = {

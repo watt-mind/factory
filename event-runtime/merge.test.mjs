@@ -340,8 +340,22 @@ describe("durable autonomous merge registry (WM-398/WM-403)", () => {
   test("central mappings register scan, bounded fix, deterministic apply, landed verify, and explicit verify", () => {
     expect(registry.eventTypes["factory.merge.requested"]).toMatchObject({
       agent: "merge-scan@2",
-      adapter: "agy",
+      adapter: "command",
     });
+    expect(registry.eventTypes["factory.merge-review.requested"]).toMatchObject(
+      {
+        agent: "merge-review@1",
+        adapter: "agy",
+      },
+    );
+    expect(registry.agents.get("merge-scan@2").workspace.type).toBe(
+      "ephemeral",
+    );
+    expect(registry.agents.get("merge-scan@2").command).toEqual([
+      "bun",
+      "{factoryRoot}/event-runtime/lib/merge-reviews.mjs",
+      "scan",
+    ]);
     expect(registry.eventTypes["factory.merge-fix.requested"]).toMatchObject({
       agent: "merge-fix@1",
       adapter: "agy",
@@ -454,7 +468,7 @@ describe("merge-scan selected PR contract (WM-426)", () => {
       "utf8",
     );
     expect(prompt).toContain("`prNumbers` is absent");
-    expect(prompt).toContain("exactly those PR numbers");
+    expect(prompt).toMatch(/exactly those\s+PR numbers/);
     expect(prompt).toMatch(
       /missing, closed, draft, or targets a\s+base other than/,
     );
@@ -469,7 +483,7 @@ describe("merge-scan selected PR contract (WM-426)", () => {
 describe("merge-scan required-context resolution (WM-433)", () => {
   test("scan uses the supported PR query through the deterministic resolver", () => {
     const prompt = readFileSync(
-      registry.agents.get("merge-scan@2").promptPath,
+      registry.agents.get("merge-review@1").promptPath,
       "utf8",
     );
 
@@ -522,7 +536,7 @@ describe("merge-scan required-context resolution (WM-433)", () => {
 
 describe("format and lint mechanical merge fixes (WM-769)", () => {
   const scanPrompt = readFileSync(
-    registry.agents.get("merge-scan@2").promptPath,
+    registry.agents.get("merge-review@1").promptPath,
     "utf8",
   );
   const fixPrompt = readFileSync(
@@ -590,9 +604,9 @@ describe("format and lint mechanical merge fixes (WM-769)", () => {
   });
 });
 
-describe("merge-scan repository workspace and result contract (WM-425)", () => {
+describe("merge-review repository workspace and result contract (WM-425/WM-907)", () => {
   test("the definition and prompt declare the pinned repository contract", () => {
-    const def = registry.agents.get("merge-scan@2");
+    const def = registry.agents.get("merge-review@1");
     expect(def.workspace).toEqual({
       type: "repository",
       checkoutDir: "repo",
@@ -664,15 +678,22 @@ describe("merge-scan repository workspace and result contract (WM-425)", () => {
         db,
         registry,
         envelope(
-          "factory.merge.requested",
-          { repo: "mergefixture" },
-          "merge-scan-workspace",
+          "factory.merge-review.requested",
+          {
+            repo: "mergefixture",
+            github: "watt-mind/mergefixture",
+            base: "develop",
+            pr: 42,
+            headSha: SHA,
+            baseSha: BASE_SHA,
+          },
+          "merge-review-workspace",
         ),
       );
       planAdmittedEvents(db, registry, { policyVersion: PV });
       const proposal = openProposals(db, {})[0];
 
-      expect(registry.agents.get("merge-scan@2").workspace).toEqual({
+      expect(registry.agents.get("merge-review@1").workspace).toEqual({
         type: "repository",
         checkoutDir: "repo",
         retainOnFailure: true,
@@ -1294,12 +1315,27 @@ describe("merge transition chains", () => {
     });
   });
 
-  test("a fixer can only request a fresh independent scan, never apply", () => {
+  test("a fixer can only request a fresh independent review, never apply", () => {
     const db = openDb(":memory:");
     seedCompleted(db, {
       runId: "fix-done",
       agent: "merge-fix@1",
-      input: { repo: "factory" },
+      input: {
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr: 50,
+        headSha: SHA,
+        baseSha: BASE_SHA,
+        headRef: "feat/WM-501",
+        ticket: "WM-501",
+        finding: "rebase_onto_base",
+        findingHash: FINDING_HASH,
+        round: 1,
+        mechanical: true,
+        withinOwnedPaths: true,
+        ownedPaths: ["event-runtime/lib/chain.mjs"],
+      },
       artifact: {
         outcome: "UPDATED",
         repo: "factory",
@@ -1314,8 +1350,15 @@ describe("merge transition chains", () => {
     const row = db
       .query(`SELECT type,envelope_json FROM events WHERE source='chain'`)
       .get();
-    expect(row.type).toBe("factory.merge.requested");
-    expect(JSON.parse(row.envelope_json).payload).toEqual({ repo: "factory" });
+    expect(row.type).toBe("factory.merge-review.requested");
+    expect(JSON.parse(row.envelope_json).payload).toEqual({
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 50,
+      headSha: SHA,
+      baseSha: BASE_SHA,
+    });
   });
 });
 

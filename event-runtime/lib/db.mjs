@@ -313,6 +313,30 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 9,
+    name: "merge_reviews",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS merge_reviews (
+          github         TEXT NOT NULL,
+          pr             INTEGER NOT NULL,
+          head_sha       TEXT NOT NULL,
+          base_sha       TEXT NOT NULL,
+          verdict        TEXT NOT NULL,
+          findings_json  TEXT NOT NULL,
+          fix_json       TEXT,
+          plan_json      TEXT,
+          policy_version TEXT,
+          run_id         TEXT,
+          reviewed_at    TEXT NOT NULL,
+          PRIMARY KEY (github, pr, head_sha, base_sha)
+        );
+        CREATE INDEX IF NOT EXISTS idx_merge_reviews_github_pr
+          ON merge_reviews (github, pr, reviewed_at DESC);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
@@ -333,6 +357,7 @@ export const CORE_TABLES = [
   "inbox_items",
   "memos",
   "memo_uses",
+  "merge_reviews",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */

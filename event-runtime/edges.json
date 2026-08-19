@@ -161,6 +161,23 @@
     "recommendationField": "recommendation",
     "independent": true,
     "edges": {
+      "REVIEW": {
+        "eventType": "factory.merge-review.requested",
+        "whenItemsField": "reviews",
+        "mixedEventId": "chain-${runId}-review-${item.pr}",
+        "itemsField": "reviews",
+        "itemKey": "pr",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "base": "$.artifact.base"
+        },
+        "perItem": {
+          "pr": "$.item.pr",
+          "headSha": "$.item.headSha",
+          "baseSha": "$.item.baseSha"
+        }
+      },
       "MERGE": {
         "eventType": "factory.merge-apply.requested",
         "whenItemsField": "plan",
@@ -209,13 +226,58 @@
       }
     }
   },
+  "merge-review@1": {
+    "recommendationField": "verdict",
+    "independent": true,
+    "edges": {
+      "FIX": {
+        "eventType": "factory.merge-fix.requested",
+        "whenItemsField": "fix",
+        "mixedEventId": "chain-${runId}-fix-${item.pr}-${item.findingHash}",
+        "itemsField": "fix",
+        "itemKey": "ticket",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "base": "$.artifact.base"
+        },
+        "perItem": {
+          "pr": "$.item.pr",
+          "headSha": "$.item.headSha",
+          "baseSha": "$.item.baseSha",
+          "headRef": "$.item.headRef",
+          "ticket": "$.item.ticket",
+          "finding": "$.item.finding",
+          "findingHash": "$.item.findingHash",
+          "round": "$.item.round",
+          "mechanical": "$.item.mechanical",
+          "withinOwnedPaths": "$.item.withinOwnedPaths",
+          "ownedPaths": "$.item.ownedPaths"
+        }
+      },
+      "ESCALATE": {
+        "eventType": "factory.merge-escalate.requested",
+        "whenItemsField": "escalate",
+        "mixedEventId": "chain-${runId}-escalate",
+        "input": {
+          "repo": "$.artifact.repo",
+          "summary": "$.artifact.summary"
+        }
+      }
+    }
+  },
   "merge-fix@1": {
     "recommendationField": "outcome",
     "edges": {
       "UPDATED": {
-        "eventType": "factory.merge.requested",
+        "eventType": "factory.merge-review.requested",
         "input": {
-          "repo": "$.artifact.repo"
+          "repo": "$.artifact.repo",
+          "github": "$.input.github",
+          "base": "$.input.base",
+          "pr": "$.artifact.pr",
+          "headSha": "$.artifact.headSha",
+          "baseSha": "$.input.baseSha"
         }
       }
     }

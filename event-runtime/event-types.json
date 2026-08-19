@@ -115,8 +115,14 @@
   },
   "factory.merge.requested": {
     "agent": "merge-scan@2",
-    "adapter": "agy",
+    "adapter": "command",
     "idempotencyScope": ["correlationId", "inputHash"],
+    "proposalTtlSeconds": 1800
+  },
+  "factory.merge-review.requested": {
+    "agent": "merge-review@1",
+    "adapter": "agy",
+    "idempotencyScope": ["inputHash"],
     "proposalTtlSeconds": 1800
   },
   "factory.merge-apply.requested": {

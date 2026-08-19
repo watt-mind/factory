@@ -662,6 +662,111 @@ describe("multi-emit chain resolution (WM-119)", () => {
     });
   });
 
+  test("merge-scan REVIEW fans out per-PR merge-review.requested (WM-907)", () => {
+    const dir = tmpDir("evrt-chain-merge-review-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const head = "a".repeat(40);
+    const base = "b".repeat(40);
+
+    seedCompletedRun(db, {
+      runId: "run-scan-reviews",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: {
+        recommendation: "REVIEW",
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        deployBranch: "master",
+        reviews: [
+          { pr: 12, headSha: head, baseSha: base },
+          { pr: 13, headSha: head, baseSha: base },
+        ],
+        plan: [],
+        fix: [],
+        escalate: [],
+        summary: "two misses",
+      },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 2,
+      skipped: 0,
+      errors: [],
+    });
+    for (const pr of [12, 13]) {
+      const event = db
+        .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
+        .get(`chain-run-scan-reviews-${pr}`);
+      expect(event).toBeTruthy();
+      expect(event.type).toBe("factory.merge-review.requested");
+      expect(JSON.parse(event.envelope_json).payload).toEqual({
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr,
+        headSha: head,
+        baseSha: base,
+      });
+    }
+  });
+
+  test("merge-fix UPDATED targets merge-review.requested for the new head (WM-907)", () => {
+    const dir = tmpDir("evrt-chain-merge-fix-review-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const oldHead = "a".repeat(40);
+    const newHead = "c".repeat(40);
+    const base = "b".repeat(40);
+
+    seedCompletedRun(db, {
+      runId: "run-fix-updated",
+      agent: "merge-fix@1",
+      input: {
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        pr: 12,
+        headSha: oldHead,
+        baseSha: base,
+        headRef: "feat/WM-12",
+        ticket: "WM-12",
+        finding: "rebase_onto_base",
+        findingHash: "d".repeat(64),
+        round: 1,
+        mechanical: true,
+        withinOwnedPaths: true,
+        ownedPaths: ["event-runtime/lib/chain.mjs"],
+      },
+      artifact: {
+        outcome: "UPDATED",
+        repo: "factory",
+        ticket: "WM-12",
+        pr: 12,
+        headSha: newHead,
+        round: 1,
+        summary: "rebased",
+      },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    const event = db
+      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
+      .get("chain-run-fix-updated");
+    expect(event.type).toBe("factory.merge-review.requested");
+    expect(JSON.parse(event.envelope_json).payload).toEqual({
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 12,
+      headSha: newHead,
+      baseSha: base,
+    });
+  });
+
   test("non-completed runs do not generate chain candidates", () => {
     const dir = tmpDir("evrt-chain-triage-fail-");
     const db = openDb(path.join(dir, "runtime.db"));

@@ -1,0 +1,5 @@
+{
+  "title": "factory.merge-review/v1",
+  "$comment": "Alias of schemas/merge-review.output.json — the per-PR cold-review contract (WM-907).",
+  "$ref": "../schemas/merge-review.output.json"
+}

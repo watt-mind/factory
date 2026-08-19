@@ -476,7 +476,7 @@ describe("work-scan registration (WM-110)", () => {
     expect([...byAdapter.agy].sort()).toEqual([
       "agy-smoke@1",
       "merge-fix@1",
-      "merge-scan@2",
+      "merge-review@1",
       "triage-scan@1",
     ]);
     // dispatch@1 rides cursor (Grok 4.6) since 2026-08-19 — operator decision to
@@ -492,7 +492,7 @@ describe("work-scan registration (WM-110)", () => {
         registry.modelTiers,
       ),
     ).toBe(registry.modelTiers.cursor.standard);
-    for (const ref of ["merge-fix@1", "merge-scan@2", "triage-scan@1"]) {
+    for (const ref of ["merge-fix@1", "merge-review@1", "triage-scan@1"]) {
       const resolved = resolveModel(
         registry.agents.get(ref),
         "agy",

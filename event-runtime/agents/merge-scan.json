@@ -5,18 +5,22 @@
   "input_schema": "schemas/merge-scan.input.json",
   "output_schema": "schemas/merge-scan.output.json",
   "output_contract": "factory.merge-plan/v2",
-  "model_tier": "standard",
+  "command": [
+    "bun",
+    "{factoryRoot}/event-runtime/lib/merge-reviews.mjs",
+    "scan"
+  ],
+  "writesResult": true,
   "workspace": {
-    "type": "repository",
-    "checkoutDir": "repo",
+    "type": "ephemeral",
     "retainOnFailure": true
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["gh:read", "linear:read", "repo:read"]
+    "services": ["gh:read"]
   },
   "limits": {
-    "timeout_seconds": 1500,
+    "timeout_seconds": 120,
     "attempts": 1
   },
   "mutating": false,
@@ -31,8 +35,8 @@
     }
   ],
   "pins": {
-    "agents/merge-scan.md": "sha256:3b2d898c29bd0d95eda7b3c942c66cf1226020933dd9d937fd0e7c07d77d98b4",
+    "agents/merge-scan.md": "sha256:cbedecd2f5c02aa4a81c71ec14b6d57ec358f4a05ecc8df61252acb2204f601b",
     "schemas/merge-scan.input.json": "sha256:dcd0cf7d2c17ae1142edc93d2e48016c23f824e2447edc4bc929daf89ec9d80b",
-    "schemas/merge-scan.output.json": "sha256:84791d0fcfe80716ffda27b1432cb8be7a003d1c7c967d4dc9445ae182b236a2"
+    "schemas/merge-scan.output.json": "sha256:7da0007262077e89f63ebb5a9627137ef64b6e48733593eea0bf08a69c7ce398"
   }
 }

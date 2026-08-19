@@ -228,7 +228,12 @@ const independentMergeRegistry = ({
               ...edge,
               whenItemsField:
                 selectors[name] ??
-                { MERGE: "plan", FIX: "fix", ESCALATE: "escalate" }[name],
+                {
+                  MERGE: "plan",
+                  FIX: "fix",
+                  ESCALATE: "escalate",
+                  REVIEW: "reviews",
+                }[name],
             },
           ]),
         ),
@@ -478,6 +483,43 @@ describe("chain auto approval (WM-357)", () => {
       [...CHAIN_AUTO_APPROVAL_EVENT_TYPES].sort(),
     );
     expect(loaded.reason).toBeNull();
+  });
+
+  test("merge-scan REVIEW proposals auto-approve factory.merge-review.requested (WM-907)", async () => {
+    const db = openDb(":memory:");
+    const headSha = "a".repeat(40);
+    const baseSha = "b".repeat(40);
+    const reviewInput = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 12,
+      headSha,
+      baseSha,
+    };
+    const candidate = seed(db, {
+      id: "merge-review-from-scan",
+      type: "factory.merge-review.requested",
+      input: reviewInput,
+      predecessorAgent: "merge-scan@2",
+      predecessorInput: { repo: "factory" },
+      predecessorArtifact: {
+        recommendation: "REVIEW",
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        deployBranch: "master",
+        reviews: [{ pr: 12, headSha, baseSha }],
+        plan: [],
+        fix: [],
+        escalate: [],
+        summary: "one miss",
+      },
+    });
+
+    expect((await auto(db)).approved).toEqual([
+      { proposalId: candidate.id, runId: candidate.runId },
+    ]);
   });
 
   test("budget, worker cap, and circuit breaker each stop unattended approvals", async () => {
