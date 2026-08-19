@@ -53,8 +53,52 @@ function runNotify({ args, stdin = "", exitCode = "0", env = {} }) {
     status: result.exitCode,
     args: existsSync(argsFile) ? readFileSync(argsFile, "utf8") : null,
     stdin: existsSync(stdinFile) ? readFileSync(stdinFile, "utf8") : null,
+    stderr: result.stderr.toString(),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+async function withInboxStub(response, fn) {
+  const dir = mkdtempSync(path.join(tmpdir(), "factory-inbox-server-"));
+  const requestFile = path.join(dir, "request.json");
+  const serverScript = path.join(dir, "server.py");
+  writeFileSync(
+    serverScript,
+    `
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("content-length", "0"))
+        with open(${JSON.stringify(requestFile)}, "w") as f:
+            f.write(self.rfile.read(length).decode())
+        body = json.dumps(json.loads(${JSON.stringify(JSON.stringify(response))})).encode()
+        self.send_response(201)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *_): pass
+server = HTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_address[1], flush=True)
+server.handle_request()
+`,
+  );
+  const server = Bun.spawn({
+    cmd: ["python3", serverScript],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const reader = server.stdout.getReader();
+  const { value } = await reader.read();
+  const port = Number(new TextDecoder().decode(value).trim());
+  try {
+    return await fn({ port, requestFile });
+  } finally {
+    server.kill();
+    await server.exited;
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 test("factory notify delegates argv to the notifier from any cwd", () => {
@@ -84,60 +128,77 @@ test("factory notify preserves stdin mode and the notifier exit code", () => {
 });
 
 test("factory notify posts a structured inbox item when serve is reachable", async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "factory-inbox-server-"));
-  const requestFile = path.join(dir, "request.json");
-  const serverScript = path.join(dir, "server.py");
-  const port = 31000 + (process.pid % 10000);
-  writeFileSync(
-    serverScript,
-    `
-import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get("content-length", "0"))
-        with open(${JSON.stringify(requestFile)}, "w") as f:
-            f.write(self.rfile.read(length).decode())
-        body = json.dumps({"delivery": {"ok": True}}).encode()
-        self.send_response(201)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def log_message(self, *_): pass
-server = HTTPServer(("127.0.0.1", ${port}), Handler)
-print("ready", flush=True)
-server.handle_request()
-`,
+  await withInboxStub(
+    { delivery: { ok: true } },
+    async ({ port, requestFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: { FACTORY_EVENT_PORT: String(port), FACTORY_RUN_ID: "run_test" },
+      });
+      try {
+        expect(result.status).toBe(0);
+        expect(result.args).toBeNull();
+        const body = JSON.parse(readFileSync(requestFile, "utf8"));
+        expect(body).toEqual({
+          kind: "BLOCKED",
+          title: "BLOCKED WM-1: choose policy",
+          refs: { issue: "WM-1" },
+          source: "agent:run_test",
+        });
+      } finally {
+        result.cleanup();
+      }
+    },
   );
-  const server = Bun.spawn({
-    cmd: ["python3", serverScript],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const reader = server.stdout.getReader();
-  await reader.read();
+});
 
-  const result = runNotify({
-    args: ["BLOCKED", "WM-1:", "choose policy"],
-    env: { FACTORY_EVENT_PORT: String(port), FACTORY_RUN_ID: "run_test" },
-  });
-  try {
-    expect(result.status).toBe(0);
-    expect(result.args).toBeNull();
-    const body = JSON.parse(readFileSync(requestFile, "utf8"));
-    expect(body).toEqual({
-      kind: "BLOCKED",
-      title: "BLOCKED WM-1: choose policy",
-      refs: { issue: "WM-1" },
-      source: "agent:run_test",
-    });
-  } finally {
-    server.kill();
-    await server.exited;
-    result.cleanup();
-    rmSync(dir, { recursive: true, force: true });
-  }
+test("factory notify falls back to direct transport when durable record succeeds but serve push fails", async () => {
+  await withInboxStub(
+    {
+      item: { id: "inbox_wm759" },
+      delivery: { ok: false, exitCode: 9, error: "telegram unavailable" },
+    },
+    async ({ port, requestFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: { FACTORY_EVENT_PORT: String(port) },
+      });
+      try {
+        expect(result.status).toBe(0);
+        expect(result.args).toBe("BLOCKED\nWM-1:\nchoose policy\n");
+        expect(result.stderr).toContain("inbox item inbox_wm759 stored");
+        expect(result.stderr).toContain("telegram unavailable");
+        expect(result.stderr).toContain("falling back to direct transport");
+        const body = JSON.parse(readFileSync(requestFile, "utf8"));
+        expect(body.kind).toBe("BLOCKED");
+      } finally {
+        result.cleanup();
+      }
+    },
+  );
+});
+
+test("factory notify prints why when durable-ok push-failed and the fallback also fails", async () => {
+  await withInboxStub(
+    {
+      item: { id: "inbox_undeliverable" },
+      delivery: { ok: false, exitCode: 9, error: "telegram unavailable" },
+    },
+    async ({ port }) => {
+      const result = runNotify({
+        args: ["ESCALATED", "WM-1:", "need a human"],
+        exitCode: "7",
+        env: { FACTORY_EVENT_PORT: String(port) },
+      });
+      try {
+        expect(result.status).toBe(7);
+        expect(result.args).toBe("ESCALATED\nWM-1:\nneed a human\n");
+        expect(result.stderr).toContain("telegram unavailable");
+      } finally {
+        result.cleanup();
+      }
+    },
+  );
 });
 
 test("factory ps executes orchestrator/ps.mjs via CLI", () => {

@@ -143,9 +143,11 @@ case "$cmd" in
     ;;
   run)          run_sh runners/run-agent.sh "$@" ;;
   notify)
-    # Durable first, push second (WM-285). A runtime connection failure falls
-    # back to the original direct transport so an offline serve process cannot
-    # swallow the interrupt. HTTP/delivery failures do not double-send.
+    # Durable first, push second (WM-285). Connection failure (11) or a failed
+    # serve-side push after a successful durable record (12) fall back to the
+    # original direct transport so the human is reached on at least one leg
+    # (WM-759). A successful durable+push does not fall through (no double-send).
+    # HTTP rejection (10) is still terminal.
     _notify_stdin=0
     if [[ "${1:-}" == "-" ]]; then
       _notify_stdin=1
@@ -198,26 +200,26 @@ case "$cmd" in
           });
           if (!response.ok) process.exit(10);
           const body = await response.json();
-          // The inbox item is the durable record; the external projection
-          // (notify.py) is best-effort. A stored item with a failed projection
-          // is a warning, not a failed run (WM-825): merge-notify was FAILED
-          // on every escalation on hosts without ~/Develop/hdkiller.
+          // Durable record succeeded; the serve-side notify.py projection did
+          // not. Exit 12 so the shell falls through to the CLI transport
+          // rather than treating this as delivered (WM-759). WM-825 exited 0
+          // once an item id existed, which left the human unreached when
+          // serve could not push. Stderr must stay visible; it used to be discarded.
           if (body?.delivery?.ok === false) {
-            if (body?.item?.id) {
-              console.error(`notify: inbox item ${body.item.id} stored; external projection failed: ${body.delivery.error ?? "exit " + body.delivery.exitCode}`);
-              process.exit(0);
-            }
+            const why = body.delivery.error ?? ("exit " + body.delivery.exitCode);
+            const stored = body?.item?.id ? `inbox item ${body.item.id} stored; ` : "";
+            console.error(`notify: ${stored}external projection failed: ${why}; falling back to direct transport`);
             process.exit(12);
           }
           process.exit(0);
         } catch {
           process.exit(11);
         }
-      ' >/dev/null 2>&1
+      ' >/dev/null
       _notify_status=$?
       set -e
       if [[ "$_notify_status" -eq 0 ]]; then exit 0; fi
-      if [[ "$_notify_status" -ne 11 ]]; then exit "$_notify_status"; fi
+      if [[ "$_notify_status" -ne 11 && "$_notify_status" -ne 12 ]]; then exit "$_notify_status"; fi
     fi
 
     # Unreachable runtime (or an unstructured legacy message): preserve the
@@ -288,7 +290,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   demo          run the bundled starter ticket (WM-799); --dry for CI.
                 Isolated event-runtime env: demo --here / demo --down
   run           runners/run-agent.sh
-  notify        durable human inbox + notify.py projection (direct fallback when serve is offline)
+  notify        durable human inbox + notify.py projection (direct fallback when serve is offline or its push fails)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
   emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
 
