@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Triage applied",
+  "status": {
+    "path": "/outcome",
+    "tone": {
+      "SUPPLY_CHANGED": "ok",
+      "DETAIL_CHANGED": "ok",
+      "NO_CHANGE": "muted"
+    }
+  },
+  "sections": [
+    {
+      "path": "/applied",
+      "as": "table",
+      "label": "Applied",
+      "columns": ["issueId", "action"],
+      "formats": { "issueId": "issue" }
+    },
+    {
+      "path": "/repo",
+      "as": "keyvalue",
+      "label": "Repo",
+      "formats": { "": "repo" }
+    }
+  ]
+}
