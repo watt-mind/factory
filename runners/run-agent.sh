@@ -154,6 +154,15 @@ if [[ -z "${FACTORY_NOTIFY_CMD:-}" && -z "${FACTORY_NOTIFY_SCRIPT:-}" ]]; then
   eval "$(cd "$ROOT" && bun "$ROOT/lib/notify.mjs" --export-env 2>/dev/null || true)"
 fi
 
+# Runtime workers materialize declared RunSpec.harness content into the run
+# workspace (WM-851, lib/worker.mjs materializeRunHarness) so a headless run
+# does not depend on ~/.claude/agents and ~/.cursor/commands having been
+# populated by `bun build/emit.mjs --link`. This orchestrator path still
+# launches inside a product checkout and reads slash commands from that
+# checkout's `.claude/commands/` (link-repos) plus the operator's home-dir
+# install — it has no RunSpec. Do not treat this script as the runtime
+# materialization path.
+
 if [[ "$USE_API" == "1" ]]; then
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "--use-api given but ANTHROPIC_API_KEY is not set" >&2; exit 2; }
   AUTH_NOTE="ANTHROPIC_API_KEY (billed per token; connectors disabled)"

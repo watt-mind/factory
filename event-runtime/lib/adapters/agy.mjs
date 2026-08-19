@@ -29,6 +29,29 @@ export const SANDBOX_SUPPORT = "unsupported";
 const SANDBOX_REFUSAL_REASON =
   "the agy CLI has no guest execution path yet — its binary, Google Cloud/Antigravity auth, and prompt transport have not been translated to the microVM";
 
+/**
+ * Workspace-relative packaging of RunSpec.harness (WM-851). agy/gemini emit
+ * packages commands as skills (`dist/gemini/skills/<name>/`), so both
+ * `skills` and `commands` copy that directory into `.gemini/skills`.
+ */
+export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["dist", "gemini", "skills", name],
+    dest: (name) => [".gemini", "skills", name],
+    type: "dir",
+  }),
+  commands: Object.freeze({
+    source: (name) => ["dist", "gemini", "skills", name],
+    dest: (name) => [".gemini", "skills", name],
+    type: "dir",
+  }),
+  subagents: Object.freeze({
+    source: (name) => ["dist", "gemini", "agents", `${name}.md`],
+    dest: (name) => [".gemini", "agents", `${name}.md`],
+    type: "file",
+  }),
+});
+
 export const KILL_GRACE_MS = 30_000;
 const TEXT_PREVIEW_CHARS = 4000;
 

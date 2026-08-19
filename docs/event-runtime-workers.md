@@ -255,6 +255,69 @@ machine-readable output) prints the registered adapters with their source and
 sandbox support — the same registry a worker builds, so it needs no running
 `serve`.
 
+## 2d. Harness content as a RunSpec input — **shipped, WM-851**
+
+Runtime LLM runs used to acquire skills, slash commands, and subagents from
+ambient host home-dir symlinks (`~/.claude/agents`, `~/.cursor/commands`,
+`~/.pi/agent/…`) written by `bun build/emit.mjs --link`. A worker on a
+machine that had never been linked, or a run that named a subset of that
+content, had no declared input — the harness just inherited whatever $HOME
+happened to contain.
+
+A definition may now declare:
+
+```json
+"harness": {
+  "skills": ["ticket-spec"],
+  "commands": ["factory-ticket"],
+  "subagents": ["factory-ux-critic"]
+}
+```
+
+`buildRunSpec` (`lib/planner.mjs`) copies a well-formed block onto the
+immutable RunSpec — same omit-when-undeclared rule as `model_tier`, so
+existing definitions stay byte-identical. Shape is checked at plan time
+(object, closed keys, names matching `^[a-z0-9][a-z0-9._-]*$`); catalog
+membership is not, because `buildRunSpec` is pure.
+
+The worker materializes that declaration **after** workspace create and
+**before** adapter spawn (`materializeRunHarness` in `lib/worker.mjs`):
+
+1. Resolve each name against `registry.harnessRoots` when WM-849 has
+   populated it, otherwise `shared/{skills,commands,agents}`.
+2. Copy the **adapter's emitted packaging** (not the shared source) into a
+   workspace-relative tree the CLI reads from cwd:
+
+   | Adapter  | skills                                           | commands                       | subagents                 |
+   | -------- | ------------------------------------------------ | ------------------------------ | ------------------------- |
+   | `claude` | `.claude/skills/<n>/` from `plugins/core/skills` | `.claude/commands/<n>.md`      | `.claude/agents/<n>.md`   |
+   | `cursor` | **unsupported** (emit has none)                  | `.cursor/commands/<n>.md`      | `.cursor/agents/<n>.md`   |
+   | `pi`     | `.pi/agent/skills/<n>/` from `dist/pi/skills`    | `.pi/agent/prompts/<n>.md`     | `.pi/agent/agents/<n>.md` |
+   | `agy`    | `.gemini/skills/<n>/` from `dist/gemini/skills`  | same (commands emit as skills) | `.gemini/agents/<n>.md`   |
+
+3. Refuse with a typed reason, never spawn:
+
+   - `harness_unknown_skill` / `_command` / `_subagent` — name not in the catalog;
+   - `harness_unsupported` — the adapter has no layout for that kind (cursor
+     skills; fake/command/actions when anything is named);
+   - `harness_unmaterializable` — catalog hit but emit output is missing or
+     the dest would escape the workspace.
+
+Those codes are fatal (`classifyFailureCause` treats the `harness_` prefix
+as fatal). An undeclared or empty `harness` is a no-op.
+
+LLM adapters export `HARNESS_LAYOUT` describing source/dest/type; it is
+**not** part of the WM-837 adapter contract (`execute` + `SANDBOX_SUPPORT`
+remain the required pair). There is no runtime `codex` adapter — Codex
+packaging lives under `dist/codex/` for emit/`--link` only.
+
+The orchestrator path (`runners/run-agent.sh`) is unchanged: it still
+launches inside a product checkout and relies on `link-repos` plus the
+operator home-dir install. It has no RunSpec.
+
+Auth stays in the real `$HOME`. Materialization adds the declared set to the
+workspace; it does not hide extra home-dir content the CLI may still load.
+
 ## 3. Stage 2 — workers on other nodes
 
 A `work` process on another machine talks to the authenticated `/worker/v1`

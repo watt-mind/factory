@@ -180,6 +180,54 @@ export function pinMemos(
 }
 
 /**
+ * Closed identifiers for `def.harness.{skills,commands,subagents}` (WM-851).
+ * No slashes: namespaced third-party pack names wait on WM-849's catalog.
+ */
+export const HARNESS_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+export const HARNESS_KINDS = Object.freeze(["skills", "commands", "subagents"]);
+
+/**
+ * Shape-check an agent definition's `harness` block. Pure: no catalog I/O —
+ * unknown names are a worker refusal, not a plan-time fetch.
+ * Absent field → undefined so undeclared specs stay byte-identical.
+ */
+export function harnessFromDef(def) {
+  if (def?.harness === undefined) return undefined;
+  return normalizeHarness(def.harness, def.ref ?? def.id ?? "harness");
+}
+
+export function normalizeHarness(raw, source = "harness") {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      `${source}: "harness" must be an object { skills?, commands?, subagents? }`,
+    );
+  }
+  const allowed = new Set(HARNESS_KINDS);
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) {
+      throw new Error(
+        `${source}: "harness" unknown key "${key}" (allowed: ${HARNESS_KINDS.join(", ")})`,
+      );
+    }
+  }
+  const out = {};
+  for (const kind of HARNESS_KINDS) {
+    if (raw[kind] === undefined) continue;
+    const names = raw[kind];
+    const wellFormed =
+      Array.isArray(names) &&
+      names.every((n) => typeof n === "string" && HARNESS_NAME_PATTERN.test(n));
+    if (!wellFormed) {
+      throw new Error(
+        `${source}: "harness.${kind}" must be an array of names matching ${HARNESS_NAME_PATTERN}`,
+      );
+    }
+    out[kind] = [...names];
+  }
+  return out;
+}
+
+/**
  * Pure assembly of the §5.2 RunSpec from a registered mapping. No I/O, no
  * clock reads beyond the injected `now` — same inputs, same spec, always.
  */
@@ -236,6 +284,11 @@ export function buildRunSpec(
     // Declared repo scope (WM-64) rides in the spec so the proposal the
     // operator approves names it, same as capabilities.
     ...(def.repos ? { repos: def.repos } : {}),
+    // Declared harness content (WM-851): skills/commands/subagents the
+    // worker materializes into the run workspace. Omitted when the
+    // definition does not declare the field, so undeclared specs stay
+    // byte-identical to before.
+    ...(def.harness !== undefined ? { harness: harnessFromDef(def) } : {}),
     // Model-tier routing (WM-135), the house repoPin pattern: the tier is
     // resolved HERE, at plan time, and the concrete value is pinned so the
     // proposal, receipt, and inspect output all name the exact model. Fields

@@ -13,6 +13,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -39,6 +40,8 @@ import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
 import {
+  HARNESS_KINDS,
+  HARNESS_NAME_PATTERN,
   worktreeDispatchAutoEligibility,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
@@ -67,6 +70,165 @@ import {
 import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
 import { templateFor } from "./decision-templates.mjs";
+
+const HARNESS_UNKNOWN_CODES = Object.freeze({
+  skills: "harness_unknown_skill",
+  commands: "harness_unknown_command",
+  subagents: "harness_unknown_subagent",
+});
+
+export class HarnessMaterializeError extends Error {
+  /**
+   * @param {string} code - typed reason: `harness_unknown_*` / `harness_unsupported` / `harness_unmaterializable`
+   * @param {string} detail
+   */
+  constructor(code, detail) {
+    super(detail);
+    this.name = "HarnessMaterializeError";
+    this.code = code;
+  }
+}
+
+/**
+ * Catalog roots for resolving declared harness names (WM-851). Prefers
+ * WM-849's `registry.harnessRoots` when present; otherwise `shared/`.
+ */
+export function harnessCatalogRoots(registry, factoryRoot = FACTORY_ROOT) {
+  if (Array.isArray(registry?.harnessRoots) && registry.harnessRoots.length > 0)
+    return registry.harnessRoots;
+  return [
+    {
+      name: "factory/core",
+      builtin: true,
+      prefix: null,
+      skills: path.join(factoryRoot, "shared", "skills"),
+      commands: path.join(factoryRoot, "shared", "commands"),
+      subagents: path.join(factoryRoot, "shared", "agents"),
+    },
+  ];
+}
+
+function catalogHas(roots, kind, name) {
+  for (const root of roots) {
+    const dir = root[kind];
+    if (typeof dir !== "string" || dir === "") continue;
+    const candidate =
+      kind === "skills" ? path.join(dir, name) : path.join(dir, `${name}.md`);
+    if (existsSync(candidate)) return true;
+  }
+  return false;
+}
+
+function harnessRelDest(layout, name) {
+  const parts = layout.dest(name);
+  if (!Array.isArray(parts) || parts.some((p) => typeof p !== "string")) {
+    throw new HarnessMaterializeError(
+      "harness_unmaterializable",
+      `adapter dest() for ${JSON.stringify(name)} did not return a path-segment array`,
+    );
+  }
+  return parts.join("/");
+}
+
+/**
+ * Copy declared RunSpec.harness content into the attempt workspace using the
+ * target adapter's `HARNESS_LAYOUT`. No-op when the spec omits harness or
+ * names nothing. Throws `HarnessMaterializeError` with a typed `code`.
+ */
+export function materializeRunHarness({
+  spec,
+  adapter,
+  adapterKey,
+  workspaceDir,
+  registry,
+  factoryRoot = FACTORY_ROOT,
+} = {}) {
+  const harness = spec?.harness;
+  if (!harness || typeof harness !== "object") return [];
+  const declaredCount = HARNESS_KINDS.reduce(
+    (n, kind) => n + (Array.isArray(harness[kind]) ? harness[kind].length : 0),
+    0,
+  );
+  if (declaredCount === 0) return [];
+
+  const layout = adapter?.HARNESS_LAYOUT;
+  const roots = harnessCatalogRoots(registry, factoryRoot);
+  const written = [];
+
+  for (const kind of HARNESS_KINDS) {
+    const names = Array.isArray(harness[kind]) ? harness[kind] : [];
+    for (const name of names) {
+      if (typeof name !== "string" || !HARNESS_NAME_PATTERN.test(name)) {
+        throw new HarnessMaterializeError(
+          HARNESS_UNKNOWN_CODES[kind],
+          `${kind} name ${JSON.stringify(name)} is not a legal harness identifier`,
+        );
+      }
+      if (!catalogHas(roots, kind, name)) {
+        throw new HarnessMaterializeError(
+          HARNESS_UNKNOWN_CODES[kind],
+          `${kind.slice(0, -1)} "${name}" is not in the harness catalog`,
+        );
+      }
+      const kindLayout = layout?.[kind];
+      if (!kindLayout) {
+        throw new HarnessMaterializeError(
+          "harness_unsupported",
+          `adapter "${adapterKey}" cannot materialize ${kind}`,
+        );
+      }
+      const srcParts = kindLayout.source(name);
+      if (
+        !Array.isArray(srcParts) ||
+        srcParts.some((p) => typeof p !== "string")
+      ) {
+        throw new HarnessMaterializeError(
+          "harness_unmaterializable",
+          `adapter "${adapterKey}" source() for ${kind}/${name} did not return a path-segment array`,
+        );
+      }
+      const src = path.join(factoryRoot, ...srcParts);
+      let dest;
+      try {
+        dest = safeJoin(workspaceDir, harnessRelDest(kindLayout, name));
+      } catch (err) {
+        throw new HarnessMaterializeError(
+          "harness_unmaterializable",
+          err instanceof PathViolation
+            ? `${kind}/${name} dest escapes the workspace`
+            : (err?.message ?? String(err)),
+        );
+      }
+      if (!existsSync(src)) {
+        throw new HarnessMaterializeError(
+          "harness_unmaterializable",
+          `${kind}/${name} has no emitted packaging for adapter "${adapterKey}"`,
+        );
+      }
+      const st = statSync(src);
+      if (kindLayout.type === "dir" && !st.isDirectory()) {
+        throw new HarnessMaterializeError(
+          "harness_unmaterializable",
+          `${kind}/${name} emit path is not a directory for adapter "${adapterKey}"`,
+        );
+      }
+      if (kindLayout.type === "file" && !st.isFile()) {
+        throw new HarnessMaterializeError(
+          "harness_unmaterializable",
+          `${kind}/${name} emit path is not a file for adapter "${adapterKey}"`,
+        );
+      }
+      mkdirSync(path.dirname(dest), { recursive: true });
+      cpSync(src, dest, { recursive: kindLayout.type === "dir" });
+      written.push({
+        kind,
+        name,
+        dest: path.relative(workspaceDir, dest),
+      });
+    }
+  }
+  return written;
+}
 
 /**
  * Runtime-injected artifacts: adapters that capture the agent's output write
@@ -460,7 +622,8 @@ export function classifyFailureCause(reasonCode) {
   }
   if (
     FATAL_FAILURES.has(reasonCode) ||
-    String(reasonCode).startsWith("policy_denied:")
+    String(reasonCode).startsWith("policy_denied:") ||
+    String(reasonCode).startsWith("harness_")
   ) {
     return "fatal";
   }
@@ -2184,6 +2347,33 @@ export async function executeClaimed(
         reasonCode: "agent_definition_mismatch",
         receipt: refusedRes.receipt,
       };
+    }
+
+    try {
+      materializeRunHarness({
+        spec,
+        adapter,
+        adapterKey,
+        workspaceDir,
+        registry,
+      });
+    } catch (err) {
+      if (err instanceof HarnessMaterializeError) {
+        const refusedRes = refuseTerminal(err.code, ["harness_materialize"], {
+          causeTyped: true,
+          detail: err.message,
+        });
+        cleanupWorkspace();
+        if (refusedRes?.fenced) return { fenced: true };
+        return {
+          runId,
+          attempt,
+          terminalState: "REFUSED",
+          reasonCode: err.code,
+          receipt: refusedRes.receipt,
+        };
+      }
+      throw err;
     }
 
     // Live trace (factory.trace/v1): the recorder is already defensive, but

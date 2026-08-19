@@ -71,6 +71,29 @@ export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
 export const SANDBOX_SUPPORT = "gondolin";
 
 /**
+ * Workspace-relative packaging of RunSpec.harness (WM-851). Commands emit as
+ * `dist/pi/prompts`; dest mirrors `~/.pi/agent/{skills,prompts,agents}` so a
+ * run does not depend on `bun build/emit.mjs --link` having populated $HOME.
+ */
+export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["dist", "pi", "skills", name],
+    dest: (name) => [".pi", "agent", "skills", name],
+    type: "dir",
+  }),
+  commands: Object.freeze({
+    source: (name) => ["dist", "pi", "prompts", `${name}.md`],
+    dest: (name) => [".pi", "agent", "prompts", `${name}.md`],
+    type: "file",
+  }),
+  subagents: Object.freeze({
+    source: (name) => ["dist", "pi", "agents", `${name}.md`],
+    dest: (name) => [".pi", "agent", "agents", `${name}.md`],
+    type: "file",
+  }),
+});
+
+/**
  * Workspace file the prompt is written to for a sandboxed run, then redirected
  * onto pi's stdin inside the guest. Not an artifact: it is the same text the
  * host path pipes, and it lives beside input.json under the workspace mount.

@@ -63,6 +63,29 @@ export const SANDBOX_DEFERRAL_REASON =
 /** This adapter refuses sandboxed definitions (fail closed) until the deferral above is resolved. */
 export const SANDBOX_SUPPORT = "unsupported";
 
+/**
+ * Workspace-relative packaging of RunSpec.harness (WM-851). Sources are emit
+ * output under FACTORY_ROOT (`plugins/core`) so the bytes match the Claude
+ * plugin; dest is the project `.claude/` tree the CLI reads from cwd.
+ */
+export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["plugins", "core", "skills", name],
+    dest: (name) => [".claude", "skills", name],
+    type: "dir",
+  }),
+  commands: Object.freeze({
+    source: (name) => ["plugins", "core", "commands", `${name}.md`],
+    dest: (name) => [".claude", "commands", `${name}.md`],
+    type: "file",
+  }),
+  subagents: Object.freeze({
+    source: (name) => ["plugins", "core", "agents", `${name}.md`],
+    dest: (name) => [".claude", "agents", `${name}.md`],
+    type: "file",
+  }),
+});
+
 export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
