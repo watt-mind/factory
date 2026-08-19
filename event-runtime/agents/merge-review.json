@@ -13,11 +13,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": [
-      "gh:read",
-      "linear:read",
-      "repo:read"
-    ]
+    "services": ["gh:read", "linear:read", "repo:read"]
   },
   "limits": {
     "timeout_seconds": 300,
@@ -30,9 +26,7 @@
         "type": "repo",
         "id": "$.input.repo"
       },
-      "kinds": [
-        "decision"
-      ],
+      "kinds": ["decision"],
       "max": 10
     }
   ],
