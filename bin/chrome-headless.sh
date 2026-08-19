@@ -26,7 +26,15 @@
 set -euo pipefail
 
 resolve_chrome() {
-  if [[ -n "${CHROME_BIN:-}" ]]; then
+  # CHROME_BIN, when set, is the only candidate — even if empty. Tests starve
+  # discovery by exporting CHROME_BIN= so a macOS host with Chrome in
+  # /Applications cannot be exec'd by a "no browser installed" case. Unset
+  # keeps the previous PATH + app-bundle search. `${VAR+set}` is bash 3.2-safe
+  # (/bin/bash on macOS); `[[ -v ]]` is not.
+  if [ "${CHROME_BIN+set}" = "set" ]; then
+    if [ -z "$CHROME_BIN" ]; then
+      return 1
+    fi
     printf '%s\n' "$CHROME_BIN"
     return 0
   fi

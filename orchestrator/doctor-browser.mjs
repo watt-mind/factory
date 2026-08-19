@@ -31,7 +31,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { homedir, platform, tmpdir } from "node:os";
 import path from "node:path";
 import { factoryRoot } from "../lib/factory-root.mjs";
@@ -43,6 +43,47 @@ export const CHROME_HEADLESS_WRAPPER = path.join(
 export const PI_CHROME_DEVTOOLS_SETTINGS = "pi-chrome-devtools.json";
 
 const expand = (p) => String(p ?? "").replace(/^~/, homedir());
+
+/**
+ * Kill the wrapper, Chrome, and any helper that still holds this profile.
+ * SIGKILL on the child alone is not enough on macOS: Chrome forks GPU/helper
+ * processes, and a leftover descendant keeps `bun test` from ever exiting.
+ * Profiles are mkdtemp'd under `factory-doctor-chrome-`; refuse to pkill
+ * without that marker so a bad path cannot sweep unrelated browsers.
+ */
+function reapBrowserProcess(child, profile) {
+  const pid = child?.pid;
+  if (pid) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      /* not a group leader, or already gone */
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  if (
+    typeof profile === "string" &&
+    profile.includes("factory-doctor-chrome")
+  ) {
+    try {
+      spawnSync("pkill", ["-9", "-f", "--", `--user-data-dir=${profile}`], {
+        stdio: "ignore",
+        timeout: 2000,
+      });
+    } catch {
+      /* pkill absent or nothing matched */
+    }
+  }
+}
 
 /**
  * Name the dependency a failed Chrome launch is missing, from its stderr.
@@ -110,9 +151,15 @@ export function browserLaunchCheck({
         "--no-default-browser-check",
         "about:blank",
       ],
-      { env, stdio: ["ignore", "ignore", "pipe"] },
+      {
+        env,
+        stdio: ["ignore", "ignore", "pipe"],
+        // New process group so SIGKILL cannot miss Chrome helpers, and so we
+        // never signal the bun test runner that spawned us.
+        detached: process.platform !== "win32",
+      },
     );
-    child.stderr.on("data", (d) => {
+    child.stderr?.on("data", (d) => {
       stderr += d;
     });
     const finish = (result) => {
@@ -120,21 +167,42 @@ export function browserLaunchCheck({
       settled = true;
       clearInterval(poll);
       clearTimeout(timer);
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-      // Chrome's helpers hold the profile briefly after the kill; sweep it a
-      // moment later, best effort — it lives under tmpdir either way.
-      setTimeout(() => {
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        clearTimeout(waitForReap);
         try {
-          rmSync(profile, { recursive: true, force: true });
+          child.stderr?.destroy();
         } catch {
-          /* best effort */
+          /* already closed */
         }
-      }, 200).unref?.();
-      resolve(result);
+        try {
+          child.unref?.();
+        } catch {
+          /* already unref'd */
+        }
+        // Chrome's helpers hold the profile briefly after the kill; sweep it
+        // a moment later, best effort — it lives under tmpdir either way.
+        setTimeout(() => {
+          try {
+            rmSync(profile, { recursive: true, force: true });
+          } catch {
+            /* best effort */
+          }
+        }, 200).unref?.();
+        resolve(result);
+      };
+      // Reap the zombie before resolving so bun test is not left holding a
+      // defunct child. Cap the wait: a stuck wait would hang the suite the
+      // same way an unbounded Chrome launch does.
+      const waitForReap = setTimeout(release, 500);
+      child.once("close", release);
+      child.once("exit", release);
+      reapBrowserProcess(child, profile);
+      if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+        release();
+      }
     };
     child.on("error", (e) =>
       finish({
