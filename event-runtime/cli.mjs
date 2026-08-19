@@ -19,7 +19,7 @@ import {
 
 const USAGE = BASE_USAGE.replace(
   "  inbox                          open items waiting on the human",
-  "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API",
+  "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API\n  memos <subjectType> <id> [--kind k] [--all]\n                                 live memos for a subject, with provenance and expiry",
 )
   .replace(
     "  agents                         registered agent definitions and event routing",
@@ -73,6 +73,70 @@ async function callControl(method, pathname, body) {
     throw err;
   }
   return payload;
+}
+
+/** Format one memo row for `memos` (docs/event-runtime-memos.md §8). */
+function formatMemoLine(memo) {
+  const subject = `${memo.subject?.type ?? "?"}:${memo.subject?.id ?? "?"}`;
+  const live = memo.live === false ? "expired" : "live";
+  const expires = memo.expiresAt ?? "-";
+  const uses = `${memo.usefulCount ?? 0}u/${memo.wrongCount ?? 0}w`;
+  const agent = memo.provenance?.agent ?? "-";
+  const from =
+    memo.inboxItemId && !memo.runId
+      ? `operator decision ${memo.inboxItemId}`
+      : memo.runId
+        ? `${agent} ${memo.runId}`
+        : agent;
+  return `${memo.kind}\t${subject}\t${live}\t${expires}\t${uses}\t${from}`;
+}
+
+/** Read-only fold of live memos for one subject (WM-814). */
+export async function memosCommand(args = []) {
+  const positional = [];
+  let kind;
+  let all = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--kind") {
+      kind = args[++i];
+      continue;
+    }
+    if (args[i] === "--all") {
+      all = true;
+      continue;
+    }
+    positional.push(args[i]);
+  }
+  const [subjectType, subjectId] = positional;
+  if (!subjectType || !subjectId) {
+    throw new Error("usage: memos <subjectType> <id> [--kind k] [--all]");
+  }
+  const query = new URLSearchParams({
+    subjectType,
+    subjectId,
+    live: all ? "false" : "true",
+  });
+  if (kind) query.set("kind", kind);
+  const body = await callControl("GET", `/memos?${query}`);
+  const memos = body.memos ?? [];
+  if (memos.length === 0) {
+    console.log(
+      all
+        ? `no memos for ${subjectType}:${subjectId}`
+        : `no live memos for ${subjectType}:${subjectId}`,
+    );
+    return memos;
+  }
+  console.log("KIND\tSUBJECT\tSTATE\tEXPIRES\tUSES\tFROM");
+  for (const memo of memos) {
+    console.log(formatMemoLine(memo));
+    if (typeof memo.body === "string" && memo.body.trim()) {
+      for (const line of memo.body.trim().split("\n")) {
+        console.log(`  ${line}`);
+      }
+    }
+  }
+  return memos;
 }
 
 /** Owned-path override of the split inbox command, adding decision markers. */
@@ -279,6 +343,7 @@ export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === "decide") return decideCommand(args);
   if (command === "inbox") return inboxCommand(args);
+  if (command === "memos") return memosCommand(args);
   if (command === "adapters") return adaptersCommand(args);
   if (command === "extensions") return extensionsCommand(args);
   if (command === "artifacts") return artifactsCommand(args);

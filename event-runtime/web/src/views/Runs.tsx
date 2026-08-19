@@ -34,6 +34,11 @@ import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
+import {
+  NotesPanel,
+  memoPinShas,
+  subjectsFromRunInput,
+} from "../components/NotesPanel";
 import { AgentHoverCard } from "../components/AgentHoverCard";
 import { CausationGlyphs, chainHref } from "../components/EventHoverCard";
 import { RunHoverCard, runDurationSeconds } from "../components/RunHoverCard";
@@ -1692,6 +1697,11 @@ export function Runs({
                       onExpand={() => onOpenFull(d.run.runId)}
                     />
                   }
+                />
+                <NotesPanel
+                  subjects={subjectsFromRunInput(d.run.spec.input, d.run.runId)}
+                  readShas={memoPinShas(d.run.spec.input)}
+                  wroteRunId={d.run.runId}
                 />
               </div>
             </>
