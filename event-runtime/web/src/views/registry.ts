@@ -110,13 +110,24 @@ export type ViewDef = {
 };
 
 /**
- * `g` suffixes no view may take: `a` approve/ack, `x` reject/cancel/resolve
- * (single-key list verbs that would double-fire under the chord), `i` and
- * `0`–`9` (context chords, WM-235), and `h` (Projects' `g h` opens GitHub).
+ * Single-key list verbs that would double-fire under a `g` chord. The `?`
+ * cheatsheet and `RESERVED_GO_SUFFIXES` both read this list — do not duplicate
+ * the keys or labels elsewhere (WM-857).
+ */
+export const LIST_VERBS: readonly { keys: string; does: string }[] = [
+  { keys: "a", does: "approve proposal (Proposals) · ack item (Inbox)" },
+  {
+    keys: "x",
+    does: "reject proposal (Proposals) · cancel run (Runs) · resolve item (Inbox)",
+  },
+];
+
+/**
+ * `g` suffixes no view may take: list verbs above, `i` and `0`–`9` (context
+ * chords, WM-235), and `h` (Projects' `g h` opens GitHub).
  */
 export const RESERVED_GO_SUFFIXES: ReadonlySet<string> = new Set([
-  "a",
-  "x",
+  ...LIST_VERBS.map((v) => v.keys),
   "i",
   "h",
   ..."0123456789",

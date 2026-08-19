@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog } from "./ui";
 import { NAV } from "../nav";
-import { Button as PrimitiveButton } from "./ui";
+import { LIST_VERBS } from "../views/registry";
+import { Button as PrimitiveButton, Dialog } from "./ui";
 
 const CONTEXT_CHORDS: { chord: string; label: string }[] = [
   { chord: "g 0", label: "All context" },
@@ -42,11 +42,7 @@ const ACTIONS: { keys: string; does: string }[] = [
     keys: "c / l",
     does: "view chain (Run, Events)",
   },
-  { keys: "a", does: "approve proposal (Proposals) · ack item (Inbox)" },
-  {
-    keys: "x",
-    does: "reject proposal (Proposals) · cancel run (Runs) · resolve item (Inbox)",
-  },
+  ...LIST_VERBS,
   {
     keys: "Space / Shift+Space",
     does: "toggle highlighted proposal selection · toggle highlighted inbox item selection",

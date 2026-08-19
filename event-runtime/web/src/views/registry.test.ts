@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { NAV } from "../nav";
 import {
+  LIST_VERBS,
   NAV as REGISTRY_NAV,
   RESERVED_GO_SUFFIXES,
   VIEWS,
@@ -25,15 +26,19 @@ describe("view registry (WM-839)", () => {
   });
 
   test("no `g` chord collides with a reserved suffix (list verb or context chord)", () => {
-    // The rule from the registry header: `g a` would double-fire the
-    // proposals view's `a` (approve) list verb, `x` is reject/cancel/resolve,
-    // `g i` and `g 0`–`g 9` are the context chords (WM-235), and `g h` is the
-    // Projects "open on GitHub" chord.
+    // The rule from the registry header: list verbs (`LIST_VERBS`) would
+    // double-fire under `g`, `g i` and `g 0`–`g 9` are the context chords
+    // (WM-235), and `g h` is the Projects "open on GitHub" chord.
     for (const n of NAV) {
       expect(RESERVED_GO_SUFFIXES.has(n.go)).toBe(false);
     }
-    expect(RESERVED_GO_SUFFIXES.has("a")).toBe(true);
+    expect(LIST_VERBS.length).toBeGreaterThan(0);
+    for (const verb of LIST_VERBS) {
+      expect(verb.keys).toMatch(/^[a-z]$/);
+      expect(RESERVED_GO_SUFFIXES.has(verb.keys)).toBe(true);
+    }
     expect(RESERVED_GO_SUFFIXES.has("i")).toBe(true);
+    expect(RESERVED_GO_SUFFIXES.has("h")).toBe(true);
     for (let d = 0; d <= 9; d++)
       expect(RESERVED_GO_SUFFIXES.has(String(d))).toBe(true);
   });

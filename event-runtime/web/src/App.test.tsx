@@ -143,6 +143,30 @@ beforeEach(() => {
     }
     if (url.includes("/api/repos")) return jsonResponse({ repos: [] });
     if (url.includes("/api/metrics")) return jsonResponse(EMPTY_METRICS);
+    if (url.includes("/api/config")) {
+      // Object-shaped so Settings can read `.registry` / `.sections`. The
+      // generic `[]` fallback is truthy and then throws on `.registry.loadedAt`.
+      return jsonResponse({
+        generatedAt: "2026-01-01T00:00:00.000Z",
+        policyVersion: "wm857-config",
+        registry: {
+          loadedAt: "2026-01-01T00:00:00.000Z",
+          agentCount: 0,
+          eventTypeCount: 0,
+          edgeCount: 0,
+          scheduleCount: 0,
+        },
+        sections: [
+          {
+            id: "policy",
+            title: "Policy",
+            source: { file: "config/policy.yaml", kind: "yaml" },
+            reload: "hot",
+            entries: [{ key: "workers.max", value: 20 }],
+          },
+        ],
+      });
+    }
     if (url.includes("/api/runs?ticket=")) {
       const ticket =
         new URL(url, "http://localhost").searchParams.get("ticket") ?? "WM-0";
@@ -332,6 +356,21 @@ describe("view registry routing (WM-839)", () => {
         .getAttribute("aria-current"),
     ).toBe("page");
     expect(document.title).toBe(`factory · Proposals · ${OPEN_PROPOSAL_ID}`);
+  });
+
+  test("the Settings route renders against the config fixture (WM-857)", async () => {
+    window.location.hash = "#/settings";
+    const utils = renderApp();
+    expect(
+      await utils.findByRole("heading", { name: "Settings" }),
+    ).toBeTruthy();
+    expect(
+      utils.sidebar
+        .getByRole("button", { name: "Settings" })
+        .getAttribute("aria-current"),
+    ).toBe("page");
+    expect(await utils.findByText("wm857-config")).toBeTruthy();
+    expect(utils.getByText("workers.max")).toBeTruthy();
   });
 });
 
