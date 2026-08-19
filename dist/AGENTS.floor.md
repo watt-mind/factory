@@ -171,7 +171,24 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 
 Factory-spawned sessions get their **own isolated headless Chrome** (via `--mcp-config`, `config/mcp/claude.json` in the factory repo) — a temp profile per session, screenshots served as capped webp. There is nothing to share and nothing to fight over.
 
-If a browser tool still errors: report it and continue with non-browser verification — never retry in a loop, and **never kill another process's Chrome**; a killed browser mid-flight destroys another agent's verification run. `browser is already running for .../chrome-profile` means you are running outside the factory config (interactive session, older harness) where the profile IS shared — attach to the running browser (`list_pages`, then work in your own new page) rather than fighting the lock.
+If an IDE browser tool reports a stale/missing tab, its tab listing disagrees with navigation, or a call deadlocks, use **one bounded recovery**: record the backend/tool/URL and exact error (or the harness timeout with no result), call `list_pages`/`tabs` once, discard every cached tab ID, select or create a page from the fresh result, and navigate once. If listing and navigation still disagree or either call times out, that browser backend is unavailable — never retry it in a loop.
+
+Use an independent isolated headless backend when the harness provides one (the factory Chrome DevTools MCP or Pi `chrome_devtools_*`), rather than reusing the broken IDE registry. Let the backend own the browser lifecycle whenever possible. On display-less Linux, launch through the factory wrapper. If `FACTORY_ROOT` is unset, do not guess its location: run `factory doctor`, record that the fallback is not configured, and stop browser recovery. For a CDP-capable fallback driver, kept in one managed shell session:
+
+```bash
+profile="$(mktemp -d "${TMPDIR:-/tmp}/factory-browser.XXXXXX")"
+"$FACTORY_ROOT/bin/chrome-headless.sh" --remote-debugging-port=0 \
+  --user-data-dir="$profile" about:blank >"$profile/chrome.log" 2>&1 &
+chrome_pid=$!
+bun -e 'import { existsSync, watch } from "node:fs"; const [file, dir] = process.argv.slice(1); if (existsSync(file)) process.exit(0); const timer = setTimeout(() => process.exit(1), 10000); const watcher = watch(dir, () => { if (existsSync(file)) { clearTimeout(timer); watcher.close(); process.exit(0); } });' \
+  "$profile/DevToolsActivePort" "$profile"
+```
+
+The file watcher is the bounded readiness gate; never replace it with a fixed sleep. Attach the fallback driver using `$profile/DevToolsActivePort`. If readiness or attachment fails, preserve the exact error and the last lines of `$profile/chrome.log`, then clean up. After failure or after the review, stop and reap only that child and remove only the profile created above: `kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; rm -rf -- "$profile"`. A raw `curl`, DOM dump, source read, or bare headless screenshot is not an interactive browser fallback and cannot support a UX verdict. If no independent driver exists or launch/attach fails, stop browser recovery and continue only with non-browser verification.
+
+**Never kill another process's Chrome or delete another profile**; a killed browser mid-flight destroys another agent's verification run. `browser is already running for .../chrome-profile` means you are outside the factory config (interactive session, older harness) where the profile is shared — attach to the running browser (`list_pages`, then work in your own fresh page) rather than fighting the lock.
+
+For a required UX critique, browser failure is `NOT-ASSESSED`, not approval. Report the failed backend/tool, requested URL, exact error or timeout, registry-resync result, fallback launch/attach result, and unexercised flows. Reserve `BLOCKED` for the critic's startup worktree/shell mismatch. `SHIP` and `FIX-FIRST` require an exercised journey plus at least one observed page URL or screenshot path; static inspection never qualifies.
 
 ### Shell globs
 

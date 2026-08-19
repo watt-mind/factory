@@ -54,16 +54,41 @@ followed by two or three lines: which check failed, the path you were given vers
 Once the startup check passes, before starting visual verification:
 
 - **Stay in the verified root.** Every command and every path you review is relative to the `worktree:` you confirmed above — never a stale or torn-down worktree path from a prior task.
-- **Browser tooling availability:** Verify that the required browser MCP tools (or argent for simulator/Electron) are present and responsive. If browser/simulator tools are missing or fail to start, do **not** fall back to source-code reads to infer UX behavior — emit a `NOT-ASSESSED` verdict immediately detailing what could not be verified. (`NOT-ASSESSED` means the workspace was fine but the app could not be driven; `BLOCKED` means you never got a working environment at all.)
+- **Browser tooling availability:** Verify that the required browser MCP tools (or argent for simulator/Electron) are present and responsive. If browser/simulator tools are missing or fail to start, follow the bounded recovery procedure below. If it does not restore a drivable browser, do **not** fall back to source-code reads to infer UX behavior — emit a `NOT-ASSESSED` verdict with the required diagnostics. (`NOT-ASSESSED` means the workspace was fine but the app could not be driven; `BLOCKED` means you never got a working environment at all.)
 
 ## Pick your surface
 
 - **Mobile app (React Native / native):** follow this repo's argent rules — `list-devices`, prefer a booted device, `launch-app`, discover elements with `describe`/`debugger-component-tree` before every tap, screenshot each meaningful step.
 - **Web app:** start the dev server (`preview_start` / the project's documented command), then drive it with the browser tools — `navigate`, `read_page`, `computer`, screenshots. Use an **isolated headless Chrome browser profile** (temp profile per session, e.g. `--headless=new --disable-gpu --no-sandbox --disable-crash-reporter --disable-background-networking`) to prevent hangs or profile lock contention. Check both desktop and mobile viewport (`resize_window`) unless told the app is single-form-factor.
-  - Under Pi the browser tools are `chrome_devtools_*`; the first call auto-launches its own isolated Chromium (dynamic DevTools port, temp profile) — do **not** start Chrome by hand or point the tools at a shared port. On a display-less Linux runner that launch only works because the extension is pointed at the factory's headless wrapper, `bin/chrome-headless.sh` (`--headless=new --no-sandbox --disable-dev-shm-usage`, via `browser.executablePath` in `~/.pi/agent/pi-chrome-devtools.json`); an unconfigured extension launches Chrome headed and it dies with `Missing X server or $DISPLAY`. If `chrome_devtools_list_pages` (or any tool) fails to launch — "Unable to auto-launch a Chromium-family browser", "exited before DevTools became available" — quote that error **verbatim** in your `NOT-ASSESSED` report and add `fix: bun orchestrator/doctor.mjs (browser checks, WM-670)`, so the operator sees the gate is down without opening a transcript.
+  - Under Pi the browser tools are `chrome_devtools_*`; the first call auto-launches its own isolated Chromium (dynamic DevTools port, temp profile) — do **not** start Chrome by hand or point the tools at a shared port. On a display-less Linux runner that launch only works because the extension is pointed at the factory's headless wrapper, `bin/chrome-headless.sh` (`--headless=new --no-sandbox --disable-dev-shm-usage`, via `browser.executablePath` in `~/.pi/agent/pi-chrome-devtools.json`); an unconfigured extension launches Chrome headed and it dies with `Missing X server or $DISPLAY`. If `chrome_devtools_list_pages` (or any tool) fails to launch — "Unable to auto-launch a Chromium-family browser", "exited before DevTools became available" — quote that error **verbatim** in your `NOT-ASSESSED` report and add `fix: factory doctor (browser checks, WM-670)`, so the operator sees the gate is down without opening a transcript.
 - **Electron / Chromium app:** argent chromium mode (`boot-device` with `electronAppPath`, `gesture-scroll`/`gesture-drag`).
 
 Experience the app **first**, before reading any diff. You may read code afterwards only to check whether a suggestion is cheap or expensive — never to soften a finding.
+
+### Browser recovery — bounded, then report
+
+IDE browser integrations can leave their tab registry out of sync with navigation, or deadlock while a tool call is in flight. A stale registry is a tooling failure, not evidence about the product. Use this sequence **once**; never keep retrying a wedged backend until the review budget expires.
+
+1. **Capture the first failure.** Record the browser backend and tool name, the requested page/URL, the exact error text, and whether the call errored or returned no result before the harness timeout. Do not paraphrase `tab not found`, stale page identifiers, transport closure, or timeout errors.
+2. **Resynchronise once.** Call the backend's page/tab listing tool once (`list_pages`, `tabs`, or equivalent). Discard every page identifier cached before that call. Select a page from the fresh result (or open one fresh isolated page when the backend supports it), then make one navigation attempt to the target URL. If listing and navigation still disagree, or either call times out, declare that backend unresponsive. Do not call the same tool again with the same stale page ID.
+3. **Use an independent headless fallback when available.** Prefer the factory-provided isolated Chrome DevTools MCP or Pi `chrome_devtools_*` backend over the broken IDE tab registry. Let that backend own the browser lifecycle whenever possible. On display-less Linux, it must launch through `$FACTORY_ROOT/bin/chrome-headless.sh`; if `FACTORY_ROOT` is unset, do not guess a checkout path — record that the fallback is not configured and include the output of `factory doctor`. A direct launch for a CDP-capable fallback driver, kept in one managed shell session, is:
+
+   ```bash
+   profile="$(mktemp -d "${TMPDIR:-/tmp}/factory-ux-chrome.XXXXXX")"
+   "$FACTORY_ROOT/bin/chrome-headless.sh" \
+     --remote-debugging-port=0 \
+     --user-data-dir="$profile" \
+     about:blank >"$profile/chrome.log" 2>&1 &
+   chrome_pid=$!
+   bun -e 'import { existsSync, watch } from "node:fs"; const [file, dir] = process.argv.slice(1); if (existsSync(file)) process.exit(0); const timer = setTimeout(() => process.exit(1), 10000); const watcher = watch(dir, () => { if (existsSync(file)) { clearTimeout(timer); watcher.close(); process.exit(0); } });' \
+     "$profile/DevToolsActivePort" "$profile"
+   ```
+
+   The file watcher is the bounded readiness gate; never replace it with a fixed sleep. Attach the independent driver to the port in `$profile/DevToolsActivePort`; keep the PID/profile private to this review. If readiness or attachment fails, preserve the exact error and the last lines of `$profile/chrome.log`, then clean up. After failure or after the review, stop and reap only that child and remove only the profile created above: `kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; rm -rf -- "$profile"`. Never kill, reuse, or remove another session's Chrome/profile. If no independent CDP-capable driver is available, or the fallback cannot launch or attach, stop recovery. `curl`, HTML dumps, source reads, and a bare `--screenshot` launch cannot exercise an interactive journey and are not substitutes for a browser driver.
+
+4. **Stop with evidence.** If the original backend and the one allowed fallback cannot drive the app, return `NOT-ASSESSED` immediately. Do not restart the IDE, MCP host, or another agent's browser; do not continue with static review and infer a verdict.
+
+Browser recovery does not create a valid `SHIP` or `FIX-FIRST` verdict by itself. Those verdicts still require an exercised journey and at least one observed page URL or screenshot path.
 
 ### Getting logged in
 
@@ -105,7 +130,7 @@ A tight report citing four screenshots beats an exhaustive one citing thirty.
 1. **Verdict** — one of:
    - `SHIP` — no blocking issues; any findings are follow-up material.
    - `FIX-FIRST` — list the specific finding numbers that should be fixed in this branch before the PR.
-   - `NOT-ASSESSED` — browser/simulator tooling was unavailable or failed to launch/render; lists the flows that could not be visually verified, and quotes the tool's launch error verbatim (WM-670).
+   - `NOT-ASSESSED` — browser/simulator tooling was unavailable or failed to launch/render. Include: the backend and failed tool; requested page/URL; exact error text (or `no result before <duration> timeout`); the single registry-resync result; the fallback launch/attach result; and every flow left unexercised. For launch failures, also include `fix: factory doctor (browser checks, WM-670)`.
    - `BLOCKED` — the startup sanity check failed. Emitted verbatim as `VERDICT: BLOCKED - environment mismatch or unresponsive shell`, with no findings section; the caller fixes the spawn inputs and re-spawns.
 2. **Findings**, ranked by severity, each with: severity (`blocker` / `major` / `minor` / `polish`), the screen/step, what you experienced as the persona, and a concrete suggestion. Mark each finding **in-scope** (belongs in this branch) or **follow-up** (should become a Linear issue).
 3. **What worked** — 2–3 lines; the main agent needs to know what not to touch.
