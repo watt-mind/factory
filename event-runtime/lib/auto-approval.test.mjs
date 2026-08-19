@@ -522,6 +522,53 @@ describe("chain auto approval (WM-357)", () => {
     ]);
   });
 
+  test("merge-review edge match ignores the planner-folded repoPin/memoPin (WM-907 follow-up)", async () => {
+    const db = openDb(":memory:");
+    const headSha = "c".repeat(40);
+    const baseSha = "d".repeat(40);
+    const reviewInput = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 13,
+      headSha,
+      baseSha,
+      // The planner adds these after merge-scan emitted the event; the live
+      // lane sat on chain_edge_not_registered for every review until the edge
+      // comparison learned to drop them.
+      repoPin: {
+        repo: "factory",
+        github: "watt-mind/factory",
+        ref: "develop",
+        sha: baseSha,
+      },
+      memoPin: { entries: [], foldedAt: "2026-08-19T16:26:32.868Z" },
+    };
+    const candidate = seed(db, {
+      id: "merge-review-with-pins",
+      type: "factory.merge-review.requested",
+      input: reviewInput,
+      predecessorAgent: "merge-scan@2",
+      predecessorInput: { repo: "factory" },
+      predecessorArtifact: {
+        recommendation: "REVIEW",
+        repo: "factory",
+        github: "watt-mind/factory",
+        base: "develop",
+        deployBranch: "master",
+        reviews: [{ pr: 13, headSha, baseSha }],
+        plan: [],
+        fix: [],
+        escalate: [],
+        summary: "one miss",
+      },
+    });
+
+    expect((await auto(db)).approved).toEqual([
+      { proposalId: candidate.id, runId: candidate.runId },
+    ]);
+  });
+
   test("budget, worker cap, and circuit breaker each stop unattended approvals", async () => {
     const runtimePolicy = {
       budget: { per_day_usd: 1 },

@@ -1,5 +1,5 @@
 {
-  "title": "merge-review input — one PR to cold-review against the pinned repo",
+  "title": "merge-review input \u2014 one PR to cold-review against the pinned repo",
   "type": "object",
   "required": ["repo", "github", "base", "pr", "headSha", "baseSha"],
   "additionalProperties": false,
@@ -17,21 +17,104 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9._/-]+$"
     },
-    "pr": { "type": "integer", "minimum": 1 },
-    "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+    "pr": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "headSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "baseSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "headRef": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]+$"
+    },
+    "ticket": {
+      "type": "string",
+      "pattern": "^[A-Z]+-[0-9]+$"
+    },
     "repoPin": {
       "type": "object",
       "required": ["repo", "sha"],
       "additionalProperties": false,
-      "description": "Filled by the planner (pinRepo) at plan time — not operator-supplied",
+      "description": "Filled by the planner (pinRepo) at plan time \u2014 not operator-supplied",
       "properties": {
-        "repo": { "type": "string", "minLength": 1 },
-        "ref": { "type": "string" },
-        "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-        "github": { "type": ["string", "null"] }
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "github": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "memoPin": {
+      "type": "object",
+      "required": ["foldedAt", "entries"],
+      "additionalProperties": false,
+      "description": "Planner-resolved live memos for declared subjects at plan time (docs/event-runtime-memos.md \u00a74.2). Empty entries is the normal case when nothing is known yet; never human_needed.",
+      "properties": {
+        "foldedAt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ISO timestamp of the fold; part of inputHash so a new memo re-admits work"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["sha256", "subject", "kind", "createdAt"],
+            "additionalProperties": false,
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Content hash of the memo artifact in the store"
+              },
+              "subject": {
+                "type": "object",
+                "required": ["type", "id"],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "enum": ["repo", "ticket", "pr", "workflow", "run"]
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "kind": {
+                "enum": [
+                  "repo-note",
+                  "postmortem",
+                  "decision",
+                  "flake",
+                  "handoff"
+                ]
+              },
+              "runId": {
+                "type": ["string", "null"]
+              },
+              "createdAt": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
       }
     }
   }

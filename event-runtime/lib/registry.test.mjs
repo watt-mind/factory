@@ -153,8 +153,11 @@ describe("registry", () => {
     // Regenerated (WM-907, cold-review fixup): merge-review@1 declares the same
     // decision-memo block WM-812 gave merge-scan, so the per-PR reviewer sees
     // prior repo decisions too; agent def is a registry input.
+    // Regenerated (WM-907 follow-up): merge-review.input.json admits the
+    // planner-folded memoPin (the memos block made every review
+    // input_schema_invalid without it); re-pinned merge-review.json.
     const expected =
-      "sha256:80ee956f8de2e4c0397393a73775717237d5c086af9db9c65cecd0a3d6591267";
+      "sha256:55dff52f524185c364bda22fc39ac4153dbc3e016eed3468249fa6cf12664f1a";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

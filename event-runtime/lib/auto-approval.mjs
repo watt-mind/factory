@@ -224,6 +224,21 @@ function sameJson(left, right) {
   return hashJson(left) === hashJson(right);
 }
 
+// Keys the planner folds into a chain event's payload after the predecessor
+// emitted it: `repoPin` for repository-workspace targets and `memoPin` for
+// agents that declare memos (docs/event-runtime-memos.md §4.2). They are not
+// part of the edge the predecessor declared, so an independent-edge match must
+// compare the payload without them — otherwise every merge-review fan-out
+// (pinned checkout + decision memos) sat as chain_edge_not_registered.
+const PLANNER_INJECTED_PAYLOAD_KEYS = ["repoPin", "memoPin"];
+
+function withoutPlannerPins(payload) {
+  if (!payload || typeof payload !== "object") return payload ?? {};
+  const out = { ...payload };
+  for (const key of PLANNER_INJECTED_PAYLOAD_KEYS) delete out[key];
+  return out;
+}
+
 /** `approve.before` hook point (lib/hooks.mjs); the seam an extension gates on. */
 export const APPROVE_BEFORE_HOOK = "approve.before";
 
@@ -420,6 +435,7 @@ function chainArrayField(field, context) {
 /** Prove an explicitly independent sibling edge from its declared selector and payload. */
 function independentlySelectedEdge(rule, spec, result, envelope) {
   if (rule?.independent !== true) return false;
+  const eventPayload = withoutPlannerPins(envelope.payload);
 
   const artifactHash = {};
   for (const entry of result.artifacts ?? []) {
@@ -464,17 +480,12 @@ function independentlySelectedEdge(rule, spec, result, envelope) {
           }
           if (edge.perItem)
             Object.assign(payload, buildChainInput(edge.perItem, itemContext));
-          if (sameJson(payload, envelope.payload ?? {})) return true;
+          if (sameJson(payload, eventPayload)) return true;
         }
         continue;
       }
 
-      if (
-        sameJson(
-          buildChainInput(edge.input ?? {}, context),
-          envelope.payload ?? {},
-        )
-      ) {
+      if (sameJson(buildChainInput(edge.input ?? {}, context), eventPayload)) {
         return true;
       }
     } catch {
