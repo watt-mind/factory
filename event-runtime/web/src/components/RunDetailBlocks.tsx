@@ -814,9 +814,10 @@ export function RunDetailBlocks({
             : null;
           return inputView ? (
             <Suspense fallback={<InputRows input={d.run.spec.input} />}>
+              {/* Omit inputSchema so its design-ticket title (e.g. WM-108) is
+                  not the glance caption; the section label is. */}
               <ArtifactPanel
                 artifact={d.run.spec.input}
-                schema={agentDef?.inputSchema}
                 view={inputView}
                 rawFallback={<InputRows input={d.run.spec.input} />}
               />

@@ -280,4 +280,29 @@ describe("input view (WM-897)", () => {
       "https://linear.app/watt-mind/issue/WM-862",
     );
   });
+
+  test("omitting schema keeps the dispatch input-schema title out of the glance", () => {
+    const inputView = inputViewOf(readView("dispatch"));
+    const r = render(
+      <ArtifactView
+        artifact={{ repo: "bj29", ticket: "WM-100" }}
+        schema={{
+          title:
+            "dispatch input — one repo, one already-queued ticket (WM-108)",
+        }}
+        view={inputView!}
+      />,
+    );
+    expect(r.getByText(/WM-108/)).toBeTruthy();
+    cleanup();
+    const r2 = render(
+      <ArtifactView
+        artifact={{ repo: "bj29", ticket: "WM-100" }}
+        view={inputView!}
+      />,
+    );
+    expect(r2.queryByText(/WM-108/)).toBeNull();
+    expect(r2.queryByText(/already-queued/)).toBeNull();
+    expect(r2.getByText("Input")).toBeTruthy();
+  });
 });
