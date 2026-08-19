@@ -95,7 +95,7 @@ const modelIsOverlaid = (a: AgentDef): boolean =>
 function RuntimeChip() {
   return (
     <span
-      className="rounded-sm border border-(--border) px-1 py-px text-[10px] text-(--text-faint)"
+      className="rounded-sm border border-(--border) px-1 py-px text-[11px] text-(--text-faint)"
       title="This box's runtime.db overlay — not origin/develop."
     >
       this runtime
