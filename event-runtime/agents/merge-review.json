@@ -20,6 +20,16 @@
     "attempts": 1
   },
   "mutating": false,
+  "memos": [
+    {
+      "subject": {
+        "type": "repo",
+        "id": "$.input.repo"
+      },
+      "kinds": ["decision"],
+      "max": 10
+    }
+  ],
   "pins": {
     "agents/merge-review.md": "sha256:285105f51813a31f81e3dc9af56bb45ad4c97ce91d3f178464d6c79d8362bf89",
     "schemas/merge-review.input.json": "sha256:e64c8725e8ed715cdfcb261527c67f3424d140faba5d525d9aad20269f5dc0fc",

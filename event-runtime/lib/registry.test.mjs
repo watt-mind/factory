@@ -150,8 +150,11 @@ describe("registry", () => {
     // Regenerated (WM-812): dispatch/merge-scan declare decision memos and re-pin briefs.
     // Regenerated (WM-907): merge-scan@2 is the command enumerator; merge-review@1 is the per-PR agy reviewer;
     // factory.merge-review.requested + REVIEW fan-out + merge_reviews ledger.
+    // Regenerated (WM-907, cold-review fixup): merge-review@1 declares the same
+    // decision-memo block WM-812 gave merge-scan, so the per-PR reviewer sees
+    // prior repo decisions too; agent def is a registry input.
     const expected =
-      "sha256:4bfa2303906bea9ccb90fef3443e2ac8a863e19f248dc8ef82d0982174ba132d";
+      "sha256:80ee956f8de2e4c0397393a73775717237d5c086af9db9c65cecd0a3d6591267";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

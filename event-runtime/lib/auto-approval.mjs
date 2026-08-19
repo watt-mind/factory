@@ -35,6 +35,7 @@ export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
 
 const MERGE_EVENT_TYPES = new Set([
   "factory.merge.requested",
+  "factory.merge-review.requested",
   "factory.merge-fix.requested",
   "factory.merge-apply.requested",
   "factory.merge-landed",
