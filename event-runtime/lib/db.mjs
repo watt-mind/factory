@@ -337,6 +337,21 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 10,
+    name: "inbox_waiters",
+    up(db) {
+      const columns = db
+        .query(`PRAGMA table_info(inbox_items)`)
+        .all()
+        .map((row) => row.name);
+      if (!columns.includes("waiters_json")) {
+        db.exec(
+          `ALTER TABLE inbox_items ADD COLUMN waiters_json TEXT NOT NULL DEFAULT '[]';`,
+        );
+      }
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

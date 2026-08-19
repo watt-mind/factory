@@ -215,6 +215,27 @@ export function deliveryText(item: InboxItem): string {
   return `Telegram: sent ${when} · exit ${t.exit_code ?? 0}`;
 }
 
+type InboxWaiter = { runId?: string; at?: string };
+
+function inboxWaiters(item: InboxItem): InboxWaiter[] {
+  const waiters = (item as InboxItem & { waiters?: InboxWaiter[] }).waiters;
+  return Array.isArray(waiters) ? waiters : [];
+}
+
+/** 1 (this item) + attached runs. Hidden in the list when the count is 1. */
+export function waitingCount(item: InboxItem): number {
+  const named = (item as InboxItem & { waitingCount?: number }).waitingCount;
+  if (typeof named === "number" && Number.isFinite(named) && named >= 1) {
+    return named;
+  }
+  return 1 + inboxWaiters(item).length;
+}
+
+export function waitingLabel(count: number): string | null {
+  if (count <= 1) return null;
+  return `${count} runs waiting on this answer`;
+}
+
 const DELIVERY_HUES: Record<DeliveryState, string> = {
   sent: "var(--hue-ok)",
   failed: "var(--hue-err)",
@@ -1316,6 +1337,11 @@ export function Inbox({
                                 </span>
                               )}
                               {displayTitle(item)}
+                              {waitingLabel(waitingCount(item)) && (
+                                <span className="ml-1.5 text-(--text-faint)">
+                                  {waitingCount(item)} waiting
+                                </span>
+                              )}
                             </div>
                           </td>
                         )}
@@ -1507,6 +1533,9 @@ export function Inbox({
               }
             />
             <KV k="status" v={itemStatus(sel)} />
+            {waitingLabel(waitingCount(sel)) && (
+              <KV k="waiting" v={waitingLabel(waitingCount(sel))} />
+            )}
             {sel.severity !== "normal" && <KV k="severity" v={sel.severity} />}
             <KV k="created" v={<Ago iso={sel.createdAt} now={now} />} />
             {sel.ackedAt && (

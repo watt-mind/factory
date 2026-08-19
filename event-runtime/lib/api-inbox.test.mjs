@@ -258,4 +258,53 @@ describe("human inbox API (WM-285)", () => {
       s.close();
     }
   });
+
+  test("POST of the same subject attaches a waiter and does not push again", async () => {
+    const delivered = [];
+    const s = await makeServer({
+      now: () => 1000,
+      inboxSend: async (_command, message) => {
+        delivered.push(message);
+        return { ok: true, exitCode: 0, error: null };
+      },
+    });
+    try {
+      const payload = {
+        kind: "BLOCKED",
+        title: "BLOCKED WM-1: choose a policy",
+        refs: { issue: "WM-1", runId: "run_1" },
+        source: "agent:run_1",
+      };
+      const first = await fetch(s.url("/inbox"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(first.status).toBe(201);
+      const firstBody = await first.json();
+      expect(firstBody.item.waitingCount).toBe(1);
+      expect(delivered).toHaveLength(1);
+
+      const second = await fetch(s.url("/inbox"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...payload,
+          refs: { issue: "WM-1", runId: "run_2" },
+          source: "agent:run_2",
+        }),
+      });
+      expect(second.status).toBe(201);
+      const secondBody = await second.json();
+      expect(secondBody.item.id).toBe(firstBody.item.id);
+      expect(secondBody.item.waitingCount).toBe(2);
+      expect(secondBody.item.waiters).toEqual([
+        { runId: "run_2", at: expect.any(String) },
+      ]);
+      expect(secondBody.delivery.skipped).toBe("deduped");
+      expect(delivered).toHaveLength(1);
+    } finally {
+      s.close();
+    }
+  });
 });

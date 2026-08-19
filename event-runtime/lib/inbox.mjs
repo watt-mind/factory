@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { hashJson } from "./canonical.mjs";
 import {
   decisionRequestHash,
   validateDecisionRequest,
@@ -95,6 +96,184 @@ function parseNullableObject(value) {
   }
 }
 
+function parseWaiters(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (waiter) =>
+        waiter && typeof waiter === "object" && !Array.isArray(waiter),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Option id+effect (+ authorise paths); free text is not part of "same question". */
+function decisionShape(decision) {
+  if (!decision || !Array.isArray(decision.options)) return null;
+  return decision.options.map((option) => ({
+    id: option.id,
+    effect: option.effect,
+    ...(Array.isArray(option.scope?.paths)
+      ? { paths: [...option.scope.paths].sort() }
+      : {}),
+  }));
+}
+
+function hasDedupSubject(refs) {
+  return Boolean(
+    refs.issue || refs.pr || refs.repo || refs.proposalId || refs.eventId,
+  );
+}
+
+/**
+ * Identity of "the same question" (WM-813 / memos §7): kind + subject refs
+ * +, for a decision request, the option/effect shape. proposalId and the
+ * event pair are included when present so two proposals (or two parked
+ * events) in one repo do not share a waiter list.
+ */
+export function inboxDedupKey(kind, refs = {}, decision = null) {
+  const subject = {
+    kind,
+    issue: refs.issue ?? null,
+    pr: refs.pr ?? null,
+    repo: refs.repo ?? null,
+  };
+  if (refs.proposalId) subject.proposalId = refs.proposalId;
+  if (refs.eventSource || refs.eventId) {
+    subject.eventSource = refs.eventSource ?? null;
+    subject.eventId = refs.eventId ?? null;
+  }
+  if (decision) subject.shape = decisionShape(decision);
+  return hashJson(subject);
+}
+
+function computedKeyOfRow(row) {
+  return inboxDedupKey(
+    row.kind,
+    parseObject(row.refs_json),
+    parseNullableObject(row.decision_json),
+  );
+}
+
+function findOpenMatch(db, { callerKey, computedKey }) {
+  if (callerKey) {
+    const keyed = db
+      .query(
+        `SELECT * FROM inbox_items
+       WHERE dedupe_key = ? AND resolved_at IS NULL
+       LIMIT 1`,
+      )
+      .get(callerKey);
+    if (keyed) return keyed;
+  }
+  if (!computedKey) return null;
+  const rows = db
+    .query(`SELECT * FROM inbox_items WHERE resolved_at IS NULL`)
+    .all();
+  return rows.find((row) => computedKeyOfRow(row) === computedKey) ?? null;
+}
+
+function rowIsUndecided(row) {
+  return !row.response_json && !row.decided_at;
+}
+
+function attachWaiter(db, row, { refs, now }) {
+  const runId = refs.runId ?? null;
+  const owner = parseObject(row.refs_json);
+  const waiters = parseWaiters(row.waiters_json);
+  if (
+    runId &&
+    (runId === owner.runId || waiters.some((waiter) => waiter.runId === runId))
+  ) {
+    return { ...getInboxItem(db, row.id), attached: true };
+  }
+  const waiter = { at: new Date(now).toISOString() };
+  if (runId) waiter.runId = runId;
+  const extra = {};
+  for (const key of ["proposalId", "eventSource", "eventId"]) {
+    if (refs[key] && refs[key] !== owner[key]) extra[key] = refs[key];
+  }
+  if (Object.keys(extra).length) waiter.refs = extra;
+  waiters.push(waiter);
+  db.query(`UPDATE inbox_items SET waiters_json = ? WHERE id = ?`).run(
+    JSON.stringify(waiters),
+    row.id,
+  );
+  return { ...getInboxItem(db, row.id), attached: true };
+}
+
+function waiterReferentKey(effectKind, refs) {
+  switch (effectKind) {
+    case "dismiss":
+      return "dismiss";
+    case "authorise":
+    case "send_to_triage":
+    case "answer":
+      return `issue:${refs.issue ?? ""}`;
+    case "requeue":
+      return `event:${refs.eventSource ?? ""}:${refs.eventId ?? ""}`;
+    case "approve_proposal":
+    case "reject_proposal":
+      return `proposal:${refs.proposalId ?? ""}`;
+    default:
+      return `run:${refs.runId ?? ""}`;
+  }
+}
+
+function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
+  const option = item.decision?.options?.find(
+    (candidate) => candidate.id === response?.optionId,
+  );
+  const effectKind = option?.effect ?? "unknown";
+  const seen = new Set([waiterReferentKey(effectKind, item.refs)]);
+  const outcomes = [];
+  const nextWaiters = waiters.map((waiter) => ({ ...waiter }));
+  for (const waiter of nextWaiters) {
+    const refs = {
+      ...item.refs,
+      ...(waiter.refs ?? {}),
+      ...(waiter.runId ? { runId: waiter.runId } : {}),
+    };
+    const referent = waiterReferentKey(effectKind, refs);
+    if (seen.has(referent)) {
+      const effect = {
+        kind: effectKind,
+        outcome: "applied",
+        detail: "shared_referent",
+      };
+      waiter.effect = effect;
+      outcomes.push({ runId: waiter.runId ?? null, effect });
+      continue;
+    }
+    seen.add(referent);
+    const waiterItem = { ...item, refs };
+    let effect;
+    try {
+      effect = normalizeEffect(
+        applyEffect(db, waiterItem, response),
+        waiterItem,
+        response,
+      );
+    } catch (err) {
+      effect = normalizeEffect(
+        { outcome: "failed", error: err?.message ?? String(err) },
+        waiterItem,
+        response,
+      );
+    }
+    waiter.effect = effect;
+    outcomes.push({ runId: waiter.runId ?? null, effect });
+  }
+  db.query(`UPDATE inbox_items SET waiters_json = ? WHERE id = ?`).run(
+    JSON.stringify(nextWaiters),
+    item.id,
+  );
+  return outcomes;
+}
+
 export class InboxDecisionError extends Error {
   constructor(code, message, status = 400, errors = undefined) {
     super(message);
@@ -132,6 +311,8 @@ export function itemView(row) {
     decidedAt: row.decided_at ?? null,
     decidedBy: row.decided_by ?? null,
     dedupeKey: row.dedupe_key ?? null,
+    waiters: parseWaiters(row.waiters_json),
+    waitingCount: 1 + parseWaiters(row.waiters_json).length,
   };
 }
 
@@ -201,18 +382,21 @@ export function createInboxItem(
       );
     }
   }
-  const dedupeKey = optionalString(input?.dedupeKey, "dedupeKey");
+  const callerKey = optionalString(input?.dedupeKey, "dedupeKey");
+  const computedKey = hasDedupSubject(refs)
+    ? inboxDedupKey(kind, refs, decision)
+    : null;
+  const dedupeKey = callerKey ?? computedKey;
   const createdAt = new Date(now).toISOString();
 
-  if (dedupeKey) {
-    const existing = db
-      .query(
-        `SELECT * FROM inbox_items
-       WHERE dedupe_key = ? AND resolved_at IS NULL
-       LIMIT 1`,
-      )
-      .get(dedupeKey);
-    if (existing) {
+  const existing = findOpenMatch(db, { callerKey, computedKey });
+  if (existing) {
+    const sameQuestion =
+      Boolean(computedKey) && computedKeyOfRow(existing) === computedKey;
+    if (sameQuestion && rowIsUndecided(existing)) {
+      return attachWaiter(db, existing, { refs, now });
+    }
+    if (existing.dedupe_key && existing.dedupe_key === callerKey) {
       const superseded = supersedeInboxDecision(db, existing, {
         body,
         refs,
@@ -228,8 +412,8 @@ export function createInboxItem(
       db.query(
         `INSERT INTO inbox_items
            (id, kind, severity, title, body, refs_json, source, created_at,
-            delivery_json, decision_json, dedupe_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+            delivery_json, decision_json, dedupe_key, waiters_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
       ).run(
         id,
         kind,
@@ -258,6 +442,11 @@ export function createInboxItem(
             .get(dedupeKey)
         : null;
       if (!winner) break;
+      const sameQuestion =
+        Boolean(computedKey) && computedKeyOfRow(winner) === computedKey;
+      if (sameQuestion && rowIsUndecided(winner)) {
+        return attachWaiter(db, winner, { refs, now });
+      }
       const superseded = supersedeInboxDecision(db, winner, {
         body,
         refs,
@@ -532,10 +721,26 @@ function decideInboxItemInTransaction(
       storedResponse,
     );
   }
-  return settleInboxDecision(db, id, storedResponse, effect, {
+  const settled = settleInboxDecision(db, id, storedResponse, effect, {
     now,
     artifactStore,
   });
+  const waiters = parseWaiters(row.waiters_json);
+  if (
+    waiters.length > 0 &&
+    settled.effect.outcome === "applied" &&
+    settled.effect.detail !== REPLANNED_DETAIL
+  ) {
+    settled.waiterEffects = fanOutWaiterEffects(
+      db,
+      settled.item,
+      storedResponse,
+      waiters,
+      applyEffect,
+    );
+    settled.item = getInboxItem(db, id);
+  }
+  return settled;
 }
 
 export function decideInboxItem(db, id, response, options = {}) {
@@ -594,11 +799,27 @@ function retryInboxDecisionInTransaction(
       response,
     );
   }
-  return settleInboxDecision(db, id, response, effect, {
+  const settled = settleInboxDecision(db, id, response, effect, {
     now,
     recordedEffect: { ...effect, retryAttempt },
     artifactStore,
   });
+  const waiters = parseWaiters(row.waiters_json);
+  if (
+    waiters.length > 0 &&
+    settled.effect.outcome === "applied" &&
+    settled.effect.detail !== REPLANNED_DETAIL
+  ) {
+    settled.waiterEffects = fanOutWaiterEffects(
+      db,
+      settled.item,
+      response,
+      waiters,
+      applyEffect,
+    );
+    settled.item = getInboxItem(db, id);
+  }
+  return settled;
 }
 
 export function retryInboxDecision(db, id, options = {}) {
@@ -798,6 +1019,20 @@ export async function deliverInboxItem(
   if (!item) throw new Error(`unknown inbox item ${id}`);
   if (typeof send !== "function")
     throw new Error("inbox delivery transport is required");
+  // One Telegram per question (WM-813): waiters attach to the existing
+  // item instead of projecting a second push.
+  if (item.delivery?.telegram) {
+    return {
+      ok:
+        item.delivery.telegram.error == null &&
+        (item.delivery.telegram.exit_code === null ||
+          item.delivery.telegram.exit_code === 0),
+      skipped: true,
+      exitCode: item.delivery.telegram.exit_code,
+      error: item.delivery.telegram.error,
+      item,
+    };
+  }
   let outcome;
   try {
     outcome = await send(command, telegramMessage(item, webUrl));

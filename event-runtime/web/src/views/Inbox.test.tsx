@@ -21,6 +21,8 @@ import {
   itemStatus,
   matchesTab,
   prHref,
+  waitingCount,
+  waitingLabel,
   sourceRunId,
 } from "./Inbox";
 import { api } from "../api";
@@ -237,6 +239,17 @@ describe("inbox pure helpers", () => {
       ),
     ).toBe("1d 4h ago");
   });
+
+  test("waitingCount is 1 plus attached waiters and hides the label at 1", () => {
+    expect(waitingCount(item({ id: "a", kind: "BLOCKED" }))).toBe(1);
+    expect(waitingLabel(1)).toBeNull();
+    const crowded = {
+      ...item({ id: "b", kind: "BLOCKED" }),
+      waiters: [{ runId: "run_2" }, { runId: "run_3" }],
+    };
+    expect(waitingCount(crowded)).toBe(3);
+    expect(waitingLabel(3)).toBe("3 runs waiting on this answer");
+  });
 });
 
 const origInbox = api.inbox;
@@ -348,6 +361,27 @@ describe("Inbox view", () => {
     // Group headers in triage order.
     expect(view.getByText("Decide")).toBeTruthy();
     expect(view.getByText("Red")).toBeTruthy();
+  });
+
+  test("list and detail show how many runs wait on one answer", async () => {
+    ledger = [
+      {
+        ...item({
+          id: "inbox_wait",
+          kind: "BLOCKED",
+          title: "BLOCKED WM-9: shared question",
+          refs: { issue: "WM-9", runId: "run_a" },
+        }),
+        waiters: [{ runId: "run_b" }, { runId: "run_c" }],
+        waitingCount: 3,
+      } as InboxItem,
+    ];
+    const { view } = renderInbox({
+      focusItemId: "inbox_wait",
+      onSelectItem: () => {},
+    });
+    await waitFor(() => view.getByText("3 waiting"));
+    expect(view.getByText("3 runs waiting on this answer")).toBeTruthy();
   });
 
   test("filters with inbox facets and free text, with an Esc-hinted empty state", async () => {

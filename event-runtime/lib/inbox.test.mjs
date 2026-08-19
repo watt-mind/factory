@@ -84,7 +84,51 @@ describe("human inbox ledger (WM-285)", () => {
     });
   });
 
-  test("open dedupe supersedes the request without stacking rows", () => {
+  test("same-question open items attach as waiters instead of stacking rows", () => {
+    const db = openDb(":memory:");
+    const first = createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "first",
+        body: "old",
+        refs: { issue: "WM-1", runId: "run_1" },
+        source: "agent:run_1",
+        decision: decision(),
+        dedupeKey: "ESCALATED:WM-1",
+      },
+      { id: "first" },
+    );
+    const second = createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "second",
+        body: "new",
+        refs: { issue: "WM-1", runId: "run_2" },
+        source: "agent:run_2",
+        decision: decision(),
+        dedupeKey: "ESCALATED:WM-1",
+      },
+      { id: "second" },
+    );
+    expect(second.id).toBe(first.id);
+    expect(second.attached).toBe(true);
+    expect(second.body).toBe("old");
+    expect(second.refs).toEqual({ issue: "WM-1", runId: "run_1" });
+    expect(second.decision).toEqual(decision());
+    expect(second.waiters).toEqual([
+      { runId: "run_2", at: expect.any(String) },
+    ]);
+    expect(second.waitingCount).toBe(2);
+    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
+
+    createInboxItem(db, { kind: "ESCALATED", title: "unkeyed one" });
+    createInboxItem(db, { kind: "ESCALATED", title: "unkeyed two" });
+    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(3);
+  });
+
+  test("a different decision shape on the same caller key still supersedes", () => {
     const db = openDb(":memory:");
     const first = createInboxItem(
       db,
@@ -100,7 +144,7 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "first" },
     );
     const replacement = decision([
-      { id: "dismiss", label: "Dismiss this time", effect: "dismiss" },
+      { id: "retry", label: "Retry", effect: "requeue" },
     ]);
     const second = createInboxItem(
       db,
@@ -108,7 +152,12 @@ describe("human inbox ledger (WM-285)", () => {
         kind: "ESCALATED",
         title: "second",
         body: "new",
-        refs: { issue: "WM-1", runId: "run_2" },
+        refs: {
+          issue: "WM-1",
+          runId: "run_2",
+          eventSource: "test",
+          eventId: "e",
+        },
         source: "agent:run_2",
         decision: replacement,
         dedupeKey: "ESCALATED:WM-1",
@@ -120,11 +169,93 @@ describe("human inbox ledger (WM-285)", () => {
     expect(second.refs).toEqual({ issue: "WM-1", runId: "run_2" });
     expect(second.decision).toEqual(replacement);
     expect(second.delivery.supersededDecisions).toBe(1);
-    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
+    expect(second.waiters).toEqual([]);
+  });
 
-    createInboxItem(db, { kind: "ESCALATED", title: "unkeyed one" });
-    createInboxItem(db, { kind: "ESCALATED", title: "unkeyed two" });
-    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(3);
+  test("decideInboxItem fans the effect out across waiters bound to each run", () => {
+    const db = openDb(":memory:");
+    const request = decision();
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "first",
+        refs: { issue: "WM-1", runId: "run_1" },
+        decision: request,
+        dedupeKey: "ESCALATED:WM-1",
+      },
+      { id: "first", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "second",
+        refs: { issue: "WM-1", runId: "run_2" },
+        decision: request,
+        dedupeKey: "ESCALATED:WM-1",
+      },
+      { now: 2000 },
+    );
+    const appliedRuns = [];
+    const decided = decideInboxItem(
+      db,
+      "first",
+      {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "dismiss",
+        fields: {},
+      },
+      {
+        now: 3000,
+        applyEffect: (_db, item) => {
+          appliedRuns.push(item.refs.runId);
+          return { kind: "dismiss", outcome: "applied" };
+        },
+      },
+    );
+    expect(appliedRuns).toEqual(["run_1"]);
+    expect(decided.waiterEffects).toEqual([
+      {
+        runId: "run_2",
+        effect: {
+          kind: "dismiss",
+          outcome: "applied",
+          detail: "shared_referent",
+        },
+      },
+    ]);
+    expect(decided.item.waitingCount).toBe(2);
+    expect(decided.item.waiters[0].effect.detail).toBe("shared_referent");
+    expect(decided.item.resolvedAt).toBe(new Date(3000).toISOString());
+  });
+
+  test("delivery is not retried once a projection exists", async () => {
+    const db = openDb(":memory:");
+    const item = createInboxItem(
+      db,
+      { kind: "CI RED", title: "CI RED PR-4: tests", source: "cli" },
+      { id: "inbox_delivery_once" },
+    );
+    const sends = [];
+    await deliverInboxItem(db, item.id, {
+      command: "/stub",
+      send: async () => {
+        sends.push(1);
+        return { ok: true, exitCode: 0, error: null };
+      },
+    });
+    const again = await deliverInboxItem(db, item.id, {
+      command: "/stub",
+      send: async () => {
+        sends.push(2);
+        return { ok: true, exitCode: 0, error: null };
+      },
+    });
+    expect(sends).toEqual([1]);
+    expect(again.skipped).toBe(true);
+    expect(again.ok).toBe(true);
   });
 
   test("dedupe supersession clears a stored response to avoid binding it to a new request", () => {
@@ -504,6 +635,9 @@ describe("human inbox ledger (WM-285)", () => {
         { id, now: 1000 },
       );
     }
+    expect(getInboxItem(db, "duplicate")).toBeNull();
+    expect(getInboxItem(db, "blocked").waitingCount).toBe(2);
+
     const calls = [];
     const linearIssues = async (ids) => {
       calls.push(ids);
@@ -523,7 +657,6 @@ describe("human inbox ledger (WM-285)", () => {
 
     expect(await reconcileInbox(db, { now: 60_000, linearIssues })).toEqual([
       { id: "blocked", resolvedBy: "auto:linear_unblocked" },
-      { id: "duplicate", resolvedBy: "auto:linear_unblocked" },
     ]);
     expect(calls).toEqual([["WM-10", "WM-11"]]);
     expect(await reconcileInbox(db, { now: 100_000, linearIssues })).toEqual(

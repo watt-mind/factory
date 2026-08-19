@@ -26,6 +26,18 @@ export async function handleInboxApiRoute({
     if (parsed.error) return send(422, { error: parsed.error });
     try {
       const item = createInboxItem(db, parsed.value, { now: nowMs });
+      if (item.attached) {
+        const { attached: _attached, ...publicItem } = item;
+        return send(201, {
+          item: publicItem,
+          delivery: {
+            ok: true,
+            skipped: "deduped",
+            exitCode: null,
+            error: null,
+          },
+        });
+      }
       // Item first, projection second: even a failed transport leaves a
       // queryable row and records the delivery error on it.
       const delivery = await deliverInboxItem(db, item.id, {

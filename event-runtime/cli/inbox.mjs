@@ -15,11 +15,15 @@ export async function inbox(client) {
     return;
   }
   console.log(
-    `${pad("ID", 44)}${pad("KIND", 18)}${pad("SEVERITY", 11)}${pad("CREATED", 26)}TITLE`,
+    `${pad("ID", 44)}${pad("KIND", 18)}${pad("SEVERITY", 11)}${pad("WAITING", 10)}${pad("CREATED", 26)}TITLE`,
   );
   for (const item of body.items) {
+    const waiting =
+      typeof item.waitingCount === "number" && item.waitingCount > 1
+        ? String(item.waitingCount)
+        : "-";
     console.log(
-      `${pad(item.id, 44)}${pad(item.kind, 18)}${pad(item.severity, 11)}${pad(item.createdAt, 26)}${item.title}`,
+      `${pad(item.id, 44)}${pad(item.kind, 18)}${pad(item.severity, 11)}${pad(waiting, 10)}${pad(item.createdAt, 26)}${item.title}`,
     );
   }
 }
