@@ -161,8 +161,9 @@ describe("registry", () => {
     // Regenerated (WM-908 rebase onto WM-936): merge-plan@1 + batched apply/verify;
     // merge-scan enumerator keys on head SHA and re-pins merge-scan.md;
     // registry inputs (agents, edges, event-types).
+    // Regenerated (merge-factory clock scan 15m -> 4h in schedules.json).
     const expected =
-      "sha256:4d665879ba9d5d01ce37687d1a6fadc50d4de8525fb2d4e181d250fdd8349d16";
+      "sha256:2e66f5a300e4eeeae200dfb850991cd3461e72880f5eaa50c6489c575cf9b127";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
