@@ -14,7 +14,9 @@ import path from "node:path";
 import { loadForge, ForgeError } from "../../lib/forge/index.mjs";
 import { sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
+import { policyMergeBatchSize } from "./planner.mjs";
 import { getRepo, loadRepos, RepoError } from "./repos.mjs";
+import { noRequiredChecksDiagnostic } from "./merge-ci-proof.mjs";
 
 export const MERGE_REVIEW_VERDICTS = Object.freeze([
   "MERGE",
@@ -37,7 +39,7 @@ const PR_LIST_FIELDS = [
   "mergeable",
   "mergeStateStatus",
 ];
-const PR_VIEW_FIELDS = PR_LIST_FIELDS;
+const PR_VIEW_FIELDS = [...PR_LIST_FIELDS, "labels"];
 const REBASE_FINDING = "rebase_onto_base";
 const IN_FLIGHT_RUN_STATES = [
   "PROPOSED",
@@ -47,6 +49,7 @@ const IN_FLIGHT_RUN_STATES = [
   "RUNNING",
   "VERIFYING",
 ];
+const GITHUB_HOLD_LABELS = new Set(["escalated", "ai:escalated"]);
 
 function iso(now = Date.now()) {
   return new Date(now).toISOString();
@@ -267,20 +270,38 @@ function lowestMergePlan(candidates) {
   return [mergeable[0].plan];
 }
 
-function recommendationOf({ reviews, plan, fix, escalate }) {
+function planRequestsOf(repo, mergeHits) {
+  return mergeHits.length > 0 ? [{ repo }] : [];
+}
+
+function recommendationOf({
+  reviews,
+  plan,
+  fix = [],
+  escalate,
+  planRequests = [],
+}) {
   if (escalate.length > 0) return "ESCALATE";
-  if (plan.length > 0) return "MERGE";
+  if (plan.length > 0 || planRequests.length > 0) return "MERGE";
   if (reviews.length > 0) return "REVIEW";
   if (fix.length > 0) return "FIX";
   return "NOOP";
 }
 
-function noopReasonOf({ reviews, plan, fix, escalate, listedCount }) {
+function noopReasonOf({
+  reviews,
+  plan,
+  fix = [],
+  escalate,
+  listedCount,
+  planRequests = [],
+}) {
   if (
     escalate.length > 0 ||
     plan.length > 0 ||
     reviews.length > 0 ||
-    fix.length > 0
+    fix.length > 0 ||
+    planRequests.length > 0
   )
     return undefined;
   if (listedCount === 0) return "no_open_prs";
@@ -548,16 +569,24 @@ function assemble({
     }
     if (hit.verdict === "MERGE") mergeHits.push(hit);
   }
-  const plan = lowestMergePlan(mergeHits);
+  const plan = [];
+  const planRequests = planRequestsOf(repo, mergeHits);
   const escalate = [];
   const artifact = {
-    recommendation: recommendationOf({ reviews, plan, fix, escalate }),
+    recommendation: recommendationOf({
+      reviews,
+      plan,
+      fix,
+      escalate,
+      planRequests,
+    }),
     repo,
     github,
     base,
     deployBranch,
     reviews,
     plan,
+    planRequests,
     fix,
     escalate,
     summary: summaryFor({
@@ -566,6 +595,7 @@ function assemble({
       fix,
       listedCount,
       forceReview,
+      planRequests,
     }),
   };
   const noopReason = noopReasonOf({
@@ -574,17 +604,26 @@ function assemble({
     fix,
     escalate,
     listedCount,
+    planRequests,
   });
   if (noopReason) artifact.noopReason = noopReason;
   return completed(artifact);
 }
 
-function summaryFor({ reviews, plan, fix, listedCount, forceReview }) {
+function summaryFor({
+  reviews,
+  plan,
+  fix = [],
+  listedCount,
+  forceReview,
+  planRequests = [],
+}) {
   const bits = [];
   if (forceReview) bits.push(`selected scan of ${listedCount} PR(s)`);
   else bits.push(`${listedCount} open base-targeting PR(s)`);
   bits.push(`${reviews.length} review(s) to run`);
   if (fix.length > 0) bits.push(`${fix.length} rebase fix(es)`);
+  if (planRequests.length > 0) bits.push("MERGE hits queued for planning");
   if (plan.length > 0) bits.push(`lowest MERGE candidate is #${plan[0].pr}`);
   return bits.join("; ") + ".";
 }
@@ -618,10 +657,251 @@ function transient(github, repo, base, deployBranch, err) {
     deployBranch,
     reviews: [],
     plan: [],
+    planRequests: [],
     fix: [],
     escalate: [],
     summary,
   });
+}
+
+function githubLabelsOf(raw) {
+  const labels = raw?.labels;
+  if (!Array.isArray(labels)) return [];
+  return labels
+    .map((entry) =>
+      typeof entry === "string"
+        ? entry
+        : typeof entry?.name === "string"
+          ? entry.name
+          : "",
+    )
+    .filter(Boolean);
+}
+
+function linearHeld(ticketState) {
+  if (!ticketState || typeof ticketState !== "object") return true;
+  const state = ticketState.state?.name;
+  if (state === "Blocked") return true;
+  const names = (ticketState.labels?.nodes ?? [])
+    .map((node) => (typeof node?.name === "string" ? node.name : ""))
+    .filter(Boolean);
+  return names.some((name) =>
+    /^(ai:escalated|type:security|.*security.*)$/i.test(name),
+  );
+}
+
+export function requiredChecksGreen(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return false;
+  return checks.every(
+    (check) =>
+      check &&
+      (check.bucket === "pass" || check.bucket === "SUCCESS") &&
+      (check.state === "SUCCESS" || check.state === "success"),
+  );
+}
+
+export function defaultProveCi({
+  forge,
+  github,
+  pr,
+  headRef,
+  headSha,
+  repo,
+  repos,
+}) {
+  try {
+    const checks = forge.prChecks(github, pr, {
+      required: true,
+      fields: ["name", "bucket", "state"],
+    });
+    if (Array.isArray(checks) && checks.length > 0) {
+      return requiredChecksGreen(checks);
+    }
+  } catch (err) {
+    if (err instanceof ForgeError) {
+      const diagnostic = String(err.stderr ?? "").trim();
+      if (diagnostic !== noRequiredChecksDiagnostic(headRef)) return false;
+    } else {
+      return false;
+    }
+  }
+  if (!repo || !repos) return false;
+  try {
+    const record = getRepo(repos, repo);
+    const gate = record.mergeCi;
+    if (!gate) return false;
+    const runs = forge.runList(github, {
+      limit: 20,
+      fields: ["databaseId", "status", "conclusion", "headSha", "workflowName"],
+    });
+    const matching = (runs ?? []).filter(
+      (run) => run.workflowName === gate.workflow && run.headSha === headSha,
+    );
+    if (matching.length !== 1) return false;
+    return (
+      matching[0].status === "completed" && matching[0].conclusion === "success"
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function defaultLinearGet(ticket) {
+  const result = Bun.spawnSync(["factory", "linear", "get", ticket, "--json"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`linear lookup failed for ${ticket}`);
+  }
+  return JSON.parse(new TextDecoder().decode(result.stdout));
+}
+
+/**
+ * Deterministic planner (WM-908). Reads the ledger, re-checks live
+ * mergeability / required CI / holds, and takes the lowest PR numbers up to
+ * policy.merge.batch_size.
+ */
+export function enumerateMergePlan({
+  input,
+  db,
+  forge,
+  repos,
+  now = Date.now(),
+  batchSize,
+  proveCi = defaultProveCi,
+  linearGet = defaultLinearGet,
+}) {
+  const size =
+    Number.isInteger(batchSize) && batchSize > 0
+      ? batchSize
+      : policyMergeBatchSize();
+  const listed = enumerateMergeScan({ input, db, forge, repos, now });
+  if (listed.terminalState !== "completed") return listed;
+
+  const { repo, github, base, deployBranch } = listed.artifact;
+  let baseSha;
+  try {
+    const raw = String(
+      forge.apiRaw(`repos/${github}/git/ref/heads/${base}`, {
+        jq: ".object.sha",
+      }),
+    ).trim();
+    baseSha = asSha(raw);
+    if (!baseSha) {
+      try {
+        const parsed = JSON.parse(raw);
+        baseSha = asSha(parsed?.object?.sha ?? parsed?.sha);
+      } catch {
+        baseSha = null;
+      }
+    }
+  } catch (err) {
+    return transient(github, repo, base, deployBranch, err);
+  }
+  if (!baseSha) return refuse(`unresolvable base SHA for ${github}#${base}`);
+
+  let open;
+  try {
+    open = forge.prList(github, {
+      state: "open",
+      limit: 100,
+      fields: PR_VIEW_FIELDS,
+    });
+  } catch (err) {
+    return transient(github, repo, base, deployBranch, err);
+  }
+
+  const candidates = [];
+  for (const raw of open) {
+    const pr = normalizeListedPr(raw, baseSha);
+    if (!pr || pr.isDraft) continue;
+    if (pr.baseRefName && pr.baseRefName !== base) continue;
+    const hit = lookupMergeReview(db, {
+      github,
+      pr: pr.number,
+      headSha: pr.headSha,
+      baseSha: pr.baseSha,
+    });
+    if (hit?.verdict !== "MERGE" || !hit.plan || typeof hit.plan !== "object")
+      continue;
+    if (String(raw.mergeable ?? "").toUpperCase() !== "MERGEABLE") continue;
+    if (
+      githubLabelsOf(raw).some((name) =>
+        GITHUB_HOLD_LABELS.has(name.toLowerCase()),
+      )
+    )
+      continue;
+    if (!pr.ticket) continue;
+    try {
+      if (linearHeld(linearGet(pr.ticket))) continue;
+    } catch {
+      continue;
+    }
+    if (
+      !proveCi({
+        forge,
+        github,
+        pr: pr.number,
+        headRef: pr.headRef,
+        headSha: pr.headSha,
+        repo,
+        repos,
+      })
+    )
+      continue;
+    candidates.push(hit.plan);
+  }
+
+  const plan = candidates.sort((a, b) => a.pr - b.pr).slice(0, size);
+  const artifact = {
+    recommendation: plan.length > 0 ? "MERGE" : "NOOP",
+    repo,
+    github,
+    base,
+    deployBranch,
+    reviews: [],
+    plan,
+    planRequests: [],
+    fix: [],
+    escalate: [],
+    summary:
+      plan.length > 0
+        ? `planning ${plan.length} MERGE PR(s) (batch_size ${size}): ${plan.map((item) => `#${item.pr}`).join(", ")}.`
+        : "no live MERGE candidates passed mergeability, CI, and hold checks.",
+  };
+  if (plan.length === 0) artifact.noopReason = "no_merge_candidates";
+  return completed(artifact);
+}
+
+export function runPlanCli({
+  cwd = process.cwd(),
+  db = openDb(),
+  forge = loadForge(),
+  repos = loadRepos(),
+  batchSize,
+  proveCi,
+  linearGet,
+} = {}) {
+  const input = JSON.parse(readFileSync(path.join(cwd, "input.json"), "utf8"));
+  const result = enumerateMergePlan({
+    input,
+    db,
+    forge,
+    repos,
+    batchSize,
+    proveCi,
+    linearGet,
+  });
+  writeFileSync(
+    path.join(cwd, "result.json"),
+    `${JSON.stringify(result, null, 2)}\n`,
+    "utf8",
+  );
+  return result.terminalState === "completed" ||
+    result.terminalState === "refused"
+    ? 0
+    : 1;
 }
 
 export function runScanCli({
@@ -645,8 +925,11 @@ export function runScanCli({
 
 if (import.meta.main) {
   const verb = process.argv[2];
+  if (verb === "plan") {
+    process.exit(runPlanCli());
+  }
   if (verb !== "scan") {
-    console.error("usage: bun event-runtime/lib/merge-reviews.mjs scan");
+    console.error("usage: bun event-runtime/lib/merge-reviews.mjs scan|plan");
     process.exit(2);
   }
   process.exit(runScanCli());

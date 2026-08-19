@@ -35,8 +35,8 @@
     }
   ],
   "pins": {
-    "agents/merge-scan.md": "sha256:300203edbf3cfa4fd36d94094ae9e58bb986526f65233cff70086fdd454fdcb7",
+    "agents/merge-scan.md": "sha256:a17ce903254b5e2d4d1702ae82f94189078537541a154aba8f5c381b5adee97c",
     "schemas/merge-scan.input.json": "sha256:dcd0cf7d2c17ae1142edc93d2e48016c23f824e2447edc4bc929daf89ec9d80b",
-    "schemas/merge-scan.output.json": "sha256:7da0007262077e89f63ebb5a9627137ef64b6e48733593eea0bf08a69c7ce398"
+    "schemas/merge-scan.output.json": "sha256:7c38ac7992fb647815cac346ebe3e51744b689ca7b5af497c9bd5bcabbfa641b"
   }
 }

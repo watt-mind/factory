@@ -17,9 +17,9 @@ live base tip), emit an operational `rebase_onto_base` item in `fix[]` with
 `mechanical: true`, `withinOwnedPaths: true`, and `round` from the ledger; do
 not start a review run. Do not emit a review item when an open, queued, or
 running `merge-review@1` proposal or run already exists at the same
-`(pr, headSha)`. The stub `plan[]` is today's single lowest MERGE candidate
-already in the ledger that is still mergeable, so the lane still lands one PR
-per cycle until merge-lane v3 part 2 batches landing.
+`(pr, headSha)`. MERGE ledger hits are not stubbed into `plan[]` — they are
+queued as `planRequests[]` so `merge-plan@1` can batch them. `plan[]` on a
+scan artifact is always empty.
 
 When `prNumbers` is absent, enumerate **all** open PRs and consider every
 base-targeting, non-draft PR. When `prNumbers` is present, review exactly those

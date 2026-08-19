@@ -1,19 +1,25 @@
-# merge-apply — deterministic one-PR landing
+# merge-apply — deterministic batched landing
 
-This is a closed action definition, not a model prompt. Its input contains
-exactly one schema-validated `merge_pr` item from an independent cold scan.
-Immediately before merging, the fixed command re-reads the PR head and base
-SHA, exact branch names, open/draft/mergeable state, GitHub and Linear holds,
-and real required CI. Any stale, missing, red, unknown, or ambiguous fact
-fails closed; moved head/base evidence emits a durable fresh merge scan.
+This is a closed command definition, not a model prompt. Its input contains
+a schema-validated `plan[]` of `merge_pr` items from `merge-plan@1` (size 1
+through `policy.merge.batch_size`). Immediately before each squash, the
+command re-reads that PR's head and base SHA, exact branch names,
+open/draft/mergeable state, GitHub and Linear holds, and required CI. A
+stale, unmergeable, held, or red item is **skipped with a reason**; the rest
+of the batch continues. Only `develop` is auto-mergeable.
 
-Only `develop` is accepted. Policy auto-approval separately requires an
-allowed owner/base and rejects main/master, deploy branches, sensitive or
-ambiguous reviews. The command uses `--match-head-commit`, never deletes the
-branch, never tears down a worktree, and never marks Linear Done.
+The command uses `--match-head-commit`, never deletes a branch, never tears
+down a worktree, and never marks Linear Done.
 
-After GitHub proves the PR is MERGED, the command reads its exact merge commit
-and injects one idempotent `factory.merge-landed` event. That event is the only
-path to merge verification. A failure after the merge but before durable event
-admission is reported as uncertain and must be recovered before another merge;
-it is never treated as success.
+After GitHub proves each successful squash is MERGED, the command records
+that item's exact merge SHA. One idempotent `factory.merge-landed` event is
+emitted for the whole batch, carrying `landed[]` (`pr`, `ticket`, `headSha`,
+`mergeSha`, `headRef`) plus `finalSha` (the last successful merge SHA). That
+event is the only path to merge verification. If nothing landed, a refresh
+`factory.merge.requested` is emitted so skipped items can be re-planned.
+Uncertain merge (squash succeeded but SHA unreadable) fails the run when
+nothing has landed yet; after earlier successes it skips the remainder.
+
+```
+bun {factoryRoot}/event-runtime/lib/merge-apply.mjs
+```

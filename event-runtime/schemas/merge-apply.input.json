@@ -1,5 +1,5 @@
 {
-  "title": "merge-apply input — exactly one independently reviewed PR",
+  "title": "merge-apply input — independently reviewed PRs, up to policy.merge.batch_size",
   "type": "object",
   "required": ["repo", "github", "base", "deployBranch", "plan"],
   "additionalProperties": false,
@@ -14,7 +14,7 @@
     "plan": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 1,
+      "maxItems": 16,
       "items": {
         "type": "object",
         "required": [

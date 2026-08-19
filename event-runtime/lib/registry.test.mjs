@@ -158,11 +158,11 @@ describe("registry", () => {
     // input_schema_invalid without it); re-pinned merge-review.json.
     // Regenerated (WM-907 follow-up): merge-review.md defines
     // fix.withinOwnedPaths (operational fixes are always true); re-pinned.
-    // Regenerated (WM-936): merge-scan enumerator keys the ledger on head SHA,
-    // emits rebase_onto_base for behind hits, and dedupes in-flight reviews;
-    // re-pinned merge-scan.md.
+    // Regenerated (WM-908 rebase onto WM-936): merge-plan@1 + batched apply/verify;
+    // merge-scan enumerator keys on head SHA and re-pins merge-scan.md;
+    // registry inputs (agents, edges, event-types).
     const expected =
-      "sha256:daf55446288eb3275153d485a7ba87ddf602c46e6a32f1eeb26c2423422bb6e4";
+      "sha256:4d665879ba9d5d01ce37687d1a6fadc50d4de8525fb2d4e181d250fdd8349d16";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

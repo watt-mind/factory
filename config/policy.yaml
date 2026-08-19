@@ -17,6 +17,7 @@ chain_auto_approval:
     - factory.merge.requested
     - factory.merge-review.requested
     - factory.merge-fix.requested
+    - factory.merge-plan.requested
     - factory.merge-apply.requested
     - factory.merge-landed
     - factory.merge-verify.requested
@@ -24,6 +25,11 @@ chain_auto_approval:
 
 merge:
   max_fix_rounds: 2
+  # One writer (concurrency.max_concurrent_merges: 1) still serializes
+  # landing onto a base. batch_size is how many already-reviewed MERGE
+  # PRs that writer squashes per verify cycle. Default 4 so a 15-minute
+  # schedule plus verify can land ~16 PRs/hour instead of ~2–4.
+  batch_size: 4
 
 # Forge connector (WM-836): which code host implementation `lib/forge/`
 # loads. Everything that used to shell out to `gh` goes through it now.

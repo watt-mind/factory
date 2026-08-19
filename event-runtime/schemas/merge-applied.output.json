@@ -11,8 +11,8 @@
     },
     "applied": {
       "type": "array",
-      "minItems": 1,
-      "description": "Every item that actually ran, in order — a failed item ends the list and fails the attempt, so nothing here claims success it cannot prove",
+      "minItems": 0,
+      "description": "Every item that actually merged, in order. Conflicts and stale SHAs are skipped rather than aborting the batch (WM-908).",
       "items": {
         "type": "object",
         "required": ["issueId", "action"],
@@ -28,6 +28,20 @@
             "minLength": 1,
             "description": "Registered action id that ran for this item"
           }
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Plan items that were not merged, with a reason, so the next plan cycle can retry them",
+      "items": {
+        "type": "object",
+        "required": ["pr", "ticket", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "pr": { "type": "integer", "minimum": 1 },
+          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "reason": { "type": "string", "minLength": 1 }
         }
       }
     }

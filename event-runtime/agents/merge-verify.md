@@ -1,19 +1,25 @@
-# merge-verify — exact landing gate
+# merge-verify — exact batched landing gate
 
 This is a deterministic command, not a model prompt. A durable
-`factory.merge-landed` event pins the PR, original head/branch, base, ticket,
-and exact merge commit.
+`factory.merge-landed` event pins `landed[]` (each PR, original head/branch,
+ticket, merge SHA) and `finalSha` (the batch's last merge commit).
 
-The command first proves GitHub still reports that exact merge. It then polls
-with bounded deadlines for check-runs on the exact merge commit and, when the
-repo config declares `smoke_workflow`, that workflow on the same commit.
-Missing, red, cancelled, stale, or uncertain evidence fails closed. CI RED or
-SMOKE RED blocks the ticket, preserves branch/worktree, sends the required
-notification, exits failed, and therefore keeps the global merge barrier held.
+The command first proves GitHub still reports every landed PR as MERGED at
+its recorded merge SHA. It then polls with bounded deadlines for check-runs
+on **`finalSha` only** and, when the repo config declares `smoke_workflow`,
+that workflow on the same commit. Missing, red, cancelled, stale, or
+uncertain evidence fails closed.
 
-Only after all configured landing gates are green does it run the repo-owned
-worktree teardown for exactly the ticket, verify the remote head branch still
-points at the merged head SHA, refuse protected branch names, delete exactly
-that ref, mark the ticket Done, and inject the next merge scan. Replays are
-idempotent at event admission; no apply action can mark Done or delete a
-branch.
+**Green:** for every ticket in `landed[]`, run the repo-owned worktree
+teardown for that ticket, verify the remote head branch still points at the
+merged head SHA, refuse protected branch names, delete exactly that ref, and
+mark the ticket Done. Then inject the next merge scan. Replays are
+idempotent at event admission.
+
+**Red:** the existing CI/SMOKE RED handling runs for **every** ticket in
+`landed[]` (block + notify). Branches and worktrees are preserved. The merge
+barrier stays held. Apply never marks Done or deletes a branch.
+
+```
+bun {factoryRoot}/event-runtime/lib/merge-verify.mjs
+```

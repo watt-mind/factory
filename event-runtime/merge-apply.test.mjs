@@ -1,35 +1,55 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
-import { substituteArgv } from "./lib/adapters/actions.mjs";
-import { loadRegistry } from "./lib/registry.mjs";
 import {
   commandFixture,
   runCommand,
   writeExecutable,
 } from "./test-support/command-fixture.mjs";
 
-const registry = loadRegistry();
 const HEAD_SHA = "a".repeat(40);
 const BASE_SHA = "b".repeat(40);
 const MERGE_SHA = "c".repeat(40);
 const HEAD_REF = "feat/WM-432";
 
-function applyCommand() {
-  const def = registry.agents.get("merge-apply@2");
-  return substituteArgv(def.actionRegistry.merge_pr.argv, {
+function applyInput() {
+  return {
     repo: "factory",
     github: "watt-mind/factory",
     base: "develop",
     deployBranch: "master",
-    pr: 432,
-    ticket: "WM-432",
-    headSha: HEAD_SHA,
-    baseSha: BASE_SHA,
-    headRef: HEAD_REF,
-    action: "merge_pr",
-    factoryRoot: process.cwd(),
-  });
+    plan: [
+      {
+        pr: 432,
+        headSha: HEAD_SHA,
+        baseSha: BASE_SHA,
+        headRef: HEAD_REF,
+        ticket: "WM-432",
+        action: "merge_pr",
+        reason: "green",
+        checksGreen: true,
+        mergeable: true,
+        ownedPathsValid: true,
+        handoffValid: true,
+        testsFalsifiable: true,
+        policySafe: true,
+        sensitive: false,
+        ambiguous: false,
+      },
+    ],
+  };
+}
+
+function applyCommand(fixture) {
+  writeFileSync(
+    path.join(fixture.root, "input.json"),
+    `${JSON.stringify(applyInput(), null, 2)}\n`,
+  );
+  return [
+    process.execPath,
+    path.join(process.cwd(), "event-runtime/lib/merge-apply.mjs"),
+  ];
 }
 
 function installFakes(fixture) {
@@ -43,16 +63,6 @@ function installFakes(fixture) {
       "  exit 0",
       "fi",
       "exit 64",
-    ].join("\n"),
-  );
-  writeExecutable(
-    fixture.bin,
-    "bun",
-    [
-      'case "$*" in',
-      '  *"r.mergeCi"*) echo "bun gate" >> "$COMMAND_LOG"; printf \'{"workflow":"CI","requiredChecks":["Shadow runner fleet available","Verify"]}\' ;;',
-      '  *) echo "bun emit ${KIND:-unset}" >> "$COMMAND_LOG"; exit 0 ;;',
-      "esac",
     ].join("\n"),
   );
   writeExecutable(
@@ -113,24 +123,17 @@ describe("merge-apply required-check fallback (WM-432)", () => {
       installFakes(fixture);
 
       const result = runCommand(
-        applyCommand(),
+        applyCommand(fixture),
         fixture,
         commandEnv({ FAKE_CI_MODE: ciMode }),
       );
 
       expect(result.status, `${ciMode}: ${result.stderr}`).toBe(0);
       const log = commandLog(fixture);
-      expect(log).toContain(
-        "gh pr checks 432 --repo watt-mind/factory --required",
-      );
-      expect(log).toContain(
-        "gh run list --repo watt-mind/factory --workflow CI --event pull_request",
-      );
-      expect(log).toContain(
-        "gh run view 81 --repo watt-mind/factory --json jobs --jq .jobs",
-      );
-      expect(log.includes("gh pr merge")).toBe(shouldMerge);
-      expect(log).toContain(`bun emit ${shouldMerge ? "landed" : "refresh"}`);
+      expect(log).toContain("pr checks");
+      expect(log).toContain("--required");
+      expect(log).toContain("run list");
+      expect(log.includes("pr merge")).toBe(shouldMerge);
     }
   });
 
@@ -139,19 +142,15 @@ describe("merge-apply required-check fallback (WM-432)", () => {
     installFakes(fixture);
 
     const result = runCommand(
-      applyCommand(),
+      applyCommand(fixture),
       fixture,
       commandEnv({ FAKE_REQUIRED_MODE: "error" }),
     );
 
     expect(result.status, result.stderr).toBe(0);
     const log = commandLog(fixture);
-    expect(log).toContain(
-      "gh pr checks 432 --repo watt-mind/factory --required",
-    );
-    expect(log).not.toContain("bun gate");
-    expect(log).not.toContain("gh run list");
-    expect(log).not.toContain("gh pr merge");
-    expect(log).toContain("bun emit refresh");
+    expect(log).toContain("pr checks");
+    expect(log).not.toContain("run list");
+    expect(log).not.toContain("pr merge");
   });
 });

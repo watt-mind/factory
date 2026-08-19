@@ -605,6 +605,22 @@ export function policyMaxConcurrentMerges(root = reposRoot()) {
   }
 }
 
+/** How many MERGE-verdict PRs one apply batch may squash (WM-908). */
+export const DEFAULT_MERGE_BATCH_SIZE = 4;
+
+export function policyMergeBatchSize(root = reposRoot()) {
+  const file = path.join(root, "config", "policy.yaml");
+  if (!existsSync(file)) return DEFAULT_MERGE_BATCH_SIZE;
+  try {
+    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.merge?.batch_size;
+    return Number.isInteger(value) && value > 0
+      ? value
+      : DEFAULT_MERGE_BATCH_SIZE;
+  } catch {
+    return DEFAULT_MERGE_BATCH_SIZE;
+  }
+}
+
 function agentSingletonEnabled(registry, agentRef) {
   return Object.values(registry.schedules ?? {}).some(
     (candidate) =>

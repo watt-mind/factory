@@ -326,11 +326,16 @@ function seedMergeResolution(
     repo: input.repo,
     github: input.github,
     base: input.base,
-    pr: item.pr,
-    ticket: item.ticket,
-    headSha: item.headSha,
-    headRef: item.headRef,
-    mergeCommitSha: "c".repeat(40),
+    landed: [
+      {
+        pr: item.pr,
+        ticket: item.ticket,
+        headSha: item.headSha,
+        mergeSha: "c".repeat(40),
+        headRef: item.headRef,
+      },
+    ],
+    finalSha: "c".repeat(40),
   };
   const eventId = `event-landed-${id}`;
   const at = new Date(now).toISOString();
@@ -418,11 +423,16 @@ describe("declared chain command edge characterization (WM-469)", () => {
         repo: "factory",
         github: "watt-mind/factory",
         base: "develop",
-        pr: 469,
-        ticket: "WM-469",
-        headSha: "a".repeat(40),
-        headRef: "feat/WM-469",
-        mergeCommitSha: "c".repeat(40),
+        landed: [
+          {
+            pr: 469,
+            ticket: "WM-469",
+            headSha: "a".repeat(40),
+            mergeSha: "c".repeat(40),
+            headRef: "feat/WM-469",
+          },
+        ],
+        finalSha: "c".repeat(40),
       },
     ],
   ])("merge-apply@2 auto-approves its %s command edge", async (type, input) => {
@@ -1094,17 +1104,27 @@ describe("chain auto approval (WM-357)", () => {
       id: "mixed-merge",
       type: "factory.merge-apply.requested",
       input: mergeInput,
-      predecessorAgent: "merge-scan@2",
-      predecessorArtifact,
+      predecessorAgent: "merge-plan@1",
+      predecessorArtifact: {
+        recommendation: "MERGE",
+        ...mergeInput,
+        reviews: [],
+        fix: [],
+        escalate: [],
+        planRequests: [],
+        summary: "reviewed merge batch",
+      },
       predecessorInput: { repo: "factory" },
-      parentRunId,
+      parentRunId: "parent-plan",
     });
     const fix = seed(db, {
       id: "mixed-fix",
       type: "factory.merge-fix.requested",
       input: fixInput,
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact,
+      predecessorInput: { repo: "factory" },
       parentRunId,
-      seedPredecessor: false,
     });
     const escalation = seed(db, {
       id: "mixed-escalation",

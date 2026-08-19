@@ -125,9 +125,15 @@
     "idempotencyScope": ["inputHash"],
     "proposalTtlSeconds": 1800
   },
+  "factory.merge-plan.requested": {
+    "agent": "merge-plan@1",
+    "adapter": "command",
+    "idempotencyScope": ["inputHash"],
+    "proposalTtlSeconds": 1800
+  },
   "factory.merge-apply.requested": {
     "agent": "merge-apply@2",
-    "adapter": "actions",
+    "adapter": "command",
     "idempotencyScope": ["inputHash"],
     "proposalTtlSeconds": 1800
   },

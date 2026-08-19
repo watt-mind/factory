@@ -1,25 +1,29 @@
 {
-  "title": "exact merge landing verification",
+  "title": "exact merge landing verification for one apply batch",
   "type": "object",
-  "required": [
-    "repo",
-    "github",
-    "base",
-    "pr",
-    "ticket",
-    "headSha",
-    "headRef",
-    "mergeCommitSha"
-  ],
+  "required": ["repo", "github", "base", "landed", "finalSha"],
   "additionalProperties": false,
   "properties": {
     "repo": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
     "github": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
     "base": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-    "pr": { "type": "integer", "minimum": 1 },
-    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
-    "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-    "mergeCommitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+    "finalSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "landed": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["pr", "ticket", "headSha", "mergeSha", "headRef"],
+        "additionalProperties": false,
+        "properties": {
+          "pr": { "type": "integer", "minimum": 1 },
+          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "mergeSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" }
+        }
+      }
+    }
   }
 }

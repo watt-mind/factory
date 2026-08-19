@@ -7,6 +7,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-merge-rev
 import { sha256Hex } from "./canonical.mjs";
 import { MIGRATIONS, migrateDb, openDb } from "./db.mjs";
 import {
+  enumerateMergePlan,
   enumerateMergeScan,
   lookupMergeReview,
   persistMergeReviewFromResult,
@@ -45,6 +46,10 @@ function pr({
   mergeable = "MERGEABLE",
   mergeStateStatus = "CLEAN",
   files = OWNED,
+  labels = [],
+  checks = [
+    { name: "Verify", bucket: "pass", state: "SUCCESS", required: true },
+  ],
 } = {}) {
   return {
     number,
@@ -57,6 +62,8 @@ function pr({
     mergeable,
     mergeStateStatus,
     files,
+    labels,
+    checks,
   };
 }
 
@@ -392,7 +399,8 @@ describe("merge-scan enumerator (WM-907)", () => {
       repos,
     });
     expect(result.artifact.reviews).toEqual([]);
-    expect(result.artifact.plan[0].pr).toBe(8);
+    expect(result.artifact.plan).toEqual([]);
+    expect(result.artifact.planRequests).toEqual([{ repo: "factory" }]);
     expect(result.artifact.recommendation).toBe("MERGE");
   });
 
@@ -632,5 +640,87 @@ describe("merge-scan enumerator (WM-936)", () => {
     });
     expect(result.artifact.fix).toEqual([]);
     expect(result.artifact.reviews).toEqual([]);
+  });
+});
+
+describe("merge-plan batch selection (WM-908)", () => {
+  const linearOpen = () => ({
+    state: { name: "In Review" },
+    labels: { nodes: [] },
+  });
+
+  function seedMergeHits(db, numbers) {
+    for (const number of numbers) {
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: number,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(number),
+      });
+    }
+  }
+
+  test("orders by PR number and truncates to batch_size", () => {
+    const db = openDb(":memory:");
+    seedMergeHits(db, [11, 8, 9, 10, 12, 7]);
+    const first = enumerateMergePlan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([7, 8, 9, 10, 11, 12].map((number) => pr({ number }))),
+      repos,
+      batchSize: 4,
+      proveCi: () => true,
+      linearGet: linearOpen,
+    });
+    expect(first.artifact.plan.map((item) => item.pr)).toEqual([7, 8, 9, 10]);
+    expect(first.artifact.recommendation).toBe("MERGE");
+
+    seedMergeHits(db, [11, 12]);
+    const second = enumerateMergePlan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([11, 12].map((number) => pr({ number }))),
+      repos,
+      batchSize: 4,
+      proveCi: () => true,
+      linearGet: linearOpen,
+    });
+    expect(second.artifact.plan.map((item) => item.pr)).toEqual([11, 12]);
+  });
+
+  test("skips held, unmergeable, and red-CI MERGE hits", () => {
+    const db = openDb(":memory:");
+    seedMergeHits(db, [1, 2, 3, 4]);
+    const result = enumerateMergePlan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({ number: 1, mergeable: "CONFLICTING" }),
+        pr({ number: 2, labels: [{ name: "ai:escalated" }] }),
+        pr({ number: 3 }),
+        pr({ number: 4 }),
+      ]),
+      repos,
+      batchSize: 4,
+      proveCi: ({ pr }) => pr !== 3,
+      linearGet: linearOpen,
+    });
+    expect(result.artifact.plan.map((item) => item.pr)).toEqual([4]);
+  });
+
+  test("zero live candidates is a NOOP", () => {
+    const result = enumerateMergePlan({
+      input: { repo: "factory" },
+      db: openDb(":memory:"),
+      forge: forgeWith([]),
+      repos,
+      proveCi: () => true,
+      linearGet: linearOpen,
+    });
+    expect(result.artifact.recommendation).toBe("NOOP");
+    expect(result.artifact.plan).toEqual([]);
+    expect(result.artifact.noopReason).toBe("no_merge_candidates");
   });
 });

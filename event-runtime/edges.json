@@ -178,16 +178,14 @@
           "baseSha": "$.item.baseSha"
         }
       },
-      "MERGE": {
-        "eventType": "factory.merge-apply.requested",
-        "whenItemsField": "plan",
-        "mixedEventId": "chain-${runId}-merge",
+      "PLAN": {
+        "eventType": "factory.merge-plan.requested",
+        "whenItemsField": "planRequests",
+        "mixedEventId": "chain-${runId}-plan-${item.repo}",
+        "itemsField": "planRequests",
+        "itemKey": "repo",
         "input": {
-          "repo": "$.artifact.repo",
-          "github": "$.artifact.github",
-          "base": "$.artifact.base",
-          "deployBranch": "$.artifact.deployBranch",
-          "plan": "$.artifact.plan"
+          "repo": "$.artifact.repo"
         }
       },
       "FIX": {
@@ -222,6 +220,23 @@
         "input": {
           "repo": "$.artifact.repo",
           "summary": "$.artifact.summary"
+        }
+      }
+    }
+  },
+  "merge-plan@1": {
+    "recommendationField": "recommendation",
+    "edges": {
+      "MERGE": {
+        "eventType": "factory.merge-apply.requested",
+        "eventId": "chain-${runId}-merge",
+        "mixedEventId": "chain-${runId}-merge",
+        "input": {
+          "repo": "$.artifact.repo",
+          "github": "$.artifact.github",
+          "base": "$.artifact.base",
+          "deployBranch": "$.artifact.deployBranch",
+          "plan": "$.artifact.plan"
         }
       }
     }

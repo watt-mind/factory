@@ -31,6 +31,7 @@ export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
   "factory.merge.requested",
   "factory.merge-review.requested",
   "factory.merge-fix.requested",
+  "factory.merge-plan.requested",
   "factory.merge-apply.requested",
   "factory.merge-landed",
   "factory.merge-verify.requested",
@@ -41,6 +42,7 @@ const MERGE_EVENT_TYPES = new Set([
   "factory.merge.requested",
   "factory.merge-review.requested",
   "factory.merge-fix.requested",
+  "factory.merge-plan.requested",
   "factory.merge-apply.requested",
   "factory.merge-landed",
   "factory.merge-verify.requested",
@@ -100,10 +102,15 @@ export function loadChainAutoApprovalPolicy({ root = reposRoot() } = {}) {
         autoMergeOwners: new Set(),
       };
     }
+    const mergeBatchSize =
+      Number.isInteger(merge?.batch_size) && merge.batch_size > 0
+        ? merge.batch_size
+        : 4;
     return {
       allowed: new Set(allowed),
       reason: null,
       maxFixRounds,
+      mergeBatchSize,
       autoMergeBase: new Set(autoMergeBase),
       autoMergeOwners: new Set(autoMergeOwners),
     };
@@ -696,6 +703,7 @@ function mergeEligibility(db, registry, candidate, envelope, policy, now) {
   if (
     envelope.type === "factory.merge.requested" ||
     envelope.type === "factory.merge-review.requested" ||
+    envelope.type === "factory.merge-plan.requested" ||
     envelope.type === "factory.merge-escalate.requested"
   ) {
     return null;
@@ -732,21 +740,23 @@ function mergeEligibility(db, registry, candidate, envelope, policy, now) {
 
   if (envelope.type === "factory.merge-apply.requested") {
     const plan = input.plan;
-    if (!Array.isArray(plan) || plan.length !== 1)
-      return "merge_plan_must_name_one_pr";
-    const item = plan[0];
-    if (
-      item?.action !== "merge_pr" ||
-      item.policySafe !== true ||
-      item.checksGreen !== true ||
-      item.mergeable !== true ||
-      item.ownedPathsValid !== true ||
-      item.handoffValid !== true ||
-      item.testsFalsifiable !== true ||
-      item.sensitive !== false ||
-      item.ambiguous !== false
-    )
-      return "merge_review_not_policy_safe";
+    const batchSize = policy.mergeBatchSize ?? 4;
+    if (!Array.isArray(plan) || plan.length < 1 || plan.length > batchSize)
+      return "merge_plan_must_name_one_to_batch_prs";
+    for (const item of plan) {
+      if (
+        item?.action !== "merge_pr" ||
+        item.policySafe !== true ||
+        item.checksGreen !== true ||
+        item.mergeable !== true ||
+        item.ownedPathsValid !== true ||
+        item.handoffValid !== true ||
+        item.testsFalsifiable !== true ||
+        item.sensitive !== false ||
+        item.ambiguous !== false
+      )
+        return "merge_review_not_policy_safe";
+    }
     return mergeBarrierReason(db, registry, candidate, now);
   }
 

@@ -1,5 +1,5 @@
 {
-  "title": "factory.merge-plan/v2 — cold per-PR verdicts pinned to both head and base",
+  "title": "factory.merge-plan/v2 — batched MERGE plan from the review ledger",
   "type": "object",
   "required": [
     "recommendation",
@@ -38,7 +38,7 @@
     },
     "plan": {
       "type": "array",
-      "maxItems": 1,
+      "maxItems": 16,
       "items": {
         "type": "object",
         "required": [
@@ -145,6 +145,8 @@
       }
     },
     "summary": { "type": "string", "minLength": 1 },
-    "noopReason": { "enum": ["no_open_prs", "all_prs_held"] }
+    "noopReason": {
+      "enum": ["no_open_prs", "all_prs_held", "no_merge_candidates"]
+    }
   }
 }

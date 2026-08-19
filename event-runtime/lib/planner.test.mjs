@@ -16,6 +16,7 @@ import {
   planAdmittedEvents,
   planEvent,
   policyMaxConcurrentMerges,
+  policyMergeBatchSize,
   worktreeDispatchAutoEligibility,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
@@ -120,6 +121,21 @@ describe("merge concurrency policy", () => {
         `concurrency:\n  max_concurrent_merges: ${invalid}\n`,
       );
       expect(policyMaxConcurrentMerges(root)).toBe(1);
+    }
+  });
+
+  test("reads a positive integer merge.batch_size and fails safe to 4 otherwise", () => {
+    const root = tmpDir("evrt-merge-batch-");
+    mkdirSync(path.join(root, "config"));
+    const policy = path.join(root, "config", "policy.yaml");
+
+    writeFileSync(policy, "merge:\n  batch_size: 6\n");
+    expect(policyMergeBatchSize(root)).toBe(6);
+    expect(policyMergeBatchSize(tmpDir("evrt-merge-batch-missing-"))).toBe(4);
+
+    for (const invalid of ["0", "1.5", "many"]) {
+      writeFileSync(policy, `merge:\n  batch_size: ${invalid}\n`);
+      expect(policyMergeBatchSize(root)).toBe(4);
     }
   });
 });

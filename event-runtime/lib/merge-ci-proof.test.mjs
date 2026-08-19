@@ -67,20 +67,14 @@ describe("required-context resolver", () => {
   });
 
   test("the resolver remains behaviorally aligned with merge-apply", () => {
-    const apply = JSON.parse(
-      readFileSync(
-        new URL("../agents/merge-apply.json", import.meta.url),
-        "utf8",
-      ),
-    ).actionRegistry.merge_pr.argv[2];
+    const apply = readFileSync(
+      new URL("./merge-apply.mjs", import.meta.url),
+      "utf8",
+    );
 
-    expect(apply).toContain(
-      'gh pr checks "$pr" --repo "$github" --required --json name,bucket,state',
-    );
-    expect(apply).toContain('[ "$required_status" -eq 1 ]');
-    expect(apply).toContain(
-      "no required checks reported on the '$expected_ref' branch",
-    );
+    expect(apply).toContain("--required");
+    expect(apply).toContain("name,bucket,state");
+    expect(apply).toContain("noRequiredChecksDiagnostic");
     expect(apply).not.toContain("/protection");
   });
 });

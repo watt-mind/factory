@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Merge plan",
+  "summary": "/summary",
+  "status": {
+    "path": "/recommendation",
+    "tone": {
+      "MERGE": "ok",
+      "NOOP": "neutral"
+    }
+  },
+  "sections": [
+    {
+      "path": "/plan",
+      "as": "table",
+      "label": "Batch",
+      "columns": ["pr", "ticket", "headRef", "reason"],
+      "formats": {
+        "pr": "pr",
+        "ticket": "issue",
+        "headSha": "sha",
+        "baseSha": "sha"
+      },
+      "expand": ["headSha", "baseSha"]
+    },
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Repo",
+      "keys": ["repo", "github", "base", "deployBranch", "noopReason"],
+      "formats": { "repo": "repo" }
+    }
+  ]
+}
