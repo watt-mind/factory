@@ -24,14 +24,25 @@
   "mutating": true,
   "memos": [
     {
-      "subject": { "type": "ticket", "id": "$.input.ticket" },
-      "kinds": ["postmortem"],
+      "subject": {
+        "type": "ticket",
+        "id": "$.input.ticket"
+      },
+      "kinds": ["postmortem", "decision"],
+      "max": 10
+    },
+    {
+      "subject": {
+        "type": "repo",
+        "id": "$.input.repo"
+      },
+      "kinds": ["decision"],
       "max": 10
     }
   ],
   "pins": {
-    "agents/dispatch.md": "sha256:aac2eb7d47a6d5e27a504c3d24f2a5c5bc07cc730d40780a9db78f970ef12ac3",
-    "schemas/dispatch.input.json": "sha256:2855ba815604953b9b1564cfa8fb6eec14906c46b3373945b28c16c31a093573",
+    "agents/dispatch.md": "sha256:03b4b5aba3d6ae725645a5b7d000938b7948fc608006b6b5fe2bf18212df3757",
+    "schemas/dispatch.input.json": "sha256:7949221631e30ad9c6f8fa8a92d071f6ee88ea03e7fbafcbf3af1dffa432cdee",
     "schemas/dispatch.output.json": "sha256:bc25aee1baa16aa21f50e9a3f8c320e57cec11cbdf31c822baee838d49ddb672"
   }
 }

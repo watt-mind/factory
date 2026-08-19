@@ -147,8 +147,9 @@ describe("registry", () => {
     // Regenerated (dispatch on cursor): dispatch@1 adapter pi→cursor; event-types.json is a registry input.
     // Regenerated (WM-811): dispatch declares ticket postmortem memos; run-postmortem
     // emits them; dispatch.input admits memoPin; both defs re-pinned.
+    // Regenerated (WM-812): dispatch/merge-scan declare decision memos and re-pin briefs.
     const expected =
-      "sha256:9f9a0f35d31e6284fcf611a16712643f5b1ee822e14c248e829ba05a6248c36f";
+      "sha256:e24e3f3be336136beb62a18ec3fe76d74bef14c2fdd289f6612cc327c32e8c6d";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -168,8 +169,9 @@ describe("registry", () => {
     // WM-718 and WM-391 changed dispatch@1's prompt and input schema, so its
     // pin — and therefore this defHash — legitimately moved, exactly as it did
     // for WM-610. Still not a provenance break: `pack` stays non-enumerable.
+    // WM-812 adds decision-memo declarations and re-pins the dispatch brief.
     expect(computeDefHash(def)).toBe(
-      "sha256:ee4c35754465539959b5dee9831c7c4d42e10ce9153fe79a5a379185335631fa",
+      "sha256:dc4dc32b31daba9bbb70cf570c78145f5125d0454a99ad62c8b28cf037079eb4",
     );
   });
 
@@ -495,13 +497,18 @@ describe("registry", () => {
     expect(() => loadRegistry({ root })).toThrow(/mutating/);
   });
 
-  test("dispatch declares ticket postmortem memos and run-postmortem emits them (WM-811)", () => {
+  test("dispatch declares ticket postmortem/decision and repo decision memos (WM-811, WM-812)", () => {
     const registry = loadRegistry();
     const dispatch = getAgent(registry, "dispatch@1");
     expect(dispatch.memos).toEqual([
       {
         subject: { type: "ticket", id: "$.input.ticket" },
-        kinds: ["postmortem"],
+        kinds: ["postmortem", "decision"],
+        max: 10,
+      },
+      {
+        subject: { type: "repo", id: "$.input.repo" },
+        kinds: ["decision"],
         max: 10,
       },
     ]);
@@ -514,6 +521,14 @@ describe("registry", () => {
     expect(
       postmortem.outputSchema.properties.memos.items.properties.kind,
     ).toEqual({ const: "postmortem" });
+    const mergeScan = getAgent(registry, "merge-scan@2");
+    expect(mergeScan.memos).toEqual([
+      {
+        subject: { type: "repo", id: "$.input.repo" },
+        kinds: ["decision"],
+        max: 10,
+      },
+    ]);
   });
 
   test("dispatch input exposes the closed per-ticket modelTier vocabulary (WM-694)", () => {

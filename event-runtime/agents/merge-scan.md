@@ -87,6 +87,14 @@ ambiguity in the diff itself, `main`/`master`, the configured deploy branch,
 and a fix whose next round would exceed `merge.max_fix_rounds`. Existing
 draft/escalated holds stay held and are summarized.
 
+If `memos.json` holds a `decision` memo on this repo (or a related ticket/PR
+subject), the operator has ruled on a related question before. **Cite it** —
+item id, decided-at, option — in the `reason` / `context` of any new
+decision request or escalate item, so the operator sees the precedent and
+can answer faster. A decision memo never lets you MERGE or otherwise
+proceed: only an explicit human authorisation does that, and a memo is
+precedent, not permission.
+
 Operational conditions are FIX, never ESCALATE (WM-679). They are mechanical
 and merge-fix already performs them:
 

@@ -1748,6 +1748,76 @@ export function Overview({
               )}
             </div>
 
+            {s.hooks &&
+              (() => {
+                const entries = Object.entries(s.hooks.decisions24h);
+                const allowTotal = entries.reduce(
+                  (sum, [, counts]) => sum + counts.allow,
+                  0,
+                );
+                const denyTotal = entries.reduce(
+                  (sum, [, counts]) => sum + counts.deny,
+                  0,
+                );
+                return (
+                  <div className="mt-3.5 border-t border-(--border) pt-2.5">
+                    <div className="mb-1.5 flex items-baseline justify-between text-[11px]">
+                      <span className="font-semibold text-(--text)">
+                        Hook decisions · 24h
+                      </span>
+                      <span className="mono text-(--text-dim)">
+                        {entries.length === 0
+                          ? "no hook decisions in 24h"
+                          : `${allowTotal} allow · ${denyTotal} deny`}
+                      </span>
+                    </div>
+                    {entries.length === 0 ? (
+                      <div className="text-[12px] text-(--text-faint)">
+                        no hook decisions in 24h
+                      </div>
+                    ) : (
+                      <ul
+                        className="flex flex-col gap-1"
+                        aria-label="Hook decisions · 24h"
+                      >
+                        {entries.map(([hookId, counts]) => (
+                          <li
+                            key={hookId}
+                            className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[12px] text-(--text-dim)"
+                            title={`${counts.source} · ${counts.point}`}
+                          >
+                            <span className="mono truncate text-(--text)">
+                              {hookId}
+                            </span>
+                            <span className="tabular-nums">
+                              <span
+                                style={
+                                  counts.allow > 0
+                                    ? { color: "var(--hue-ok)" }
+                                    : undefined
+                                }
+                              >
+                                {counts.allow} allow
+                              </span>
+                              {" · "}
+                              <span
+                                style={
+                                  counts.deny > 0
+                                    ? { color: "var(--hue-err)" }
+                                    : undefined
+                                }
+                              >
+                                {counts.deny} deny
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })()}
+
             {/* Sub-row 3: Waiting on you (inbox ledger, WM-286). Absent on a
                 pre-inbox control API — the row simply does not render. */}
             {s.inbox && (

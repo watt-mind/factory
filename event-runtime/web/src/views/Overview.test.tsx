@@ -1819,3 +1819,59 @@ describe("Overview declarative panels (WM-840)", () => {
     );
   });
 });
+
+describe("Overview hook metrics (WM-864)", () => {
+  test("renders /status.hooks.decisions24h allow/deny counts per hook", async () => {
+    await withApi(
+      {
+        status: async () => ({
+          ...baseStatus(),
+          hooks: {
+            decisions24h: {
+              "factory:escalation-labels": {
+                source: "builtin",
+                point: "approve.before",
+                allow: 3,
+                deny: 1,
+              },
+              "acme/x:gate": {
+                source: "extension:acme/x",
+                point: "approve.before",
+                allow: 0,
+                deny: 2,
+              },
+            },
+          },
+        }),
+      },
+      async () => {
+        const r = renderOverview();
+        const list = await waitFor(() =>
+          r.getByLabelText("Hook decisions · 24h"),
+        );
+        expect(
+          within(list).getByText("factory:escalation-labels"),
+        ).toBeTruthy();
+        expect(within(list).getByText("acme/x:gate")).toBeTruthy();
+        expect(within(list).getByText("3 allow")).toBeTruthy();
+        expect(within(list).getByText("1 deny")).toBeTruthy();
+        expect(within(list).getByText("0 allow")).toBeTruthy();
+        expect(within(list).getByText("2 deny")).toBeTruthy();
+        expect(r.getByText("Hook decisions · 24h")).toBeTruthy();
+      },
+    );
+  });
+
+  test("does not render hook metrics against a pre-hooks control API", async () => {
+    await withApi(
+      {
+        status: async () => baseStatus(),
+      },
+      async () => {
+        const r = renderOverview();
+        await waitFor(() => r.getByText("Approval Gate"));
+        expect(r.queryByText(/Hook decisions/i)).toBeNull();
+      },
+    );
+  });
+});

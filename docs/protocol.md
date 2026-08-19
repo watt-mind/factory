@@ -1,18 +1,37 @@
 # Control plane protocol
 
-Tracker-neutral contract for the factory's ticket adapter (`lib/control-plane/`, WM-797). Implementations exist for Linear (v1) and an in-memory fake (tests / offline demo). GitHub Issues is the next implementation (WM-798).
+Tracker-neutral contract for the factory's ticket adapter (`lib/control-plane/`, WM-797). Implementations exist for Linear (v1), an in-memory fake (tests / offline demo), and GitHub Issues (`lib/control-plane/github.mjs`, WM-798).
 
 This file is the **adapter contract**, not the full agent operating protocol. Dispatchable predicates, Owned Paths, heartbeats, and harness packaging still live in the operator's `linear.md` until WM-795 copies them here. What this document freezes is the vocabulary everything outside `lib/control-plane/` is allowed to speak.
 
-Call `loadControlPlane({ root })`. Selection is `config/policy.yaml`:
+Call `loadControlPlane({ root })` for Linear/memory. The GitHub Issues adapter is `githubControlPlane()` in `lib/control-plane/github.mjs` (wiring `kind: github` into `loadControlPlane()` is a follow-up so this ticket stays inside Owned Paths). Selection is `config/policy.yaml`:
 
 ```yaml
 controlPlane:
   kind: linear # default when the stanza is absent
   # kind: memory   # in-process fake; no network
+  # kind: github   # Issues + Projects; zero Linear account
+  # github:
+  #   repo: owner/name
+  #   teams: { DEMO: owner/name }   # team key → repository
+  #   project: Factory              # Projects v2 title
+  #   statusField: Status
 ```
 
-An unknown kind is a configuration error. A tracker the factory cannot reach must never be silently read as "no tickets".
+`factory init --control-plane github` writes those GitHub defaults (see `config/policy.example.yaml`). An unknown kind is a configuration error. A tracker the factory cannot reach must never be silently read as "no tickets".
+
+## GitHub Issues binding
+
+| Protocol     | GitHub                                                                                        |
+| :----------- | :-------------------------------------------------------------------------------------------- |
+| `identifier` | `owner/repo#42`                                                                               |
+| `team`       | Repository, via `controlPlane.github.teams` (or a key that already looks like `owner/name`)   |
+| `labels`     | Issue labels of the **same spelling**. Writes send the complete resulting set, never a delta. |
+| `assignee`   | Issue assignee. `claim` assigns the `gh` viewer, then **reads the assignee back**.            |
+| `state`      | Projects v2 single-select (`project` / `statusField`). Options must match the names below.    |
+| `raw`        | GraphQL via `gh api graphql`, or a REST path when the query string starts with `/`.           |
+
+Production talks to GitHub through `gh api` — the same CLI the forge already requires. No Octokit, no Linear token. `gh auth login` is the quickstart credential.
 
 ## Ticket shape
 
@@ -69,7 +88,7 @@ These names are part of the protocol, not Linear branding. A GitHub Issues adapt
 | `setLabels(id, { add, remove })`                   | Compute the **complete** resulting label set and write that. Passing only the labels you want added is how every other label on the ticket disappears.                                                                                                                                                                                             |
 | `file({ team, title, body?, labels?, state? })`    | Create a ticket. Default state `Triage`.                                                                                                                                                                                                                                                                                                           |
 | `appendDetail(id, markdown)`                       | Idempotent description append. `{ appended: false }` if the text is already present.                                                                                                                                                                                                                                                               |
-| `raw(query, variables?)`                           | Escape hatch. Linear GraphQL today; GitHub REST later. Grows only when a call site cannot be expressed with the verbs above.                                                                                                                                                                                                                       |
+| `raw(query, variables?)`                           | Escape hatch. Linear GraphQL; GitHub GraphQL via `gh api graphql` (REST when `query` starts with `/`). Grows only when a call site cannot be expressed with the verbs above.                                                                                                                                                                       |
 
 Every method returns the parsed answer or throws `ControlPlaneError`. `claim` returning `{ ok: false }` is the one protocol outcome that is not an error.
 

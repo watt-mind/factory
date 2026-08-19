@@ -20,6 +20,7 @@ import {
   templateFor,
 } from "./decision-templates.mjs";
 import { txImmediate } from "./db.mjs";
+import { registerInboxDecisionMemos } from "./memos.mjs";
 
 export const INBOX_KINDS = Object.freeze([
   "BLOCKED",
@@ -377,7 +378,7 @@ function settleInboxDecision(
   id,
   response,
   effect,
-  { now, recordedEffect = effect },
+  { now, recordedEffect = effect, artifactStore },
 ) {
   const answer = { ...response, effect: recordedEffect };
   const replanned =
@@ -409,7 +410,16 @@ function settleInboxDecision(
        WHERE id = ?`,
     ).run(new Date(now).toISOString(), `operator:${effect.kind}`, id);
   }
-  return { item: getInboxItem(db, id), effect };
+  const item = getInboxItem(db, id);
+  let memos = [];
+  if (effect.outcome === "applied" && !replanned) {
+    memos = registerInboxDecisionMemos(db, item, response, {
+      now,
+      artifactStore,
+      descriptionHash: effect.descriptionHash,
+    });
+  }
+  return { item, effect, memos };
 }
 
 function normalizeEffect(effect, item, response) {
@@ -435,6 +445,7 @@ function decideInboxItemInTransaction(
     now = Date.now(),
     decidedBy = "operator",
     applyEffect = applyDecisionEffect,
+    artifactStore,
   } = {},
 ) {
   const row = decisionRow(db, id);
@@ -521,7 +532,10 @@ function decideInboxItemInTransaction(
       storedResponse,
     );
   }
-  return settleInboxDecision(db, id, storedResponse, effect, { now });
+  return settleInboxDecision(db, id, storedResponse, effect, {
+    now,
+    artifactStore,
+  });
 }
 
 export function decideInboxItem(db, id, response, options = {}) {
@@ -540,6 +554,7 @@ function retryInboxDecisionInTransaction(
     now = Date.now(),
     applyEffect = applyDecisionEffect,
     expectedResponseJson,
+    artifactStore,
   } = {},
 ) {
   const row = decisionRow(db, id);
@@ -582,6 +597,7 @@ function retryInboxDecisionInTransaction(
   return settleInboxDecision(db, id, response, effect, {
     now,
     recordedEffect: { ...effect, retryAttempt },
+    artifactStore,
   });
 }
 

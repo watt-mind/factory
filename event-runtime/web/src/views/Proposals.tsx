@@ -26,7 +26,7 @@ import {
 import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
-import type { Proposal } from "../types";
+import type { HookDecision, Proposal, ProposalDetail } from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
 import {
@@ -79,6 +79,22 @@ import { Button as PrimitiveButton } from "../components/ui";
 
 const PROPOSAL_TABS = ["open", "history"] as const;
 type ProposalTab = (typeof PROPOSAL_TABS)[number];
+
+const HOOK_DECISION_HUES: Record<string, string> = {
+  allow: "var(--hue-ok)",
+  deny: "var(--hue-err)",
+};
+
+/**
+ * `GET /proposals/:id` — raw fetch because `api.ts` has no proposal-detail
+ * method yet (WM-926). Same pattern as Graph.tsx `/metrics/breakdown`.
+ */
+export async function fetchProposalDetail(id: string): Promise<ProposalDetail> {
+  const response = await fetch(`/api/proposals/${encodeURIComponent(id)}`);
+  if (!response.ok)
+    throw new Error(`/proposals/${id} returned HTTP ${response.status}`);
+  return response.json() as Promise<ProposalDetail>;
+}
 
 export function proposalDrilldownFilters(
   hash: string,
@@ -365,6 +381,14 @@ export function Proposals({
     queryFn: () => api.agents(),
     ...refetchIntervals.secondary,
   });
+  const hookDecisionsQuery = useQuery({
+    queryKey: ["proposals", focusProposalId, "hooks"],
+    queryFn: () => fetchProposalDetail(focusProposalId!),
+    enabled: Boolean(focusProposalId),
+    ...refetchIntervals.secondary,
+  });
+  const hookDecisions: HookDecision[] =
+    hookDecisionsQuery.data?.hookDecisions ?? [];
 
   const [filter, setFilter] = useState("");
   const [rejecting, setRejecting] = useState(false);
@@ -1630,6 +1654,54 @@ export function Proposals({
                   </span>
                 }
               />
+            )}
+          </Section>
+
+          <Section title="Hook decisions" icons>
+            {hookDecisionsQuery.isPending ? (
+              <div className="text-[12px] text-(--text-faint)">
+                Loading hook decisions…
+              </div>
+            ) : hookDecisionsQuery.isError ? (
+              <div className="text-[12px] text-(--hue-err)">
+                Could not load hook decisions.
+              </div>
+            ) : hookDecisions.length === 0 ? (
+              <div className="text-[12px] text-(--text-faint)">
+                No hook ran for this proposal.
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-1.5" aria-label="Hook decisions">
+                {hookDecisions.map((decision) => (
+                  <li
+                    key={decision.id}
+                    className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[12px]"
+                  >
+                    <span
+                      className="mono truncate text-(--text)"
+                      title={`${decision.source} · ${decision.point}`}
+                    >
+                      {decision.hookId}
+                    </span>
+                    <StateBadge
+                      state={decision.decision}
+                      hues={HOOK_DECISION_HUES}
+                    />
+                    {decision.reason ? (
+                      <span
+                        className="min-w-0 break-words text-(--text-dim)"
+                        title={decision.error ?? undefined}
+                      >
+                        {decision.reason}
+                      </span>
+                    ) : decision.error ? (
+                      <span className="min-w-0 break-words text-(--hue-err)">
+                        {decision.error}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
             )}
           </Section>
 

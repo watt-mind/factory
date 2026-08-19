@@ -20,9 +20,19 @@
     "attempts": 1
   },
   "mutating": false,
+  "memos": [
+    {
+      "subject": {
+        "type": "repo",
+        "id": "$.input.repo"
+      },
+      "kinds": ["decision"],
+      "max": 10
+    }
+  ],
   "pins": {
-    "agents/merge-scan.md": "sha256:78436422e010c525b185b809e1ae7eb69587c7d7df4f7ca60860653b33655054",
-    "schemas/merge-scan.input.json": "sha256:a1d63f0f667856195ca0cba6a7030b4f4ad0a3cb6a97284d48212934f3dff0f0",
+    "agents/merge-scan.md": "sha256:3b2d898c29bd0d95eda7b3c942c66cf1226020933dd9d937fd0e7c07d77d98b4",
+    "schemas/merge-scan.input.json": "sha256:dcd0cf7d2c17ae1142edc93d2e48016c23f824e2447edc4bc929daf89ec9d80b",
     "schemas/merge-scan.output.json": "sha256:84791d0fcfe80716ffda27b1432cb8be7a003d1c7c967d4dc9445ae182b236a2"
   }
 }

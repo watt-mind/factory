@@ -133,7 +133,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["sha256", "subject", "kind"],
+            "required": ["sha256", "subject", "kind", "createdAt"],
             "additionalProperties": false,
             "properties": {
               "sha256": {
@@ -161,7 +161,7 @@
                   "handoff"
                 ]
               },
-              "runId": { "type": "string", "minLength": 1 },
+              "runId": { "type": ["string", "null"] },
               "createdAt": { "type": "string", "minLength": 1 }
             }
           }

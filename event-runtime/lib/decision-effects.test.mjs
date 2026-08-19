@@ -197,6 +197,7 @@ describe("runtime decision effects", () => {
       kind: "authorise",
       outcome: "applied",
       detail: "dispatched",
+      descriptionHash: hashBytes("Current Linear body"),
     });
     expect(envelope).toMatchObject({
       schemaVersion: "factory.event/v1",
@@ -310,6 +311,7 @@ describe("runtime decision effects", () => {
     const retried = retryInboxDecision(db, "retry_effect", {
       now: NOW + 1,
       applyEffect,
+      artifactStore: null,
     });
     expect(retried.effect.outcome).toBe("applied");
     expect(retried.item.resolvedBy).toBe("operator:send_to_triage");

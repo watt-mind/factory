@@ -5,10 +5,18 @@
  * decisions) may register one. Reads are by exact subject; liveness is a fold
  * over the ledger, never a directory listing. There is no write API.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { storeCollected } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
-import { RUNTIME_ROOT } from "./config.mjs";
+import { artifactsRoot, RUNTIME_ROOT } from "./config.mjs";
 import { loadRepos } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 
@@ -236,6 +244,143 @@ export function registerMemos(
     registered.push(insertMemoRow(db, entry, { now }));
   }
   recordMemoUses(db, runId, result, { now, runState });
+  return registered;
+}
+
+const DECISION_PRODUCER = "runtime:inbox";
+
+function persistMemoDocument(storeRoot, document) {
+  const bytes = canonicalJson(document);
+  const sha256 = memoDigest(document);
+  const dir = mkdtempSync(path.join(tmpdir(), "factory-memo-"));
+  try {
+    const file = path.join(dir, sha256);
+    writeFileSync(file, bytes);
+    storeCollected({
+      entries: [{ kind: "memo", sha256, uri: `file://${file}` }],
+      storeRoot,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return sha256;
+}
+
+function insightText(item, response) {
+  const fields = item?.decision?.fields ?? [];
+  return fields
+    .filter((field) => field.kind === "text")
+    .map((field) => response?.fields?.[field.id])
+    .filter((value) => typeof value === "string" && value.trim() !== "")
+    .join("\n\n");
+}
+
+function selectedPaths(item, response) {
+  const option = item?.decision?.options?.find(
+    (candidate) => candidate.id === response?.optionId,
+  );
+  const scoped = option?.scope?.paths;
+  if (!Array.isArray(scoped) || scoped.length === 0) return [];
+  const gated = (item.decision.fields ?? []).filter(
+    (field) =>
+      field.kind === "multi-choice" &&
+      Array.isArray(field.whenOption) &&
+      field.whenOption.includes(option.id),
+  );
+  if (gated.length === 0) return [...scoped];
+  const selected = new Set();
+  for (const field of gated) {
+    const ids = new Set(response.fields?.[field.id] ?? []);
+    for (const choice of field.choices ?? []) {
+      if (ids.has(choice.id)) selected.add(choice.label);
+    }
+  }
+  return scoped.filter((scopedPath) => selected.has(scopedPath));
+}
+
+/** Subjects an inbox item names for a decision memo (docs/event-runtime-memos.md §5.3). */
+export function inboxDecisionSubjects(refs, options) {
+  const subjects = [];
+  const add = (type, id) => {
+    try {
+      subjects.push(normalizeSubject({ type, id }, options));
+    } catch {
+      // A malformed optional ref is not a subject.
+    }
+  };
+  if (typeof refs?.issue === "string" && refs.issue.trim()) {
+    add("ticket", refs.issue);
+  }
+  if (typeof refs?.repo === "string" && refs.repo.trim()) {
+    add("repo", refs.repo);
+  }
+  if (typeof refs?.pr === "string" && refs.pr.trim()) {
+    const raw = refs.pr.trim();
+    if (raw.includes("#")) add("pr", raw);
+    else if (typeof refs?.repo === "string" && refs.repo.trim()) {
+      add("pr", `${refs.repo.trim()}#${raw.replace(/^#/, "")}`);
+    } else add("pr", raw);
+  }
+  return subjects;
+}
+
+/** Operator-facing distillation stored as the decision memo body. */
+export function inboxDecisionMemoBody(
+  item,
+  response,
+  { now = Date.now() } = {},
+) {
+  const optionId =
+    typeof response?.optionId === "string" && response.optionId.trim()
+      ? response.optionId.trim()
+      : "unknown";
+  const decidedAt = response?.decidedAt ?? new Date(now).toISOString();
+  const day = String(decidedAt).slice(0, 10);
+  const insight = insightText(item, response);
+  const paths = selectedPaths(item, response);
+  let body = `Operator chose \`${optionId}\` on ${day}`;
+  if (insight) body += `: "${insight}"`;
+  if (paths.length > 0) body += ` (paths: ${paths.join(", ")})`;
+  return `${body}.`;
+}
+
+/**
+ * Runtime producer for inbox decisions (docs/event-runtime-memos.md §5.3).
+ * Persist bytes before the ledger row so a memo never names a missing object.
+ * `artifactStore: null` skips the store (ledger only); omit to use the runtime home.
+ */
+export function registerInboxDecisionMemos(
+  db,
+  item,
+  response,
+  { now = Date.now(), artifactStore, descriptionHash } = {},
+) {
+  const store = artifactStore === undefined ? artifactsRoot() : artifactStore;
+  const createdAt = new Date(now).toISOString();
+  const body = inboxDecisionMemoBody(item, response, { now });
+  const binding =
+    typeof descriptionHash === "string" && descriptionHash.trim()
+      ? descriptionHash.trim()
+      : null;
+  const registered = [];
+  for (const subject of inboxDecisionSubjects(item?.refs)) {
+    const document = withProvenance(
+      {
+        schemaVersion: MEMO_SCHEMA_VERSION,
+        subject,
+        kind: "decision",
+        precedentOnly: true,
+        body,
+        refs: { inboxItemId: item.id },
+        ...(binding && subject.type === "ticket"
+          ? { bindings: { descriptionHash: binding } }
+          : {}),
+      },
+      { runId: null, agent: DECISION_PRODUCER, createdAt },
+    );
+    if (store) persistMemoDocument(store, document);
+    registered.push(...registerMemos(db, null, document, { now }));
+  }
   return registered;
 }
 
