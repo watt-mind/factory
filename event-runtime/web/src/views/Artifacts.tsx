@@ -1035,7 +1035,7 @@ export function Artifacts({
                     : binary
                       ? "not text"
                       : matchCount === null
-                        ? `${previewLines.length.toLocaleString()} lines`
+                        ? `${previewLines.length.toLocaleString()} ${previewLines.length === 1 ? "line" : "lines"}`
                         : `${matchCount.toLocaleString()} matching lines`}
                 </p>
               </div>

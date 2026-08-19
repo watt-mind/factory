@@ -349,6 +349,28 @@ describe("Artifacts inventory (WM-207)", () => {
 describe("Artifact rows inspect on click, download on demand (WM-699)", () => {
   const SHA_A = "a".repeat(64);
 
+  test.each([
+    ["single-line", "line one", "1 line"],
+    ["multi-line", "line one\nline two", "2 lines"],
+  ])(
+    "labels a %s preview with the correct line-count grammar",
+    async (_, raw, label) => {
+      globalThis.fetch = mock(
+        async () => new Response(raw, { status: 200 }),
+      ) as unknown as typeof fetch;
+      window.location.hash = `#/artifacts/${SHA_A}`;
+
+      const view = renderArtifacts();
+      await view.findByRole("region", { name: "Artifact content" });
+
+      expect(
+        within(
+          view.getByRole("region", { name: "Artifact preview" }),
+        ).getByText(label),
+      ).toBeTruthy();
+    },
+  );
+
   test("opening and closing the inspector preserves project context (WM-748)", async () => {
     globalThis.fetch = mock(
       async () => new Response("line one", { status: 200 }),
