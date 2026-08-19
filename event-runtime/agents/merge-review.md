@@ -206,6 +206,18 @@ item (merge the findings into one `finding` string, keep the most severe
 first); several fix items for the same PR only race each other
 (`merge_fix_run_active`).
 
+`fix.withinOwnedPaths` means: merge-fix can perform this fix without editing
+any file outside the ticket's Owned Paths. Operational findings —
+`rebase_onto_base`, `rerun_ci_at_head`, `format_and_lint` — are **always
+`true`**: a rebase or a formatter pass changes no file the PR did not already
+own, and those conditions exist precisely so merge-fix can clear them. The
+merge-fix input schema only admits `withinOwnedPaths: true`; a `false` item
+never reaches merge-fix — it parks as `invalid_input` and the PR sits behind
+base forever (the lane went idle on seven such items on 2026-08-19). So when
+the only viable fix would touch files outside the ticket's Owned Paths, do not
+emit a `fix` item with `false`; emit an `escalate` item naming the files
+instead, and keep any operational fix for the same PR as its own `true` item.
+
 `escalate` item — exactly `pr`, `headSha`, `ticket`, `reason` (no `title`/`headRefName`/`headRef`):
 <!-- prettier-ignore -->
 ```json
