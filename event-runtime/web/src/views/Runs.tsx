@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -34,11 +36,9 @@ import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { setContextActions } from "../palette";
 import { RunTrace } from "../components/RunTrace";
-import {
-  NotesPanel,
-  memoPinShas,
-  subjectsFromRunInput,
-} from "../components/NotesPanel";
+const NotesPanelLazy = lazy(() =>
+  import("../components/NotesPanel").then((m) => ({ default: m.NotesPanel })),
+);
 import { AgentHoverCard } from "../components/AgentHoverCard";
 import { CausationGlyphs, chainHref } from "../components/EventHoverCard";
 import { RunHoverCard, runDurationSeconds } from "../components/RunHoverCard";
@@ -1698,11 +1698,13 @@ export function Runs({
                     />
                   }
                 />
-                <NotesPanel
-                  subjects={subjectsFromRunInput(d.run.spec.input, d.run.runId)}
-                  readShas={memoPinShas(d.run.spec.input)}
-                  wroteRunId={d.run.runId}
-                />
+                <Suspense fallback={null}>
+                  <NotesPanelLazy
+                    runInput={d.run.spec.input}
+                    runId={d.run.runId}
+                    wroteRunId={d.run.runId}
+                  />
+                </Suspense>
               </div>
             </>
           )}

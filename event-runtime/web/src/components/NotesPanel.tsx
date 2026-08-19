@@ -220,18 +220,40 @@ function MemoCard({
 }
 
 export function NotesPanel({
-  subjects,
-  readShas = [],
+  subjects: explicitSubjects,
+  readShas: explicitReadShas,
   wroteRunId,
+  runInput,
+  runId,
 }: {
-  subjects: readonly MemoSubject[];
+  subjects?: readonly MemoSubject[];
   /** Memo hashes this run read (`memoPin`); tagged "read" when present. */
   readShas?: readonly string[];
   /** Producer run id; matching memos are tagged "wrote". */
   wroteRunId?: string | null;
+  /** Run spec input — used to derive subjects and readShas when subjects are not passed. */
+  runInput?: unknown;
+  /** Run id — used to derive subjects when runInput is passed. */
+  runId?: string;
 }) {
   const now = useNow();
   const [showExpired, setShowExpired] = useState(false);
+  const subjects = useMemo(() => {
+    if (explicitSubjects) return explicitSubjects;
+    if (runInput !== undefined && runId !== undefined) {
+      return subjectsFromRunInput(runInput, runId);
+    }
+    return [];
+  }, [explicitSubjects, runInput, runId]);
+
+  const readShas = useMemo(() => {
+    if (explicitReadShas) return explicitReadShas;
+    if (runInput !== undefined) {
+      return memoPinShas(runInput);
+    }
+    return [];
+  }, [explicitReadShas, runInput]);
+
   const key = subjects.map((s) => `${s.type}:${s.id}`).join("|");
   const query = useQuery({
     queryKey: ["memos", key, showExpired],
