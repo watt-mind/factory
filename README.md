@@ -456,3 +456,7 @@ The event runtime under `event-runtime/` is a second, deliberately isolated trac
 - `~/Develop/hdkiller/docs/orgs/linear.md` — the execution protocol (SoT)
 - `~/Develop/hdkiller/docs/guides/project-conventions.md` — the quality baseline and `PC-*` audit
 - `~/Develop/hdkiller/docs/servers/workstations/hdkiller-macbook-pro.md` — the host these jobs run on
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution information.
