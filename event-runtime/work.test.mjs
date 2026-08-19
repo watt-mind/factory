@@ -365,7 +365,10 @@ function harness() {
   const dir = tmpDir("evrt-work-");
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = tmpDir("evrt-work-ws-");
-  const adapters = { pi: workFake };
+  // work-scan@1 rides pi; dispatch@1 rides cursor (WM-215/WM-694) — the fake
+  // dispatches on spec.outputContract, not the adapter key, so both routes
+  // share it.
+  const adapters = { pi: workFake, cursor: workFake };
   const workerOpts = {
     workspacesRoot: workspaces,
     owner: "w-test",
@@ -430,16 +433,16 @@ describe("work-scan registration (WM-110)", () => {
     });
   });
 
-  // WM-215: pi is the default harness, so the one mutating LLM agent in the
-  // registry now rides it. The §14 admission rule that lets a mutating LLM
-  // agent exist at all is the tier-2 worktree carve-out (WM-108, generalized
-  // to any adapter by OPS-296) — assert it holds for dispatch@1 on pi, since
-  // a regression here would refuse the whole registry at load, not just this
-  // route.
-  test("dispatch@1 is admissible as a mutating pi agent over a tier-2 worktree (WM-215)", () => {
+  // WM-215/WM-694: dispatch@1 rides cursor (Grok 4.6) since 2026-08-19
+  // (operator decision to spare codex quota — see WM-215 test above). The
+  // §14 admission rule that lets a mutating LLM agent exist at all is the
+  // tier-2 worktree carve-out (WM-108, generalized to any adapter by
+  // OPS-296) — assert it holds for dispatch@1 on cursor, since a regression
+  // here would refuse the whole registry at load, not just this route.
+  test("dispatch@1 is admissible as a mutating cursor agent over a tier-2 worktree (WM-215)", () => {
     expect(registry.eventTypes["factory.dispatch.requested"]).toEqual({
       agent: "dispatch@1",
-      adapter: "pi",
+      adapter: "cursor",
       idempotencyScope: ["inputHash"],
       proposalTtlSeconds: 1800,
     });
@@ -448,11 +451,11 @@ describe("work-scan registration (WM-110)", () => {
     expect(def.workspace.type).toBe("worktree");
     // The registry loaded at module scope: loadRegistry() already ran the §14
     // admission check and the WM-135 fail-closed model resolution over this
-    // route, so a pi+worktree+mutating definition is admitted and its strong
-    // tier resolves against models.pi.
+    // route, so a cursor+worktree+mutating definition is admitted and its
+    // strong tier resolves against models.cursor.
     expect(def.model_tier).toBe("strong");
-    expect(resolveModel(def, "pi", registry.modelTiers)).toBe(
-      registry.modelTiers.pi.strong,
+    expect(resolveModel(def, "cursor", registry.modelTiers)).toBe(
+      registry.modelTiers.cursor.strong,
     );
   });
 

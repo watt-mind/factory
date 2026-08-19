@@ -496,7 +496,8 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     const summary = await runOnce(
       db,
       registry,
-      { pi: dispatchFake },
+      // dispatch@1 rides cursor (WM-215/WM-694).
+      { cursor: dispatchFake },
       {
         workspacesRoot: workspaces,
         owner: "w-test",
@@ -617,7 +618,8 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     const summary = await runOnce(
       db,
       registry,
-      { pi: crashing },
+      // dispatch@1 rides cursor (WM-215/WM-694).
+      { cursor: crashing },
       {
         workspacesRoot: workspaces,
         owner: "w-test",

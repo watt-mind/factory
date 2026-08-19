@@ -798,7 +798,7 @@ describe("planEvent worktree gate (WM-108)", () => {
           labels: [],
           source: "definition",
           tier: "strong",
-          model: "openai-codex/gpt-5.6-sol",
+          model: "cursor-grok-4.6-high",
         },
         {
           eventId: "tier-label",
@@ -806,7 +806,7 @@ describe("planEvent worktree gate (WM-108)", () => {
           labels: ["tier:light"],
           source: "label",
           tier: "light",
-          model: "openai-codex/gpt-5.6-luna",
+          model: "cursor-grok-4.6-low-fast",
         },
         {
           eventId: "tier-payload",
@@ -818,7 +818,7 @@ describe("planEvent worktree gate (WM-108)", () => {
           labels: ["tier:light"],
           source: "payload",
           tier: "standard",
-          model: "openai-codex/gpt-5.6-terra",
+          model: "cursor-grok-4.6-high",
         },
       ];
 
@@ -872,9 +872,9 @@ describe("planEvent worktree gate (WM-108)", () => {
         ...registry,
         modelTiers: {
           ...registry.modelTiers,
-          pi: {
-            strong: registry.modelTiers.pi.strong,
-            standard: registry.modelTiers.pi.standard,
+          cursor: {
+            strong: registry.modelTiers.cursor.strong,
+            standard: registry.modelTiers.cursor.standard,
           },
         },
       };
@@ -890,7 +890,7 @@ describe("planEvent worktree gate (WM-108)", () => {
           now: NOW,
           dispatch: tierDispatch(["tier:light"]),
         }),
-      ).toThrow(/model_tier "light" has no mapping for adapter "pi"/);
+      ).toThrow(/model_tier "light" has no mapping for adapter "cursor"/);
       expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
     });
   });
@@ -1591,7 +1591,7 @@ describe("buildRunSpec", () => {
       now: 0,
     });
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"pi","agent":"dispatch@1","capabilities":["linear:write","repo:write","github:write"],"idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"openai-codex/gpt-5.6-sol","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["linear:write","repo:write","github:write"],"idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
   });
 
