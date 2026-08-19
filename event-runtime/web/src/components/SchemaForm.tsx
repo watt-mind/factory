@@ -311,7 +311,7 @@ function SchemaFields({
                 {prop.title ?? key}
               </div>
               {usingDefault && value !== undefined && (
-                <span className="mt-0.5 inline-block text-[10px] tracking-wide text-(--text-faint) uppercase">
+                <span className="mt-0.5 inline-block text-xs tracking-wide text-(--text-faint) uppercase">
                   default
                 </span>
               )}
