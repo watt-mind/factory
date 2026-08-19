@@ -1,15 +1,19 @@
 /**
  * Artifact views — `factory.artifact-view/v1` (docs/event-runtime-artifact-views.md §2).
  *
- * A sidecar `agents/<name>.view.json` annotates JSON pointers into an agent's
- * output schema with a closed hint vocabulary so a generic renderer can draw
- * the artifact. Two checks, both fail closed and both here rather than in the
- * renderer: the document must match the v1 schema (lib/schema.mjs, the same
- * validator every contract goes through), and every pointer it names must
- * resolve to a property of the agent's output schema — a view cannot drift
- * from the contract it describes (§2.3). Pointer resolution against a
- * concrete document (`resolvePointer`) is shared with the presentation layer
- * (WM-456).
+ * A sidecar `agents/<name>.view.json` (or a contract-keyed fallback under
+ * `agents/views/`) annotates JSON pointers into an agent's output — and
+ * optionally input — schema with a closed hint vocabulary so a generic
+ * renderer can draw the document. Two checks, both fail closed and both here
+ * rather than in the renderer: the document must match the v1 schema
+ * (lib/schema.mjs, the same validator every contract goes through), and every
+ * pointer it names must resolve to a property of the matching schema — a view
+ * cannot drift from the contract it describes (§2.3). Pointer resolution
+ * against a concrete document (`resolvePointer`) is shared with the
+ * presentation layer (WM-456).
+ *
+ * `subject` is a one-line template over input-schema pointers (`{/ticket}`)
+ * plus the fixed RunSpec fields `agent`, `model`, `adapter`, `repo`.
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -46,6 +50,28 @@ export const FORMATS = [
   "count",
 ];
 export const TONES = ["ok", "warn", "error", "muted", "neutral"];
+
+/** Fixed RunSpec fields a `subject` template may name without a leading `/`. */
+export const SUBJECT_FIELDS = ["agent", "model", "adapter", "repo"];
+
+/**
+ * `factory.command-result/v1` → `agents/views/factory.command-result.v1.view.json`.
+ * Slashes become dots so the contract id is a single path segment.
+ */
+export function contractViewRel(outputContract) {
+  if (typeof outputContract !== "string" || !outputContract) return null;
+  return `agents/views/${outputContract.replaceAll("/", ".")}.view.json`;
+}
+
+/** `{/ticket}` and `{model}` tokens, in template order. Empty / nested braces are not tokens. */
+export function subjectPlaceholders(template) {
+  if (typeof template !== "string") return [];
+  const out = [];
+  const re = /\{([^{}]+)\}/g;
+  let m;
+  while ((m = re.exec(template)) !== null) out.push(m[1]);
+  return out;
+}
 
 /** Keys every section may carry, plus the per-`as` keys (design §2.2 `as` row). */
 const COMMON_SECTION_KEYS = new Set(["path", "as", "label"]);
@@ -144,6 +170,57 @@ function relativeNode(base, key) {
   return walkSchema(base, tokens);
 }
 
+function hasOutputBody(view) {
+  return (
+    hasOwn(view, "summary") ||
+    hasOwn(view, "status") ||
+    (Array.isArray(view.sections) && view.sections.length > 0)
+  );
+}
+
+function hasInputBody(body) {
+  return (
+    isObject(body) &&
+    (hasOwn(body, "summary") ||
+      hasOwn(body, "status") ||
+      (Array.isArray(body.sections) && body.sections.length > 0) ||
+      hasOwn(body, "formats") ||
+      hasOwn(body, "tone") ||
+      hasOwn(body, "title"))
+  );
+}
+
+function subjectErrors(template, inputSchema, at) {
+  const errors = [];
+  if (typeof template !== "string" || !template.trim()) {
+    errors.push(`${at}: must be a non-empty template string`);
+    return errors;
+  }
+  const tokens = subjectPlaceholders(template);
+  if (tokens.length === 0) return errors;
+  const needsInput = tokens.some((t) => t.startsWith("/"));
+  if (needsInput && !isObject(inputSchema)) {
+    errors.push(
+      `${at}: input schema is missing — nothing to resolve placeholders against`,
+    );
+    return errors;
+  }
+  for (const token of tokens) {
+    if (token.startsWith("/")) {
+      if (resolveSchemaPointer(inputSchema, token) === undefined) {
+        errors.push(
+          `${at}: placeholder "{${token}}" does not resolve in the input schema`,
+        );
+      }
+    } else if (!SUBJECT_FIELDS.includes(token)) {
+      errors.push(
+        `${at}: unknown placeholder "{${token}}" (input pointer or ${SUBJECT_FIELDS.join("|")})`,
+      );
+    }
+  }
+  return errors;
+}
+
 /** The per-`as` key checks the schema cannot express (design §2.2 `as` row). */
 function sectionKeyErrors(section, at) {
   const errors = [];
@@ -171,67 +248,51 @@ function sectionKeyErrors(section, at) {
 }
 
 /**
- * Validate a view document's *shape* only: the v1 schema plus the per-`as`
- * key rules, with no output schema to resolve pointers against. This is the
- * check a panel (`factory.panel-view/v1`, lib/panel-view.mjs) gets — its data
- * comes from an API endpoint that has no published schema — and the first
- * half of `validateArtifactView`. Never throws.
- * @returns {{ valid: boolean, errors: string[] }}
+ * Pointer and per-`as` checks for one view body (the output side, or
+ * `view.input`) against one schema. `at` prefixes every error (`view` /
+ * `view.input`). A pointer that does not resolve names `schemaLabel`
+ * ("output schema" / "input schema").
  */
-export function validateArtifactViewShape(view) {
-  const schemaCheck = validate(ARTIFACT_VIEW_SCHEMA, view, "view");
-  if (!schemaCheck.valid) return { valid: false, errors: schemaCheck.errors };
+function validateViewBody(body, schema, at, schemaLabel) {
   const errors = [];
-  view.sections.forEach((section, i) => {
-    errors.push(...sectionKeyErrors(section, `view.sections[${i}]`));
-  });
-  return { valid: errors.length === 0, errors };
-}
-
-/**
- * Validate a view document against the v1 schema AND against the agent's
- * output schema (pointer drift). Never throws.
- * @returns {{ valid: boolean, errors: string[] }}
- */
-export function validateArtifactView(view, outputSchema) {
-  const schemaCheck = validate(ARTIFACT_VIEW_SCHEMA, view, "view");
-  if (!schemaCheck.valid) return { valid: false, errors: schemaCheck.errors };
-  if (!isObject(outputSchema)) {
-    return {
-      valid: false,
-      errors: [
-        "view: output schema is missing — nothing to resolve pointers against",
-      ],
-    };
+  if (!isObject(body)) {
+    errors.push(`${at}: must be an object`);
+    return errors;
   }
-  const errors = [];
+  if (!isObject(schema)) {
+    errors.push(
+      `${at}: ${schemaLabel} is missing — nothing to resolve pointers against`,
+    );
+    return errors;
+  }
 
   if (
-    hasOwn(view, "summary") &&
-    resolveSchemaPointer(outputSchema, view.summary) === undefined
+    hasOwn(body, "summary") &&
+    resolveSchemaPointer(schema, body.summary) === undefined
   ) {
     errors.push(
-      `view.summary: pointer "${view.summary}" does not resolve in the output schema`,
+      `${at}.summary: pointer "${body.summary}" does not resolve in the ${schemaLabel}`,
     );
   }
   if (
-    hasOwn(view, "status") &&
-    resolveSchemaPointer(outputSchema, view.status.path) === undefined
+    hasOwn(body, "status") &&
+    resolveSchemaPointer(schema, body.status.path) === undefined
   ) {
     errors.push(
-      `view.status.path: pointer "${view.status.path}" does not resolve in the output schema`,
+      `${at}.status.path: pointer "${body.status.path}" does not resolve in the ${schemaLabel}`,
     );
   }
 
-  view.sections.forEach((section, i) => {
-    const at = `view.sections[${i}]`;
+  const sections = Array.isArray(body.sections) ? body.sections : [];
+  sections.forEach((section, i) => {
+    const secAt = `${at}.sections[${i}]`;
     const kind = section.as;
-    errors.push(...sectionKeyErrors(section, at));
+    errors.push(...sectionKeyErrors(section, secAt));
 
-    const node = resolveSchemaPointer(outputSchema, section.path);
+    const node = resolveSchemaPointer(schema, section.path);
     if (node === undefined) {
       errors.push(
-        `${at}.path: pointer "${section.path}" does not resolve in the output schema`,
+        `${secAt}.path: pointer "${section.path}" does not resolve in the ${schemaLabel}`,
       );
       return;
     }
@@ -240,7 +301,7 @@ export function validateArtifactView(view, outputSchema) {
       !(hasOwn(node, "items") && isObject(node.items))
     ) {
       errors.push(
-        `${at}.path: as=${kind} needs an array schema at "${section.path}"`,
+        `${secAt}.path: as=${kind} needs an array schema at "${section.path}"`,
       );
     }
     const base = itemNode(node);
@@ -248,7 +309,7 @@ export function validateArtifactView(view, outputSchema) {
       if (key === "") return;
       if (relativeNode(base, key) === undefined) {
         errors.push(
-          `${at}.${field}: "${key}" does not resolve under "${section.path}" in the output schema`,
+          `${secAt}.${field}: "${key}" does not resolve under "${section.path}" in the ${schemaLabel}`,
         );
       }
     };
@@ -269,20 +330,89 @@ export function validateArtifactView(view, outputSchema) {
         checkKey("tone", key);
         if (!isObject(value)) {
           errors.push(
-            `${at}.tone.${key}: as=${kind} tone maps a column/key to a (value → tone) object`,
+            `${secAt}.tone.${key}: as=${kind} tone maps a column/key to a (value → tone) object`,
           );
           continue;
         }
         for (const [v, tone] of Object.entries(value)) {
           if (!TONES.includes(tone)) {
             errors.push(
-              `${at}.tone.${key}.${v}: tone must be one of ${TONES.join("|")}`,
+              `${secAt}.tone.${key}.${v}: tone must be one of ${TONES.join("|")}`,
             );
           }
         }
       }
     }
   });
+  return errors;
+}
+
+/**
+ * Validate a view document's *shape* only: the v1 schema plus the per-`as`
+ * key rules, with no output schema to resolve pointers against. This is the
+ * check a panel (`factory.panel-view/v1`, lib/panel-view.mjs) gets — its data
+ * comes from an API endpoint that has no published schema — and the first
+ * half of `validateArtifactView`. Never throws.
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+export function validateArtifactViewShape(view) {
+  const schemaCheck = validate(ARTIFACT_VIEW_SCHEMA, view, "view");
+  if (!schemaCheck.valid) return { valid: false, errors: schemaCheck.errors };
+  const errors = [];
+  if (
+    !hasOutputBody(view) &&
+    !hasOwn(view, "subject") &&
+    !hasInputBody(view.input)
+  ) {
+    errors.push(
+      "view: needs sections, input, or subject — an empty sidecar is not a view",
+    );
+  }
+  (view.sections ?? []).forEach((section, i) => {
+    errors.push(...sectionKeyErrors(section, `view.sections[${i}]`));
+  });
+  (view.input?.sections ?? []).forEach((section, i) => {
+    errors.push(...sectionKeyErrors(section, `view.input.sections[${i}]`));
+  });
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate a view document against the v1 schema AND against the agent's
+ * schemas (pointer drift). Output pointers (`summary`, `status`, `sections`)
+ * resolve in `outputSchema`; `input.*` and `subject` placeholders resolve in
+ * `inputSchema` (plus the fixed spec field list). Never throws.
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+export function validateArtifactView(view, outputSchema, inputSchema) {
+  const shape = validateArtifactViewShape(view);
+  if (!shape.valid) return shape;
+  const errors = [];
+
+  if (hasOutputBody(view)) {
+    errors.push(
+      ...validateViewBody(view, outputSchema, "view", "output schema"),
+    );
+  }
+  if (hasOwn(view, "input")) {
+    if (!hasInputBody(view.input)) {
+      errors.push(
+        "view.input: needs summary, status, or sections — an empty input body is not a view",
+      );
+    } else {
+      errors.push(
+        ...validateViewBody(
+          view.input,
+          inputSchema,
+          "view.input",
+          "input schema",
+        ),
+      );
+    }
+  }
+  if (hasOwn(view, "subject")) {
+    errors.push(...subjectErrors(view.subject, inputSchema, "view.subject"));
+  }
 
   return { valid: errors.length === 0, errors };
 }

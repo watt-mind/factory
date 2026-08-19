@@ -8,6 +8,7 @@ import {
   FORMATS,
   SECTION_KINDS,
   TONES,
+  contractViewRel,
   inspectHeader,
   parsePointer,
   resolvePointer,
@@ -128,6 +129,12 @@ describe("factory.artifact-view/v1 schema (WM-454)", () => {
     expect(TONES).toEqual(["ok", "warn", "error", "muted", "neutral"]);
     // additionalProperties: false throughout the object shapes.
     expect(ARTIFACT_VIEW_SCHEMA.additionalProperties).toBe(false);
+    expect(ARTIFACT_VIEW_SCHEMA.required).toEqual(["schemaVersion"]);
+    expect(ARTIFACT_VIEW_SCHEMA.properties.input).toBeDefined();
+    expect(ARTIFACT_VIEW_SCHEMA.properties.subject).toBeDefined();
+    expect(ARTIFACT_VIEW_SCHEMA.properties.input.additionalProperties).toBe(
+      false,
+    );
     expect(ARTIFACT_VIEW_SCHEMA.properties.status.additionalProperties).toBe(
       false,
     );
@@ -387,7 +394,7 @@ describe("committed views fit their agents' output schemas (drift gate, design �
   });
 
   for (const name of viewFiles) {
-    test(`agents/${name} resolves every pointer against its output schema`, () => {
+    test(`agents/${name} resolves every pointer against its schemas`, () => {
       const defFile = path.join(
         agentsDir,
         name.replace(/\.view\.json$/, ".json"),
@@ -396,8 +403,11 @@ describe("committed views fit their agents' output schemas (drift gate, design �
       const outputSchema = JSON.parse(
         readFileSync(path.join(RUNTIME_ROOT, def.output_schema), "utf8"),
       );
+      const inputSchema = JSON.parse(
+        readFileSync(path.join(RUNTIME_ROOT, def.input_schema), "utf8"),
+      );
       const view = JSON.parse(readFileSync(path.join(agentsDir, name), "utf8"));
-      expect(validateArtifactView(view, outputSchema)).toEqual({
+      expect(validateArtifactView(view, outputSchema, inputSchema)).toEqual({
         valid: true,
         errors: [],
       });
@@ -443,6 +453,122 @@ describe("committed views fit their agents' output schemas (drift gate, design �
   });
 });
 
+const INPUT_SCHEMA = {
+  type: "object",
+  required: ["repo", "ticket"],
+  additionalProperties: false,
+  properties: {
+    repo: { type: "string" },
+    ticket: { type: "string" },
+    modelTier: { type: "string" },
+  },
+};
+
+const INPUT_ONLY = {
+  schemaVersion: ARTIFACT_VIEW_SCHEMA_VERSION,
+  subject: "Dispatch {/ticket} · {/repo} · {model}",
+  input: {
+    sections: [
+      {
+        path: "",
+        as: "keyvalue",
+        label: "Input",
+        keys: ["repo", "ticket"],
+        formats: { ticket: "issue", repo: "repo" },
+      },
+    ],
+  },
+};
+
+describe("input view + subject (WM-897)", () => {
+  test("an input-only sidecar (no output sections) is schema-valid and drift-clean", () => {
+    expect(
+      validateArtifactView(INPUT_ONLY, OUTPUT_SCHEMA, INPUT_SCHEMA),
+    ).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+
+  test("a bad input path or placeholder fails at validation (registry load, never a crash)", () => {
+    const badPath = clone(INPUT_ONLY);
+    badPath.input.sections[0].keys = ["nope"];
+    const pathResult = validateArtifactView(
+      badPath,
+      OUTPUT_SCHEMA,
+      INPUT_SCHEMA,
+    );
+    expect(pathResult.valid).toBe(false);
+    expect(pathResult.errors.join("\n")).toMatch(
+      /view.input.sections\[0\].keys: "nope" does not resolve/,
+    );
+
+    const badPlaceholder = clone(INPUT_ONLY);
+    badPlaceholder.subject = "Dispatch {/missing} · {model}";
+    const phResult = validateArtifactView(
+      badPlaceholder,
+      OUTPUT_SCHEMA,
+      INPUT_SCHEMA,
+    );
+    expect(phResult.valid).toBe(false);
+    expect(phResult.errors.join("\n")).toMatch(
+      /placeholder "\{\/missing\}" does not resolve in the input schema/,
+    );
+
+    const unknownField = clone(INPUT_ONLY);
+    unknownField.subject = "Hello {flavour}";
+    const fieldResult = validateArtifactView(
+      unknownField,
+      OUTPUT_SCHEMA,
+      INPUT_SCHEMA,
+    );
+    expect(fieldResult.valid).toBe(false);
+    expect(fieldResult.errors.join("\n")).toMatch(
+      /unknown placeholder "\{flavour\}"/,
+    );
+  });
+
+  test("unknown keys on input still fail closed; empty sidecar is not a view", () => {
+    const extra = clone(INPUT_ONLY);
+    extra.input.layout = "wide";
+    expect(validateArtifactView(extra, OUTPUT_SCHEMA, INPUT_SCHEMA).valid).toBe(
+      false,
+    );
+    expect(
+      validateArtifactView(
+        { schemaVersion: ARTIFACT_VIEW_SCHEMA_VERSION },
+        OUTPUT_SCHEMA,
+        INPUT_SCHEMA,
+      ).valid,
+    ).toBe(false);
+  });
+
+  test("dispatch.view.json is the worked example: input + subject only", () => {
+    const view = JSON.parse(
+      readFileSync(
+        path.join(RUNTIME_ROOT, "agents", "dispatch.view.json"),
+        "utf8",
+      ),
+    );
+    expect(view.sections).toBeUndefined();
+    expect(view.subject).toBe("Dispatch {/ticket} · {/repo} · {model}");
+    expect(view.input.sections[0].formats.ticket).toBe("issue");
+    const def = JSON.parse(
+      readFileSync(path.join(RUNTIME_ROOT, "agents", "dispatch.json"), "utf8"),
+    );
+    const outputSchema = JSON.parse(
+      readFileSync(path.join(RUNTIME_ROOT, def.output_schema), "utf8"),
+    );
+    const inputSchema = JSON.parse(
+      readFileSync(path.join(RUNTIME_ROOT, def.input_schema), "utf8"),
+    );
+    expect(validateArtifactView(view, outputSchema, inputSchema)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+});
+
 describe("inspectHeader — the first lines of `inspect`'s result section (WM-455)", () => {
   const view = JSON.parse(
     readFileSync(
@@ -480,5 +606,34 @@ describe("inspectHeader — the first lines of `inspect`'s result section (WM-45
         { summary: "x" },
       ),
     ).toEqual([]);
+  });
+});
+
+describe("contract-keyed view path (WM-897)", () => {
+  test("factory.command-result/v1 maps onto agents/views/<contract>.view.json", () => {
+    expect(contractViewRel("factory.command-result/v1")).toBe(
+      "agents/views/factory.command-result.v1.view.json",
+    );
+    expect(contractViewRel("")).toBeNull();
+    expect(contractViewRel(null)).toBeNull();
+  });
+
+  test("committed contract views resolve against the contract's output schema", () => {
+    const viewsDir = path.join(RUNTIME_ROOT, "agents", "views");
+    const files = readdirSync(viewsDir).filter((n) => n.endsWith(".view.json"));
+    expect(files).toContain("factory.command-result.v1.view.json");
+    const commandSchema = JSON.parse(
+      readFileSync(
+        path.join(RUNTIME_ROOT, "schemas", "command-result.output.json"),
+        "utf8",
+      ),
+    );
+    for (const name of files) {
+      const view = JSON.parse(readFileSync(path.join(viewsDir, name), "utf8"));
+      expect(validateArtifactView(view, commandSchema)).toEqual({
+        valid: true,
+        errors: [],
+      });
+    }
   });
 });

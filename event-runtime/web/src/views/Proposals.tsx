@@ -38,6 +38,7 @@ import {
 import { ScopeCaption } from "../components/ContextTabs";
 import { SpecDiff } from "../components/SpecDiff";
 import { AgentHoverCard } from "../components/AgentHoverCard";
+import { TicketText } from "../components/TicketHoverCard";
 import {
   ApprovalRiskDetails,
   ApprovalSafetyCard,
@@ -1518,8 +1519,15 @@ export function Proposals({
                     sel.status === "open" ? DECISION_HUES : PROPOSAL_STATUS_HUES
                   }
                 />
-                <span className="truncate mono" title={sel.id}>
-                  {shortId(sel.id)}
+                <span
+                  className={`truncate ${sel.subject ? "" : "mono"}`}
+                  title={sel.subject ? `${sel.subject} · ${sel.id}` : sel.id}
+                >
+                  {sel.subject ? (
+                    <TicketText text={sel.subject} />
+                  ) : (
+                    shortId(sel.id)
+                  )}
                 </span>
               </span>
             </nav>

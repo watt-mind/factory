@@ -4,10 +4,12 @@ import path from "node:path";
 import type { ArtifactView } from "../types";
 import {
   formatBytes,
+  formatForColumn,
   formatValue,
   githubOf,
   groupRows,
   headerFor,
+  inputViewOf,
   parsePointer,
   resolvePointer,
   resolveRelative,
@@ -477,5 +479,39 @@ describe("the other section kinds", () => {
         language: "json",
       },
     ]);
+  });
+});
+
+describe("inputViewOf + formatForColumn (WM-897)", () => {
+  const dispatchView = readView("dispatch");
+
+  test("inputViewOf lifts the input body so the same renderer can draw spec.input", () => {
+    const inputView = inputViewOf(dispatchView);
+    expect(inputView).not.toBeNull();
+    expect(inputView?.sections?.[0].formats?.ticket).toBe("issue");
+    const input = { repo: "factory", ticket: "WM-862" };
+    expect(viewApplies(inputView, input)).toBe(true);
+    const sections = sectionsFor(inputView!, input);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].as).toBe("keyvalue");
+    if (sections[0].as === "keyvalue") {
+      expect(sections[0].entries.map((e) => e.key)).toEqual(["repo", "ticket"]);
+      expect(sections[0].entries[1].value).toMatchObject({
+        kind: "chip",
+        chip: "issue",
+        id: "WM-862",
+      });
+    }
+    expect(inputViewOf(triageView)).toBeNull();
+    expect(inputViewOf(null)).toBeNull();
+  });
+
+  test("formatForColumn reads the closed format from the active view", () => {
+    expect(formatForColumn(mergeView, "ticket")).toBe("issue");
+    expect(formatForColumn(mergeView, "pr")).toBe("pr");
+    expect(formatForColumn(dispatchView, "ticket")).toBe("issue");
+    expect(formatForColumn(dispatchView, "repo")).toBe("repo");
+    expect(formatForColumn(triageView, "nope")).toBeUndefined();
+    expect(formatForColumn(null, "ticket")).toBeUndefined();
   });
 });

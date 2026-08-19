@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "subject": "Dispatch {/ticket} · {/repo} · {model}",
+  "input": {
+    "sections": [
+      {
+        "path": "",
+        "as": "keyvalue",
+        "label": "Input",
+        "keys": ["repo", "ticket"],
+        "formats": {
+          "repo": "repo",
+          "ticket": "issue"
+        }
+      }
+    ]
+  }
+}

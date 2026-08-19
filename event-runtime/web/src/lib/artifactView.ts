@@ -523,6 +523,57 @@ export function sectionsFor(
   return out;
 }
 
+/**
+ * Lift `view.input` into a stand-alone `factory.artifact-view/v1` document
+ * so the same renderer draws the input glance. Null when the sidecar has
+ * no input body.
+ */
+export function inputViewOf(
+  view: ArtifactView | null | undefined,
+): ArtifactView | null {
+  if (!view?.input) return null;
+  const input = view.input;
+  if (
+    !input.sections?.length &&
+    input.summary === undefined &&
+    input.status === undefined
+  )
+    return null;
+  return {
+    schemaVersion: view.schemaVersion,
+    title: input.title,
+    summary: input.summary,
+    status: input.status,
+    sections: input.sections ?? [],
+  };
+}
+
+/**
+ * The closed format a view assigns to a column/key, first section that
+ * names it. Callers that have a view (Artifacts custom columns) pass this
+ * into CustomCell; without a view the cell falls back to the id-scan.
+ */
+export function formatForColumn(
+  view: ArtifactView | null | undefined,
+  column: string,
+): ArtifactFormat | undefined {
+  if (!view) return undefined;
+  for (const section of view.sections ?? []) {
+    const format = section.formats?.[column];
+    if (format) return format;
+  }
+  if (view.formats && column in view.formats) return view.formats[column];
+  if (view.input) {
+    for (const section of view.input.sections ?? []) {
+      const format = section.formats?.[column];
+      if (format) return format;
+    }
+    if (view.input.formats && column in view.input.formats)
+      return view.input.formats[column];
+  }
+  return undefined;
+}
+
 /** The artifact's own `owner/repo` when it reports one — the only place a PR link can come from. */
 export function githubOf(artifact: unknown): string | null {
   const g = isObject(artifact) ? artifact.github : undefined;

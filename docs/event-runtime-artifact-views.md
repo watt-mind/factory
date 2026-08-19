@@ -61,10 +61,14 @@ Out of scope, said out loud:
 ### 2.1 Where it lives
 
 `event-runtime/agents/<name>.view.json`, beside the agent's `.md`/`.json`.
-Optional: an agent without one renders as JSON exactly as today. The registry
-loads it (`lib/registry.mjs`) and `GET /agents` exposes it as `outputView`
-next to the `outputSchema` it already ships, so the web has both without a
-new endpoint.
+Optional: an agent without one renders as JSON exactly as today. When the
+agent sidecar is absent, the registry also looks for a **contract-keyed
+fallback** at `agents/views/<output_contract>.view.json` (slashes in the
+contract id become dots: `factory.command-result/v1` →
+`agents/views/factory.command-result.v1.view.json`). Nine command-result
+agents share that one file. The agent sidecar wins when both exist.
+`GET /agents` exposes the applied view as `outputView` plus
+`view.source: "agent" | "contract"` (or `view: null` when neither applied).
 
 ### 2.2 The contract
 
@@ -112,9 +116,11 @@ new endpoint.
 | Key        | Rule                                                                                                                                                                                                                                                                                                                                                                                                    |
 | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `title`    | Optional, ≤ 60 chars; falls back to the output schema's `title`.                                                                                                                                                                                                                                                                                                                                        |
-| `summary`  | Optional JSON pointer (RFC 6901) to a string rendered first, as prose.                                                                                                                                                                                                                                                                                                                                  |
+| `summary`  | Optional JSON pointer (RFC 6901) to a string rendered first, as prose. Pointers on the output body resolve in the **output** schema.                                                                                                                                                                                                                                                                    |
 | `status`   | Optional `{ path, tone }`: a pointer to an enum/string plus a value → tone map. Rendered as the header badge.                                                                                                                                                                                                                                                                                           |
-| `sections` | 1–12, rendered in order. Each has `path` (pointer; array or object or scalar), `as` from the closed set below, optional `label`, and per-`as` keys. A pointer that resolves to `undefined` in a given artifact renders nothing — optional fields are optional.                                                                                                                                          |
+| `sections` | Optional, 1–12 when present, rendered in order. Each has `path` (pointer; array or object or scalar), `as` from the closed set below, optional `label`, and per-`as` keys. A pointer that resolves to `undefined` in a given artifact renders nothing — optional fields are optional. A sidecar may omit `sections` entirely when it only ships `input` and/or `subject`.                               |
+| `input`    | Optional view body (`title`, `summary`, `status`, `sections`, `formats`, `tone`) whose pointers resolve against the agent's **input** schema. Drawn in place of the hand-coded run-detail glance when present.                                                                                                                                                                                          |
+| `subject`  | Optional template string, one line. Placeholders are `{/pointer}` into the input schema or the fixed RunSpec fields `{agent}`, `{model}`, `{adapter}`, `{repo}`. Rendered by `lib/spec-subject.mjs` and exposed as `subject` on `GET /runs/:id`, `GET /proposals`, and `GET /proposals/:id`. Example: `"Dispatch {/ticket} · {/repo} · {model}"`.                                                       |
 | `as`       | `table` (array of objects: `columns` 1–8, optional `groupBy`, `expand` — columns shown only in the row's expanded state, `formats`, `tone`), `keyvalue` (object or scalar: `keys` optional subset, `formats`, `tone`), `list` (array of scalars/objects: `itemLabel` pointer relative to the item, `formats`, `tone`), `badge` (scalar: `tone`), `code` (string: `language` optional), `prose` (string) |
 | `formats`  | Map of column/key (or `""` for the section value itself) → `format`, from `issue \| pr \| url \| sha \| repo \| run \| duration \| datetime \| state \| bytes \| count`. `issue`/`pr`/`run` render as jump chips using the same link builders the rest of the UI uses; `state` uses the run-state hues.                                                                                                 |
 | `tone`     | Map of column/key → (value → `ok \| warn \| error \| muted \| neutral`), or a value map directly for scalars.                                                                                                                                                                                                                                                                                           |
@@ -126,7 +132,16 @@ decides everything else, once, for every agent.
 
 ### 2.3 Why a sidecar and not `x-ui` in the schema
 
-Three reasons, all structural:
+`x-ui` is gone, not merely discouraged. WM-701 introduced
+`x-ui: { kind: "ticket" }` as a schema annotation; `web/src/components/CustomCell.tsx`
+used to read it, but no schema in the repo ever carried `x-ui`, none of the
+`<CustomCell>` callers passed `ui`/`schema`, and `lib/schema.mjs` fails closed
+on unknown keywords so `x-ui` cannot legally appear in an input/output
+schema. CustomCell now takes the closed `formats` value from the active
+artifact view (`issue` → ticket hover-card); without a view it still scans
+the cell text for ticket ids.
+
+Three reasons the rest of the vocabulary stays in a sidecar, all structural:
 
 - `lib/schema.mjs` **fails closed on any unsupported keyword** — a contract
   with `x-ui` in it is an invalid contract today. Admitting an opaque
@@ -139,10 +154,11 @@ Three reasons, all structural:
 
 The cost is drift: a sidecar can name a path the schema no longer has. That is
 closed by a test, not by discipline — `lib/artifact-view.test.mjs` resolves
-every `path`, `columns`, `keys`, `expand`, `itemLabel`, `summary`, and
-`status.path` against the agent's output schema and fails on any that does not
-exist. The registry runs the same check at load and refuses a view that does
-not fit its schema (a bad view is a configuration anomaly, shown in
+every `path`, `columns`, `keys`, `expand`, `itemLabel`, `summary`,
+`status.path`, `input.*` pointer, and `subject` placeholder against the
+matching schema (output or input) and fails on any that does not exist. The
+registry runs the same check at load and refuses a view that does not fit
+(a bad view is a configuration anomaly, shown in
 `/status.anomalies.configuration`, never a rendering crash).
 
 ### 2.4 Rendering
@@ -161,11 +177,33 @@ Tables in a terminal are not worth it yet.
 
 ### 2.5 First views
 
-`triage-scan` and `merge-scan` ship views in the same ticket as the contract:
-they are the two artifacts the operator reads most and the two that are
-hardest to read as JSON. `dispatch`, `work-scan`, `run-postmortem` follow in
-the Backlog ticket once the first two have shown what the vocabulary is
-missing.
+`triage-scan` and `merge-scan` ship output views with the contract: they are
+the two artifacts the operator reads most and the two that are hardest to
+read as JSON. `dispatch` ships an **input + subject** sidecar (no output
+sections — those come with WM-898):
+
+```json
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "subject": "Dispatch {/ticket} · {/repo} · {model}",
+  "input": {
+    "sections": [
+      {
+        "path": "",
+        "as": "keyvalue",
+        "label": "Input",
+        "keys": ["repo", "ticket"],
+        "formats": { "repo": "repo", "ticket": "issue" }
+      }
+    ]
+  }
+}
+```
+
+The nine `factory.command-result/v1` agents share
+`agents/views/factory.command-result.v1.view.json`. `work-scan` and
+`run-postmortem` follow in the Backlog ticket once the first two have shown
+what the vocabulary is missing.
 
 ### 2.6 Panels — `factory.panel-view/v1` (WM-840)
 

@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { ArtifactView as ArtifactViewDoc } from "../types";
 import { ARTIFACT_RAW_KEY, ArtifactPanel, ArtifactView } from "./ArtifactView";
+import { inputViewOf } from "../lib/artifactView";
 
 const AGENTS = path.resolve(import.meta.dir, "../../../agents");
 const readView = (name: string): ArtifactViewDoc =>
@@ -258,5 +259,25 @@ describe("ArtifactView with the shipped merge-scan view", () => {
         r2.getByRole("link", { name: "run_44fa5716" }) as HTMLAnchorElement
       ).getAttribute("href"),
     ).toBe("#/runs/run_44fa5716-0304-49b1-8b65-a45500d0d784");
+  });
+});
+
+describe("input view (WM-897)", () => {
+  test("dispatch input view renders repo + ticket with an issue chip", () => {
+    const dispatchView = readView("dispatch");
+    const inputView = inputViewOf(dispatchView);
+    expect(inputView).not.toBeNull();
+    const r = render(
+      <ArtifactView
+        artifact={{ repo: "factory", ticket: "WM-862" }}
+        view={inputView!}
+      />,
+    );
+    expect(r.getByText("Input")).toBeTruthy();
+    expect(r.getByText("factory")).toBeTruthy();
+    const link = r.getByRole("link", { name: "WM-862" });
+    expect(link.getAttribute("href")).toBe(
+      "https://linear.app/watt-mind/issue/WM-862",
+    );
   });
 });

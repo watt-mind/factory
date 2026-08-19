@@ -1,46 +1,31 @@
 /**
  * Reusable cell renderer for dynamic / custom payload columns (WM-214).
- * Extracts nested path values safely and formats primitives, code badges, and objects.
  *
- * A column can declare what a value *means* with the `x-ui` schema annotation
- * (WM-701): `x-ui: { kind: "ticket" }` says the whole cell is one ticket id, so
- * it renders as a hover-card link rather than as a string that happens to look
- * like one. Everything else is still scanned for embedded ids, because the
- * useful ticket reference is usually buried in a summary line, not in a column
- * anybody thought to annotate.
+ * A column can declare what a value *means* with the active artifact-view
+ * `formats` map (WM-897): `issue` says the whole cell is one ticket id, so
+ * it renders as a hover-card link rather than as a string that happens to
+ * look like one. Everything else is still scanned for embedded ids, because
+ * the useful ticket reference is usually buried in a summary line, not in a
+ * column anybody thought to annotate.
+ *
+ * The `x-ui` schema annotation (WM-701) is gone — `lib/schema.mjs` fails
+ * closed on unknown keywords, so nothing could legally send it.
  */
 import { extractRowValue } from "../pathExtractor";
+import type { ArtifactFormat } from "../types";
 import { TicketHoverCard, TicketText } from "./TicketHoverCard";
-
-/** The `x-ui` annotation a payload schema can attach to a property. */
-export interface CellUi {
-  kind?: string | null;
-}
-
-/**
- * Read `x-ui` off a JSON-schema node. Anything that is not an object with a
- * string `kind` is not an annotation — a schema served mid-migration must not
- * take a table down.
- */
-export function readCellUi(schema: unknown): CellUi | null {
-  if (!schema || typeof schema !== "object") return null;
-  const annotation = (schema as Record<string, unknown>)["x-ui"];
-  if (!annotation || typeof annotation !== "object") return null;
-  const kind = (annotation as Record<string, unknown>).kind;
-  return typeof kind === "string" && kind ? { kind } : null;
-}
 
 export interface CellFormat {
   text: string;
   isComplex: boolean;
   title?: string;
-  /** The `x-ui` kind this cell can honour, null when the value cannot carry it. */
+  /** `ticket` when the view format (or equivalent) says the whole cell is one issue id. */
   kind: string | null;
 }
 
 export function formatCellValue(
   value: unknown,
-  ui?: CellUi | null,
+  format?: ArtifactFormat | null,
 ): CellFormat {
   if (value === undefined || value === null)
     return { text: "—", isComplex: false, kind: null };
@@ -49,10 +34,10 @@ export function formatCellValue(
   if (typeof value === "number")
     return { text: String(value), isComplex: false, kind: null };
   if (typeof value === "string") {
-    // Only a scalar string can be the ticket the schema promised; a column
-    // annotated `ticket` whose value arrived as an object is a payload bug,
+    // Only a scalar string can be the ticket the format promised; a column
+    // annotated `issue` whose value arrived as an object is a payload bug,
     // and linking it would hide that.
-    if (ui?.kind === "ticket")
+    if (format === "issue")
       return {
         text: value.trim().toUpperCase(),
         isComplex: false,
@@ -84,26 +69,22 @@ export function formatCellValue(
 export function CustomCell({
   row,
   path,
-  ui,
-  schema,
+  format,
   onNavigateTicket,
 }: {
   row: unknown;
   path: string;
-  /** The column's `x-ui` annotation, already resolved. */
-  ui?: CellUi | null;
-  /** The column's schema node, for callers that hold the schema, not the annotation. */
-  schema?: unknown;
+  /** Closed `formats` value from the active view, when the caller has one. */
+  format?: ArtifactFormat | null;
   onNavigateTicket?: (ticketId: string) => void;
 }) {
   const cleanPath = path.replace(/^custom:/, "");
   const value = extractRowValue(row, cleanPath);
-  const { text, isComplex, title, kind } = formatCellValue(
-    value,
-    ui ?? readCellUi(schema),
-  );
+  const { text, isComplex, title, kind } = formatCellValue(value, format);
 
   const isMono =
+    format === "sha" ||
+    format === "repo" ||
     cleanPath.toLowerCase().includes("id") ||
     cleanPath.toLowerCase().includes("sha") ||
     cleanPath.toLowerCase().includes("hash") ||

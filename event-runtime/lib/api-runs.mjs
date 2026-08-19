@@ -19,6 +19,7 @@ import {
   releaseStalledWorkerLease,
   retryRun,
 } from "./worker.mjs";
+import { proposalSubject } from "./proposal-subject.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
 
@@ -52,7 +53,7 @@ export function repoNamesFromInput(input) {
   return names;
 }
 
-function proposalView(row) {
+function proposalView(row, registry) {
   return {
     id: row.id,
     decision: row.decision,
@@ -68,6 +69,7 @@ function proposalView(row) {
     eventSource: row.event_source,
     agent: row.spec?.agent ?? null,
     spec: row.spec,
+    subject: registry ? proposalSubject(registry, row.spec) : null,
     repos: repoNamesFromInput(row.spec?.input),
   };
 }
@@ -103,13 +105,16 @@ function proposalHistory(db, status, filters = {}) {
         return [];
     }
     return [
-      proposalView({
-        ...row,
-        status: effectiveStatus,
-        decided_at: decisionAt,
-        expired: effectiveStatus === "expired",
-        spec: row.spec_json ? JSON.parse(row.spec_json) : null,
-      }),
+      proposalView(
+        {
+          ...row,
+          status: effectiveStatus,
+          decided_at: decisionAt,
+          expired: effectiveStatus === "expired",
+          spec: row.spec_json ? JSON.parse(row.spec_json) : null,
+        },
+        filters.registry,
+      ),
     ];
   });
 }
@@ -1111,7 +1116,7 @@ export function observedModelFromTranscript(head) {
   return null;
 }
 
-function runView(db, runId, { artifactsDir } = {}) {
+function runView(db, runId, { artifactsDir, registry } = {}) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
   if (!row) return null;
   const attempts = db
@@ -1127,8 +1132,9 @@ function runView(db, runId, { artifactsDir } = {}) {
     (a) => a.kind === "transcript",
   );
   const latest = attempts[attempts.length - 1];
+  const spec = JSON.parse(row.spec_json);
   const deadline = latest
-    ? attemptDeadline(db, runId, latest.attempt, JSON.parse(row.spec_json))
+    ? attemptDeadline(db, runId, latest.attempt, spec)
     : null;
   return {
     run: {
@@ -1139,8 +1145,9 @@ function runView(db, runId, { artifactsDir } = {}) {
       specHash: row.spec_hash,
       created_at: row.created_at,
       updated_at: row.updated_at,
-      spec: JSON.parse(row.spec_json),
+      spec,
     },
+    subject: registry ? proposalSubject(registry, spec) : null,
     lifecycle: lifecycleOf(db, runId),
     attempts,
     result,
@@ -1187,6 +1194,7 @@ export async function handleRunApiRoute({
       const filters = {
         ...listFilters(url, { proposal: true, nowMs }),
         decisionStatus: url.searchParams.get("decisionStatus") ?? undefined,
+        registry,
       };
       if (status || filters.population)
         return send(200, {
@@ -1197,7 +1205,9 @@ export async function handleRunApiRoute({
           ),
         });
       return send(200, {
-        proposals: openProposals(db, { now: nowMs }).map(proposalView),
+        proposals: openProposals(db, { now: nowMs }).map((row) =>
+          proposalView(row, registry),
+        ),
       });
     } catch (err) {
       if (err instanceof ListQueryError) return send(422, err.body);
@@ -1216,14 +1226,17 @@ export async function handleRunApiRoute({
     const expiresAt =
       Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
     return send(200, {
-      proposal: proposalView({
-        ...row,
-        spec: row.spec_json ? JSON.parse(row.spec_json) : null,
-        expired:
-          row.status === "open" &&
-          Number.isFinite(expiresAt) &&
-          expiresAt < nowMs,
-      }),
+      proposal: proposalView(
+        {
+          ...row,
+          spec: row.spec_json ? JSON.parse(row.spec_json) : null,
+          expired:
+            row.status === "open" &&
+            Number.isFinite(expiresAt) &&
+            expiresAt < nowMs,
+        },
+        registry,
+      ),
       hookDecisions: hookDecisionsFor(db, id),
     });
   }
@@ -1312,7 +1325,10 @@ export async function handleRunApiRoute({
         return send(200, {
           approved: false,
           replanned: true,
-          proposal: proposalView({ ...outcome.proposal, expired: false }),
+          proposal: proposalView(
+            { ...outcome.proposal, expired: false },
+            registry,
+          ),
         });
       }
       const outcome = rejectProposal(db, id, {
@@ -1492,7 +1508,7 @@ export async function handleRunApiRoute({
 
   const runGet = url.pathname.match(/^\/runs\/([^/]+)$/);
   if (req.method === "GET" && runGet) {
-    const view = runView(db, runGet[1], { artifactsDir });
+    const view = runView(db, runGet[1], { artifactsDir, registry });
     if (!view) return send(404, { error: `unknown run ${runGet[1]}` });
     return send(200, view);
   }

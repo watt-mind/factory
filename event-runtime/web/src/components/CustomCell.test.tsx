@@ -1,7 +1,7 @@
 import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { CustomCell, formatCellValue, readCellUi } from "./CustomCell";
+import { CustomCell, formatCellValue } from "./CustomCell";
 import { renderWithClient, restoreApi, withApi } from "../test-render";
 import type { RepoItem } from "../types";
 
@@ -74,43 +74,27 @@ describe("formatCellValue", () => {
     });
   });
 
-  test("x-ui kind ticket marks a scalar cell as a ticket reference", () => {
-    expect(formatCellValue("wm-701", { kind: "ticket" })).toMatchObject({
+  test("view format issue marks a scalar cell as a ticket reference", () => {
+    expect(formatCellValue("wm-701", "issue")).toMatchObject({
       text: "WM-701",
       kind: "ticket",
     });
   });
 
-  test("x-ui kind ticket never claims a complex value", () => {
-    expect(
-      formatCellValue({ id: "WM-701" }, { kind: "ticket" }).kind,
-    ).toBeNull();
-    expect(formatCellValue(null, { kind: "ticket" }).kind).toBeNull();
-  });
-});
-
-describe("readCellUi", () => {
-  test("reads the x-ui annotation off a schema node", () => {
-    expect(readCellUi({ type: "string", "x-ui": { kind: "ticket" } })).toEqual({
-      kind: "ticket",
-    });
-  });
-
-  test("ignores schemas without a usable annotation", () => {
-    expect(readCellUi({ type: "string" })).toBeNull();
-    expect(readCellUi({ "x-ui": "ticket" })).toBeNull();
-    expect(readCellUi(null)).toBeNull();
+  test("view format issue never claims a complex value", () => {
+    expect(formatCellValue({ id: "WM-701" }, "issue").kind).toBeNull();
+    expect(formatCellValue(null, "issue").kind).toBeNull();
   });
 });
 
 describe("CustomCell", () => {
-  test("an x-ui ticket column links the whole cell to the ticket journey", async () => {
+  test("a view format=issue column links the whole cell to the ticket journey", async () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
         <CustomCell
           row={{ payload: { ticket: "WM-701" } }}
           path="payload.ticket"
-          ui={{ kind: "ticket" }}
+          format="issue"
         />,
       );
       const link = await waitFor(() => r.getByRole("link", { name: "WM-701" }));
@@ -118,13 +102,13 @@ describe("CustomCell", () => {
     });
   });
 
-  test("an x-ui ticket column normalizes the id it links to", async () => {
+  test("a view format=issue column normalizes the id it links to", async () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
         <CustomCell
           row={{ ticket: " clnt-526 " }}
           path="ticket"
-          ui={{ kind: "ticket" }}
+          format="issue"
         />,
       );
       await waitFor(() =>
@@ -137,14 +121,10 @@ describe("CustomCell", () => {
 
   // The annotation is what the free-text scan cannot do: a column that says it
   // holds a ticket is believed even when the team is not one this factory runs.
-  test("an x-ui ticket column links a team the free-text scan would skip", async () => {
+  test("a view format=issue column links a team the free-text scan would skip", async () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
-        <CustomCell
-          row={{ ticket: "FOO-12" }}
-          path="ticket"
-          ui={{ kind: "ticket" }}
-        />,
+        <CustomCell row={{ ticket: "FOO-12" }} path="ticket" format="issue" />,
       );
       await waitFor(() =>
         expect(
@@ -154,14 +134,10 @@ describe("CustomCell", () => {
     });
   });
 
-  test("reads the annotation off a raw schema node when given one", async () => {
+  test("the caller passes the view format, not a schema annotation", async () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
-        <CustomCell
-          row={{ ticket: "FOO-12" }}
-          path="ticket"
-          schema={{ type: "string", "x-ui": { kind: "ticket" } }}
-        />,
+        <CustomCell row={{ ticket: "FOO-12" }} path="ticket" format="issue" />,
       );
       await waitFor(() =>
         expect(
@@ -171,7 +147,7 @@ describe("CustomCell", () => {
     });
   });
 
-  test("the same value without the annotation stays plain text", async () => {
+  test("the same value without a view format stays plain text", async () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
         <CustomCell row={{ ticket: "FOO-12" }} path="ticket" />,
@@ -233,7 +209,7 @@ describe("CustomCell", () => {
         <CustomCell
           row={{ ticket: "WM-701" }}
           path="ticket"
-          ui={{ kind: "ticket" }}
+          format="issue"
           onNavigateTicket={onNavigateTicket}
         />,
       );

@@ -20,10 +20,16 @@ export function agentsView(registry) {
       inputSchema: def.inputSchema,
       outputSchemaFile: def.output_schema,
       outputSchema: def.outputSchema,
-      // Artifact-view sidecar (WM-454): null when the agent has none or its
-      // view failed the drift check (then /status names the anomaly).
+      // Artifact-view sidecar (WM-454 / WM-897): null when the agent has
+      // none or its view failed the drift check (then /status names the
+      // anomaly). `view.source` says whether the agent file or the
+      // contract-keyed fallback applied.
       outputViewFile: getArtifactView(registry, def.ref).file,
       outputView: getArtifactView(registry, def.ref).view,
+      view: (() => {
+        const source = getArtifactView(registry, def.ref).source;
+        return source ? { source } : null;
+      })(),
       pins: def.pins,
       command: def.command ?? null,
       actionRegistry: def.actionRegistry ?? null,

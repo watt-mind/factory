@@ -770,17 +770,31 @@ describe("registry", () => {
     // The committed views: present, validated, keyed by ref, not on the def.
     const merge = getArtifactView(registry, "merge-scan@2");
     expect(merge.file).toBe("agents/merge-scan.view.json");
+    expect(merge.source).toBe("agent");
     expect(merge.view.schemaVersion).toBe("factory.artifact-view/v1");
     expect(getArtifactView(registry, "triage-scan@1").view.status.path).toBe(
       "/recommendation",
     );
-    expect(getArtifactView(registry, "reconcile@1")).toEqual({
+    const dispatch = getArtifactView(registry, "dispatch@1");
+    expect(dispatch.source).toBe("agent");
+    expect(dispatch.view.subject).toBe(
+      "Dispatch {/ticket} · {/repo} · {model}",
+    );
+    const reconcile = getArtifactView(registry, "reconcile@1");
+    expect(reconcile.source).toBe("contract");
+    expect(reconcile.file).toBe(
+      "agents/views/factory.command-result.v1.view.json",
+    );
+    expect(reconcile.view.title).toBe("Command");
+    expect(getArtifactView(registry, "ship-scan@1")).toEqual({
       file: null,
       view: null,
+      source: null,
     });
     expect(getArtifactView(registry, "ghost@9")).toEqual({
       file: null,
       view: null,
+      source: null,
     });
     expect(registry.anomalies).toEqual([]);
     // Views are not part of the definition pin nor of the receipt defHash:
@@ -818,6 +832,7 @@ describe("registry", () => {
     expect(getArtifactView(registry, "merge-scan@2")).toEqual({
       file: "agents/merge-scan.view.json",
       view: null,
+      source: null,
     });
     expect(registry.anomalies).toHaveLength(1);
     expect(registry.anomalies[0]).toContain("merge-scan@2");
@@ -838,6 +853,65 @@ describe("registry", () => {
     );
     expect(loadRegistry({ root, modelTiers: PI_TIERS }).anomalies[0]).toMatch(
       /not in enum/,
+    );
+  });
+
+  test("contract-keyed fallback applies when the agent sidecar is absent; agent sidecar wins when both exist (WM-897)", () => {
+    const root = tempRegistry();
+    const registry = loadRegistry({ root, modelTiers: PI_TIERS });
+    const shared = getArtifactView(registry, "reconcile@1");
+    expect(shared.source).toBe("contract");
+    expect(getArtifactView(registry, "warm@1").file).toBe(shared.file);
+    expect(getArtifactView(registry, "ci-rerun@1").source).toBe("contract");
+    // Agent sidecar wins even when a contract view exists.
+    writeFileSync(
+      path.join(root, "agents", "reconcile.view.json"),
+      JSON.stringify({
+        schemaVersion: "factory.artifact-view/v1",
+        title: "Reconcile (agent)",
+        sections: [{ path: "/command", as: "list", label: "Command" }],
+      }),
+    );
+    const again = loadRegistry({ root, modelTiers: PI_TIERS });
+    const won = getArtifactView(again, "reconcile@1");
+    expect(won.source).toBe("agent");
+    expect(won.file).toBe("agents/reconcile.view.json");
+    expect(won.view.title).toBe("Reconcile (agent)");
+    // A broken agent sidecar does not fall through to the contract view.
+    writeFileSync(
+      path.join(root, "agents", "reconcile.view.json"),
+      JSON.stringify({
+        schemaVersion: "factory.artifact-view/v1",
+        sections: [{ path: "/nope", as: "prose" }],
+      }),
+    );
+    const broken = loadRegistry({ root, modelTiers: PI_TIERS });
+    expect(getArtifactView(broken, "reconcile@1")).toEqual({
+      file: "agents/reconcile.view.json",
+      view: null,
+      source: null,
+    });
+    expect(broken.anomalies[0]).toMatch(/"\/nope" does not resolve/);
+  });
+
+  test("a sidecar with a bad input path / placeholder is a configuration anomaly (WM-897)", () => {
+    const root = tempRegistry();
+    writeFileSync(
+      path.join(root, "agents", "dispatch.view.json"),
+      JSON.stringify({
+        schemaVersion: "factory.artifact-view/v1",
+        subject: "Dispatch {/missing} · {model}",
+        input: {
+          sections: [{ path: "", as: "keyvalue", keys: ["nope"] }],
+        },
+      }),
+    );
+    const registry = loadRegistry({ root, modelTiers: PI_TIERS });
+    expect(getArtifactView(registry, "dispatch@1").view).toBeNull();
+    expect(registry.anomalies.join("\n")).toMatch(/dispatch@1/);
+    expect(registry.anomalies.join("\n")).toMatch(/"nope" does not resolve/);
+    expect(registry.anomalies.join("\n")).toMatch(
+      /placeholder "\{\/missing\}"/,
     );
   });
 });

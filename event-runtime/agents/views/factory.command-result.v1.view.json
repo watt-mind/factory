@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Command",
+  "status": {
+    "path": "/exitCode",
+    "tone": { "0": "ok" }
+  },
+  "sections": [
+    {
+      "path": "/command",
+      "as": "list",
+      "label": "Command"
+    },
+    {
+      "path": "/outputTail",
+      "as": "code",
+      "label": "Output",
+      "language": "text"
+    }
+  ]
+}

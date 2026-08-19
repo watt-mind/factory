@@ -25,6 +25,7 @@ import {
 } from "../components/RunDetailBlocks";
 import { handleRunArtifactClick, toggleRunPin } from "./Runs";
 import { AgentHoverCard } from "../components/AgentHoverCard";
+import { TicketText } from "../components/TicketHoverCard";
 import type { RunListItem } from "../types";
 
 /**
@@ -403,10 +404,14 @@ export function RunFull({
                   <StateBadge state={d?.run.state ?? listRow!.state} />
                 )}
                 <span
-                  className="display mono min-w-0 truncate text-[15px] font-semibold text-(--text)"
-                  title={runId}
+                  className="display min-w-0 truncate text-[15px] font-semibold text-(--text)"
+                  title={d?.subject ? `${d.subject} · ${runId}` : runId}
                 >
-                  {runId}
+                  {d?.subject ? (
+                    <TicketText text={d.subject} />
+                  ) : (
+                    <span className="mono">{runId}</span>
+                  )}
                 </span>
               </li>
             </ol>

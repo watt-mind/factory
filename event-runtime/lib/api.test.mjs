@@ -361,11 +361,27 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
       expect(merge.outputViewFile).toBe("agents/merge-scan.view.json");
       expect(merge.outputView.schemaVersion).toBe("factory.artifact-view/v1");
       expect(merge.outputView.status.path).toBe("/recommendation");
+      expect(merge.view).toEqual({ source: "agent" });
       const triage = defs.find((d) => d.ref === "triage-scan@1");
       expect(triage.outputView.summary).toBe("/summary");
-      const bare = defs.find((d) => d.ref === "reconcile@1");
+      const dispatch = defs.find((d) => d.ref === "dispatch@1");
+      expect(dispatch.view).toEqual({ source: "agent" });
+      expect(dispatch.outputView.subject).toBe(
+        "Dispatch {/ticket} · {/repo} · {model}",
+      );
+      expect(dispatch.outputView.input.sections[0].formats.ticket).toBe(
+        "issue",
+      );
+      const command = defs.find((d) => d.ref === "reconcile@1");
+      expect(command.view).toEqual({ source: "contract" });
+      expect(command.outputViewFile).toBe(
+        "agents/views/factory.command-result.v1.view.json",
+      );
+      expect(command.outputView.title).toBe("Command");
+      const bare = defs.find((d) => d.ref === "ship-scan@1");
       expect(bare.outputView).toBeNull();
       expect(bare.outputViewFile).toBeNull();
+      expect(bare.view).toBeNull();
       // Not part of the pinned identity.
       expect(Object.keys(merge.pins)).not.toContain(
         "agents/merge-scan.view.json",
@@ -381,6 +397,7 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
       );
       expect(agentDef).toContain("outputViewFile?");
       expect(agentDef).toContain("outputView?");
+      expect(agentDef).toContain('source: "agent" | "contract"');
     } finally {
       server.close();
     }
@@ -417,6 +434,81 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
       expect(anomaly).toMatch(/"\/tldr" does not resolve/);
     } finally {
       server.close();
+    }
+  });
+});
+
+describe("spec subject on GET /runs/:id and /proposals (WM-897)", () => {
+  const spec = {
+    schemaVersion: "factory.run-spec/v1",
+    runId: "run_subject",
+    agent: "dispatch@1",
+    input: { repo: "factory", ticket: "WM-862" },
+    inputHash: "sha256:input",
+    workspace: { type: "none" },
+    adapter: "cursor",
+    promptVersion: "test",
+    policyVersion: PV,
+    outputContract: "factory.dispatch-result/v1",
+    capabilities: [],
+    timeoutSeconds: 60,
+    maxAttempts: 1,
+    idempotencyKey: "idem-subject",
+    model: "cursor-grok-4.6-high",
+  };
+
+  test("GET /runs/:id exposes the rendered subject", async () => {
+    const s = await makeServer();
+    try {
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'COMPLETED', 1, ?, ?)`,
+        )
+        .run(
+          "run_subject",
+          "idem-subject",
+          JSON.stringify(spec),
+          "sha256:spec",
+          "2026-08-19T12:00:00.000Z",
+          "2026-08-19T12:00:00.000Z",
+        );
+      const res = await fetch(s.url("/runs/run_subject"));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.subject).toBe(
+        "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("GET /proposals and GET /proposals/:id expose the rendered subject", async () => {
+    const s = await makeServer();
+    try {
+      s.db
+        .query(
+          `INSERT INTO proposals
+             (id, event_source, event_id, decision, status, created_at, ttl_seconds, spec_json)
+           VALUES (?, 'test', 'ev-subject', 'run', 'open', ?, 3600, ?)`,
+        )
+        .run("prop_subject", "2026-08-19T12:00:00.000Z", JSON.stringify(spec));
+      const list = await fetch(s.url("/proposals?status=all"));
+      expect(list.status).toBe(200);
+      const listed = (await list.json()).proposals.find(
+        (p) => p.id === "prop_subject",
+      );
+      expect(listed.subject).toBe(
+        "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+      );
+      const detail = await fetch(s.url("/proposals/prop_subject"));
+      expect(detail.status).toBe(200);
+      expect((await detail.json()).proposal.subject).toBe(
+        "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+      );
+    } finally {
+      s.close();
     }
   });
 });

@@ -14,7 +14,7 @@ import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import { reposRoot } from "./repos.mjs";
-import { validateArtifactView } from "./artifact-view.mjs";
+import { contractViewRel, validateArtifactView } from "./artifact-view.mjs";
 import { PANELS_DIR, loadPanelDir, mergePanels } from "./panel-view.mjs";
 
 export class RegistryError extends Error {
@@ -285,19 +285,22 @@ const isDefinitionFile = (name) =>
   name.endsWith(".json") && !name.endsWith(VIEW_SUFFIX);
 
 /**
- * Artifact-view sidecar (WM-454, docs/event-runtime-artifact-views.md §2):
- * `agents/<name>.view.json` beside `agents/<name>.json`, optional. Loaded
- * and validated against the definition's output schema; a view that does
- * not parse or does not fit its schema is a configuration anomaly (surfaced
- * in /status.anomalies.configuration) and the agent is served WITHOUT a
- * view — never a load failure, never a rendering crash. Views are not part
- * of the definition pin (§2.3): a rendering tweak is not a contract change.
- * @returns {{ file: string|null, view: object|null, anomaly: string|null }}
+ * Artifact-view sidecar (WM-454 / WM-897, docs/event-runtime-artifact-views.md §2):
+ * `agents/<name>.view.json` beside `agents/<name>.json`, optional. When that
+ * file is absent, `agents/views/<output_contract>.view.json` is the
+ * contract-keyed fallback so nine command-result agents share one sidecar.
+ * The agent file wins when both exist, including when it is invalid — a
+ * broken agent sidecar is an anomaly, not a silent fall-through.
+ *
+ * Loaded and validated against the definition's output *and* input schemas;
+ * a view that does not parse or does not fit is a configuration anomaly
+ * (surfaced in /status.anomalies.configuration) and the agent is served
+ * WITHOUT a view — never a load failure, never a rendering crash. Views are
+ * not part of the definition pin (§2.3): a rendering tweak is not a
+ * contract change.
+ * @returns {{ file: string|null, view: object|null, source: "agent"|"contract"|null, anomaly: string|null }}
  */
-function loadArtifactView(root, defFile, def) {
-  const rel = path.relative(root, defFile).replace(/\.json$/, VIEW_SUFFIX);
-  const abs = path.join(root, rel);
-  if (!existsSync(abs)) return { file: null, view: null, anomaly: null };
+function readViewFile(abs, rel, def, source) {
   let view;
   try {
     view = JSON.parse(readFileSync(abs, "utf8"));
@@ -305,18 +308,34 @@ function loadArtifactView(root, defFile, def) {
     return {
       file: rel,
       view: null,
+      source: null,
       anomaly: `artifact view ${rel} for ${def.ref} is unparseable: ${err.message}`,
     };
   }
-  const check = validateArtifactView(view, def.outputSchema);
+  const check = validateArtifactView(view, def.outputSchema, def.inputSchema);
   if (!check.valid) {
     return {
       file: rel,
       view: null,
-      anomaly: `artifact view ${rel} for ${def.ref} does not fit ${def.output_schema} (served without a view): ${check.errors.join("; ")}`,
+      source: null,
+      anomaly: `artifact view ${rel} for ${def.ref} does not fit its schemas (served without a view): ${check.errors.join("; ")}`,
     };
   }
-  return { file: rel, view, anomaly: null };
+  return { file: rel, view, source, anomaly: null };
+}
+
+function loadArtifactView(root, defFile, def) {
+  const agentRel = path.relative(root, defFile).replace(/\.json$/, VIEW_SUFFIX);
+  const agentAbs = path.join(root, agentRel);
+  if (existsSync(agentAbs))
+    return readViewFile(agentAbs, agentRel, def, "agent");
+  const contractRel = contractViewRel(def.output_contract);
+  if (contractRel) {
+    const contractAbs = path.join(root, contractRel);
+    if (existsSync(contractAbs))
+      return readViewFile(contractAbs, contractRel, def, "contract");
+  }
+  return { file: null, view: null, source: null, anomaly: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -691,13 +710,17 @@ export function loadRegistry({
       // Kept off the definition object so receipts' defHash and the pinned
       // identity never see the view (§2.3). Loaders that expose no sidecars
       // (non-fs packs) simply contribute no view.
-      const { file, view, anomaly } = loader.readArtifactView?.(entry, def) ?? {
+      const { file, view, source, anomaly } = loader.readArtifactView?.(
+        entry,
+        def,
+      ) ?? {
         file: null,
         view: null,
+        source: null,
         anomaly: null,
       };
       if (anomaly) anomalies.push(anomaly);
-      views.set(def.ref, { file, view });
+      views.set(def.ref, { file, view, source: source ?? null });
     }
     if (typeof loader.listPanels === "function") {
       panelBatches.push(
@@ -1004,9 +1027,9 @@ export function loadRegistry({
   };
 }
 
-/** The artifact view for a registered agent: `{ file, view }`, both null when the agent has none. */
+/** The artifact view for a registered agent: `{ file, view, source }`, all null when the agent has none. */
 export function getArtifactView(registry, ref) {
-  return registry.views?.get(ref) ?? { file: null, view: null };
+  return registry.views?.get(ref) ?? { file: null, view: null, source: null };
 }
 
 export function getAgent(registry, ref) {

@@ -56,6 +56,8 @@ export interface Proposal {
   eventSource: string | null;
   agent: string | null;
   spec: RunSpec | null;
+  /** One-line spec heading from the agent's view `subject` (WM-897). */
+  subject?: string | null;
   /** Repos the spec input names. Empty if unscoped. */
   repos: string[];
 }
@@ -374,6 +376,8 @@ export interface RunDetail {
    * takes no model, or the harness named none.
    */
   observedModel: string | null;
+  /** One-line spec heading from the agent's view `subject` (WM-897). */
+  subject?: string | null;
 }
 
 /** Which event types route to an agent, and how (GET /agents). */
@@ -434,12 +438,21 @@ export interface ArtifactViewSection {
   /** table/keyvalue/list: column/key → (value → tone); badge: value → tone */
   tone?: Record<string, ArtifactTone | Record<string, ArtifactTone>>;
 }
-export interface ArtifactView {
-  schemaVersion: "factory.artifact-view/v1";
+/** Output or input view body — `input` reuses this shape (WM-897). */
+export interface ArtifactViewBody {
   title?: string;
   summary?: string;
   status?: { path: string; tone: Record<string, ArtifactTone> };
-  sections: ArtifactViewSection[];
+  sections?: ArtifactViewSection[];
+  formats?: Record<string, ArtifactFormat>;
+  tone?: Record<string, ArtifactTone | Record<string, ArtifactTone>>;
+}
+export interface ArtifactView extends ArtifactViewBody {
+  schemaVersion: "factory.artifact-view/v1";
+  /** One-line spec heading template, rendered server-side onto GET /runs/:id and /proposals. */
+  subject?: string;
+  /** View body whose pointers resolve against the agent's input schema. */
+  input?: ArtifactViewBody;
 }
 
 /** One registered agent, fully readable: definition, prompt, schemas, pins. */
@@ -461,6 +474,8 @@ export interface AgentDef {
   /** Artifact-view sidecar (WM-454), null when the agent ships none. */
   outputViewFile?: string | null;
   outputView?: ArtifactView | null;
+  /** Which sidecar applied: the agent file, or the contract-keyed fallback (WM-897). */
+  view?: { source: "agent" | "contract" } | null;
   pins: Record<string, string>;
   /** Closed-execution shape: fixed argv (command adapter) or action registry. */
   command: string[] | null;
