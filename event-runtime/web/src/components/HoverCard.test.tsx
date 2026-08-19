@@ -83,10 +83,16 @@ function Fixture(props: {
   );
 }
 
-/** The wrapper is the only element carrying the popup ARIA state. */
+/** The element carrying the popup ARIA state (wrapper or inner trigger). */
 function triggerOf(container: HTMLElement): HTMLElement {
   const el = container.querySelector<HTMLElement>("[aria-haspopup='dialog']");
   if (!el) throw new Error("trigger not found");
+  return el;
+}
+
+function wrapperOf(container: HTMLElement): HTMLElement {
+  const el = container.querySelector<HTMLElement>("span[tabindex]");
+  if (!el) throw new Error("wrapper not found");
   return el;
 }
 
@@ -192,8 +198,45 @@ describe("HoverCard", () => {
 
   test("does not add a second tab stop when the trigger is interactive", () => {
     const r = render(<Fixture focusable={false} interactiveTrigger />);
-    expect(triggerOf(r.container).getAttribute("tabindex")).toBe("-1");
+    expect(wrapperOf(r.container).getAttribute("tabindex")).toBe("-1");
     expect(r.getByRole("button", { name: "triage-scan" })).toBeTruthy();
+  });
+
+  test("puts popup ARIA on an interactive trigger, not the roleless wrapper", async () => {
+    const r = render(
+      <Fixture focusable={false} interactiveTrigger secondAction />,
+    );
+    const button = r.getByRole("button", { name: "triage-scan" });
+    const wrapper = wrapperOf(r.container);
+
+    expect(wrapper.hasAttribute("aria-haspopup")).toBe(false);
+    expect(button.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(button.hasAttribute("aria-controls")).toBe(false);
+
+    fireEvent.focus(button);
+    await waitFor(() => expect(r.getByRole("dialog")).toBeTruthy());
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    expect(button.getAttribute("aria-controls")).toBe(r.getByRole("dialog").id);
+
+    fireEvent.keyDown(button, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        r.getByRole("button", { name: /Open in Agents/ }),
+      ),
+    );
+
+    const last = r.getByRole("button", { name: "Copy id" });
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(r.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(button.hasAttribute("aria-controls")).toBe(false);
   });
 
   test("opens on focus and marks the trigger expanded", async () => {

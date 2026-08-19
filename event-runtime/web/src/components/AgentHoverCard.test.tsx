@@ -58,7 +58,7 @@ const agentsApi = () => ({
   agents: mock(async () => createAgentsFixture({ agents: [sampleAgent] })),
 });
 
-/** The wrapper the primitive puts the popup ARIA state on. */
+/** The element carrying the popup ARIA state (wrapper or inner trigger). */
 function triggerOf(container: HTMLElement): HTMLElement {
   const el = container.querySelector<HTMLElement>("[aria-haspopup='dialog']");
   if (!el) throw new Error("hover card trigger not found");
@@ -121,7 +121,10 @@ describe("AgentHoverCard", () => {
       fireEvent.focus(jump);
 
       await waitFor(() => expect(r.getByRole("dialog")).toBeTruthy());
-      expect(triggerOf(r.container).getAttribute("aria-expanded")).toBe("true");
+      expect(jump.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(jump.getAttribute("aria-expanded")).toBe("true");
+      expect(jump.getAttribute("aria-controls")).toBe(r.getByRole("dialog").id);
+      expect(jump.parentElement?.hasAttribute("aria-haspopup")).toBe(false);
     });
   });
 

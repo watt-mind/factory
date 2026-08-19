@@ -13,12 +13,16 @@
  * portal puts the panel's tab stops after everything else in the document.
  */
 import {
+  cloneElement,
   type FocusEvent as ReactFocusEvent,
+  isValidElement,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
   type ReactNode,
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -39,6 +43,60 @@ export const VIEWPORT_MARGIN = 12;
 export const TRIGGER_GAP = 8;
 
 const FOCUSABLE = "a[href],button,input,select,textarea,[tabindex]";
+/** Host tags that can carry popup ARIA without a composite forwarding them. */
+const HOST_TRIGGER_TAGS = new Set(["a", "button"]);
+
+interface PopupAria {
+  "aria-haspopup": "dialog";
+  "aria-expanded": boolean;
+  "aria-controls"?: string;
+}
+
+function popupAria(open: boolean, panelId: string): PopupAria {
+  return {
+    "aria-haspopup": "dialog",
+    "aria-expanded": open,
+    ...(open ? { "aria-controls": panelId } : {}),
+  };
+}
+
+function applyPopupAria(el: HTMLElement, aria: PopupAria): void {
+  el.setAttribute("aria-haspopup", aria["aria-haspopup"]);
+  el.setAttribute("aria-expanded", aria["aria-expanded"] ? "true" : "false");
+  if (aria["aria-controls"]) {
+    el.setAttribute("aria-controls", aria["aria-controls"]);
+  } else {
+    el.removeAttribute("aria-controls");
+  }
+}
+
+function clearPopupAria(el: HTMLElement): void {
+  el.removeAttribute("aria-haspopup");
+  el.removeAttribute("aria-expanded");
+  el.removeAttribute("aria-controls");
+}
+
+/**
+ * The control the keyboard actually lands on inside a non-focusable wrapper.
+ * Composite triggers (JumpLink → Button) do not forward unknown ARIA, so the
+ * layout effect stamps these onto the descendant host rather than the span.
+ */
+function firstInteractiveDescendant(root: HTMLElement): HTMLElement | null {
+  for (const candidate of root.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    if (candidate.tabIndex < 0 || candidate.matches(":disabled")) continue;
+    if (candidate.hidden) continue;
+    return candidate;
+  }
+  return null;
+}
+
+/** Merge popup ARIA onto a native `<a>` / `<button>` trigger; leave composites. */
+function mergeHostPopupAria(node: ReactNode, aria: PopupAria): ReactNode {
+  if (!isValidElement(node)) return node;
+  const type = (node as ReactElement).type;
+  if (typeof type !== "string" || !HOST_TRIGGER_TAGS.has(type)) return node;
+  return cloneElement(node as ReactElement, aria);
+}
 
 /**
  * Return the controls the browser can actually reach with Tab, in tab order.
@@ -190,7 +248,8 @@ export interface HoverCardProps {
   /**
    * Whether the wrapper is its own tab stop. Pass false when `trigger` already
    * renders a button or link: two tab stops for one thing is worse than none,
-   * and focus still bubbles to the wrapper's handlers either way.
+   * and focus still bubbles to the wrapper's handlers either way. Popup ARIA
+   * then lives on that inner control — a roleless wrapper is not announced.
    */
   focusable?: boolean;
   className?: string;
@@ -233,6 +292,7 @@ export function HoverCard({
   const notifiedRef = useRef(open);
   const [dismissals, setDismissals] = useState(0);
   const panelId = useId();
+  const stampedTriggerRef = useRef<HTMLElement | null>(null);
   const reducedMotion = useReducedMotion();
 
   useEffect(() => {
@@ -478,6 +538,34 @@ export function HoverCard({
   const api: HoverCardApi = { close };
   const body = typeof children === "function" ? children(api) : children;
   const triggerBody = typeof trigger === "function" ? trigger(api) : trigger;
+  const triggerAria = popupAria(open, panelId);
+  const triggerNode = focusable
+    ? triggerBody
+    : mergeHostPopupAria(triggerBody, triggerAria);
+
+  /**
+   * When the wrapper is not a tab stop, the inner control is what a screen
+   * reader focuses. Host `<a>`/`<button>` already received the ARIA via clone;
+   * JumpLink and other composites do not forward those props, so stamp the
+   * descendant after layout. Skip the wrapper itself — it has no role.
+   */
+  useLayoutEffect(() => {
+    const previous = stampedTriggerRef.current;
+    if (focusable) {
+      if (previous) clearPopupAria(previous);
+      stampedTriggerRef.current = null;
+      return;
+    }
+    const wrapper = wrapperRef.current;
+    const inner = wrapper ? firstInteractiveDescendant(wrapper) : null;
+    if (previous && previous !== inner) clearPopupAria(previous);
+    if (!inner) {
+      stampedTriggerRef.current = null;
+      return;
+    }
+    applyPopupAria(inner, triggerAria);
+    stampedTriggerRef.current = inner;
+  }, [focusable, triggerAria, triggerNode]);
 
   const motion = reducedMotion
     ? ""
@@ -488,9 +576,7 @@ export function HoverCard({
       <span
         ref={wrapperRef}
         tabIndex={focusable ? 0 : -1}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-controls={open ? panelId : undefined}
+        {...(focusable ? triggerAria : {})}
         onMouseEnter={scheduleOpen}
         onMouseLeave={scheduleClose}
         onFocus={onTriggerFocus}
@@ -498,7 +584,7 @@ export function HoverCard({
         onKeyDown={onTriggerKeyDown}
         className={`inline-flex items-center outline-none focus-visible:ring-1 focus-visible:ring-(--accent) ${className ?? ""}`}
       >
-        {triggerBody}
+        {triggerNode}
       </span>
 
       {open &&
