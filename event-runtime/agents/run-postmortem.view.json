@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "factory.artifact-view/v1",
+  "title": "Run postmortem",
+  "summary": "/whatHappened",
+  "status": {
+    "path": "/category",
+    "tone": {
+      "agent_error": "error",
+      "environment": "warn",
+      "contract_violation": "error",
+      "cut_short": "warn",
+      "unclear": "muted"
+    }
+  },
+  "sections": [
+    {
+      "path": "/operatorAction",
+      "as": "prose",
+      "label": "Operator action"
+    },
+    {
+      "path": "",
+      "as": "keyvalue",
+      "label": "Run",
+      "keys": ["runId"],
+      "formats": { "runId": "run" }
+    },
+    {
+      "path": "/evidenceLines",
+      "as": "list",
+      "label": "Evidence"
+    }
+  ]
+}
