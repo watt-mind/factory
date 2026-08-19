@@ -182,7 +182,7 @@ async function dispatchTo(outcome, eventId, ticket) {
   const summary = await runOnce(
     db,
     registry,
-    { pi: dispatchFake(outcome) },
+    { cursor: dispatchFake(outcome) },
     {
       workspacesRoot: workspaces,
       owner: "w-test",
