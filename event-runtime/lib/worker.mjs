@@ -2000,10 +2000,15 @@ export async function executeClaimed(
             (() =>
               db
                 .query(
+                  // A competing run is one that is actually admitted to execute.
+                  // PROPOSED rows (unapproved or expired proposals) and FAILED
+                  // runs are not competing: counting them refused every later
+                  // merge-fix for the ticket forever (WM-747/#663 on 2026-08-19:
+                  // two expired PROPOSED rows blocked six rounds of fixes).
                   `SELECT run_id AS runId, state
                FROM runs
               WHERE run_id <> ?
-                AND state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+                AND state IN ('QUEUED','LEASED','RUNNING','VERIFYING')
                 AND json_extract(spec_json, '$.input.repo') = ?
                 AND json_extract(spec_json, '$.input.ticket') = ?
               ORDER BY created_at, run_id`,
