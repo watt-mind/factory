@@ -17,18 +17,23 @@
  * produce the white main canvas between the two grey chrome/card steps.
  */
 :root {
+  /* UA widgets (scrollbars, form controls, date pickers) follow this, not
+     prefers-color-scheme — otherwise light tokens paint while chrome stays dark. */
+  color-scheme: dark;
   --base: oklch(0.16 0.007 260);
   --contrast: oklch(0.93 0.004 260);
   --accent: oklch(0.64 0.15 265);
   --on-accent: var(--base);
 }
 [data-theme="light"] {
+  color-scheme: light;
   --base: oklch(0.985 0.002 260);
   --contrast: oklch(0.21 0.012 260);
   --accent: oklch(0.52 0.17 265);
   --on-accent: #ffffff;
 }
 [data-theme="contrast"] {
+  color-scheme: dark;
   --base: oklch(0.08 0 0);
   --contrast: oklch(0.99 0 0);
   --accent: oklch(0.78 0.17 265);
@@ -61,8 +66,10 @@
 }
 
 /* A white canvas between soft-grey chrome and slightly deeper raised surfaces
-   restores the same three-step hierarchy that dark gets from its mixes. */
-[data-theme="light"] {
+   restores the same three-step hierarchy that dark gets from its mixes.
+   `html[data-theme="light"]` beats `:root, [data-theme]` (same attribute
+   specificity, plus the type) so a bundler merge cannot let the mixes win. */
+html[data-theme="light"] {
   --surface-0: oklch(0.965 0.003 260);
   --surface-1: oklch(1 0 0);
   --surface-2: oklch(0.94 0.004 260);
@@ -157,6 +164,38 @@ main[tabindex="-1"]:focus-visible {
   background: transparent;
 }
 
+/* React Flow's stylesheet hardcodes light (`#fff`) and `.dark` (`#141414`)
+   surfaces. The app themes via `data-theme` and never adds `.dark`, so the
+   canvas, nodes, and minimap would keep vendor colors after a theme toggle.
+   Map the `--xy-*` slots onto our tokens so Graph/Chain follow every theme. */
+.react-flow {
+  background-color: var(--surface-0);
+  --xy-background-color: var(--surface-0);
+  --xy-background-pattern-dots-color: var(--border);
+  --xy-node-background-color: var(--surface-1);
+  --xy-node-color: var(--text);
+  --xy-node-border: 1px solid var(--border);
+  --xy-handle-background-color: var(--border-strong);
+  --xy-handle-border-color: var(--surface-1);
+  --xy-minimap-background-color: var(--surface-1);
+  --xy-minimap-mask-background-color: color-mix(
+    in oklch,
+    var(--contrast) 28%,
+    transparent
+  );
+  --xy-controls-button-background-color: var(--surface-1);
+  --xy-controls-button-background-color-hover: var(--surface-3);
+  --xy-controls-button-color: var(--text-dim);
+  --xy-controls-button-border-color: var(--border);
+  --xy-edge-label-background-color: var(--surface-1);
+  --xy-edge-label-color: var(--text-faint);
+  --xy-attribution-background-color: color-mix(
+    in oklch,
+    var(--surface-1) 80%,
+    transparent
+  );
+}
+
 /* React Flow minimap: SVG fills cannot use var()/color-mix, so the node
    colors live here as classes (Graph view, OPS-224). */
 .react-flow__minimap-node.minimap-node {
@@ -168,6 +207,13 @@ main[tabindex="-1"]:focus-visible {
 }
 .react-flow__minimap-node.minimap-terminal {
   fill: var(--text-faint);
+}
+
+/* Graph.tsx sets maskColor as a React prop (`--xy-*-props`), which beats the
+   variable above. Paint the mask from tokens so light mode is not a 55% black
+   rectangle. */
+.react-flow__minimap-mask {
+  fill: color-mix(in oklch, var(--contrast) 28%, transparent) !important;
 }
 
 /* Canvas controls inherit the app's surfaces rather than React Flow's default white. */

@@ -350,4 +350,49 @@ describe("Theme contrast & accessibility (OPS-447, OPS-338)", () => {
     });
     expect(offenders).toEqual([]);
   });
+
+  test("each theme declares color-scheme so UA chrome follows data-theme (WM-867)", () => {
+    const css = fs.readFileSync(path.resolve(__dirname, "theme.css"), "utf-8");
+    const root = css.slice(
+      css.indexOf(":root {"),
+      css.indexOf('[data-theme="light"]'),
+    );
+    const light = css.slice(
+      css.indexOf('[data-theme="light"]'),
+      css.indexOf('[data-theme="contrast"]'),
+    );
+    const contrast = css.slice(
+      css.indexOf('[data-theme="contrast"]'),
+      css.indexOf(":root,"),
+    );
+    expect(root).toMatch(/color-scheme:\s*dark;/);
+    expect(light).toMatch(/color-scheme:\s*light;/);
+    expect(contrast).toMatch(/color-scheme:\s*dark;/);
+  });
+
+  test("light surface tokens beat the shared mix block (WM-867)", () => {
+    const css = fs.readFileSync(path.resolve(__dirname, "theme.css"), "utf-8");
+    expect(css).toMatch(
+      /html\[data-theme="light"\]\s*\{[^}]*--surface-0:\s*oklch\(0\.965/,
+    );
+    expect(css).toMatch(
+      /html\[data-theme="light"\]\s*\{[^}]*--surface-1:\s*oklch\(1 0 0\)/,
+    );
+  });
+
+  test("react-flow vendor surfaces follow theme tokens (WM-867)", () => {
+    const css = fs.readFileSync(path.resolve(__dirname, "theme.css"), "utf-8");
+    expect(css).toMatch(
+      /\.react-flow\s*\{[^}]*--xy-background-color:\s*var\(--surface-0\)/s,
+    );
+    expect(css).toMatch(
+      /\.react-flow\s*\{[^}]*--xy-node-background-color:\s*var\(--surface-1\)/s,
+    );
+    expect(css).toMatch(
+      /\.react-flow\s*\{[^}]*--xy-minimap-background-color:\s*var\(--surface-1\)/s,
+    );
+    expect(css).toMatch(
+      /\.react-flow__minimap-mask\s*\{[^}]*var\(--contrast\)/s,
+    );
+  });
 });
