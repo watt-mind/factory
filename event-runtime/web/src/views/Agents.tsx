@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import {
   refetchIntervals,
   useDisplayOptions,
@@ -41,6 +41,7 @@ import {
   copyText,
   copyLink,
   shortId,
+  notify,
 } from "../components/ui";
 import { ScopeCaption } from "../components/ContextTabs";
 import { AgentMutationBadge } from "../components/AgentHoverCard";
@@ -63,14 +64,44 @@ const caps = (a: AgentDef) =>
  * and rides the CLI's own default. Collapsing both to a blank cell is exactly
  * the ambiguity this view exists to remove.
  */
-const MODEL_ADAPTERS = new Set(["claude", "pi"]);
+const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
 
 /**
  * Tier buckets, strongest first — the group order and the sort order at once,
  * so "sort by tier" and "group by tier" cannot disagree. `override` is not a
  * tier but reads as one here: it is what a definition says instead of a tier.
  */
+const TIER_CHOICES = ["strong", "standard", "light"] as const;
 const TIER_ORDER = ["strong", "standard", "light", "override", EMPTY] as const;
+
+const SELECT_CLASS =
+  "rounded-md border border-(--border) bg-(--surface-1) px-1.5 py-0.5 text-[11px] text-(--text)";
+
+const declaredAdapterOf = (r: AgentEventRoute): string =>
+  r.declaredAdapter ?? r.adapter;
+
+const adapterIsOverlaid = (r: AgentEventRoute): boolean =>
+  declaredAdapterOf(r) !== r.adapter;
+
+const declaredTierOf = (a: AgentDef): string | null =>
+  a.declaredModelTier ?? a.modelTier;
+
+const declaredModelOf = (a: AgentDef): string | null =>
+  a.declaredModel ?? a.model ?? null;
+
+const modelIsOverlaid = (a: AgentDef): boolean =>
+  declaredTierOf(a) !== a.modelTier || declaredModelOf(a) !== (a.model ?? null);
+
+function RuntimeChip() {
+  return (
+    <span
+      className="rounded-sm border border-(--border) px-1 py-px text-[10px] text-(--text-faint)"
+      title="This box's runtime.db overlay — not origin/develop."
+    >
+      this runtime
+    </span>
+  );
+}
 
 const AGENT_TABS = ["ALL", "MUTATING", "READ_ONLY"] as const;
 type AgentTab = (typeof AGENT_TABS)[number];
@@ -196,12 +227,38 @@ const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
  */
 const eventsTypeHref = (type: string) => `#/${eventsHash(null, null, type)}`;
 
+function ModelPinEditor({
+  agent,
+  onSave,
+}: {
+  agent: AgentDef;
+  onSave: (model: string | null) => void;
+}) {
+  const [draft, setDraft] = useState(agent.model ?? "");
+  useEffect(() => {
+    setDraft(agent.model ?? "");
+  }, [agent.ref, agent.model]);
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      <input
+        aria-label="Exact model pin overlay"
+        className={`${SELECT_CLASS} min-w-[12rem]`}
+        value={draft}
+        placeholder="exact model id"
+        title="Exact model id — resolved verbatim, whatever the tier says."
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      <Button onClick={() => onSave(draft.trim() === "" ? null : draft.trim())}>
+        Apply
+      </Button>
+    </span>
+  );
+}
+
 /**
- * Agents (webui doc §10.6) — the registry, fully readable. An operator
- * approving "factory-status-report@1" can read exactly what that ref means —
- * prompt, schemas, pins, routing, and (WM-211) which adapter runs it on which
- * model — without opening the repo. Read-only: the registry has no mutation
- * surface, by design.
+ * Agents (webui doc §10.6) — the registry, fully readable, plus a narrow
+ * operational overlay editor (WM-884) for event-type adapter and agent
+ * model_tier / model. Saves write runtime.db on this box, not git.
  */
 export function Agents({
   context,
@@ -212,6 +269,7 @@ export function Agents({
   focusAgentRef: string | null;
   onSelectAgent: (ref: string | null) => void;
 }) {
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["agents"],
     queryFn: api.agents,
@@ -219,6 +277,54 @@ export function Agents({
   });
   const rows = query.data?.agents ?? [];
   const contracts = query.data?.contracts ?? {};
+  const adapters = useMemo(() => {
+    const fromApi = query.data?.adapters ?? [];
+    if (fromApi.length > 0) return fromApi;
+    return uniq(rows.flatMap((a) => a.eventTypes.map((r) => r.adapter)));
+  }, [query.data?.adapters, rows]);
+
+  const invalidateAgents = () =>
+    queryClient.invalidateQueries({ queryKey: ["agents"] });
+  const overlayError = (err: unknown) =>
+    notify(err instanceof ApiError ? err.message : "save failed", "err");
+
+  const saveAdapter = useMutation({
+    mutationFn: ({ type, adapter }: { type: string; adapter: string }) =>
+      api.putEventTypeOverride(type, { adapter }),
+    onSuccess: () => {
+      notify("Saved on this runtime — not origin/develop", "ok");
+      invalidateAgents();
+    },
+    onError: overlayError,
+  });
+  const revertAdapter = useMutation({
+    mutationFn: (type: string) => api.deleteEventTypeOverride(type),
+    onSuccess: () => {
+      notify("Reverted to git mapping", "ok");
+      invalidateAgents();
+    },
+    onError: overlayError,
+  });
+  const saveModel = useMutation({
+    mutationFn: (body: {
+      ref: string;
+      modelTier?: string | null;
+      model?: string | null;
+    }) => api.putAgentOverride(body.ref, body),
+    onSuccess: () => {
+      notify("Saved on this runtime — not origin/develop", "ok");
+      invalidateAgents();
+    },
+    onError: overlayError,
+  });
+  const revertModel = useMutation({
+    mutationFn: (ref: string) => api.deleteAgentOverride(ref),
+    onSuccess: () => {
+      notify("Reverted to git definition", "ok");
+      invalidateAgents();
+    },
+    onError: overlayError,
+  });
 
   const tabCounts = agentTabCounts(rows);
   const mutatingCount = tabCounts.MUTATING;
@@ -770,17 +876,49 @@ export function Agents({
                 route actually resolves to is per adapter, and lives on the
                 Event routing lines below — the same split `cli.mjs agents` prints. */}
             <KVGroup title="Model">
-              <KV k="model tier" v={sel.modelTier ?? EMPTY} />
+              <KV
+                k="model tier"
+                v={
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <select
+                      aria-label="Model tier overlay"
+                      className={SELECT_CLASS}
+                      value={sel.modelTier ?? ""}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        saveModel.mutate({
+                          ref: sel.ref,
+                          modelTier: value === "" ? null : value,
+                        });
+                      }}
+                    >
+                      <option value="">
+                        declared ({declaredTierOf(sel) ?? "none"})
+                      </option>
+                      {TIER_CHOICES.map((tier) => (
+                        <option key={tier} value={tier}>
+                          {tier}
+                        </option>
+                      ))}
+                    </select>
+                    {modelIsOverlaid(sel) ? <RuntimeChip /> : null}
+                    {modelIsOverlaid(sel) ? (
+                      <Button onClick={() => revertModel.mutate(sel.ref)}>
+                        Revert
+                      </Button>
+                    ) : null}
+                  </span>
+                }
+              />
               <KV
                 k="model override"
                 v={
-                  sel.model ? (
-                    <span title="Exact model id — resolved verbatim, whatever the tier says.">
-                      {sel.model}
-                    </span>
-                  ) : (
-                    EMPTY
-                  )
+                  <ModelPinEditor
+                    agent={sel}
+                    onSave={(model) =>
+                      saveModel.mutate({ ref: sel.ref, model })
+                    }
+                  />
                 }
               />
             </KVGroup>
@@ -868,42 +1006,76 @@ export function Agents({
             ) : (
               <div className="rounded-md border border-(--border) px-3 py-1">
                 {sel.eventTypes.map((r) => (
-                  <a
+                  <div
                     key={r.type}
-                    href={eventsTypeHref(r.type)}
-                    title={`Show ${r.type} in Events`}
-                    className="group -mx-3 block border-b border-(--border) px-3 py-1.5 last:border-0 hover:bg-(--surface-1)"
+                    className="-mx-3 border-b border-(--border) px-3 py-1.5 last:border-0"
                   >
-                    <div className="mono text-(--accent) group-hover:underline">
+                    <a
+                      href={eventsTypeHref(r.type)}
+                      title={`Show ${r.type} in Events`}
+                      className="mono text-(--accent) hover:underline"
+                    >
                       {r.type}
+                    </a>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-(--text-faint)">
+                      <label className="flex items-center gap-1">
+                        adapter
+                        <select
+                          aria-label={`Adapter overlay for ${r.type}`}
+                          className={SELECT_CLASS}
+                          value={r.adapter}
+                          onChange={(event) =>
+                            saveAdapter.mutate({
+                              type: r.type,
+                              adapter: event.target.value,
+                            })
+                          }
+                        >
+                          {uniq([
+                            r.adapter,
+                            declaredAdapterOf(r),
+                            ...adapters,
+                          ]).map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {adapterIsOverlaid(r) ? <RuntimeChip /> : null}
+                      {adapterIsOverlaid(r) ? (
+                        <Button onClick={() => revertAdapter.mutate(r.type)}>
+                          Revert
+                        </Button>
+                      ) : null}
+                      <span>
+                        · model{" "}
+                        <span
+                          className="mono"
+                          title={
+                            r.resolvedModel != null
+                              ? "What the planner pins into the RunSpec for this route."
+                              : MODEL_ADAPTERS.has(r.adapter)
+                                ? "This definition pins nothing, so dispatch rides the CLI's own default."
+                                : `The ${r.adapter} adapter runs a fixed argv, not a model.`
+                          }
+                        >
+                          {routeModel(r)}
+                        </span>{" "}
+                        · idempotency {r.idempotencyScope}
+                        {r.proposalTtlSeconds != null ? (
+                          <>
+                            {" · proposal TTL "}
+                            <span title={`${r.proposalTtlSeconds}s`}>
+                              {formatDuration(r.proposalTtlSeconds)}
+                            </span>
+                          </>
+                        ) : (
+                          ""
+                        )}
+                      </span>
                     </div>
-                    <div className="text-[11px] text-(--text-faint)">
-                      adapter {r.adapter} · model{" "}
-                      <span
-                        className="mono"
-                        title={
-                          r.resolvedModel != null
-                            ? "What the planner pins into the RunSpec for this route."
-                            : MODEL_ADAPTERS.has(r.adapter)
-                              ? "This definition pins nothing, so dispatch rides the CLI's own default."
-                              : `The ${r.adapter} adapter runs a fixed argv, not a model.`
-                        }
-                      >
-                        {routeModel(r)}
-                      </span>{" "}
-                      · idempotency {r.idempotencyScope}
-                      {r.proposalTtlSeconds != null ? (
-                        <>
-                          {" · proposal TTL "}
-                          <span title={`${r.proposalTtlSeconds}s`}>
-                            {formatDuration(r.proposalTtlSeconds)}
-                          </span>
-                        </>
-                      ) : (
-                        ""
-                      )}
-                    </div>
-                  </a>
+                  </div>
                 ))}
               </div>
             )}

@@ -375,7 +375,33 @@ export const api = {
       { runId },
     ),
   // The agent registry, fully readable: definitions, prompts, schemas, pins.
+  // Effective adapter/tier include the runtime overlay (WM-887).
   agents: () => call<AgentsView>("GET", "/agents"),
+  putEventTypeOverride: (type: string, body: { adapter: string }) =>
+    call<{ patch: { adapter: string } }>(
+      "PUT",
+      `/overrides/event-types/${encodeURIComponent(type)}`,
+      body,
+    ),
+  deleteEventTypeOverride: (type: string) =>
+    call<{ deleted: boolean }>(
+      "DELETE",
+      `/overrides/event-types/${encodeURIComponent(type)}`,
+    ),
+  putAgentOverride: (
+    ref: string,
+    body: { modelTier?: string | null; model?: string | null },
+  ) =>
+    call<{ patch: Record<string, unknown> }>(
+      "PUT",
+      `/overrides/agents/${encodeURIComponent(ref)}`,
+      body,
+    ),
+  deleteAgentOverride: (ref: string) =>
+    call<{ deleted: boolean }>(
+      "DELETE",
+      `/overrides/agents/${encodeURIComponent(ref)}`,
+    ),
   // Declarative Overview panels (WM-840) and the data behind one of them:
   // `panelSource` only ever GETs an endpoint the runtime already
   // allow-listed for the panel; the query is the panel's own `source.query`.

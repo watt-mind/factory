@@ -408,6 +408,8 @@ export interface RunDetail {
 export interface AgentEventRoute {
   type: string;
   adapter: string;
+  /** Git mapping, before the runtime overlay (WM-887). */
+  declaredAdapter?: string;
   idempotencyScope: string;
   proposalTtlSeconds: number | null;
   /**
@@ -507,8 +509,12 @@ export interface AgentDef {
   hosts: string[] | null;
   /** Declared intent (WM-135): strong | standard | light, or null for none. */
   modelTier: string | null;
+  /** Git model_tier, before the runtime overlay (WM-887). */
+  declaredModelTier?: string | null;
   /** Exact model id, when a definition overrides its tier outright. */
   model: string | null;
+  /** Git model pin, before the runtime overlay (WM-887). */
+  declaredModel?: string | null;
   eventTypes: AgentEventRoute[];
 }
 
@@ -532,6 +538,8 @@ export interface AgentsView {
   edges: Record<string, RecommendationRule>;
   eventTypes: EventRoute[];
   contracts: Record<string, unknown>;
+  /** Adapters the overlay may name (WM-887). */
+  adapters?: string[];
 }
 
 /** A worker's own report of what it is doing; "stopped" is a clean exit. */

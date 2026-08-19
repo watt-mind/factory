@@ -21,7 +21,7 @@ import {
   EMPTY_VALUE,
   formatDurationSeconds,
 } from "../components/AgentHoverCard";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import type { AgentDef, AgentEventRoute, AgentsView } from "../types";
 
 afterEach(() => {
@@ -34,9 +34,11 @@ afterEach(() => {
 });
 
 function stubRoute(over: Partial<AgentEventRoute> = {}): AgentEventRoute {
+  const adapter = over.adapter ?? "claude";
   return {
     type: "factory.demo/v1",
-    adapter: "claude",
+    adapter,
+    declaredAdapter: over.declaredAdapter ?? adapter,
     idempotencyScope: "repo",
     proposalTtlSeconds: null,
     resolvedModel: "sonnet",
@@ -45,6 +47,10 @@ function stubRoute(over: Partial<AgentEventRoute> = {}): AgentEventRoute {
 }
 
 function stubAgent(id: string, over: Partial<AgentDef> = {}): AgentDef {
+  const modelTier = Object.hasOwn(over, "modelTier")
+    ? (over.modelTier ?? null)
+    : "standard";
+  const model = Object.hasOwn(over, "model") ? (over.model ?? null) : null;
   return {
     ref: `${id}@1`,
     id,
@@ -64,10 +70,16 @@ function stubAgent(id: string, over: Partial<AgentDef> = {}): AgentDef {
     command: null,
     actionRegistry: null,
     hosts: null,
-    modelTier: "standard",
-    model: null,
+    modelTier,
+    declaredModelTier: over.declaredModelTier ?? modelTier,
+    model,
+    declaredModel: over.declaredModel ?? model,
     eventTypes: [stubRoute()],
     ...over,
+    modelTier,
+    declaredModelTier: over.declaredModelTier ?? modelTier,
+    model,
+    declaredModel: over.declaredModel ?? model,
   };
 }
 
@@ -103,9 +115,20 @@ function SelectableAgents() {
   );
 }
 
-function withAgents(agents: AgentDef[], fn: () => Promise<void>) {
+function withAgents(
+  agents: AgentDef[],
+  fn: () => Promise<void>,
+  extra: Partial<AgentsView> = {},
+) {
   const orig = api.agents;
-  const view: AgentsView = { agents, edges: {}, eventTypes: [], contracts: {} };
+  const view: AgentsView = {
+    agents,
+    edges: {},
+    eventTypes: [],
+    contracts: {},
+    adapters: ["claude", "pi", "cursor", "agy", "command", "actions", "fake"],
+    ...extra,
+  };
   api.agents = async () => view;
   return fn().finally(() => {
     api.agents = orig;
@@ -363,7 +386,8 @@ describe("Agents detail pane (WM-211)", () => {
       }),
     ];
     await withAgents(agents, async () => {
-      const { getByText, getAllByText } = renderAgents("pi-smoke@1");
+      const { getByText, getAllByText, getByLabelText } =
+        renderAgents("pi-smoke@1");
       await waitFor(() => {
         expect(getByText("model tier")).toBeTruthy();
       });
@@ -373,7 +397,9 @@ describe("Agents detail pane (WM-211)", () => {
       expect(getAllByText("openai-codex/gpt-5.6-luna").length).toBeGreaterThan(
         0,
       );
-      expect(getByText(/adapter pi/)).toBeTruthy();
+      expect(
+        getByLabelText("Adapter overlay for factory.pi-smoke/v1"),
+      ).toBeTruthy();
     });
   });
 
@@ -391,13 +417,119 @@ describe("Agents detail pane (WM-211)", () => {
       }),
     ];
     await withAgents(agents, async () => {
-      const { getByText, getAllByText } = renderAgents("reaper@1");
+      const { getByText, getAllByText, getByLabelText } =
+        renderAgents("reaper@1");
       await waitFor(() => {
         expect(getByText("model tier")).toBeTruthy();
       });
       expect(getAllByText("n/a").length).toBeGreaterThan(0);
-      expect(getByText(/adapter command/)).toBeTruthy();
+      expect(
+        getByLabelText("Adapter overlay for factory.reap/v1"),
+      ).toBeTruthy();
     });
+  });
+});
+
+describe("Agents overlay editors (WM-884)", () => {
+  test("select+save paints the this-runtime chip; revert restores declared", async () => {
+    const agent = stubAgent("demo", {
+      eventTypes: [
+        stubRoute({
+          type: "factory.demo.requested",
+          adapter: "pi",
+          declaredAdapter: "pi",
+        }),
+      ],
+    });
+    let current = [agent];
+    const origAgents = api.agents;
+    const origPut = api.putEventTypeOverride;
+    const origDel = api.deleteEventTypeOverride;
+    api.agents = async () => ({
+      agents: current,
+      edges: {},
+      eventTypes: [],
+      contracts: {},
+      adapters: ["pi", "cursor"],
+    });
+    api.putEventTypeOverride = async (type, body) => {
+      current = current.map((row) => ({
+        ...row,
+        eventTypes: row.eventTypes.map((route) =>
+          route.type === type ? { ...route, adapter: body.adapter } : route,
+        ),
+      }));
+      return { patch: body };
+    };
+    api.deleteEventTypeOverride = async (type) => {
+      current = current.map((row) => ({
+        ...row,
+        eventTypes: row.eventTypes.map((route) =>
+          route.type === type
+            ? { ...route, adapter: route.declaredAdapter ?? route.adapter }
+            : route,
+        ),
+      }));
+      return { deleted: true };
+    };
+    try {
+      const { getByLabelText, getByRole, queryByText } = renderAgents(
+        agent.ref,
+      );
+      const select = await waitFor(() =>
+        getByLabelText("Adapter overlay for factory.demo.requested"),
+      );
+      fireEvent.change(select, { target: { value: "cursor" } });
+      await waitFor(() => {
+        expect(queryByText("this runtime")).toBeTruthy();
+      });
+      fireEvent.click(getByRole("button", { name: "Revert" }));
+      await waitFor(() => {
+        expect(queryByText("this runtime")).toBeNull();
+      });
+    } finally {
+      api.agents = origAgents;
+      api.putEventTypeOverride = origPut;
+      api.deleteEventTypeOverride = origDel;
+    }
+  });
+
+  test("a 422 leaves declared values on screen", async () => {
+    const agent = stubAgent("demo", {
+      eventTypes: [
+        stubRoute({
+          type: "factory.demo.requested",
+          adapter: "pi",
+          declaredAdapter: "pi",
+        }),
+      ],
+    });
+    const origAgents = api.agents;
+    const origPut = api.putEventTypeOverride;
+    api.agents = async () => ({
+      agents: [agent],
+      edges: {},
+      eventTypes: [],
+      contracts: {},
+      adapters: ["pi", "cursor"],
+    });
+    api.putEventTypeOverride = async () => {
+      throw new ApiError('unknown adapter "nope"', 422);
+    };
+    try {
+      const { getByLabelText, queryByText } = renderAgents(agent.ref);
+      const select = await waitFor(() =>
+        getByLabelText("Adapter overlay for factory.demo.requested"),
+      );
+      fireEvent.change(select, { target: { value: "cursor" } });
+      await waitFor(() => {
+        expect((select as HTMLSelectElement).value).toBe("pi");
+      });
+      expect(queryByText("this runtime")).toBeNull();
+    } finally {
+      api.agents = origAgents;
+      api.putEventTypeOverride = origPut;
+    }
   });
 });
 

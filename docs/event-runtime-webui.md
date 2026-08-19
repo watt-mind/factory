@@ -1016,13 +1016,17 @@ with Copy prompt),
 hash table, captioned: content-hash pins that fail the registry closed on
 drift — versions are bumped and re-pinned, never edited in place), and
 **Event routing** (which event types select this agent, with adapter,
-idempotency scope, and proposal TTL). The shared envelope contracts
+idempotency scope, and proposal TTL). The adapter on each route and the
+agent's model tier / exact pin are editable: they write a machine-local
+overlay in `runtime.db` (WM-887 / WM-884), not git. An effective value that
+differs from the declared git mapping shows a **this runtime** chip and
+Revert. The shared envelope contracts
 (`factory.event/v1`, `factory.agent-result/v1`) render once at the list
 level, not per agent. The selected ref in the pane title is followed by the
 shared `<CopyActions />` icon controls: copy-ref (`c`) and copy-link (`c l`)
 put their chord in `title` and `aria-label`, while the text-labeled `Close`
-button carries no visible `Esc` badge. Strictly read-only — the registry has
-no mutation surface. ⌘K jumps to an agent ref the same way it jumps to a run
+button carries no visible `Esc` badge. Overlay saves are this box only —
+not `origin/develop`. ⌘K jumps to an agent ref the same way it jumps to a run
 or event.
 
 Chord choice: `g t` ("what is **t**his agent?"). `o/e/p/r` were taken, and
