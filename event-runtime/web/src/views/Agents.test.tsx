@@ -76,10 +76,6 @@ function stubAgent(id: string, over: Partial<AgentDef> = {}): AgentDef {
     declaredModel: over.declaredModel ?? model,
     eventTypes: [stubRoute()],
     ...over,
-    modelTier,
-    declaredModelTier: over.declaredModelTier ?? modelTier,
-    model,
-    declaredModel: over.declaredModel ?? model,
   };
 }
 

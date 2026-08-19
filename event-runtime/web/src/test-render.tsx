@@ -362,6 +362,25 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
       runId,
     })),
     agents: mock(async () => createAgentsFixture()),
+    putEventTypeOverride: mock(
+      async (_type: string, body: { adapter: string }) => ({
+        patch: { adapter: body.adapter },
+      }),
+    ),
+    deleteEventTypeOverride: mock(async (_type: string) => ({
+      deleted: true,
+    })),
+    putAgentOverride: mock(
+      async (
+        _ref: string,
+        body: { modelTier?: string | null; model?: string | null },
+      ) => ({
+        patch: { ...body },
+      }),
+    ),
+    deleteAgentOverride: mock(async (_ref: string) => ({
+      deleted: true,
+    })),
     panels: mock(async () => ({ panels: [], endpoints: [] })),
     panelSource: mock(
       async (_endpoint: string, _query?: Record<string, string>) => ({}),
