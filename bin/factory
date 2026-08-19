@@ -194,7 +194,18 @@ case "$cmd" in
           });
           if (!response.ok) process.exit(10);
           const body = await response.json();
-          process.exit(body?.delivery?.ok === false ? 12 : 0);
+          // The inbox item is the durable record; the external projection
+          // (notify.py) is best-effort. A stored item with a failed projection
+          // is a warning, not a failed run (WM-825): merge-notify was FAILED
+          // on every escalation on hosts without ~/Develop/hdkiller.
+          if (body?.delivery?.ok === false) {
+            if (body?.item?.id) {
+              console.error(`notify: inbox item ${body.item.id} stored; external projection failed: ${body.delivery.error ?? "exit " + body.delivery.exitCode}`);
+              process.exit(0);
+            }
+            process.exit(12);
+          }
+          process.exit(0);
         } catch {
           process.exit(11);
         }
