@@ -247,7 +247,7 @@ per-repo entries in `schedules.json`:
 | Loop           | Cadence                                 | Fires                            | Chain it heads                                                       |
 | :------------- | :-------------------------------------- | :------------------------------- | :------------------------------------------------------------------- |
 | `work-<repo>`  | `30m`                                   | `factory.work.requested {repo}`  | work-scan → dispatch (WM-110/108)                                    |
-| `merge-<repo>` | `30m` fallback (`merge-factory`: `15m`) | `factory.merge.requested {repo}` | full-set sweep → merge-scan → merge-apply / escalate (WM-109/WM-576) |
+| `merge-<repo>` | `30m` fallback (`merge-factory`: `4h`) | `factory.merge.requested {repo}` | full-set sweep → merge-scan → merge-apply / escalate (WM-109/WM-576) |
 | `ship-<repo>`  | `7d`                                    | `factory.ship.requested {repo}`  | ship-scan → human-only ship-apply (WM-111)                           |
 
 Every entry ships `enabled: false`, `approval: "watched"`, `singleton: true`,
