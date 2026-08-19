@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a focused improvement to Factory
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and pull requests for this proposal.
+          required: true
+        - label: I am describing the problem before prescribing an implementation.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who encounters this problem, in what workflow, and what does it cost today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and how a maintainer could verify it.
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Optional. Include alternatives and trade-offs if you have explored them.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent and harness packaging
+        - Orchestration and dispatch
+        - Event runtime
+        - Web control plane
+        - Developer experience and documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Link examples, screenshots, prior art, or related issues. Do not include secrets or private data.

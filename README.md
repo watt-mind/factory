@@ -61,6 +61,23 @@ bun run link-repos           # symlink plugins/core/commands/ into every repo in
 >
 > So the non-negotiables live in `shared/floor.md` and are committed into each repo's **`AGENTS.md`**, which every harness reads and which travels with the checkout.
 
+## Open-core boundary
+
+Factory's orchestration, event runtime, shared agent workflows, harness
+packaging, and public extension contracts form the open core. The current
+repository is licensed under Apache License 2.0 and is intended to remain
+useful, buildable, and testable without private services or unpublished code.
+
+[`ee/`](ee/README.md) reserves an explicit seam for possible enterprise-only
+extensions. Core code may expose generic contracts that enterprise extensions
+implement, but it must not import or depend on enterprise implementations. The
+directory currently contains documentation only. If separately licensed code
+is added there in the future, it must carry explicit terms; placement under
+`ee/` alone does not override the repository license.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change, especially one
+that may cross this boundary.
+
 **Why `--check` is the important half.** The failure this repo exists to prevent is a rule living in one harness's file and nowhere else — coach-wattz carries "NEVER `prisma db push`" only in `GEMINI.md`, invisible to Claude. Four generated copies are only safer than four hand-written ones if CI proves they still match their source. If the check fails, move the rule into `shared/`; never edit the generated file.
 
 ## Using it from a product repo
