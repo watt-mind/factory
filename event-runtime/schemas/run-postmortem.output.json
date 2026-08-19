@@ -16,6 +16,48 @@
     },
     "whatHappened": { "type": "string", "minLength": 1 },
     "operatorAction": { "type": "string", "minLength": 1 },
-    "evidenceLines": { "type": "array", "items": { "type": "string" } }
+    "evidenceLines": { "type": "array", "items": { "type": "string" } },
+    "memos": {
+      "type": "array",
+      "description": "Ticket postmortem memos for the next dispatch of the same ticket (docs/event-runtime-memos.md §5.2). Optional so a run with no Linear ticket still validates. The runtime registers only accepted results.",
+      "items": {
+        "type": "object",
+        "required": ["subject", "kind", "body"],
+        "additionalProperties": false,
+        "properties": {
+          "subject": {
+            "type": "object",
+            "required": ["type", "id"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "const": "ticket" },
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Z]+-[0-9]+$",
+                "description": "Linear issue id of the failed run, derived from its spec/transcript — never another ticket"
+              }
+            }
+          },
+          "kind": { "const": "postmortem" },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Agent-facing distillation of the failure (do not X; the scoped command is Y). operatorAction stays for the human."
+          },
+          "bindings": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "descriptionHash": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$",
+                "description": "SHA-256 of the ticket description at write time; the memo dies when the ticket is re-scoped"
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

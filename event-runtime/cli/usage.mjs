@@ -54,7 +54,9 @@ usage: bun event-runtime/cli.mjs <command>
                                  extend a RUNNING/VERIFYING deadline (max 3600s per call)
   inspect <run-id>               spec, lifecycle journal, result, receipt, workspace
   trace <run-id>                 live agent trace: assistant text, tool calls, usage
-  update-pins [--pack NAME]      re-pin built-in definitions, or one explicitly named pack
+  update-pins [--pack NAME] [--check]
+                                 re-pin built-in definitions, or one explicitly named pack;
+                                 --check exits non-zero when pins are stale without writing
 
 All commands except serve, work, supervise, and update-pins are clients of the control
 API and need serve running on ${API_HOST}:${DEFAULT_PORT} (FACTORY_EVENT_PORT to change).`;

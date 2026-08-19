@@ -1025,8 +1025,9 @@ export function getEventType(registry, type) {
  * Recompute pins deliberately. With no `pack`, this is byte-for-byte the
  * built-in behavior: inline pins in built-in definitions only. A configured
  * pack must be named explicitly and receives one root-level pins.json.
+ * `check: true` reports the same changed names without writing (WM-811).
  */
-export function updatePins({ root = RUNTIME_ROOT, pack } = {}) {
+export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
   if (pack !== undefined) {
     let descriptor = pack;
     if (typeof pack === "string") {
@@ -1055,7 +1056,7 @@ export function updatePins({ root = RUNTIME_ROOT, pack } = {}) {
     const serialized = `${JSON.stringify(pins, null, 2)}\n`;
     if (existsSync(pinsFile) && readFileSync(pinsFile, "utf8") === serialized)
       return [];
-    writeFileSync(pinsFile, serialized, "utf8");
+    if (!check) writeFileSync(pinsFile, serialized, "utf8");
     return [resolved.name];
   }
 
@@ -1070,11 +1071,13 @@ export function updatePins({ root = RUNTIME_ROOT, pack } = {}) {
       pins[def[field]] = hashBytes(readFileSync(path.join(root, def[field])));
     }
     if (JSON.stringify(def.pins) !== JSON.stringify(pins)) {
-      writeFileSync(
-        file,
-        `${JSON.stringify({ ...def, pins }, null, 2)}\n`,
-        "utf8",
-      );
+      if (!check) {
+        writeFileSync(
+          file,
+          `${JSON.stringify({ ...def, pins }, null, 2)}\n`,
+          "utf8",
+        );
+      }
       changed.push(name);
     }
   }

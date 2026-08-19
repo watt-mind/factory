@@ -117,6 +117,56 @@
           "description": "GitHub owner/name slug of the repo, or null when it has no GitHub remote"
         }
       }
+    },
+    "memoPin": {
+      "type": "object",
+      "required": ["foldedAt", "entries"],
+      "additionalProperties": false,
+      "description": "Planner-resolved live memos for declared subjects at plan time (docs/event-runtime-memos.md §4.2). Empty entries is the normal case when nothing is known yet; never human_needed.",
+      "properties": {
+        "foldedAt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ISO timestamp of the fold; part of inputHash so a new memo re-admits work"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["sha256", "subject", "kind"],
+            "additionalProperties": false,
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Content hash of the memo artifact in the store"
+              },
+              "subject": {
+                "type": "object",
+                "required": ["type", "id"],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "enum": ["repo", "ticket", "pr", "workflow", "run"]
+                  },
+                  "id": { "type": "string", "minLength": 1 }
+                }
+              },
+              "kind": {
+                "enum": [
+                  "repo-note",
+                  "postmortem",
+                  "decision",
+                  "flake",
+                  "handoff"
+                ]
+              },
+              "runId": { "type": "string", "minLength": 1 },
+              "createdAt": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
     }
   }
 }

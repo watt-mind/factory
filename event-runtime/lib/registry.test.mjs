@@ -145,8 +145,10 @@ describe("registry", () => {
     // Regenerated (work-scan advisory overlap, WM-677): agent def is a registry input.
     // Regenerated (merge-scan fix.ownedPaths rule): agent def is a registry input.
     // Regenerated (dispatch on cursor): dispatch@1 adapter pi→cursor; event-types.json is a registry input.
+    // Regenerated (WM-811): dispatch declares ticket postmortem memos; run-postmortem
+    // emits them; dispatch.input admits memoPin; both defs re-pinned.
     const expected =
-      "sha256:e01433ee54ed398681bc34fec0cbf791decc28674f1b9bee612845c584bdbf32";
+      "sha256:9f9a0f35d31e6284fcf611a16712643f5b1ee822e14c248e829ba05a6248c36f";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -167,7 +169,7 @@ describe("registry", () => {
     // pin — and therefore this defHash — legitimately moved, exactly as it did
     // for WM-610. Still not a provenance break: `pack` stays non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:cf85bb4e0cc3ca02a05ad9f780beed32daf80e86500136d84d19643ef46ae4ed",
+      "sha256:ee4c35754465539959b5dee9831c7c4d42e10ce9153fe79a5a379185335631fa",
     );
   });
 
@@ -438,7 +440,7 @@ describe("registry", () => {
     const missing = run("--pack");
     expect(missing.exitCode).not.toBe(0);
     expect(missing.stderr.toString()).toContain(
-      "usage: update-pins [--pack NAME]",
+      "usage: update-pins [--pack NAME] [--check]",
     );
 
     const unknown = run("--pack", "not-configured");
@@ -456,8 +458,13 @@ describe("registry", () => {
       `${readFileSync(promptFile, "utf8")}\n<!-- drift -->\n`,
     );
     expect(() => loadRegistry({ root })).toThrow(RegistryError);
+    expect(updatePins({ root, check: true })).toContain(
+      "factory-status-report.json",
+    );
+    expect(() => loadRegistry({ root })).toThrow(RegistryError);
     updatePins({ root });
     expect(() => loadRegistry({ root })).not.toThrow();
+    expect(updatePins({ root, check: true })).toEqual([]);
   });
 
   test("mutating agents are refused in the MVP", () => {
@@ -486,6 +493,27 @@ describe("registry", () => {
       JSON.stringify({ ...raw, workspace: { type: "ephemeral" } }),
     );
     expect(() => loadRegistry({ root })).toThrow(/mutating/);
+  });
+
+  test("dispatch declares ticket postmortem memos and run-postmortem emits them (WM-811)", () => {
+    const registry = loadRegistry();
+    const dispatch = getAgent(registry, "dispatch@1");
+    expect(dispatch.memos).toEqual([
+      {
+        subject: { type: "ticket", id: "$.input.ticket" },
+        kinds: ["postmortem"],
+        max: 10,
+      },
+    ]);
+    expect(dispatch.inputSchema.properties.memoPin.required).toEqual([
+      "foldedAt",
+      "entries",
+    ]);
+    const postmortem = getAgent(registry, "run-postmortem@1");
+    expect(postmortem.emits.memos).toEqual(["postmortem"]);
+    expect(
+      postmortem.outputSchema.properties.memos.items.properties.kind,
+    ).toEqual({ const: "postmortem" });
   });
 
   test("dispatch input exposes the closed per-ticket modelTier vocabulary (WM-694)", () => {

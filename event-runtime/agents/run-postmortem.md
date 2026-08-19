@@ -45,7 +45,15 @@ retry, cancel, or modify anything. Work only inside this directory.
     "category": "agent_error | environment | contract_violation | cut_short | unclear",
     "whatHappened": "one plain sentence",
     "operatorAction": "one actionable sentence",
-    "evidenceLines": ["the transcript lines this rests on"]
+    "evidenceLines": ["the transcript lines this rests on"],
+    "memos": [
+      {
+        "subject": { "type": "ticket", "id": "WM-313" },
+        "kind": "postmortem",
+        "body": "Attempt 1 timed out running the full suite (`bun test`) inside verification; the ticket's Verification Command scopes to event-runtime/lib. Run the scoped command, not the full suite.",
+        "bindings": { "descriptionHash": "sha256:…" }
+      }
+    ]
   },
   "evidence": { "transcriptBytes": 12345 }
 }
@@ -54,3 +62,12 @@ retry, cancel, or modify anything. Work only inside this directory.
 If the transcript is empty, unreadable, or shows nothing conclusive, use
 `category: "unclear"` and say so — a confident wrong story about a failure is
 worse than admitting the transcript does not explain it.
+
+When the failed run's transcript or captured input names a Linear ticket
+(`CLNT-123`, `WM-313`, …), emit **one** `postmortem` memo on that ticket.
+`body` is the agent-facing distillation for the next dispatch ("do not X;
+the scoped command is Y") — keep `operatorAction` for the human. Include
+`bindings.descriptionHash` only when the transcript actually carries the
+ticket description hash; omit `bindings` rather than guessing. If the failed
+run has no Linear ticket, omit `memos`. Never write a memo about a ticket
+this run was not analysing.

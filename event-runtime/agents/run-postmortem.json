@@ -25,9 +25,10 @@
     "attempts": 1
   },
   "mutating": false,
+  "emits": { "memos": ["postmortem"] },
   "pins": {
-    "agents/run-postmortem.md": "sha256:3b4de64fc474c051df3d067055cf671c4f4cf968ceb9db56902dcc435b4c7866",
+    "agents/run-postmortem.md": "sha256:4a72bb5d9e6659a3ffb0717300ef989cc7e04c9eaf18faceb6ae7e206693dad8",
     "schemas/run-postmortem.input.json": "sha256:a21960e032daf352269d81d2a71e1fa7490cc5c18b6c11c8eef99b70378ded6e",
-    "schemas/run-postmortem.output.json": "sha256:12d01cbf064103b5b6cd185a52c3345afc338200cf6a2edc9248dde7393b2b1c"
+    "schemas/run-postmortem.output.json": "sha256:1d11b1bbb2f52b4d67b2949d8aea66fc61102e16cfa82dcc7d1796bb35286a6b"
   }
 }
