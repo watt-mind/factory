@@ -4,9 +4,9 @@
  * that serves the same seed. A verb that passes here on one and not the
  * other is a contract bug, not a test bug.
  */
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-control-plane-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { linearControlPlane } from "../../lib/control-plane/linear.mjs";
 import {
@@ -477,7 +477,7 @@ for (const [name, make] of IMPLEMENTATIONS) {
 
 describe("loadControlPlane selection", () => {
   const withPolicy = (yaml) => {
-    const root = mkdtempSync(path.join(tmpdir(), "control-plane-policy-"));
+    const root = tmpDir("control-plane-policy-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     if (yaml !== null)
       writeFileSync(path.join(root, "config", "policy.yaml"), yaml);
