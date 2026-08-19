@@ -2,8 +2,21 @@ import {
   tmpDir,
   trackTmpDir,
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-runs-test-mjs";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ticketIndexView } from "./api-runs.mjs";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
+import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
+import {
+  TICKET_DETAIL_CACHE_TTL_MS,
+  clearTicketDetailCache,
+  setTicketDetailControlPlane,
+  ticketIndexView,
+} from "./api-runs.mjs";
 import {
   GH_SECRET,
   PV,
@@ -1404,6 +1417,128 @@ describe("run trace surfacing (OPS-295)", () => {
       expect(await client.trace(queuedRun)).toEqual({ head: 0, entries: [] });
     } finally {
       server.close();
+    }
+  });
+});
+
+describe("GET /tickets/:id/detail (WM-914)", () => {
+  afterEach(() => {
+    setTicketDetailControlPlane(null);
+    clearTicketDetailCache();
+  });
+
+  function seedPlane() {
+    const plane = memoryControlPlane({
+      tickets: [
+        {
+          id: "iss-914",
+          identifier: "WM-914",
+          title: "Live tracker title",
+          description: "## Spec\n\nDo the thing.",
+          url: "https://linear.app/watt-mind/issue/WM-914",
+          state: { id: "s-progress", name: "In Progress" },
+          assignee: { id: "u1", name: "Ada" },
+          comments: [
+            {
+              id: "c1",
+              body: "First comment",
+              createdAt: "2026-08-18T10:00:00.000Z",
+              user: { id: "u1", name: "Ada" },
+            },
+          ],
+        },
+      ],
+    });
+    setTicketDetailControlPlane(plane);
+    return plane;
+  }
+
+  test("returns live title, state, description, and comments", async () => {
+    seedPlane();
+    const s = await makeServer();
+    try {
+      const res = await fetch(s.url("/tickets/WM-914/detail"));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ticket).toEqual({
+        id: "WM-914",
+        identifier: "WM-914",
+        title: "Live tracker title",
+        state: "In Progress",
+        description: "## Spec\n\nDo the thing.",
+        url: "https://linear.app/watt-mind/issue/WM-914",
+        assignee: { name: "Ada" },
+      });
+      expect(body.comments).toEqual([
+        {
+          id: "c1",
+          body: "First comment",
+          createdAt: "2026-08-18T10:00:00.000Z",
+          user: { id: "u1", name: "Ada" },
+        },
+      ]);
+      expect(body.cached).toBe(false);
+      expect(typeof body.fetchedAt).toBe("string");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("caches within the TTL and refetches after it expires", async () => {
+    const plane = seedPlane();
+    let nowMs = Date.parse("2026-08-19T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const first = await fetch(s.url("/tickets/WM-914/detail"));
+      expect(first.status).toBe(200);
+      expect((await first.json()).cached).toBe(false);
+      expect(plane.calls.filter((c) => c.op === "getTicket")).toHaveLength(1);
+
+      nowMs += 1_000;
+      const cached = await fetch(s.url("/tickets/WM-914/detail"));
+      expect((await cached.json()).cached).toBe(true);
+      expect(plane.calls.filter((c) => c.op === "getTicket")).toHaveLength(1);
+
+      nowMs += TICKET_DETAIL_CACHE_TTL_MS;
+      const stale = await fetch(s.url("/tickets/WM-914/detail"));
+      expect((await stale.json()).cached).toBe(false);
+      expect(plane.calls.filter((c) => c.op === "getTicket")).toHaveLength(2);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("rejects malformed ids, missing issues, and tracker failures", async () => {
+    seedPlane();
+    const s = await makeServer();
+    try {
+      const bad = await fetch(s.url("/tickets/not-a-ticket/detail"));
+      expect(bad.status).toBe(422);
+      expect(await bad.json()).toEqual({
+        error: "ticket must look like WM-123",
+      });
+
+      const missing = await fetch(s.url("/tickets/WM-999/detail"));
+      expect(missing.status).toBe(404);
+      expect((await missing.json()).error).toMatch(/no such issue/i);
+
+      setTicketDetailControlPlane({
+        kind: "memory",
+        getTicket: async () => {
+          throw new Error("network down");
+        },
+        listComments: async () => {
+          throw new Error("network down");
+        },
+      });
+      clearTicketDetailCache();
+      const down = await fetch(s.url("/tickets/WM-914/detail"));
+      expect(down.status).toBe(502);
+      const body = await down.json();
+      expect(body.error).toBe("tracker_unavailable");
+      expect(body.message).toBe("network down");
+    } finally {
+      s.close();
     }
   });
 });

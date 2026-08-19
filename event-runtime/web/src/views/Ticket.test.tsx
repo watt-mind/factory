@@ -10,7 +10,11 @@ import {
 } from "@testing-library/react";
 import { prCandidateRunIds, PullRequest, Ticket } from "./Ticket";
 import { changeInput } from "../test-render";
-import type { JourneyRun, TicketJourneySource } from "../subjectJourney";
+import type {
+  JourneyRun,
+  TicketJourneySource,
+  TicketTrackerDetail,
+} from "../subjectJourney";
 
 const realFetch = globalThis.fetch;
 
@@ -112,11 +116,63 @@ function source(): TicketJourneySource {
   };
 }
 
-function renderTicket(data: TicketJourneySource) {
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify(data), {
-      status: 200,
-    })) as unknown as typeof fetch;
+function trackerDetail(
+  overrides: Partial<TicketTrackerDetail> = {},
+): TicketTrackerDetail {
+  return {
+    ticket: {
+      id: "WM-542",
+      identifier: "WM-542",
+      title: "Live Linear title",
+      state: "In Progress",
+      description: "## Acceptance Criteria\n\n- ship the overlay",
+      url: "https://linear.app/watt-mind/issue/WM-542",
+      assignee: { name: "Ada" },
+    },
+    comments: [
+      {
+        id: "c1",
+        body: "Looks good from Linear",
+        createdAt: "2026-08-18T12:00:00.000Z",
+        user: { name: "Ada" },
+      },
+    ],
+    fetchedAt: "2026-08-19T12:00:00.000Z",
+    cached: false,
+    ...overrides,
+  };
+}
+
+function journeyFetch(
+  data: TicketJourneySource,
+  detail?: TicketTrackerDetail | null,
+  detailStatus = 200,
+) {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (/\/api\/tickets\/[^/]+\/detail/.test(url)) {
+      if (detail === undefined) {
+        return new Response(JSON.stringify({ error: "no such issue" }), {
+          status: 404,
+        });
+      }
+      return new Response(JSON.stringify(detail), {
+        status: detailStatus,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (/\/api\/schedules/.test(url)) {
+      return new Response(JSON.stringify({ schedules: [] }), { status: 200 });
+    }
+    return new Response(JSON.stringify(data), { status: 200 });
+  }) as unknown as typeof fetch;
+}
+
+function renderTicket(
+  data: TicketJourneySource,
+  detail?: TicketTrackerDetail | null,
+) {
+  globalThis.fetch = journeyFetch(data, detail);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchInterval: false } },
   });
@@ -149,7 +205,7 @@ describe("Ticket journey view", () => {
         .getByRole("link", { name: "run_dispatch · COMPLETED" })
         .getAttribute("href"),
     ).toBe("#/run/run_dispatch");
-    const timeline = view.getByRole("region", { name: /timeline/i });
+    const timeline = view.getByRole("tabpanel", { name: /timeline/i });
     expect(within(timeline).getAllByText("QUEUED").length).toBeGreaterThan(0);
     expect(view.getByRole("heading", { name: "Where it is now" })).toBeTruthy();
   });
@@ -198,11 +254,12 @@ describe("Ticket journey view", () => {
     };
   }
 
-  function renderId(id: string, data: TicketJourneySource) {
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify(data), {
-        status: 200,
-      })) as unknown as typeof fetch;
+  function renderId(
+    id: string,
+    data: TicketJourneySource,
+    detail?: TicketTrackerDetail | null,
+  ) {
+    globalThis.fetch = journeyFetch(data, detail);
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, refetchInterval: false } },
     });
@@ -250,6 +307,79 @@ describe("Ticket journey view", () => {
         "no runtime activity for WM-542",
       ),
     );
+  });
+
+  test("header prefers live tracker title and state over runtime metadata", async () => {
+    const data = source();
+    data.ticket.title = null;
+    data.ticket.state = null;
+    const view = renderTicket(data, trackerDetail());
+    await view.findByRole("heading", { name: "WM-542" });
+    expect(view.getByText("Live Linear title")).toBeTruthy();
+    expect(view.getAllByText("In Progress").length).toBeGreaterThan(0);
+    expect(view.container.textContent).not.toContain("title not recorded");
+    const linear = view.getByRole("link", { name: "Open in Linear ↗" });
+    expect(linear.className).toContain("rounded-md");
+    expect(linear.className).toContain("border");
+  });
+
+  test("Spec & Comments tab renders the issue description and comments", async () => {
+    const view = renderTicket(source(), trackerDetail());
+    await view.findByRole("heading", { name: "WM-542" });
+    fireEvent.click(view.getByRole("tab", { name: "Spec & Comments" }));
+    expect(
+      view.getByRole("tabpanel", { name: /spec and comments/i }),
+    ).toBeTruthy();
+    expect(view.getByText("Acceptance Criteria")).toBeTruthy();
+    expect(view.getByText("Looks good from Linear")).toBeTruthy();
+    expect(view.getByText("Ada")).toBeTruthy();
+  });
+
+  test("o shortcut opens the Linear issue in a new tab", async () => {
+    let openedUrl = "";
+    const origOpen = window.open;
+    Object.defineProperty(window, "open", {
+      writable: true,
+      value: (url: string) => {
+        openedUrl = url;
+        return null;
+      },
+    });
+    try {
+      const view = renderTicket(source(), trackerDetail());
+      await view.findByRole("heading", { name: "WM-542" });
+      fireEvent.keyDown(document.body, { key: "o" });
+      expect(openedUrl).toBe("https://linear.app/watt-mind/issue/WM-542");
+    } finally {
+      Object.defineProperty(window, "open", {
+        writable: true,
+        value: origOpen,
+      });
+    }
+  });
+
+  test("an unindexed id Linear still knows shows the live title and spec tab", async () => {
+    const view = renderId(
+      "WM-999",
+      unindexed("WM-999"),
+      trackerDetail({
+        ticket: {
+          id: "WM-999",
+          identifier: "WM-999",
+          title: "External but real",
+          state: "Todo",
+          description: "Brought in from Linear.",
+          url: "https://linear.app/watt-mind/issue/WM-999",
+          assignee: null,
+        },
+      }),
+    );
+    await view.findByRole("heading", { name: "WM-999" });
+    expect(view.getByText("External but real")).toBeTruthy();
+    expect(view.queryByText("Unknown or external ticket")).toBeNull();
+    expect(view.getByText(/no runtime activity for WM-999/)).toBeTruthy();
+    fireEvent.click(view.getByRole("tab", { name: "Spec & Comments" }));
+    expect(view.getByText("Brought in from Linear.")).toBeTruthy();
   });
 });
 

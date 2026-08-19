@@ -8,7 +8,14 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "../api";
-import { refetchIntervals, useListKeys, useNow } from "../hooks";
+import { goPrefixActive } from "../goSequence";
+import {
+  keyGuard,
+  refetchIntervals,
+  useListKeys,
+  useNow,
+  useTabKeys,
+} from "../hooks";
 import {
   buildTicketJourney,
   formatDuration,
@@ -18,13 +25,16 @@ import {
   selectPrSource,
   subjectJourney,
   TICKET_ID_PATTERN,
+  overlayTrackerDetail,
   ticketIdsIn,
   type JourneyEvent,
   type JourneyProposal,
   type JourneyRun,
   type SubjectJourney,
+  type TicketTrackerDetail,
   type TimelineItem,
 } from "../subjectJourney";
+import { MarkdownView } from "../components/RunTrace";
 import {
   Ago,
   Button as PrimitiveButton,
@@ -606,14 +616,169 @@ function TicketsHub({
   );
 }
 
+const JOURNEY_TABS = ["timeline", "spec"] as const;
+type JourneyTab = (typeof JOURNEY_TABS)[number];
+
+const EXTERNAL_BUTTON_CLASS =
+  "inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 text-[12px] font-medium text-(--text) hover:bg-(--surface-3)";
+
+async function fetchTicketDetail(
+  ticketId: string,
+): Promise<TicketTrackerDetail | null> {
+  const response = await fetch(
+    `/api/tickets/${encodeURIComponent(ticketId)}/detail`,
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      message = body.message ?? body.error ?? message;
+    } catch {
+      // Keep the HTTP status when the control API did not return JSON.
+    }
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+function ExternalTicketLink({
+  href,
+  label,
+  shortcut,
+}: {
+  href: string;
+  label: string;
+  shortcut?: string;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={label}
+      title={shortcut ? `${label} (${shortcut})` : label}
+      className={EXTERNAL_BUTTON_CLASS}
+    >
+      {label}
+      {shortcut && (
+        <kbd
+          aria-hidden="true"
+          className="rounded border border-(--border) px-1 font-sans text-xs text-(--text-faint)"
+        >
+          {shortcut}
+        </kbd>
+      )}
+    </a>
+  );
+}
+
+function SpecCommentsPanel({
+  detail,
+  pending,
+  error,
+}: {
+  detail: TicketTrackerDetail | null;
+  pending: boolean;
+  error: string | null;
+}) {
+  if (pending) {
+    return (
+      <div role="status" className="text-[13px] text-(--text-faint)">
+        Loading spec and comments…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div
+        role="alert"
+        className="rounded-md border border-(--hue-warn) bg-(--surface-0) p-3 text-[13px] text-(--hue-warn)"
+      >
+        Cannot load Linear details: {error}
+      </div>
+    );
+  }
+  if (!detail) {
+    return (
+      <div role="status" className="text-[13px] text-(--text-dim)">
+        No Linear issue found for this id.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-6">
+      <section aria-labelledby="ticket-spec">
+        <h3
+          id="ticket-spec"
+          className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase"
+        >
+          Spec
+        </h3>
+        <div className="mt-3">
+          {(detail.ticket.description ?? "").trim() ? (
+            <MarkdownView text={detail.ticket.description} />
+          ) : (
+            <p className="text-[13px] text-(--text-dim)">
+              No description recorded.
+            </p>
+          )}
+        </div>
+      </section>
+      <section aria-labelledby="ticket-comments">
+        <h3
+          id="ticket-comments"
+          className="text-[11px] font-medium tracking-wide text-(--text-faint) uppercase"
+        >
+          Comments
+          <span className="ml-1.5 tabular-nums text-(--text-faint)">
+            {(detail.comments ?? []).length}
+          </span>
+        </h3>
+        {(detail.comments ?? []).length === 0 ? (
+          <p className="mt-3 text-[13px] text-(--text-dim)">No comments yet.</p>
+        ) : (
+          <ol className="mt-3 space-y-4">
+            {(detail.comments ?? []).map((comment, index) => (
+              <li
+                key={comment.id ?? `comment-${index}`}
+                className="rounded-md border border-(--border) bg-(--surface-0) p-3"
+              >
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2 text-[11px] text-(--text-faint)">
+                  <span className="font-medium text-(--text-dim)">
+                    {comment.user?.name ?? "unknown"}
+                  </span>
+                  {comment.createdAt && (
+                    <time dateTime={comment.createdAt}>
+                      {new Date(comment.createdAt).toLocaleString()}
+                    </time>
+                  )}
+                </div>
+                <MarkdownView text={comment.body} allowToggle={false} />
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+    </div>
+  );
+}
+
 /** Shared header + timeline + "Where it is now" for either subject kind. */
 function JourneyLayout({
   journey,
   onNavigateTicket,
+  detail = null,
+  detailPending = false,
+  detailError = null,
 }: {
   journey: SubjectJourney;
   onNavigateTicket?: (ticketId: string) => void;
+  detail?: TicketTrackerDetail | null;
+  detailPending?: boolean;
+  detailError?: string | null;
 }) {
+  const [tab, setTab] = useState<JourneyTab>("timeline");
   const cost =
     journey.totalCost == null ? "—" : `$${journey.totalCost.toFixed(2)}`;
   const tokens =
@@ -621,7 +786,11 @@ function JourneyLayout({
   const isPr = journey.subject.kind === "pr";
   const title =
     journey.subject.title ??
-    (isPr ? `PR #${journey.subject.id}` : "title not recorded");
+    (detailPending && !isPr
+      ? "Loading title…"
+      : isPr
+        ? `PR #${journey.subject.id}`
+        : "title not recorded");
   const state = journey.subject.state ?? (isPr ? null : "unknown");
   const heading = isPr ? `#${journey.subject.id}` : journey.subject.id;
   const noActivityLabel = isPr
@@ -629,6 +798,23 @@ function JourneyLayout({
     : `no runtime activity for ${journey.subject.id}`;
   const externalLabel = isPr ? "Open on GitHub ↗" : "Open in Linear ↗";
   const externalUrl = isPr ? (journey.pr?.url ?? null) : journey.subject.url;
+  const ticketTabs: readonly JourneyTab[] = isPr ? ["timeline"] : JOURNEY_TABS;
+
+  useTabKeys(ticketTabs, isPr ? "timeline" : tab, setTab);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (keyGuard(event) || event.metaKey || event.ctrlKey || event.altKey)
+        return;
+      if (goPrefixActive()) return;
+      if (event.key !== "o" && event.key !== "l") return;
+      if (!externalUrl) return;
+      event.preventDefault();
+      window.open(externalUrl, "_blank", "noreferrer");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [externalUrl]);
 
   return (
     <div className="h-full overflow-auto bg-(--surface-0) p-5 lg:p-7">
@@ -670,16 +856,13 @@ function JourneyLayout({
                 {title}
               </div>
             </div>
-            <div className="flex flex-wrap gap-3 text-[12px]">
+            <div className="flex flex-wrap items-center gap-3 text-[12px]">
               {externalUrl && (
-                <a
+                <ExternalTicketLink
                   href={externalUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-(--accent) hover:underline"
-                >
-                  {externalLabel}
-                </a>
+                  label={externalLabel}
+                  shortcut="O"
+                />
               )}
               {!isPr && journey.prUrls[0] && (
                 <a
@@ -717,7 +900,56 @@ function JourneyLayout({
           </div>
         </header>
 
-        {!journey.activity ? (
+        {!isPr && (
+          <div
+            className="mt-5 flex w-max flex-nowrap gap-1 whitespace-nowrap"
+            role="tablist"
+            aria-label="Ticket journey sections"
+          >
+            <PrimitiveButton
+              bare
+              type="button"
+              role="tab"
+              aria-selected={tab === "timeline"}
+              onClick={() => setTab("timeline")}
+              className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                tab === "timeline"
+                  ? "bg-(--surface-3) text-(--text)"
+                  : "text-(--text-faint) hover:bg-(--surface-1)"
+              }`}
+            >
+              Timeline
+            </PrimitiveButton>
+            <PrimitiveButton
+              bare
+              type="button"
+              role="tab"
+              aria-selected={tab === "spec"}
+              onClick={() => setTab("spec")}
+              className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                tab === "spec"
+                  ? "bg-(--surface-3) text-(--text)"
+                  : "text-(--text-faint) hover:bg-(--surface-1)"
+              }`}
+            >
+              Spec & Comments
+            </PrimitiveButton>
+          </div>
+        )}
+
+        {!isPr && tab === "spec" ? (
+          <section
+            role="tabpanel"
+            aria-label="Spec and comments"
+            className="mt-5 rounded-lg border border-(--border) bg-(--surface-1) p-5"
+          >
+            <SpecCommentsPanel
+              detail={detail}
+              pending={detailPending}
+              error={detailError}
+            />
+          </section>
+        ) : !journey.activity ? (
           <div
             role="status"
             className="mt-5 rounded-lg border border-dashed border-(--border-strong) bg-(--surface-1) p-8 text-center"
@@ -726,19 +958,19 @@ function JourneyLayout({
               {noActivityLabel}
             </div>
             {externalUrl && (
-              <a
-                href={externalUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-2 inline-block text-[12px] text-(--accent) hover:underline"
-              >
-                {externalLabel}
-              </a>
+              <div className="mt-3 flex justify-center">
+                <ExternalTicketLink
+                  href={externalUrl}
+                  label={externalLabel}
+                  shortcut="O"
+                />
+              </div>
             )}
           </div>
         ) : (
           <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
             <section
+              role="tabpanel"
               aria-labelledby="ticket-timeline"
               className="rounded-lg border border-(--border) bg-(--surface-1) p-5"
             >
@@ -847,6 +1079,13 @@ export function Ticket({
     enabled: valid,
     ...refetchIntervals.secondary,
   });
+  const detailQuery = useQuery({
+    queryKey: ["ticket-detail", normalized],
+    queryFn: () => fetchTicketDetail(normalized!),
+    enabled: valid,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  });
 
   if (!ticketId || ticketId.trim() === "")
     return <TicketsHub onNavigate={onNavigate} onNavigatePr={onNavigatePr} />;
@@ -892,10 +1131,20 @@ export function Ticket({
   }
 
   // An id nothing in the runtime has ever named — a typo, another workspace's
-  // ticket, or a team this factory does not dispatch. The journey chrome would
-  // be a page of dashes, so say what happened and offer the one link that can
-  // still answer the question.
-  if (isUnindexedTicket(query.data)) {
+  // ticket, or a team this factory does not dispatch. If the tracker still
+  // knows it, show the journey chrome with the live title instead of this
+  // empty state.
+  const trackerKnown = Boolean(
+    detailQuery.data?.ticket.title || detailQuery.data?.ticket.state,
+  );
+  if (isUnindexedTicket(query.data) && !trackerKnown) {
+    if (detailQuery.isPending) {
+      return (
+        <div className="p-8 text-[13px] text-(--text-faint)">
+          Loading {normalized} from Linear…
+        </div>
+      );
+    }
     return (
       <div className="p-8">
         <div
@@ -910,14 +1159,11 @@ export function Ticket({
             index: no run, event, or proposal has ever named it.
           </div>
           <div className="mt-4 flex flex-wrap justify-center gap-4 text-[12px]">
-            <a
+            <ExternalTicketLink
               href={query.data.ticket.url}
-              target="_blank"
-              rel="noreferrer"
-              className="text-(--accent) hover:underline"
-            >
-              Open in Linear ↗
-            </a>
+              label="Open in Linear ↗"
+              shortcut="O"
+            />
             <button
               type="button"
               onClick={() => onNavigate("")}
@@ -931,11 +1177,25 @@ export function Ticket({
     );
   }
 
-  const journey = buildTicketJourney({
-    ...query.data,
-    schedules: schedules.data?.schedules,
-  });
-  return <JourneyLayout journey={journey} />;
+  const journey = overlayTrackerDetail(
+    buildTicketJourney({
+      ...query.data,
+      schedules: schedules.data?.schedules,
+    }),
+    detailQuery.data,
+  );
+  return (
+    <JourneyLayout
+      journey={journey}
+      detail={detailQuery.data}
+      detailPending={detailQuery.isPending}
+      detailError={
+        detailQuery.isError
+          ? ((detailQuery.error as Error)?.message ?? "unavailable")
+          : null
+      }
+    />
+  );
 }
 
 /**

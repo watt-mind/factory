@@ -114,6 +114,61 @@ export interface TicketJourneySource {
   runs: JourneyRun[];
 }
 
+/** One comment from `GET /tickets/:id/detail` (WM-914). */
+export interface TicketTrackerComment {
+  id: string | null;
+  body: string;
+  createdAt: string | null;
+  user: { id?: string | null; name?: string | null } | null;
+}
+
+/** Live tracker snapshot from `GET /tickets/:id/detail` (WM-914). */
+export interface TicketTrackerDetail {
+  ticket: {
+    id: string;
+    identifier: string;
+    title: string | null;
+    state: string | null;
+    description: string;
+    url: string;
+    assignee: { name?: string | null } | null;
+  };
+  comments: TicketTrackerComment[];
+  fetchedAt: string;
+  cached: boolean;
+}
+
+/** Overlay live tracker title/state/url onto a runtime-built ticket journey. */
+export function overlayTrackerDetail(
+  journey: SubjectJourney,
+  detail: TicketTrackerDetail | null | undefined,
+): SubjectJourney {
+  if (!detail?.ticket || journey.subject.kind !== "ticket") return journey;
+  const title =
+    typeof detail.ticket.title === "string" && detail.ticket.title.trim()
+      ? detail.ticket.title.trim()
+      : journey.subject.title;
+  const state =
+    typeof detail.ticket.state === "string" && detail.ticket.state.trim()
+      ? detail.ticket.state.trim()
+      : journey.subject.state;
+  const url =
+    typeof detail.ticket.url === "string" && detail.ticket.url.trim()
+      ? detail.ticket.url.trim()
+      : journey.subject.url;
+  if (
+    title === journey.subject.title &&
+    state === journey.subject.state &&
+    url === journey.subject.url
+  ) {
+    return journey;
+  }
+  return {
+    ...journey,
+    subject: { ...journey.subject, title, state, url },
+  };
+}
+
 export interface JourneyEvent {
   source: string;
   eventId: string;

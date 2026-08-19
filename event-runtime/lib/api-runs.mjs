@@ -1,4 +1,5 @@
 /** Event, proposal, run, journal, outbox, and worker-action endpoints. */
+import { ControlPlaneError } from "../../lib/control-plane/types.mjs";
 import { artifactHead } from "./api-artifacts.mjs";
 import { FACTORY_ROOT } from "./config.mjs";
 import { runUsage } from "./db.mjs";
@@ -394,6 +395,107 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     proposals: matchedProposals,
     runs: matchedRuns,
   };
+}
+
+/** Short TTL so Ticket Journey can poll without exhausting Linear. */
+export const TICKET_DETAIL_CACHE_TTL_MS = 30_000;
+const ticketDetailCache = new Map();
+let injectedTicketDetailControlPlane = null;
+
+/** Test seam: inject a ControlPlane (typically `memoryControlPlane`) or clear. */
+export function setTicketDetailControlPlane(plane) {
+  injectedTicketDetailControlPlane = plane ?? null;
+}
+
+export function clearTicketDetailCache() {
+  ticketDetailCache.clear();
+}
+
+function trackerStateName(state) {
+  if (typeof state === "string" && state.trim()) return state.trim();
+  if (state && typeof state === "object" && typeof state.name === "string") {
+    const name = state.name.trim();
+    if (name) return name;
+  }
+  return null;
+}
+
+async function ticketDetailControlPlane(override) {
+  if (override) return override;
+  if (injectedTicketDetailControlPlane) return injectedTicketDetailControlPlane;
+  const { loadControlPlane } =
+    await import("../../lib/control-plane/index.mjs");
+  return loadControlPlane({ root: FACTORY_ROOT });
+}
+
+/**
+ * Live tracker snapshot for Ticket Journey (WM-914): title, state, markdown
+ * description, and comments. Cached briefly so a 5s UI poll does not become a
+ * Linear request storm.
+ */
+export async function ticketDetailView(rawTicket, options = {}) {
+  const ticket = String(rawTicket ?? "")
+    .trim()
+    .toUpperCase();
+  if (!TICKET_ID.test(ticket)) return { error: "invalid_ticket" };
+
+  const nowMs = options.nowMs ?? Date.now();
+  const cacheKey = ticket;
+  if (options.noCache !== true) {
+    const cached = ticketDetailCache.get(cacheKey);
+    if (cached && nowMs - cached.timestamp < TICKET_DETAIL_CACHE_TTL_MS) {
+      return { ...cached.data, cached: true };
+    }
+  }
+
+  try {
+    const plane = await ticketDetailControlPlane(options.controlPlane);
+    const [issue, comments] = await Promise.all([
+      plane.getTicket(ticket),
+      plane.listComments(ticket),
+    ]);
+    const identifier = issue.identifier ?? ticket;
+    const data = {
+      ticket: {
+        id: identifier,
+        identifier,
+        title:
+          typeof issue.title === "string" && issue.title.trim()
+            ? issue.title.trim()
+            : null,
+        state: trackerStateName(issue.state),
+        description:
+          typeof issue.description === "string" ? issue.description : "",
+        url:
+          typeof issue.url === "string" && issue.url.trim()
+            ? issue.url.trim()
+            : `https://linear.app/watt-mind/issue/${encodeURIComponent(ticket)}`,
+        assignee: issue.assignee ? { name: issue.assignee.name ?? null } : null,
+      },
+      comments: (Array.isArray(comments) ? comments : []).map((comment) => ({
+        id: comment?.id ?? null,
+        body: typeof comment?.body === "string" ? comment.body : "",
+        createdAt:
+          typeof comment?.createdAt === "string" ? comment.createdAt : null,
+        user: comment?.user
+          ? {
+              id: comment.user.id ?? null,
+              name: comment.user.name ?? null,
+            }
+          : null,
+      })),
+      fetchedAt: new Date(nowMs).toISOString(),
+      cached: false,
+    };
+    ticketDetailCache.set(cacheKey, { timestamp: nowMs, data });
+    return data;
+  } catch (err) {
+    const message = err?.message ? String(err.message) : "tracker read failed";
+    if (err instanceof ControlPlaneError && /no such issue/i.test(message)) {
+      return { error: "not_found", message };
+    }
+    return { error: "tracker_unavailable", message };
+  }
 }
 
 /** States whose attempt deadline is live and render-relevant on the run list. */
@@ -1181,6 +1283,7 @@ export async function handleRunApiRoute({
   artifactsDir,
   onEvent,
   policyRoot = FACTORY_ROOT,
+  controlPlane,
 }) {
   if (route === "GET /events") {
     return send(200, {
@@ -1344,6 +1447,27 @@ export async function handleRunApiRoute({
         : 409;
       return send(status, { error: err.message });
     }
+  }
+
+  const ticketDetail = url.pathname.match(/^\/tickets\/([^/]+)\/detail$/);
+  if (req.method === "GET" && ticketDetail) {
+    const result = await ticketDetailView(decodeURIComponent(ticketDetail[1]), {
+      nowMs,
+      controlPlane,
+    });
+    if (result.error === "invalid_ticket") {
+      return send(422, { error: "ticket must look like WM-123" });
+    }
+    if (result.error === "not_found") {
+      return send(404, { error: result.message });
+    }
+    if (result.error === "tracker_unavailable") {
+      return send(502, {
+        error: "tracker_unavailable",
+        message: result.message,
+      });
+    }
+    return send(200, result);
   }
 
   if (route === "GET /tickets") {
