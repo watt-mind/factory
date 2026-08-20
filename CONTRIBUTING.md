@@ -90,6 +90,7 @@ needed, and avoid mixing mechanical formatting with unrelated behavior.
 - Complete the pull request template and link the issue the change resolves.
 - Include the exact commands you ran and any relevant output or screenshots.
 - Call out security impact, compatibility concerns, and follow-up work.
+- Automated checks run on GitHub-hosted cloud runners; first-time outside contributors may require maintainer approval before CI executes.
 - Expect review feedback. Approval and passing automation are both required;
   an author does not merge their own pull request.
 

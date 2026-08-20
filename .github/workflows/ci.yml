@@ -5,7 +5,14 @@ on:
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   push:
     branches: ["develop", "main"]
+  schedule:
+    - cron: "0 4 * * *" # Nightly continuous exercise of the cloud runner lane (WM-950)
   workflow_dispatch:
+    inputs:
+      force_hosted:
+        description: "Force execution on GitHub-hosted runner (ubuntu-latest)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,8 +25,45 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
+  route:
+    name: Route CI lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      self_hosted: ${{ steps.detect.outputs.self_hosted }}
+      shadow_labels: ${{ steps.detect.outputs.shadow_labels }}
+      verify_labels: ${{ steps.detect.outputs.verify_labels }}
+    steps:
+      - id: detect
+        name: Determine runner lane
+        env:
+          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository && github.event_name == 'pull_request' }}
+          IS_BOT: ${{ github.actor == 'dependabot[bot]' }}
+          FORCE_HOSTED: ${{ inputs.force_hosted || github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_FORK" = "true" ] || [ "$IS_BOT" = "true" ] || [ "$FORCE_HOSTED" = "true" ]; then
+            echo "Routing to GitHub-hosted runner (ubuntu-latest)"
+            {
+              echo "self_hosted=false"
+              echo 'shadow_labels=["ubuntu-latest"]'
+              echo 'verify_labels=["ubuntu-latest"]'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "Routing to self-hosted runner fleet"
+            {
+              echo "self_hosted=true"
+              echo 'shadow_labels=["self-hosted", "shadow"]'
+              echo 'verify_labels=["self-hosted", "verify-lane"]'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
   shadow-runner-health:
     name: Shadow runner fleet available
+    # Gated on self-hosted lane (WM-950). Cloud runners (ubuntu-latest) do not
+    # have or require the local shadow fleet.
+    needs: route
+    if: needs.route.outputs.self_hosted == 'true'
     # This check must not use the shadow pool: when that pool is dead, the
     # dedicated light runners are what turn a silent queue into an explicit
     # failing check. Both pools live on the same host.
@@ -87,14 +131,19 @@ jobs:
 
   fast-unit-tests:
     name: Fast unit tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    needs: shadow-runner-health
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
+      }}
+    needs: [route, shadow-runner-health]
     # Measurements recorded in docs/ci.md show this bounded suite can run
     # safely without joining the integration/E2E host-lock queue.
-    runs-on: [self-hosted, shadow]
+    runs-on: ${{ fromJSON(needs.route.outputs.shadow_labels) }}
     timeout-minutes: 15
     steps:
       - name: Sweep stale shared-host temp directories
+        if: runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
@@ -120,7 +169,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
-            curl -fsSL https://bun.sh/install | bash
+            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
           fi
           if [ -x "$HOME/.bun/bin/bun" ]; then
             echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
@@ -173,7 +222,7 @@ jobs:
         run: bin/factory demo --dry
 
       - name: Sweep stale shared-host temp directories
-        if: always()
+        if: always() && runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
@@ -184,12 +233,17 @@ jobs:
     # shared-host contention. Not a required check — required Verify and Fast
     # unit tests exclude this group. A red result here is a flake signal, not
     # a merge blocker.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    needs: shadow-runner-health
-    runs-on: [self-hosted, shadow]
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
+      }}
+    needs: [route, shadow-runner-health]
+    runs-on: ${{ fromJSON(needs.route.outputs.shadow_labels) }}
     timeout-minutes: 20
     steps:
       - name: Sweep stale shared-host temp directories
+        if: runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
@@ -215,7 +269,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
-            curl -fsSL https://bun.sh/install | bash
+            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
           fi
           if [ -x "$HOME/.bun/bin/bun" ]; then
             echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
@@ -268,27 +322,26 @@ jobs:
           exit "$status"
 
       - name: Sweep stale shared-host temp directories
-        if: always()
+        if: always() && runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
   verify:
     name: Full verification
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    needs: [shadow-runner-health, fast-unit-tests]
-    # Self-hosted per project-conventions PC-03 / PC-22 — cloud runners are
-    # forbidden. `verify-lane` is carried by a small, fixed number of shadow
-    # runner services (WM-773): GitHub queues these jobs FIFO for a free lane
-    # runner instead of parking every shadow runner in a host flock, so the
-    # rest of the fleet stays free for lint, security and other repos. Lanes
-    # = number of runners with the label; change capacity by relabelling
-    # runners, not by editing this file.
-    runs-on: [self-hosted, verify-lane]
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success') &&
+        needs.fast-unit-tests.result == 'success'
+      }}
+    needs: [route, shadow-runner-health, fast-unit-tests]
+    runs-on: ${{ fromJSON(needs.route.outputs.verify_labels) }}
     # Runaway guard only — queue time is now spent in GitHub's queue, not here.
     timeout-minutes: 45
     steps:
       - name: Sweep stale shared-host temp directories
+        if: runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
@@ -325,7 +378,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
-            curl -fsSL https://bun.sh/install | bash
+            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
           fi
           if [ -x "$HOME/.bun/bin/bun" ]; then
             echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
@@ -519,7 +572,7 @@ jobs:
           bun event-runtime/demo/verify.mjs --port "$PORT"
 
       - name: Sweep stale shared-host temp directories
-        if: always()
+        if: always() && runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
@@ -527,14 +580,15 @@ jobs:
   required-verify:
     name: Verify
     if: always()
-    needs: [shadow-runner-health, fast-unit-tests, verify]
-    # Keep the required check responsive even when the shadow pool is busy or
-    # unhealthy. It aggregates the expensive jobs without running test code.
-    runs-on: [self-hosted, smoke-test]
+    needs: [route, shadow-runner-health, fast-unit-tests, verify]
+    # Runs on cloud runner so required verification is decoupled from host fleet
+    # health when executing cloud PR runs (WM-950).
+    runs-on: ubuntu-latest
     timeout-minutes: 2
     env:
       EVENT_NAME: ${{ github.event_name }}
       IS_DRAFT: ${{ github.event.pull_request.draft }}
+      SELF_HOSTED: ${{ needs.route.outputs.self_hosted }}
       HEALTH_RESULT: ${{ needs.shadow-runner-health.result }}
       FAST_RESULT: ${{ needs.fast-unit-tests.result }}
       FULL_RESULT: ${{ needs.verify.result }}
@@ -550,8 +604,16 @@ jobs:
           fi
 
           failed=0
+          if [ "$SELF_HOSTED" = "true" ]; then
+            echo "Shadow runner fleet available=$HEALTH_RESULT"
+            if [ "$HEALTH_RESULT" != "success" ]; then
+              failed=1
+            fi
+          else
+            echo "Cloud runner lane active: shadow runner fleet health check skipped."
+          fi
+
           for result in \
-            "Shadow runner fleet available=$HEALTH_RESULT" \
             "Fast unit tests=$FAST_RESULT" \
             "Full verification=$FULL_RESULT"
           do

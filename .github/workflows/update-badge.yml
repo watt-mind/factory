@@ -22,7 +22,8 @@ concurrency:
 jobs:
   update-badge:
     name: Refresh README dogfood badge
-    runs-on: [self-hosted, shadow]
+    # Cloud runner per OSS security policy (WM-950).
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout develop (no action download)
@@ -45,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
-            curl -fsSL https://bun.sh/install | bash
+            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
           fi
           if [ -x "$HOME/.bun/bin/bun" ]; then
             echo "$HOME/.bun/bin" >> "$GITHUB_PATH"

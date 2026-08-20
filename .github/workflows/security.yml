@@ -19,22 +19,10 @@ concurrency:
 jobs:
   gitleaks:
     name: Gitleaks
-    # Self-hosted per project-conventions PC-03 / PC-22.
-    runs-on: [self-hosted, shadow]
+    # Cloud runner per OSS security policy (WM-950).
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # No `uses:` steps in this workflow on purpose (WM-573, mirrors ci.yml):
-      # every marketplace action is fetched from codeload.github.com at "Set
-      # up job", and the shadow fleet (eight runners, one egress IP, no action
-      # archive cache) has hit 429 Too Many Requests on actions/checkout.
-      # PR runs need connected history between base and head so `git log
-      # base..head` (gitleaks --log-opts) can walk it — start shallow and
-      # deepen only as far as needed to connect the two endpoints.
-      # Push runs (WM-620) do the same against `github.event.before`: in a
-      # depth-1 clone `git log -1` emits the whole tree as added, so gitleaks
-      # scanned ~6 MB per develop push and tripped on pre-existing text.
-      # `before` is all zeros on branch creation and empty on
-      # workflow_dispatch — those fall back to a depth-1 checkout.
       - name: Checkout (no action download)
         shell: bash
         env:
@@ -98,17 +86,8 @@ jobs:
           elif [ -x "$HOME/.local/bin/gitleaks" ]; then
             echo "bin=$HOME/.local/bin/gitleaks" >> "$GITHUB_OUTPUT"
           else
-            # Releases download, not codeload — resolve the current tag via the
-            # GitHub API (versioned asset name, so a hardcoded URL goes stale)
-            # then fetch the linux_x64 tarball straight from
-            # objects.githubusercontent.com, no actions/* download involved.
-            # Capture the full response before grepping it: piping curl
-            # straight into `grep -m1` lets grep exit after the first match
-            # while curl is still writing, which curl reports as exit 23
-            # ("Failure writing output to destination").
-            resp="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
-              https://api.github.com/repos/gitleaks/gitleaks/releases/latest)"
-            tag="$(printf '%s' "$resp" | grep -m1 '"tag_name"' | cut -d '"' -f4)"
+            # Pinned release download (WM-950)
+            tag="v8.24.0"
             ver="${tag#v}"
             mkdir -p "$HOME/.local/bin"
             curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
@@ -144,7 +123,7 @@ jobs:
 
   semgrep:
     name: Semgrep
-    runs-on: [self-hosted, shadow]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout (no action download)
@@ -183,11 +162,11 @@ jobs:
           "$uvx_bin" --version
 
       - name: Semgrep scan
-        run: uvx semgrep scan --config p/security-audit --error --metrics=off .
+        run: uvx --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
 
   actionlint:
     name: Actionlint
-    runs-on: [self-hosted, shadow]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout (no action download)
@@ -211,7 +190,8 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v actionlint >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/actionlint" ]; then
-            bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) latest "$HOME/.local/bin"
+            mkdir -p "$HOME/.local/bin"
+            bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7 "$HOME/.local/bin"
           fi
           # $GITHUB_PATH only takes effect starting the *next* step, not this
           # one — resolve the binary directly here rather than relying on PATH.
@@ -237,7 +217,7 @@ jobs:
     # `CODEQL_ENABLED` repo variable to `true` and replace this placeholder
     # with the real init/analyze steps at that point.
     if: ${{ vars.CODEQL_ENABLED == 'true' }}
-    runs-on: [self-hosted, shadow]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: CodeQL gated placeholder

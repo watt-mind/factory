@@ -60,6 +60,10 @@ performed with credentials and approval explicitly granted to the operator are
 normally product-quality issues rather than vulnerabilities. A model failure
 that crosses one of the boundaries above is a security issue.
 
+## CI runner and public contribution isolation
+
+Workflows triggered by external pull requests from forks execute strictly in isolated, ephemeral GitHub-hosted environments (`ubuntu-latest`) with read-only repository permissions and withheld Actions secrets. Internal self-hosted runner infrastructure is reserved exclusively for trusted repository branches and maintainer workflows.
+
 ## Disclosure policy
 
 Please allow us a reasonable opportunity to investigate and remediate before

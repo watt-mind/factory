@@ -28,7 +28,8 @@ jobs:
         github.event_name == 'workflow_dispatch' ||
         (
           github.event.pull_request.draft == false &&
-          contains(github.event.pull_request.labels.*.name, 'run-e2e')
+          contains(github.event.pull_request.labels.*.name, 'run-e2e') &&
+          github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
     # Same dedicated lane as CI's Verify (WM-773): queue in GitHub, not flock.
@@ -36,6 +37,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Sweep stale shared-host temp directories
+        if: runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
@@ -61,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
-            curl -fsSL https://bun.sh/install | bash
+            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
           fi
           if [ -x "$HOME/.bun/bin/bun" ]; then
             echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
@@ -128,7 +130,7 @@ jobs:
         run: cd event-runtime/web && bun run test:e2e
 
       - name: Sweep stale shared-host temp directories
-        if: always()
+        if: always() && runner.environment == 'self-hosted'
         shell: bash
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true

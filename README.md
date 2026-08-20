@@ -235,6 +235,7 @@ Agents are isolated specialist contexts, not workflow entry points.
 | [docs/model.md](docs/model.md)                     | Public primitives in this repository's vocabulary             |
 | [docs/quickstart.md](docs/quickstart.md)           | 15-minute `factory demo`                                      |
 | [docs/architecture.md](docs/architecture.md)       | Why the factory is shaped this way                            |
+| [docs/orchestrator.md](docs/orchestrator.md)       | Master orchestrator guide and operating loops                 |
 | [SETUP.md](SETUP.md)                               | First-time setup, harness links, event-runtime daemon         |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                 | Setup, tests, commit conventions, CLA                         |
 | [SECURITY.md](SECURITY.md)                         | Vulnerability reporting and the autonomous-agent threat model |

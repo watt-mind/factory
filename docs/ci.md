@@ -2,9 +2,22 @@
 
 ## Runner topology
 
-Factory CI uses self-hosted runners only. The `shadow` label currently maps to eight runner services (`watt-mind-runner-1` through `watt-mind-runner-8`) on one physical host. The lightweight `smoke-test` runner is on that host too, but it only checks fleet health and host capacity.
+Factory CI uses a hybrid runner strategy designed for public open-source operation (WM-950):
 
-Treat runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
+- **Internal trusted lanes**: Branches originating within `watt-mind/factory` (pushes to `develop`/`main` and internal pull requests) run on high-performance self-hosted runners. The `shadow` label maps to eight runner services (`watt-mind-runner-1` through `watt-mind-runner-8`) on one physical host, and the `smoke-test` runner checks fleet health.
+- **External untrusted fork PRs**: Pull requests from external repository forks run in isolated, ephemeral GitHub-hosted runners (`ubuntu-latest`). Untrusted contributor code has zero access to the host machine, filesystem, `/tmp`, or internal network.
+- **Security & utility workflows**: Workflows handling credentials or isolated scans (`security.yml`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`) run unconditionally on `ubuntu-latest`.
+
+Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
+
+## Fork PR sandboxing & dual routing
+
+In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-latest` to determine the execution lane based on the event context:
+
+- Untrusted fork PRs (`github.event.pull_request.head.repo.full_name != github.repository`), Dependabot PRs, and nightly exercises route dynamically to `ubuntu-latest`.
+- Trusted internal PRs and branch pushes route to `[self-hosted, shadow]` and `[self-hosted, verify-lane]`.
+- Host-specific steps (`shadow-runner-health`, host `/tmp` sweep) execute only when `runner.environment == 'self-hosted'`.
+- Continuous exercise: A nightly schedule (`0 4 * * *`) and `workflow_dispatch` input `force_hosted` run the full CI suite on `ubuntu-latest` to prevent cloud lane regressions.
 
 ## Verify lane
 
@@ -89,7 +102,7 @@ A failed or cancelled test job breaks the streak. Record the five develop run UR
 
 ## Security scans
 
-`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `[self-hosted, shadow]` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
+`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `ubuntu-latest` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
 
 - **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
 - **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
