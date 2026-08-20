@@ -8,10 +8,10 @@
  * the useful ticket reference is usually buried in a summary line, not in a
  * column anybody thought to annotate.
  *
- * The `x-ui` schema annotation (WM-701) is gone — `lib/schema.mjs` fails
- * closed on unknown keywords, so nothing could legally send it.
+ * Registry schemas from compatible producers can additionally use an `x-ui`
+ * annotation to declare the same semantic intent for dynamic table columns.
  */
-import { extractRowValue } from "../pathExtractor";
+import { extractRowValue, parsePath } from "../pathExtractor";
 import type { ArtifactFormat } from "../types";
 import { TicketHoverCard, TicketText } from "./TicketHoverCard";
 
@@ -21,6 +21,57 @@ export interface CellFormat {
   title?: string;
   /** `ticket` when the view format (or equivalent) says the whole cell is one issue id. */
   kind: string | null;
+}
+
+/** The optional presentation annotation attached to a JSON-schema property. */
+export interface CellUi {
+  kind?: string | null;
+}
+
+/**
+ * Read an `x-ui` annotation defensively. Schemas arrive from the registry, so
+ * an incomplete or third-party schema must leave the ordinary cell intact.
+ */
+export function readCellUi(schema: unknown): CellUi | null {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema))
+    return null;
+  const annotation = (schema as Record<string, unknown>)["x-ui"];
+  if (!annotation || typeof annotation !== "object" || Array.isArray(annotation))
+    return null;
+  const kind = (annotation as Record<string, unknown>).kind;
+  return typeof kind === "string" && kind.length > 0 ? { kind } : null;
+}
+
+/**
+ * Resolve the input-schema node for a dynamic table path. Dynamic columns may
+ * name their value directly or retain the Events/Runs scope discovered by the
+ * display picker (`payload.ticket`, `spec.input.ticket`, etc.).
+ */
+export function schemaForCellPath(schema: unknown, path: string): unknown {
+  const parts = [...parsePath(path.replace(/^custom:/, ""))];
+  if (parts[0] === "envelope" && parts[1] === "payload") parts.splice(0, 2);
+  else if (parts[0] === "spec" && parts[1] === "input") parts.splice(0, 2);
+  else if (parts[0] === "payload" || parts[0] === "input") parts.shift();
+
+  let node = schema;
+  for (const part of parts) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return null;
+    const record = node as Record<string, unknown>;
+    const properties = record.properties;
+    if (
+      properties &&
+      typeof properties === "object" &&
+      !Array.isArray(properties) &&
+      part in properties
+    ) {
+      node = (properties as Record<string, unknown>)[part];
+    } else if (/^\d+$/.test(part) && record.items) {
+      node = record.items;
+    } else {
+      return null;
+    }
+  }
+  return node;
 }
 
 export function formatCellValue(
@@ -70,17 +121,27 @@ export function CustomCell({
   row,
   path,
   format,
+  schema,
+  ui,
   onNavigateTicket,
 }: {
   row: unknown;
   path: string;
   /** Closed `formats` value from the active view, when the caller has one. */
   format?: ArtifactFormat | null;
+  /** Input schema for this row's agent, when the host has registry metadata. */
+  schema?: unknown;
+  /** Resolved schema UI annotation; takes precedence over a raw schema node. */
+  ui?: CellUi | null;
   onNavigateTicket?: (ticketId: string) => void;
 }) {
   const cleanPath = path.replace(/^custom:/, "");
   const value = extractRowValue(row, cleanPath);
-  const { text, isComplex, title, kind } = formatCellValue(value, format);
+  const schemaUi = ui ?? readCellUi(schemaForCellPath(schema, cleanPath));
+  const { text, isComplex, title, kind } = formatCellValue(
+    value,
+    schemaUi?.kind === "ticket" ? "issue" : format,
+  );
 
   const isMono =
     format === "sha" ||

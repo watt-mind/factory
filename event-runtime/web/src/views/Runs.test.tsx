@@ -29,6 +29,7 @@ import type {
   RunDetail,
   RunListItem,
   RunState,
+  AgentsView,
 } from "../types";
 
 afterEach(() => {
@@ -143,7 +144,54 @@ function renderRuns(props: Partial<Parameters<typeof Runs>[0]> = {}) {
   );
 }
 
+function ticketSchemaRegistry(): AgentsView {
+  return createAgentsFixture({
+    agents: [
+      {
+        ref: "ticket-agent@1",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ticket: { type: "string", "x-ui": { kind: "ticket" } },
+          },
+        },
+        eventTypes: [],
+      } as unknown as AgentsView["agents"][number],
+    ],
+  });
+}
+
 describe("Runs sortable columns (OPS-492)", () => {
+  test("renders an x-ui ticket input column from its run agent schema", async () => {
+    localStorage.setItem(
+      "evrt-display-runs",
+      JSON.stringify({ customColumns: ["spec.input.ticket"] }),
+    );
+    const run = stubListItem("run_schema_ticket", "COMPLETED", {
+      agent: "ticket-agent@1",
+      spec: createRunSpecFixture("run_schema_ticket", {
+        input: { ticket: "FOO-12" },
+      }),
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [run] }),
+        events: async () => ({ events: [] }),
+        status: async () => createStatusFixture(),
+        agents: async () => ticketSchemaRegistry(),
+      },
+      async () => {
+        const r = renderRuns();
+        await waitFor(() =>
+          expect(
+            r.getByRole("link", { name: "FOO-12" }).getAttribute("href"),
+          ).toBe("#/tickets/FOO-12"),
+        );
+      },
+    );
+  });
+
   test("every data header cycles ascending, descending, and default order with accessible state", async () => {
     const onSelectRun = mock(() => {});
     const later = stubListItem("run_zulu", "RUNNING", {

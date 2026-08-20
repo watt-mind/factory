@@ -603,6 +603,18 @@ export function Runs({
     queryFn: () => api.events(),
     ...refetchIntervals.secondary,
   });
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.agents,
+    ...refetchIntervals.secondary,
+  });
+  const inputSchemaByAgent = useMemo(
+    () =>
+      new Map(
+        agentsQ.data?.agents.map((agent) => [agent.ref, agent.inputSchema]),
+      ),
+    [agentsQ.data],
+  );
   const causation = useMemo(() => {
     const originByKey = new Map<string, AdmittedEvent>();
     const emittedCount = new Map<string, number>();
@@ -1442,6 +1454,7 @@ export function Runs({
                         key={c.key}
                         row={r}
                         path={c.key.replace(/^custom:/, "")}
+                        schema={inputSchemaByAgent.get(r.agent)}
                       />
                     ))}
                 </tr>

@@ -458,6 +458,33 @@ export function Events({
     queryFn: () => api.runs(),
     ...refetchIntervals.secondary,
   });
+  // Dynamic payload columns can be marked by the producing route's input
+  // schema. Keep this separate from row fetching: a registry refresh must not
+  // make Events wait for a second events response before its cells gain their
+  // semantic rendering.
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.agents,
+    ...refetchIntervals.secondary,
+  });
+  const inputSchemaByEventType = useMemo(() => {
+    const registry = agentsQ.data;
+    const byRef = new Map(registry?.agents.map((agent) => [agent.ref, agent]));
+    const schemas = new Map<string, unknown>();
+    for (const route of registry?.eventTypes ?? []) {
+      const schema = route.agent ? byRef.get(route.agent)?.inputSchema : null;
+      if (schema) schemas.set(route.type, schema);
+    }
+    // The route is also retained with its agent definition. This fallback
+    // keeps the semantic cell useful for older registry responses that predate
+    // the top-level eventTypes index.
+    for (const agent of registry?.agents ?? []) {
+      for (const route of agent.eventTypes) {
+        if (!schemas.has(route.type)) schemas.set(route.type, agent.inputSchema);
+      }
+    }
+    return schemas;
+  }, [agentsQ.data]);
   const decisions = useMemo(() => {
     const byId = new Map<string, Proposal>();
     const byEvent = new Map<string, Proposal>();
@@ -1336,6 +1363,7 @@ export function Events({
                           key={c.key}
                           row={e}
                           path={c.key.replace(/^custom:/, "")}
+                          schema={inputSchemaByEventType.get(e.type)}
                         />
                       ))}
                   </tr>

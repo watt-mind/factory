@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { Events } from "./Events";
 import {
   changeInput,
+  createAgentsFixture,
   createEventFixture,
   createProposalFixture,
   createRunListItemFixture,
@@ -13,7 +14,7 @@ import {
   withApi,
 } from "../test-render";
 import { shortId } from "../components/ui";
-import type { AdmittedEvent, EventFocus } from "../types";
+import type { AdmittedEvent, AgentsView, EventFocus } from "../types";
 
 afterEach(() => {
   cleanup();
@@ -61,7 +62,58 @@ function renderEvents(props: Partial<Parameters<typeof Events>[0]> = {}) {
   );
 }
 
+function ticketSchemaRegistry(eventType: string): AgentsView {
+  return createAgentsFixture({
+    agents: [
+      {
+        ref: "ticket-agent@1",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ticket: { type: "string", "x-ui": { kind: "ticket" } },
+          },
+        },
+        eventTypes: [],
+      } as unknown as AgentsView["agents"][number],
+    ],
+    eventTypes: [{ type: eventType, agent: "ticket-agent@1" }],
+  });
+}
+
 describe("Events component harness: selection & detail view", () => {
+  test("renders an x-ui ticket payload column from its route schema", async () => {
+    localStorage.setItem(
+      "evrt-display-events",
+      JSON.stringify({ customColumns: ["payload.ticket"] }),
+    );
+    const event = stubEvent("evt_schema_ticket", "admitted", {
+      type: "ticket.route",
+      envelope: {
+        schemaVersion: "factory.event/v1",
+        eventId: "evt_schema_ticket",
+        type: "ticket.route",
+        source: "github",
+        payload: { ticket: "FOO-12" },
+      },
+    });
+
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        status: async () => createStatusFixture(),
+        agents: async () => ticketSchemaRegistry("ticket.route"),
+      },
+      async () => {
+        const r = renderEvents();
+        await waitFor(() =>
+          expect(
+            r.getByRole("link", { name: "FOO-12" }).getAttribute("href"),
+          ).toBe("#/tickets/FOO-12"),
+        );
+      },
+    );
+  });
+
   test("clicking a row selects the event via onSelectEvent", async () => {
     const onSelectEvent = mock(() => {});
     const e1 = stubEvent("evt_click_test", "admitted");

@@ -1,7 +1,12 @@
 import "../test-dom";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { CustomCell, formatCellValue } from "./CustomCell";
+import {
+  CustomCell,
+  formatCellValue,
+  readCellUi,
+  schemaForCellPath,
+} from "./CustomCell";
 import { renderWithClient, restoreApi, withApi } from "../test-render";
 import type { RepoItem } from "../types";
 
@@ -87,6 +92,23 @@ describe("formatCellValue", () => {
   });
 });
 
+describe("schema annotations", () => {
+  test("reads a ticket annotation from the matching input-schema path", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        ticket: { type: "string", "x-ui": { kind: "ticket" } },
+      },
+    };
+    expect(readCellUi(schemaForCellPath(schema, "payload.ticket"))).toEqual({
+      kind: "ticket",
+    });
+    expect(readCellUi(schemaForCellPath(schema, "spec.input.ticket"))).toEqual({
+      kind: "ticket",
+    });
+  });
+});
+
 describe("CustomCell", () => {
   test("a view format=issue column links the whole cell to the ticket journey", async () => {
     await withApi(reposApi(), async () => {
@@ -138,6 +160,28 @@ describe("CustomCell", () => {
     await withApi(reposApi(), async () => {
       const r = renderCell(
         <CustomCell row={{ ticket: "FOO-12" }} path="ticket" format="issue" />,
+      );
+      await waitFor(() =>
+        expect(
+          r.getByRole("link", { name: "FOO-12" }).getAttribute("href"),
+        ).toBe("#/tickets/FOO-12"),
+      );
+    });
+  });
+
+  test("a schema x-ui ticket column links a team the free-text scan skips", async () => {
+    await withApi(reposApi(), async () => {
+      const r = renderCell(
+        <CustomCell
+          row={{ payload: { ticket: "FOO-12" } }}
+          path="payload.ticket"
+          schema={{
+            type: "object",
+            properties: {
+              ticket: { type: "string", "x-ui": { kind: "ticket" } },
+            },
+          }}
+        />,
       );
       await waitFor(() =>
         expect(
