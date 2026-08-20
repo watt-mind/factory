@@ -29,6 +29,7 @@ export const VALID_BREAKDOWN_DIMENSIONS = Object.freeze([
   "reason_code",
   "event_type",
   "edge",
+  "modelTier",
 ]);
 
 export const VALID_BREAKDOWN_METRICS = Object.freeze([
@@ -482,6 +483,127 @@ function breakdownFacts(db, metric, range) {
     .all(range.startIso, range.endIso);
 }
 
+function parseJson(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Economics cohorts are deliberately keyed by the dispatch RunSpec, rather
+ * than by a model name. A concrete model can be reassigned by configuration;
+ * the RunSpec's modelTier is the immutable routing decision for a ticket.
+ */
+export function modelTierEconomicsView(
+  db,
+  { startMs = 0, endMs = Date.now() } = {},
+) {
+  const runRows = db
+    .query(
+      `SELECT r.run_id, r.created_at, r.spec_json,
+              COALESCE(SUM(u.cost_usd), 0) AS cost_usd
+         FROM runs r
+         LEFT JOIN run_usage u ON u.run_id = r.run_id
+        WHERE json_extract(r.spec_json, '$.input.ticket') IS NOT NULL
+        GROUP BY r.run_id`,
+    )
+    .all();
+
+  const tickets = new Map();
+  for (const row of runRows) {
+    const spec = parseJson(row.spec_json);
+    const ticket = spec.input?.ticket;
+    if (typeof ticket !== "string" || ticket === "") continue;
+    const entry = tickets.get(ticket) ?? {
+      runs: [],
+      dispatch: null,
+      totalCostUSD: 0,
+    };
+    const run = {
+      createdAt: row.created_at,
+      agent: spec.agent,
+      modelTier: spec.modelTier,
+      model: spec.model,
+      costUSD: Number(row.cost_usd ?? 0),
+    };
+    entry.runs.push(run);
+    entry.totalCostUSD += run.costUSD;
+    // A dispatch retry can create another RunSpec. The first pinned dispatch
+    // decision is the ticket's cohort; later runs still contribute all cost.
+    if (
+      typeof run.modelTier === "string" &&
+      typeof run.agent === "string" &&
+      run.agent.startsWith("dispatch@") &&
+      (!entry.dispatch || run.createdAt < entry.dispatch.createdAt)
+    ) {
+      entry.dispatch = run;
+    }
+    tickets.set(ticket, entry);
+  }
+
+  const merged = new Set();
+  for (const row of db
+    .query(
+      `SELECT envelope_json FROM events
+        WHERE type = 'factory.merge-landed'
+          AND admitted_at >= ? AND admitted_at < ?`,
+    )
+    .all(new Date(startMs).toISOString(), new Date(endMs).toISOString())) {
+    for (const landed of parseJson(row.envelope_json).payload?.landed ?? []) {
+      if (typeof landed?.ticket === "string") merged.add(landed.ticket);
+    }
+  }
+
+  const tiers = new Map();
+  const tier = (name) =>
+    tiers.get(name) ??
+    tiers
+      .set(name, {
+        key: name,
+        ticketsDispatched: 0,
+        ticketsMerged: 0,
+        costs: [],
+        standardEscalations: 0,
+      })
+      .get(name);
+  for (const [ticket, entry] of tickets) {
+    const dispatch = entry.dispatch;
+    if (!dispatch) continue;
+    const stats = tier(dispatch.modelTier);
+    const dispatchedAt = Date.parse(dispatch.createdAt);
+    if (dispatchedAt >= startMs && dispatchedAt < endMs)
+      stats.ticketsDispatched += 1;
+    if (!merged.has(ticket)) continue;
+    stats.ticketsMerged += 1;
+    stats.costs.push(entry.totalCostUSD);
+    if (
+      dispatch.modelTier === "standard" &&
+      entry.runs.some((run) => run.modelTier === "strong")
+    ) {
+      stats.standardEscalations += 1;
+    }
+  }
+
+  return [...tiers.values()]
+    .map((stats) => {
+      stats.costs.sort((a, b) => a - b);
+      return {
+        key: stats.key,
+        ticketsDispatched: stats.ticketsDispatched,
+        ticketsMerged: stats.ticketsMerged,
+        medianCostPerMergedTicketUSD: percentile(stats.costs, 0.5),
+        totalCostUSD: stats.costs.reduce((total, cost) => total + cost, 0),
+        standardTierEscalationRate:
+          stats.key === "standard" && stats.ticketsMerged > 0
+            ? stats.standardEscalations / stats.ticketsMerged
+            : null,
+      };
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
 /** Top-N operational dimensions used by GET /metrics/breakdown. */
 export function metricsBreakdownView(
   db,
@@ -513,6 +635,18 @@ export function metricsBreakdownView(
     }
   }
   const range = timeRange({ now, window, withBuckets: false });
+  if (by === "modelTier") {
+    return {
+      window,
+      by,
+      metric,
+      limit: null,
+      rows: modelTierEconomicsView(db, {
+        startMs: range.startMs,
+        endMs: range.endMs,
+      }),
+    };
+  }
   const facts = breakdownFacts(db, metric, range);
   const grouped = new Map();
   for (const fact of facts) {

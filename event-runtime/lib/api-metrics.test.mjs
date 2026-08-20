@@ -95,4 +95,13 @@ describe("metrics query API (WM-281)", () => {
     expect(valid.status).toBe(200);
     expect((await valid.json()).rows).toEqual([]);
   });
+
+  test("GET /metrics/breakdown exposes model-tier economics cohorts", async () => {
+    const response = await fetch(
+      s.url("/metrics/breakdown?window=24h&by=modelTier&metric=cost"),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ by: "modelTier", metric: "cost", rows: [] });
+  });
 });

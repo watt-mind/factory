@@ -114,6 +114,21 @@ invalid ticket label safe. As with definition tiers, a valid label whose tier
 has no mapping for the routed adapter fails closed rather than falling back to
 an adapter default.
 
+### Default-tier decision rule
+
+`GET /metrics/breakdown?by=modelTier&metric=cost` and
+`bun orchestrator/economics.mjs` report the dispatch cohort, merged-ticket
+count, total and median USD per merged ticket, and the standard-tier escalation
+rate. A cohort is keyed only by the dispatch RunSpec's pinned `modelTier`; the
+concrete model string is never used to infer a tier. For a merged ticket, its
+cost includes every RunSpec carrying that ticket, including retries, merge-fix
+rounds, and escalation reruns.
+
+Change the dispatch default from strong to standard only when standard's
+cost-per-merged-ticket is below strong's across at least 20 merged tickets in
+each tier. Treat a high standard-tier escalation rate as a reason to keep the
+strong default even if the raw cost comparison is favorable.
+
 ### Linear API budget (WM-878)
 
 Linear allows 2500 requests per hour. The factory used to treat a 400/429

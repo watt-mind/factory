@@ -41,6 +41,9 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
+import { dbPath } from "../event-runtime/lib/config.mjs";
+import { modelTierEconomicsView } from "../event-runtime/lib/metrics.mjs";
 import {
   LOG_DIR,
   METRICS_DIR,
@@ -219,6 +222,23 @@ const totals = {
     runs.filter((r) => r.wasted).reduce((a, b) => a + b.durMs, 0) / 60000,
 };
 
+// The runtime ledger is the source of truth for immutable RunSpecs and merged
+// tickets. Transcript filenames do identify tickets, but cannot safely recover
+// the tier from a mutable model name or the complete merge/fix history.
+let modelTierEconomics = [];
+const runtimeDb = dbPath();
+if (existsSync(runtimeDb)) {
+  const db = new Database(runtimeDb, { readonly: true });
+  try {
+    modelTierEconomics = modelTierEconomicsView(db, {
+      startMs: sinceMs,
+      endMs: Date.now(),
+    });
+  } finally {
+    db.close();
+  }
+}
+
 if (JSON_OUT) {
   console.log(
     JSON.stringify(
@@ -233,6 +253,7 @@ if (JSON_OUT) {
           calls: toolCalls.get(name) ?? v.calls,
         })),
         errors: [...errorsBySig.entries()].map(([sig, v]) => ({ sig, ...v })),
+        modelTierEconomics,
       },
       null,
       2,
@@ -259,6 +280,30 @@ const M = (n) =>
 const MB = (n) => (n / 1e6).toFixed(1) + "MB";
 const pad = (s, n) => String(s).padStart(n);
 const padR = (s, n) => String(s).padEnd(n);
+
+console.log(c.bold("\nmerged-ticket economics by model tier\n"));
+if (!modelTierEconomics.length) {
+  console.log(
+    c.dim("  no merged, RunSpec-pinned ticket cohorts in this window"),
+  );
+} else {
+  console.log(
+    c.dim(
+      "  tier       dispatched  merged  median $/merged  total $  std escalation",
+    ),
+  );
+  for (const row of modelTierEconomics) {
+    const escalation =
+      row.standardTierEscalationRate == null
+        ? "—"
+        : `${(row.standardTierEscalationRate * 100).toFixed(1)}%`;
+    console.log(
+      `  ${padR(row.key, 11)}${pad(row.ticketsDispatched, 6)}${pad(row.ticketsMerged, 8)}` +
+        `${pad(row.medianCostPerMergedTicketUSD == null ? "—" : "$" + row.medianCostPerMergedTicketUSD.toFixed(2), 17)}` +
+        `${pad("$" + row.totalCostUSD.toFixed(2), 9)}${pad(escalation, 16)}`,
+    );
+  }
+}
 
 console.log(
   c.bold(

@@ -18,6 +18,7 @@ function insertRun(
     agent = "agent-a@1",
     adapter = "pi",
     model = "openai/test",
+    modelTier,
     input = { repo: "factory" },
     state = "COMPLETED",
     attempts = 1,
@@ -32,7 +33,13 @@ function insertRun(
   ).run(
     id,
     `idem-${id}`,
-    JSON.stringify({ agent, adapter, model, input }),
+    JSON.stringify({
+      agent,
+      adapter,
+      model,
+      ...(modelTier ? { modelTier } : {}),
+      input,
+    }),
     state,
     attempts,
     createdAt,
@@ -108,6 +115,23 @@ function insertEvent(
     `hash-${source}-${id}`,
     status,
     admittedAt,
+  );
+}
+
+function insertMergeLandedEvent(db, tickets, admittedAt = at(20 * 60_000)) {
+  insertEvent(db, `merge-landed-${tickets.join("-")}`, {
+    type: "factory.merge-landed",
+    source: "chain",
+    admittedAt,
+  });
+  db.query(
+    `UPDATE events SET envelope_json = ?
+      WHERE source = 'chain' AND event_id = ?`,
+  ).run(
+    JSON.stringify({
+      payload: { landed: tickets.map((ticket) => ({ ticket })) },
+    }),
+    `merge-landed-${tickets.join("-")}`,
   );
 }
 
@@ -436,6 +460,81 @@ describe("metrics breakdowns (WM-281)", () => {
         metric: "p95_execution",
       }).rows[0].value,
     ).toBe(71_000);
+    db.close();
+  });
+
+  test("modelTier cohorts use dispatch pins, merged events, and every ticket run cost", () => {
+    const db = openDb(":memory:");
+    insertRun(db, "standard-dispatch", {
+      agent: "dispatch@1",
+      modelTier: "standard",
+      input: { repo: "factory", ticket: "WM-697" },
+    });
+    insertRun(db, "standard-escalation", {
+      agent: "merge-fix@1",
+      modelTier: "strong",
+      input: { repo: "factory", ticket: "WM-697" },
+    });
+    insertRun(db, "standard-unpinned-retry", {
+      agent: "merge-fix@1",
+      model: "a-model-named-strong",
+      input: { repo: "factory", ticket: "WM-697" },
+    });
+    insertRun(db, "strong-dispatch", {
+      agent: "dispatch@1",
+      modelTier: "strong",
+      input: { repo: "factory", ticket: "WM-698" },
+    });
+    insertRun(db, "unmerged-dispatch", {
+      agent: "dispatch@1",
+      modelTier: "standard",
+      input: { repo: "factory", ticket: "WM-699" },
+    });
+    for (const [runId, costUSD] of [
+      ["standard-dispatch", 1.25],
+      ["standard-escalation", 2.75],
+      ["standard-unpinned-retry", 0.5],
+      ["strong-dispatch", 8],
+      ["unmerged-dispatch", 3],
+    ]) {
+      recordRunUsage(db, {
+        runId,
+        attempt: 1,
+        adapter: "pi",
+        costUSD,
+        recordedAt: at(10 * 60_000),
+      });
+    }
+    insertMergeLandedEvent(db, ["WM-697", "WM-698"]);
+
+    expect(
+      metricsBreakdownView(db, {
+        now: NOW,
+        by: "modelTier",
+        metric: "cost",
+      }),
+    ).toMatchObject({
+      by: "modelTier",
+      limit: null,
+      rows: [
+        {
+          key: "standard",
+          ticketsDispatched: 2,
+          ticketsMerged: 1,
+          medianCostPerMergedTicketUSD: 4.5,
+          totalCostUSD: 4.5,
+          standardTierEscalationRate: 1,
+        },
+        {
+          key: "strong",
+          ticketsDispatched: 1,
+          ticketsMerged: 1,
+          medianCostPerMergedTicketUSD: 8,
+          totalCostUSD: 8,
+          standardTierEscalationRate: null,
+        },
+      ],
+    });
     db.close();
   });
 });
