@@ -14,6 +14,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
+import { resolveConfigPath } from "./config.mjs";
 import { tx } from "./db.mjs";
 import { reposRoot } from "./repos.mjs";
 
@@ -144,7 +145,7 @@ export const DEFAULT_POOL = { min: 1, max: 3 };
  * real money.
  */
 export function loadWorkerPolicy({ root = reposRoot() } = {}) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return null;
   let parsed;
   try {

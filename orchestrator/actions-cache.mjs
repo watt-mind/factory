@@ -10,9 +10,7 @@
  * The command exits 1 at the configured warning threshold so it can be used as
  * a watched/manual gate or a future alert integration.
  */
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { ROOT } from "../lib/schedule.mjs";
+import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 import {
   renderActionsCacheUsage,
@@ -35,9 +33,7 @@ const number = (flag, fallback) => {
   return parsed;
 };
 
-const policy = Bun.YAML.parse(
-  readFileSync(path.join(ROOT, "config/policy.yaml"), "utf8"),
-);
+const policy = loadConfigYaml("policy", { root: ROOT });
 const configured = policy.actions_cache ?? {};
 const organization = value("--org") ?? configured.organization;
 const includedGb = number("--included-gb", configured.included_gb);

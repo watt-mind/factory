@@ -32,7 +32,15 @@ test("emit purges orphaned commands, skills, and prompts from every output tree"
       stderr: "pipe",
     });
 
-    expect(result.stderr.toString()).toBe("");
+    // A clean checkout (WM-794) has no operator-local config/*.yaml — only
+    // the tracked examples — so resolveConfigPath's once-per-process fallback
+    // warning is expected here, not a real error. Anything else on stderr
+    // still fails the test.
+    const stderrLines = result.stderr
+      .toString()
+      .split("\n")
+      .filter((line) => line && !/config\/.*\.yaml is missing/.test(line));
+    expect(stderrLines).toEqual([]);
     expect(result.exitCode).toBe(0);
     for (const file of orphaned) expect(existsSync(file)).toBe(false);
     expect(existsSync(handMaintained)).toBe(true);

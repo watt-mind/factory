@@ -10,6 +10,7 @@ import path from "node:path";
 import { budgetExhausted } from "../../lib/spend.mjs";
 import { buildChainInput } from "./chain.mjs";
 import { hashJson } from "./canonical.mjs";
+import { resolveConfigPath } from "./config.mjs";
 import { defaultHookRegistry } from "./hooks.mjs";
 import { approveProposal } from "./proposals.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
@@ -53,7 +54,7 @@ export const CHAIN_AUTO_APPROVAL_ACTOR = "chain-auto-approval";
 const NEVER_AUTO_APPROVE = new Set(["factory.ship-apply.requested"]);
 
 function policyPath(root = reposRoot()) {
-  return path.join(root, "config", "policy.yaml");
+  return resolveConfigPath("policy", { root });
 }
 
 /** Missing or malformed policy is no approval, never an implicit default. */

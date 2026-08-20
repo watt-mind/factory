@@ -13,7 +13,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { createAdapterRegistry } from "./adapters/index.mjs";
-import { RUNTIME_ROOT } from "./config.mjs";
+import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import {
   EXTENSION_MANIFEST,
@@ -726,7 +726,10 @@ describe("extension config (contributes.config)", () => {
     mkdirSync(path.join(root, "config"));
     const { models } = Bun.YAML.parse(
       readFileSync(
-        path.join(path.dirname(RUNTIME_ROOT), "config", "policy.yaml"),
+        resolveConfigPath("policy", {
+          root: path.dirname(RUNTIME_ROOT),
+          warn: false,
+        }),
         "utf8",
       ),
     );
@@ -1275,7 +1278,10 @@ describe("cli extensions", () => {
     // temp policy carries the checkout's `models:` block alongside `extensions:`.
     const { models } = Bun.YAML.parse(
       readFileSync(
-        path.join(path.dirname(RUNTIME_ROOT), "config", "policy.yaml"),
+        resolveConfigPath("policy", {
+          root: path.dirname(RUNTIME_ROOT),
+          warn: false,
+        }),
         "utf8",
       ),
     );

@@ -35,7 +35,7 @@ import {
 import { loadForge } from "../../lib/forge/index.mjs";
 import { storeCollected, storeResultArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
-import { artifactsRoot, FACTORY_ROOT } from "./config.mjs";
+import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
@@ -264,7 +264,7 @@ export const DYNAMIC_DEADLINE_ADAPTERS = new Set([
 export function policyMaxRunMinutes(root = FACTORY_ROOT) {
   try {
     const value = Bun.YAML.parse(
-      readFileSync(path.join(root, "config", "policy.yaml"), "utf8"),
+      readFileSync(resolveConfigPath("policy", { root }), "utf8"),
     )?.limits?.max_run_minutes;
     return Number.isFinite(value) && value > 0 ? Number(value) : null;
   } catch {

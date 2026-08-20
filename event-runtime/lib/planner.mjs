@@ -28,6 +28,7 @@ import { budgetExhausted } from "../../lib/spend.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import { resolveConfigPath } from "./config.mjs";
 import { listMemos } from "./memos.mjs";
 import {
   artifactsRoot,
@@ -553,7 +554,7 @@ function fetchInFlightDefault(repoConfig) {
 }
 
 function policyMaxInFlight(root = reposRoot()) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return DEFAULT_MAX_IN_FLIGHT;
   try {
     const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency
@@ -577,7 +578,7 @@ function policyMaxInFlight(root = reposRoot()) {
  */
 export const DEFAULT_OWNED_PATHS_COLLISION = "strict";
 export function policyOwnedPathsCollision(root = reposRoot()) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return DEFAULT_OWNED_PATHS_COLLISION;
   try {
     const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.dispatch
@@ -592,7 +593,7 @@ export function policyOwnedPathsCollision(root = reposRoot()) {
 export const DEFAULT_MAX_CONCURRENT_MERGES = 1;
 
 export function policyMaxConcurrentMerges(root = reposRoot()) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return DEFAULT_MAX_CONCURRENT_MERGES;
   try {
     const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency
@@ -609,7 +610,7 @@ export function policyMaxConcurrentMerges(root = reposRoot()) {
 export const DEFAULT_MERGE_BATCH_SIZE = 4;
 
 export function policyMergeBatchSize(root = reposRoot()) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return DEFAULT_MERGE_BATCH_SIZE;
   try {
     const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.merge?.batch_size;
@@ -708,7 +709,7 @@ function loadRepoEscalatePaths(repoName, root = reposRoot()) {
 }
 
 function loadRuntimePolicy(root = reposRoot()) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return null;
   try {
     const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));

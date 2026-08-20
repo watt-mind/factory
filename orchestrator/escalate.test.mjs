@@ -19,22 +19,65 @@ import {
 import { loadConfigYaml } from "../lib/schedule.mjs";
 
 const globs = ["app/src/payment/**", "app/src/auth/**", "app/migrations/**"];
-const repos = loadConfigYaml("repos").repos;
-const cashsaasGlobs = repos.find(
-  (repo) => repo.name === "cashsaas",
-)?.escalate_paths;
-const wmHomeGlobs = repos.find(
-  (repo) => repo.name === "wm-home",
-)?.escalate_paths;
-const wattsMobileGlobs = repos.find(
-  (repo) => repo.name === "watts-mobile",
-)?.escalate_paths;
-const coachWattzGlobs = repos.find(
-  (repo) => repo.name === "coach-wattz",
-)?.escalate_paths;
-const legaleaseGlobs = repos.find(
-  (repo) => repo.name === "legalease",
-)?.escalate_paths;
+
+// Product-repo escalate_paths configs used to live inline in the tracked
+// config/repos.yaml, so these tests read them straight off the real operator
+// config. WM-794 moved that operator-owned config to an ignored local file
+// (config/repos.yaml is no longer tracked; only the generic config/
+// repos.example.yaml is), so these are now standalone fixtures — shaped like
+// a Next.js SaaS app, a mobile app, a Vue app, and a Django app's boundaries —
+// rather than a read of whichever product repos this checkout happens to
+// have configured.
+const nodeSaasGlobs = [
+  "schema.prisma",
+  "migrations/**",
+  "src/auth/**",
+  "src/admin/**",
+  "*.wasp",
+  "Dockerfile*",
+  "docker-compose.yml",
+  "nginx.conf",
+  ".github/workflows/deploy.yml",
+];
+const mobileAppGlobs = [
+  "src/features/subscriptions/**",
+  "src/auth/**",
+  "credentials/**",
+  "eas.json",
+  ".env.example",
+  ".github/workflows/build.yml",
+];
+const vueSaasGlobs = [
+  "server/api/stripe/**",
+  "server/api/subscriptions/**",
+  "server/api/auth/**",
+  "server/api/oauth/**",
+  "server/middleware/auth.ts",
+  "server/middleware/session-impersonation.ts",
+  "prisma/**",
+  "docker-compose.yml",
+  "Dockerfile",
+  ".github/workflows/ci.yml",
+];
+const djangoSaasGlobs = [
+  "**/urls.py",
+  "**/decorators.py",
+  "**/migrations/**",
+  "**/settings*.py",
+  "**/services/access_control.py",
+  "**/mcp/**",
+  "**/services/google_drive_tokens.py",
+];
+const prismaSaasGlobs = [
+  "schema.prisma",
+  "migrations/**",
+  "Dockerfile",
+  "docker-compose.yml",
+  ".github/workflows/deploy.yml",
+  ".env.example",
+  "src/auth/**",
+  "src/server/serverMiddleware.ts",
+];
 
 test("config reader prefers operator-local YAML, warns for an example, and fails closed", () => {
   const root = mkdtempSync(path.join(tmpdir(), "factory-config-fallback-"));
@@ -73,9 +116,7 @@ test("config reader prefers operator-local YAML, warns for an example, and fails
   }
 });
 
-test("wm-home config protects its schema, auth, admin, and deployment boundaries", () => {
-  expect(wmHomeGlobs).toBeDefined();
-
+test("Node/SaaS app config protects its schema, auth, admin, and deployment boundaries", () => {
   const hits = matchEscalations(
     [
       "schema.prisma",
@@ -89,7 +130,7 @@ test("wm-home config protects its schema, auth, admin, and deployment boundaries
       "nginx.conf",
       ".github/workflows/deploy.yml",
     ],
-    wmHomeGlobs,
+    nodeSaasGlobs,
   );
 
   expect(hits.map((hit) => hit.file)).toEqual([
@@ -106,7 +147,7 @@ test("wm-home config protects its schema, auth, admin, and deployment boundaries
   ]);
 });
 
-test("wm-home config leaves ordinary landing page and docs changes unflagged", () => {
+test("Node/SaaS app config leaves ordinary landing page and docs changes unflagged", () => {
   expect(
     matchEscalations(
       [
@@ -115,14 +156,12 @@ test("wm-home config leaves ordinary landing page and docs changes unflagged", (
         "README.md",
         "docs/setup.md",
       ],
-      wmHomeGlobs,
+      nodeSaasGlobs,
     ),
   ).toEqual([]);
 });
 
-test("watts-mobile config protects subscriptions, auth, credentials, and build configuration", () => {
-  expect(wattsMobileGlobs).toBeDefined();
-
+test("mobile app config protects subscriptions, auth, credentials, and build configuration", () => {
   const hits = matchEscalations(
     [
       "src/features/subscriptions/revenueCat.ts",
@@ -132,7 +171,7 @@ test("watts-mobile config protects subscriptions, auth, credentials, and build c
       ".env.example",
       ".github/workflows/build.yml",
     ],
-    wattsMobileGlobs,
+    mobileAppGlobs,
   );
 
   expect(hits.map((hit) => hit.file)).toEqual([
@@ -145,7 +184,7 @@ test("watts-mobile config protects subscriptions, auth, credentials, and build c
   ]);
 });
 
-test("watts-mobile config leaves ordinary feature screens and components unflagged", () => {
+test("mobile app config leaves ordinary feature screens and components unflagged", () => {
   expect(
     matchEscalations(
       [
@@ -154,14 +193,12 @@ test("watts-mobile config leaves ordinary feature screens and components unflagg
         "README.md",
         "docs/setup.md",
       ],
-      wattsMobileGlobs,
+      mobileAppGlobs,
     ),
   ).toEqual([]);
 });
 
-test("coach-wattz config protects stripe, auth, prisma, and deployment boundaries", () => {
-  expect(coachWattzGlobs).toBeDefined();
-
+test("Vue/SaaS app config protects stripe, auth, prisma, and deployment boundaries", () => {
   const hits = matchEscalations(
     [
       "server/api/stripe/webhook.ts",
@@ -176,7 +213,7 @@ test("coach-wattz config protects stripe, auth, prisma, and deployment boundarie
       "Dockerfile",
       ".github/workflows/ci.yml",
     ],
-    coachWattzGlobs,
+    vueSaasGlobs,
   );
 
   expect(hits.map((hit) => hit.file)).toEqual([
@@ -194,7 +231,7 @@ test("coach-wattz config protects stripe, auth, prisma, and deployment boundarie
   ]);
 });
 
-test("coach-wattz config leaves ordinary Vue pages and components unflagged", () => {
+test("Vue/SaaS app config leaves ordinary Vue pages and components unflagged", () => {
   expect(
     matchEscalations(
       [
@@ -203,59 +240,55 @@ test("coach-wattz config leaves ordinary Vue pages and components unflagged", ()
         "README.md",
         "docs/ARCHITECTURE.md",
       ],
-      coachWattzGlobs,
+      vueSaasGlobs,
     ),
   ).toEqual([]);
 });
 
-test("legalease config protects URL routing, auth decorators, migrations, settings, and MCP security boundaries", () => {
-  expect(legaleaseGlobs).toBeDefined();
-
+test("Django app config protects URL routing, auth decorators, migrations, settings, and MCP security boundaries", () => {
   const hits = matchEscalations(
     [
-      "legalease/legalease/urls.py",
-      "legalease/main/decorators.py",
-      "legalease/main/migrations/0001_initial.py",
-      "legalease/legalease/settings_prod.py",
-      "legalease/main/services/access_control.py",
-      "legalease/main/mcp/auth.py",
-      "legalease/main/mcp/scopes.py",
-      "legalease/main/mcp/security.py",
-      "legalease/main/services/google_drive_tokens.py",
+      "app/app/urls.py",
+      "app/main/decorators.py",
+      "app/main/migrations/0001_initial.py",
+      "app/app/settings_prod.py",
+      "app/main/services/access_control.py",
+      "app/main/mcp/auth.py",
+      "app/main/mcp/scopes.py",
+      "app/main/mcp/security.py",
+      "app/main/services/google_drive_tokens.py",
     ],
-    legaleaseGlobs,
+    djangoSaasGlobs,
   );
 
   expect(hits.map((hit) => hit.file)).toEqual([
-    "legalease/legalease/urls.py",
-    "legalease/main/decorators.py",
-    "legalease/main/migrations/0001_initial.py",
-    "legalease/legalease/settings_prod.py",
-    "legalease/main/services/access_control.py",
-    "legalease/main/mcp/auth.py",
-    "legalease/main/mcp/scopes.py",
-    "legalease/main/mcp/security.py",
-    "legalease/main/services/google_drive_tokens.py",
+    "app/app/urls.py",
+    "app/main/decorators.py",
+    "app/main/migrations/0001_initial.py",
+    "app/app/settings_prod.py",
+    "app/main/services/access_control.py",
+    "app/main/mcp/auth.py",
+    "app/main/mcp/scopes.py",
+    "app/main/mcp/security.py",
+    "app/main/services/google_drive_tokens.py",
   ]);
 });
 
-test("legalease config leaves ordinary document generation services and views unflagged", () => {
+test("Django app config leaves ordinary document generation services and views unflagged", () => {
   expect(
     matchEscalations(
       [
-        "legalease/main/services/document_generation.py",
-        "legalease/main/views/home.py",
+        "app/main/services/document_generation.py",
+        "app/main/views/home.py",
         "README.md",
         "docs/setup.md",
       ],
-      legaleaseGlobs,
+      djangoSaasGlobs,
     ),
   ).toEqual([]);
 });
 
-test("cashsaas config protects its destructive, deployment, credential, and auth boundaries", () => {
-  expect(cashsaasGlobs).toBeDefined();
-
+test("Prisma/SaaS app config protects its destructive, deployment, credential, and auth boundaries", () => {
   const hits = matchEscalations(
     [
       "schema.prisma",
@@ -267,7 +300,7 @@ test("cashsaas config protects its destructive, deployment, credential, and auth
       "src/auth/verifyCurrentPassword.ts",
       "src/server/serverMiddleware.ts",
     ],
-    cashsaasGlobs,
+    prismaSaasGlobs,
   );
 
   expect(hits.map((hit) => hit.file)).toEqual([
@@ -282,7 +315,7 @@ test("cashsaas config protects its destructive, deployment, credential, and auth
   ]);
 });
 
-test("cashsaas config leaves ordinary dashboard, analytics, and docs changes unflagged", () => {
+test("Prisma/SaaS app config leaves ordinary dashboard, analytics, and docs changes unflagged", () => {
   expect(
     matchEscalations(
       [
@@ -291,7 +324,7 @@ test("cashsaas config leaves ordinary dashboard, analytics, and docs changes unf
         "docs/SESSION_HANDOFF.md",
         "README.md",
       ],
-      cashsaasGlobs,
+      prismaSaasGlobs,
     ),
   ).toEqual([]);
 });
@@ -324,8 +357,8 @@ test("a single protected file among many still escalates", () => {
 
 test("settings glob with wildcard filename matches", () => {
   const hits = matchEscalations(
-    ["legalease/legalease/settings_prod.py"],
-    ["legalease/legalease/settings*.py"],
+    ["app/app/settings_prod.py"],
+    ["app/app/settings*.py"],
   );
   expect(hits.length).toBe(1);
 });

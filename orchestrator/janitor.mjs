@@ -40,17 +40,11 @@
  * reimplement Linear + worktree discovery. Stdout is JSON only; the colour
  * log is skipped. `--force` is still not a flag and must never become one.
  */
-import {
-  readFileSync,
-  existsSync,
-  readdirSync,
-  mkdirSync,
-  appendFileSync,
-} from "node:fs";
+import { existsSync, readdirSync, mkdirSync, appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { homedir } from "node:os";
-import { ROOT } from "../lib/schedule.mjs";
+import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 import { githubForge, loadForge } from "../lib/forge/index.mjs";
@@ -406,9 +400,7 @@ async function main() {
     json: JSON_OUT,
     only,
   } = parseArgs(process.argv.slice(2));
-  const cfg = Bun.YAML.parse(
-    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
-  );
+  const cfg = loadConfigYaml("repos", { root: ROOT });
   const repos = (cfg.repos ?? []).filter(
     (r) => !only.length || only.includes(r.name),
   );

@@ -12,7 +12,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
-import { RUNTIME_ROOT } from "./config.mjs";
+import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import { MEMO_KINDS, SUBJECT_TYPES } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";
 import { contractViewRel, validateArtifactView } from "./artifact-view.mjs";
@@ -51,7 +51,7 @@ function nullDict() {
 }
 
 function policyFile(root) {
-  return path.join(root, "config", "policy.yaml");
+  return resolveConfigPath("policy", { root });
 }
 
 /**
@@ -369,7 +369,7 @@ export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
  * at which point resolution fails closed below.
  */
 export function loadModelTierMap({ root = reposRoot() } = {}) {
-  const file = path.join(root, "config", "policy.yaml");
+  const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return {};
   let parsed;
   try {

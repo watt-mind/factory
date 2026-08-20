@@ -1,7 +1,7 @@
 /** Read-only, allow-listed configuration inventory (WM-704). */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { FACTORY_ROOT } from "./config.mjs";
+import { FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { loadedExtensions, maskExtensionSecrets } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
 import { loadNodesConfig, nodesConfigPath } from "./workers-remote.mjs";
@@ -280,8 +280,8 @@ export function configView({
   // What loadExtensions() accepted/disabled in this process (tests pass their own).
   extensions = loadedExtensions(),
 } = {}) {
-  const policy = readYaml(path.join(root, "config", "policy.yaml"));
-  const schedule = readYaml(path.join(root, "config", "schedule.yaml"));
+  const policy = readYaml(resolveConfigPath("policy", { root }));
+  const schedule = readYaml(resolveConfigPath("schedule", { root }));
   const nodesFile = nodesConfigPath(root);
   const loadedAt = registryLoadedAt ?? new Date(now).toISOString();
   const registryCounts = {

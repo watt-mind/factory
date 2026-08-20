@@ -1,5 +1,5 @@
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-merge-test-mjs";
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
@@ -14,6 +14,7 @@ import { substituteArgv } from "./lib/adapters/actions.mjs";
 import { resolveTemplate } from "./lib/adapters/command.mjs";
 import { resolveChains } from "./lib/chain.mjs";
 import { canonicalJson } from "./lib/canonical.mjs";
+import { FACTORY_ROOT } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { admitEvent as persistEvent } from "./lib/intake.mjs";
 import { planAdmittedEvents } from "./lib/planner.mjs";
@@ -26,6 +27,34 @@ import {
   runCommand,
   writeExecutable,
 } from "./test-support/command-fixture.mjs";
+
+// This file exercises the auto-merge eligibility path (mergeEligibility,
+// chainRuntimeGuard in auto-approval.mjs), which reads config/policy.yaml at
+// this checkout's reposRoot() — workers.max, budget, models, escalation.
+// auto_merge_owners/auto_merge_base, circuit_breaker, etc. WM-794 stopped
+// tracking the operator-local config/policy.yaml (only the conservative
+// config/policy.example.yaml — auto_merge_owners: [] — remains), so these
+// tests supply their own isolated policy root: the tracked example, with
+// auto_merge_owners widened to the "watt-mind" fixtures below use.
+const chainAutoApprovalFixtureRoot = tmpDir("evrt-merge-policy-");
+mkdirSync(path.join(chainAutoApprovalFixtureRoot, "config"), {
+  recursive: true,
+});
+writeFileSync(
+  path.join(chainAutoApprovalFixtureRoot, "config", "policy.yaml"),
+  readFileSync(
+    path.join(FACTORY_ROOT, "config", "policy.example.yaml"),
+    "utf8",
+  ).replace("auto_merge_owners: []", "auto_merge_owners: [watt-mind]"),
+);
+const previousChainAutoApprovalReposRoot = process.env.FACTORY_REPOS_ROOT;
+process.env.FACTORY_REPOS_ROOT = chainAutoApprovalFixtureRoot;
+afterAll(() => {
+  if (previousChainAutoApprovalReposRoot === undefined)
+    delete process.env.FACTORY_REPOS_ROOT;
+  else process.env.FACTORY_REPOS_ROOT = previousChainAutoApprovalReposRoot;
+  rmSync(chainAutoApprovalFixtureRoot, { recursive: true, force: true });
+});
 
 const registry = loadRegistry();
 const SHA = "a".repeat(40);

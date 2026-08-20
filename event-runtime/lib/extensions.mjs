@@ -84,7 +84,7 @@ import {
   ADAPTER_NAME_PATTERN,
   validateAdapterContract,
 } from "./adapters/index.mjs";
-import { RUNTIME_ROOT } from "./config.mjs";
+import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import {
   CONNECTOR_NAME_PATTERN,
   setLoadedConnectors,
@@ -313,7 +313,7 @@ export function resolveExtensionTarget(spec, { root = reposRoot() } = {}) {
 }
 
 function policyFile(root) {
-  return path.join(root, "config", "policy.yaml");
+  return resolveConfigPath("policy", { root });
 }
 
 function readPolicy(root) {

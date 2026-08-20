@@ -44,6 +44,14 @@ workers:
   min: 1
   max: 20
 
+actions_cache:
+  # GitHub's cache API reports decimal bytes. Set included_gb to your plan's
+  # included allowance and update it if GitHub billing shows a different one.
+  organization: watt-mind
+  included_gb: 73
+  # `factory actions-cache` exits non-zero at this threshold, before billing risk.
+  warning_percent: 60
+
 budget:
   # Notional API-equivalent runaway guards; adjust for your adapter/provider.
   per_ticket_usd: 15

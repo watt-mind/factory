@@ -24,7 +24,7 @@ import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
-import { artifactsRoot } from "./config.mjs";
+import { artifactsRoot, resolveConfigPath } from "./config.mjs";
 import { openDb, runUsage } from "./db.mjs";
 import {
   createRun,
@@ -4142,7 +4142,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           `    escalate_paths: []\n`,
       );
       const basePolicy = readFileSync(
-        path.join(repoRoot, "config", "policy.yaml"),
+        resolveConfigPath("policy", { root: repoRoot, warn: false }),
         "utf8",
       );
       const testPolicy = basePolicy.includes("  fake:")
