@@ -2,7 +2,6 @@
 /** Event-runtime CLI argument routing and command dispatch. */
 import { COMMANDS } from "./cli/commands.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
-import { createAdapterRegistry } from "./lib/adapters/index.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
 import {
   API_HOST,
@@ -24,8 +23,8 @@ const USAGE = BASE_USAGE.replace(
   "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API\n  memos <subjectType> <id> [--kind k] [--all]\n                                 live memos for a subject, with provenance and expiry",
 )
   .replace(
-    "  agents                         registered agent definitions and event routing",
-    "  agents                         registered agent definitions and event routing\n  adapters                       registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts, config namespace\n  extensions validate <path>     validate a factory-extension.json without loading it",
+    "  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)",
+    "  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts, config namespace\n  extensions validate <path>     validate a factory-extension.json without loading it",
   )
   .concat(
     "\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
@@ -216,30 +215,6 @@ export async function decideCommand(args) {
 }
 
 /**
- * Read-only listing of the adapter registry (WM-837): the same registry
- * `work` and `serve` build, so what this prints is what a worker would
- * execute with. Local — it needs no running serve.
- */
-export async function adaptersCommand(args = []) {
-  const registry = createAdapterRegistry();
-  const loaded = await loadExtensions({ adapterRegistry: registry });
-  for (const anomaly of loaded.anomalies) console.error(`anomaly: ${anomaly}`);
-  const rows = registry.list();
-  if (args.includes("--json")) {
-    console.log(JSON.stringify({ adapters: rows }, null, 2));
-    return rows;
-  }
-  const width = Math.max(8, ...rows.map((row) => row.name.length + 3));
-  console.log(`${"ADAPTER".padEnd(width)}${"SOURCE".padEnd(12)}SANDBOX`);
-  for (const row of rows) {
-    console.log(
-      `${row.name.padEnd(width)}${row.source.padEnd(12)}${row.sandboxSupport}`,
-    );
-  }
-  return rows;
-}
-
-/**
  * `extensions list` — the allow-listed extensions the loader accepts (WM-838),
  * with their contribution counts (packs, adapters, hooks, panels, config)
  * and `contributes.config` namespace; faults print as anomalies on stderr,
@@ -346,7 +321,6 @@ export async function dispatch(argv = process.argv.slice(2)) {
   if (command === "decide") return decideCommand(args);
   if (command === "inbox") return inboxCommand(args);
   if (command === "memos") return memosCommand(args);
-  if (command === "adapters") return adaptersCommand(args);
   if (command === "extensions") return extensionsCommand(args);
   if (command === "artifacts") return artifactsCommand(args);
   if (!Object.hasOwn(COMMANDS, command)) {

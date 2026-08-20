@@ -14,6 +14,7 @@ const EXPECTED_COMMANDS = [
   "proposals",
   "inbox",
   "agents",
+  "adapters",
   "workers",
   "schedule",
   "repos",
@@ -41,6 +42,7 @@ describe("cli routing", () => {
       "ps",
       "runs",
       "proposals",
+      "adapters",
       "approve",
       "reject",
       "inject",
@@ -53,9 +55,22 @@ describe("cli routing", () => {
       expect(r.all).toContain(verb);
     }
     expect(r.all).toContain("usage:");
+    expect(r.all).toContain("adapters [--json]");
     expect(r.all).toContain("--watch");
     expect(r.all).toContain("--reload-on-change");
     expect(r.all).toContain("--workers min:max");
+  });
+
+  test("adapters is routed through COMMANDS and lists locally", () => {
+    expect(COMMAND_NAMES).toContain("adapters");
+    const r = runCli(["adapters", "--json"]);
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(Array.isArray(parsed.adapters)).toBe(true);
+    expect(parsed.adapters.length).toBeGreaterThan(0);
+    expect(parsed.adapters[0]).toHaveProperty("name");
+    expect(parsed.adapters[0]).toHaveProperty("source");
+    expect(parsed.adapters[0]).toHaveProperty("sandboxSupport");
   });
 
   test("unknown command → usage text, non-zero exit", () => {

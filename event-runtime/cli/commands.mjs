@@ -1,3 +1,4 @@
+import adapters from "./adapters.mjs";
 import agents from "./agents.mjs";
 import approve from "./approve.mjs";
 import cancel from "./cancel.mjs";
@@ -36,6 +37,7 @@ export const COMMANDS = Object.freeze({
   proposals,
   inbox,
   agents,
+  adapters,
   workers,
   schedule,
   repos,

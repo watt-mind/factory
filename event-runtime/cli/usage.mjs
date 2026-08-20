@@ -35,6 +35,7 @@ usage: bun event-runtime/cli.mjs <command>
   proposals                      open proposals with TTL age
   inbox                          open items waiting on the human
   agents                         registered agent definitions and event routing
+  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)
   workers                        worker processes: host, labels, state, heartbeat
   schedule                       recurring loops: cadence, approval, last fire, next due
   repos                          factory repos: team, base, dispatch vs report-only
