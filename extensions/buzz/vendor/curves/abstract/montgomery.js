@@ -6,7 +6,15 @@
  * @module
  */
 /*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-import { abytes, aInRange, bytesToNumberLE, copyBytes, numberToBytesLE, randomBytes, validateObject, } from "../utils.js";
+import {
+  abytes,
+  aInRange,
+  bytesToNumberLE,
+  copyBytes,
+  numberToBytesLE,
+  randomBytes,
+  validateObject,
+} from "../utils.js";
 import { createKeygen } from "./curve.js";
 import { mod } from "./modular.js";
 const _0n = /* @__PURE__ */ BigInt(0);
@@ -34,7 +42,7 @@ const _2n = /* @__PURE__ */ BigInt(2);
  * @returns `P` when the low bit is clear, `P + 1` when it is set.
  */
 function cmask(P, swap) {
-    return P + swap - ((swap >> _1n) << _1n);
+  return P + swap - ((swap >> _1n) << _1n);
 }
 /**
  * Swap two field elements when `mask` is `P + 1`, keep them when it is `P`:
@@ -70,33 +78,37 @@ function cmask(P, swap) {
  * @returns A field-bound swap function taking mask, x_2, and x_3.
  */
 function cswap(P) {
-    const offset = BigInt(6) * P;
-    return (mask, x_2, x_3) => {
-        const sum = x_2 + x_3;
-        const d = offset + x_3 - x_2;
-        const a = (d * mask + x_2) % P;
-        return { x_2: a, x_3: sum - a };
-    };
+  const offset = BigInt(6) * P;
+  return (mask, x_2, x_3) => {
+    const sum = x_2 + x_3;
+    const d = offset + x_3 - x_2;
+    const a = (d * mask + x_2) % P;
+    return { x_2: a, x_3: sum - a };
+  };
 }
 /** Internal helpers, exported for tests only. Not part of the public API. */
 export const __TEST = /* @__PURE__ */ Object.freeze({
-    cmask,
-    cswap,
+  cmask,
+  cswap,
 });
 function validateOpts(curve) {
-    // Validate constructor config eagerly, but do not call user-provided hooks here:
-    // `randomBytes` may be transcript-backed or otherwise contextual. Runtime type checks are
-    // enough to fail fast on malformed configs without consuming user state.
-    validateObject(curve, {
-        P: 'bigint',
-        type: 'string',
-        adjustScalarBytes: 'function',
-        powPminus2: 'function',
-    }, {
-        randomBytes: 'function',
-        scalarMultBase: 'function',
-    });
-    return Object.freeze({ ...curve });
+  // Validate constructor config eagerly, but do not call user-provided hooks here:
+  // `randomBytes` may be transcript-backed or otherwise contextual. Runtime type checks are
+  // enough to fail fast on malformed configs without consuming user state.
+  validateObject(
+    curve,
+    {
+      P: "bigint",
+      type: "string",
+      adjustScalarBytes: "function",
+      powPminus2: "function",
+    },
+    {
+      randomBytes: "function",
+      scalarMultBase: "function",
+    },
+  );
+  return Object.freeze({ ...curve });
 }
 /**
  * @param curveDef - Montgomery curve definition.
@@ -137,176 +149,179 @@ function validateOpts(curve) {
  * ```
  */
 export function montgomery(curveDef) {
-    const CURVE = validateOpts(curveDef);
-    const { P, type, adjustScalarBytes, powPminus2, randomBytes: rand } = CURVE;
-    const mulBaseHook = CURVE.scalarMultBase;
-    const is25519 = type === 'x25519';
-    if (!is25519 && type !== 'x448')
-        throw new Error('invalid type');
-    const randomBytes_ = rand === undefined ? randomBytes : rand;
-    const montgomeryBits = is25519 ? 255 : 448;
-    const swap = cswap(P);
-    const fieldLen = is25519 ? 32 : 56;
-    const Gu = is25519 ? BigInt(9) : BigInt(5);
-    // RFC 7748 #5:
-    // The constant a24 is (486662 - 2) / 4 = 121665 for curve25519/X25519 and
-    // (156326 - 2) / 4 = 39081 for curve448/X448
-    // const a = is25519 ? 486662n : 156326n;
-    const a24 = is25519 ? BigInt(121665) : BigInt(39081);
-    // RFC: x25519 "the resulting integer is of the form 2^254 plus
-    // eight times a value between 0 and 2^251 - 1 (inclusive)"
-    // x448: "2^447 plus four times a value between 0 and 2^445 - 1 (inclusive)"
-    const minScalar = is25519 ? _2n ** BigInt(254) : _2n ** BigInt(447);
-    const maxAdded = is25519
-        ? BigInt(8) * (_2n ** BigInt(251) - _1n)
-        : BigInt(4) * (_2n ** BigInt(445) - _1n);
-    const maxScalar = minScalar + maxAdded + _1n; // (inclusive)
-    const modP = (n) => mod(n, P);
-    const GuBytes = encodeU(Gu);
-    function encodeU(u) {
-        return numberToBytesLE(modP(u), fieldLen);
-    }
-    function decodeU(u) {
-        const _u = copyBytes(abytes(u, fieldLen, 'uCoordinate'));
-        // RFC: When receiving such an array, implementations of X25519
-        // (but not X448) MUST mask the most significant bit in the final byte.
-        if (is25519)
-            _u[31] &= 127; // 0b0111_1111
-        // RFC: Implementations MUST accept non-canonical values and process them as
-        // if they had been reduced modulo the field prime.  The non-canonical
-        // values are 2^255 - 19 through 2^255 - 1 for X25519 and 2^448 - 2^224
-        // - 1 through 2^448 - 1 for X448.
-        return modP(bytesToNumberLE(_u));
-    }
-    function decodeScalar(scalar) {
-        return bytesToNumberLE(adjustScalarBytes(copyBytes(abytes(scalar, fieldLen, 'scalar'))));
-    }
-    /**
-     * u coordinates whose order divides the cofactor, on the curve and on its quadratic twist -
-     * the ladder sends every one of them to zero. Same blocklist libsodium and post-CVE-2017-0379
-     * Libgcrypt carry. decodeU() reduces mod P first, so the non-canonical encodings P and P + 1
-     * collapse onto 0 and 1, and `type` admits no curve beyond these two, so both lists are total.
-     *
-     * Complete by construction: x-only doubling sends u to (u^2 - 1)^2 / 4u(u^2 + a*u + 1). Order 4
-     * therefore needs (u^2 - 1)^2 === 0, i.e. u = +-1; order 2 needs u(u^2 + a*u + 1) === 0, and
-     * a^2 - 4 is a non-residue on both curves, leaving u = 0. curve448 stops there (cofactor 4);
-     * curve25519 (cofactor 8) adds the two order-8 roots below. Cross-checked by clearing the
-     * cofactor with those same doublings over 200k random u: no sixth value exists.
-     */
-    const lowOrderU = new Set(is25519
-        ? [
-            _0n,
-            _1n,
-            P - _1n,
-            BigInt('325606250916557431795983626356110631294008115727848805560023387167927233504'),
-            BigInt('39382357235489614581723060781553021112529911719440698176882885853963445705823'),
+  const CURVE = validateOpts(curveDef);
+  const { P, type, adjustScalarBytes, powPminus2, randomBytes: rand } = CURVE;
+  const mulBaseHook = CURVE.scalarMultBase;
+  const is25519 = type === "x25519";
+  if (!is25519 && type !== "x448") throw new Error("invalid type");
+  const randomBytes_ = rand === undefined ? randomBytes : rand;
+  const montgomeryBits = is25519 ? 255 : 448;
+  const swap = cswap(P);
+  const fieldLen = is25519 ? 32 : 56;
+  const Gu = is25519 ? BigInt(9) : BigInt(5);
+  // RFC 7748 #5:
+  // The constant a24 is (486662 - 2) / 4 = 121665 for curve25519/X25519 and
+  // (156326 - 2) / 4 = 39081 for curve448/X448
+  // const a = is25519 ? 486662n : 156326n;
+  const a24 = is25519 ? BigInt(121665) : BigInt(39081);
+  // RFC: x25519 "the resulting integer is of the form 2^254 plus
+  // eight times a value between 0 and 2^251 - 1 (inclusive)"
+  // x448: "2^447 plus four times a value between 0 and 2^445 - 1 (inclusive)"
+  const minScalar = is25519 ? _2n ** BigInt(254) : _2n ** BigInt(447);
+  const maxAdded = is25519
+    ? BigInt(8) * (_2n ** BigInt(251) - _1n)
+    : BigInt(4) * (_2n ** BigInt(445) - _1n);
+  const maxScalar = minScalar + maxAdded + _1n; // (inclusive)
+  const modP = (n) => mod(n, P);
+  const GuBytes = encodeU(Gu);
+  function encodeU(u) {
+    return numberToBytesLE(modP(u), fieldLen);
+  }
+  function decodeU(u) {
+    const _u = copyBytes(abytes(u, fieldLen, "uCoordinate"));
+    // RFC: When receiving such an array, implementations of X25519
+    // (but not X448) MUST mask the most significant bit in the final byte.
+    if (is25519) _u[31] &= 127; // 0b0111_1111
+    // RFC: Implementations MUST accept non-canonical values and process them as
+    // if they had been reduced modulo the field prime.  The non-canonical
+    // values are 2^255 - 19 through 2^255 - 1 for X25519 and 2^448 - 2^224
+    // - 1 through 2^448 - 1 for X448.
+    return modP(bytesToNumberLE(_u));
+  }
+  function decodeScalar(scalar) {
+    return bytesToNumberLE(
+      adjustScalarBytes(copyBytes(abytes(scalar, fieldLen, "scalar"))),
+    );
+  }
+  /**
+   * u coordinates whose order divides the cofactor, on the curve and on its quadratic twist -
+   * the ladder sends every one of them to zero. Same blocklist libsodium and post-CVE-2017-0379
+   * Libgcrypt carry. decodeU() reduces mod P first, so the non-canonical encodings P and P + 1
+   * collapse onto 0 and 1, and `type` admits no curve beyond these two, so both lists are total.
+   *
+   * Complete by construction: x-only doubling sends u to (u^2 - 1)^2 / 4u(u^2 + a*u + 1). Order 4
+   * therefore needs (u^2 - 1)^2 === 0, i.e. u = +-1; order 2 needs u(u^2 + a*u + 1) === 0, and
+   * a^2 - 4 is a non-residue on both curves, leaving u = 0. curve448 stops there (cofactor 4);
+   * curve25519 (cofactor 8) adds the two order-8 roots below. Cross-checked by clearing the
+   * cofactor with those same doublings over 200k random u: no sixth value exists.
+   */
+  const lowOrderU = new Set(
+    is25519
+      ? [
+          _0n,
+          _1n,
+          P - _1n,
+          BigInt(
+            "325606250916557431795983626356110631294008115727848805560023387167927233504",
+          ),
+          BigInt(
+            "39382357235489614581723060781553021112529911719440698176882885853963445705823",
+          ),
         ]
-        : [_0n, _1n, P - _1n]);
-    function scalarMult(scalar, u) {
-        // Some public keys are useless, of low-order. Curve author doesn't think
-        // it needs to be validated, but we do it nonetheless.
-        // https://cr.yp.to/ecdh.html#validate
-        //
-        // Reject them BEFORE the ladder. RFC 7748 #6.1 also permits detecting them from the
-        // all-zero output, but that first runs all 255 rounds against the long-term secret,
-        // handing an unauthenticated attacker a free timing oracle. Low-order inputs also drive
-        // the ladder into a degenerate state (x_2 + z_2 === 0) whose extra zero-operand
-        // multiplications amplify any residual key-dependent timing.
-        const pointU = decodeU(u);
-        if (lowOrderU.has(pointU))
-            throw new Error('invalid private or public key received');
-        const pu = montgomeryLadder(pointU, decodeScalar(scalar));
-        // Unreachable for RFC 7748 clamped scalars, which are cofactor multiples smaller than the
-        // group order; kept because adjustScalarBytes is caller-supplied.
-        if (pu === _0n)
-            throw new Error('invalid private or public key received');
-        return encodeU(pu);
+      : [_0n, _1n, P - _1n],
+  );
+  function scalarMult(scalar, u) {
+    // Some public keys are useless, of low-order. Curve author doesn't think
+    // it needs to be validated, but we do it nonetheless.
+    // https://cr.yp.to/ecdh.html#validate
+    //
+    // Reject them BEFORE the ladder. RFC 7748 #6.1 also permits detecting them from the
+    // all-zero output, but that first runs all 255 rounds against the long-term secret,
+    // handing an unauthenticated attacker a free timing oracle. Low-order inputs also drive
+    // the ladder into a degenerate state (x_2 + z_2 === 0) whose extra zero-operand
+    // multiplications amplify any residual key-dependent timing.
+    const pointU = decodeU(u);
+    if (lowOrderU.has(pointU))
+      throw new Error("invalid private or public key received");
+    const pu = montgomeryLadder(pointU, decodeScalar(scalar));
+    // Unreachable for RFC 7748 clamped scalars, which are cofactor multiples smaller than the
+    // group order; kept because adjustScalarBytes is caller-supplied.
+    if (pu === _0n) throw new Error("invalid private or public key received");
+    return encodeU(pu);
+  }
+  // Computes public key from private. By doing scalar multiplication of base point.
+  // With a curve-provided fixed-base hook (Edwards tables), the ladder is skipped, but the
+  // contract — scalar validation, low-order rejection, encoding — stays identical.
+  function scalarMultBase(scalar) {
+    if (mulBaseHook === undefined) return scalarMult(scalar, GuBytes);
+    const k = decodeScalar(scalar);
+    aInRange("scalar", k, minScalar, maxScalar);
+    const pu = modP(mulBaseHook(k));
+    if (pu === _0n) throw new Error("invalid private or public key received");
+    return encodeU(pu);
+  }
+  const getPublicKey = scalarMultBase;
+  const getSharedSecret = scalarMult;
+  /**
+   * Montgomery x-only multiplication ladder for the selected X25519/X448 curve.
+   * @param pointU - decoded Montgomery u coordinate for the selected curve
+   * @param scalar - decoded clamped scalar by which the point is multiplied
+   * @returns resulting Montgomery u coordinate for the selected curve
+   */
+  function montgomeryLadder(u, scalar) {
+    aInRange("u", u, _0n, P);
+    aInRange("scalar", scalar, minScalar, maxScalar);
+    const k = scalar;
+    const x_1 = u;
+    let x_2 = _1n;
+    let z_2 = _0n;
+    let x_3 = u;
+    let z_3 = _1n;
+    // The RFC tracks `swap` across rounds to hold k_t XOR k_(t+1); the low bit of `kx >> t` is
+    // the same value, without the carried state. aInRange above pins bit (montgomeryBits - 1)
+    // of k set and everything above it clear, so `kx >> t` is never zero and its width is a
+    // function of t alone - never of a secret bit.
+    const kx = k ^ (k >> _1n);
+    for (let t = BigInt(montgomeryBits - 1); t >= _0n; t--) {
+      const mask = cmask(P, kx >> t);
+      ({ x_2, x_3 } = swap(mask, x_2, x_3));
+      ({ x_2: z_2, x_3: z_3 } = swap(mask, z_2, z_3));
+      const A = x_2 + z_2;
+      const AA = modP(A * A);
+      const B = x_2 - z_2;
+      const BB = modP(B * B);
+      const E = AA - BB;
+      const C = x_3 + z_3;
+      const D = x_3 - z_3;
+      const DA = modP(D * A);
+      const CB = modP(C * B);
+      const dacb = DA + CB;
+      const da_cb = DA - CB;
+      x_3 = modP(dacb * dacb);
+      z_3 = modP(x_1 * modP(da_cb * da_cb));
+      x_2 = modP(AA * BB);
+      z_2 = modP(E * (AA + modP(a24 * E)));
     }
-    // Computes public key from private. By doing scalar multiplication of base point.
-    // With a curve-provided fixed-base hook (Edwards tables), the ladder is skipped, but the
-    // contract — scalar validation, low-order rejection, encoding — stays identical.
-    function scalarMultBase(scalar) {
-        if (mulBaseHook === undefined)
-            return scalarMult(scalar, GuBytes);
-        const k = decodeScalar(scalar);
-        aInRange('scalar', k, minScalar, maxScalar);
-        const pu = modP(mulBaseHook(k));
-        if (pu === _0n)
-            throw new Error('invalid private or public key received');
-        return encodeU(pu);
-    }
-    const getPublicKey = scalarMultBase;
-    const getSharedSecret = scalarMult;
-    /**
-     * Montgomery x-only multiplication ladder for the selected X25519/X448 curve.
-     * @param pointU - decoded Montgomery u coordinate for the selected curve
-     * @param scalar - decoded clamped scalar by which the point is multiplied
-     * @returns resulting Montgomery u coordinate for the selected curve
-     */
-    function montgomeryLadder(u, scalar) {
-        aInRange('u', u, _0n, P);
-        aInRange('scalar', scalar, minScalar, maxScalar);
-        const k = scalar;
-        const x_1 = u;
-        let x_2 = _1n;
-        let z_2 = _0n;
-        let x_3 = u;
-        let z_3 = _1n;
-        // The RFC tracks `swap` across rounds to hold k_t XOR k_(t+1); the low bit of `kx >> t` is
-        // the same value, without the carried state. aInRange above pins bit (montgomeryBits - 1)
-        // of k set and everything above it clear, so `kx >> t` is never zero and its width is a
-        // function of t alone - never of a secret bit.
-        const kx = k ^ (k >> _1n);
-        for (let t = BigInt(montgomeryBits - 1); t >= _0n; t--) {
-            const mask = cmask(P, kx >> t);
-            ({ x_2, x_3 } = swap(mask, x_2, x_3));
-            ({ x_2: z_2, x_3: z_3 } = swap(mask, z_2, z_3));
-            const A = x_2 + z_2;
-            const AA = modP(A * A);
-            const B = x_2 - z_2;
-            const BB = modP(B * B);
-            const E = AA - BB;
-            const C = x_3 + z_3;
-            const D = x_3 - z_3;
-            const DA = modP(D * A);
-            const CB = modP(C * B);
-            const dacb = DA + CB;
-            const da_cb = DA - CB;
-            x_3 = modP(dacb * dacb);
-            z_3 = modP(x_1 * modP(da_cb * da_cb));
-            x_2 = modP(AA * BB);
-            z_2 = modP(E * (AA + modP(a24 * E)));
-        }
-        // trailing cswap: the RFC's `swap` holds k_0 here, which is the low bit of k
-        const mask = cmask(P, k);
-        ({ x_2, x_3 } = swap(mask, x_2, x_3));
-        ({ x_2: z_2, x_3: z_3 } = swap(mask, z_2, z_3));
-        const z2 = powPminus2(z_2); // `Fp.pow(x, P - _2n)` is much slower equivalent
-        return modP(x_2 * z2); // Return x_2 * (z_2^(p - 2))
-    }
-    const lengths = {
-        secretKey: fieldLen,
-        publicKey: fieldLen,
-        seed: fieldLen,
-    };
-    const randomSecretKey = (seed) => {
-        seed = seed === undefined ? randomBytes_(fieldLen) : seed;
-        abytes(seed, lengths.seed, 'seed');
-        // Reuse caller-supplied seed bytes verbatim; clamping is deferred until
-        // decodeScalar(...) when the secret key is actually used.
-        return seed;
-    };
-    const utils = { randomSecretKey };
-    Object.freeze(lengths);
-    Object.freeze(utils);
-    return Object.freeze({
-        keygen: createKeygen(randomSecretKey, getPublicKey),
-        getSharedSecret,
-        getPublicKey,
-        scalarMult,
-        scalarMultBase,
-        utils,
-        GuBytes: GuBytes.slice(),
-        lengths,
-    });
+    // trailing cswap: the RFC's `swap` holds k_0 here, which is the low bit of k
+    const mask = cmask(P, k);
+    ({ x_2, x_3 } = swap(mask, x_2, x_3));
+    ({ x_2: z_2, x_3: z_3 } = swap(mask, z_2, z_3));
+    const z2 = powPminus2(z_2); // `Fp.pow(x, P - _2n)` is much slower equivalent
+    return modP(x_2 * z2); // Return x_2 * (z_2^(p - 2))
+  }
+  const lengths = {
+    secretKey: fieldLen,
+    publicKey: fieldLen,
+    seed: fieldLen,
+  };
+  const randomSecretKey = (seed) => {
+    seed = seed === undefined ? randomBytes_(fieldLen) : seed;
+    abytes(seed, lengths.seed, "seed");
+    // Reuse caller-supplied seed bytes verbatim; clamping is deferred until
+    // decodeScalar(...) when the secret key is actually used.
+    return seed;
+  };
+  const utils = { randomSecretKey };
+  Object.freeze(lengths);
+  Object.freeze(utils);
+  return Object.freeze({
+    keygen: createKeygen(randomSecretKey, getPublicKey),
+    getSharedSecret,
+    getPublicKey,
+    scalarMult,
+    scalarMultBase,
+    utils,
+    GuBytes: GuBytes.slice(),
+    lengths,
+  });
 }

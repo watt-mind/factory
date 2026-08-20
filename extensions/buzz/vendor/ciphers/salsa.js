@@ -20,7 +20,15 @@
  */
 import { createCipher, rotl } from "./_arx.js";
 import { poly1305 } from "./_poly1305.js";
-import { abytes, clean, equalBytes, getOutput, isLE, swap32IfBE, wrapCipher, } from "./utils.js";
+import {
+  abytes,
+  clean,
+  equalBytes,
+  getOutput,
+  isLE,
+  swap32IfBE,
+  wrapCipher,
+} from "./utils.js";
 /**
  * Salsa20 core function. Uses an unrolled loop (salsaCore, hsalsa) - 4x
  * faster than a simple loop, but larger & harder to read. A simple-loop
@@ -168,8 +176,8 @@ export function hsalsa(s, k, i, out) {
  * ```
  */
 export const salsa20 = /* @__PURE__ */ createCipher(salsaCore, {
-    allowShortKeys: true,
-    counterRight: true,
+  allowShortKeys: true,
+  counterRight: true,
 });
 /**
  * XSalsa20 extended-nonce salsa.
@@ -193,8 +201,8 @@ export const salsa20 = /* @__PURE__ */ createCipher(salsaCore, {
  * ```
  */
 export const xsalsa20 = /* @__PURE__ */ createCipher(salsaCore, {
-    counterRight: true,
-    extendNonceFn: hsalsa,
+  counterRight: true,
+  extendNonceFn: hsalsa,
 });
 // Test-only hook: exposes the unrolled production core so tests can compare it
 // with the simple/reference core from `test/misc/micro-ciphers.ts`.
@@ -222,60 +230,63 @@ export const __TESTS = /* @__PURE__ */ Object.freeze({ salsaCore });
  * cipher.encrypt(new Uint8Array([1, 2, 3]));
  * ```
  */
-export const xsalsa20poly1305 = /* @__PURE__ */ wrapCipher({ blockSize: 64, nonceLength: 24, tagLength: 16 }, (key, nonce) => {
+export const xsalsa20poly1305 = /* @__PURE__ */ wrapCipher(
+  { blockSize: 64, nonceLength: 24, tagLength: 16 },
+  (key, nonce) => {
     // This borrows caller key/nonce buffers by reference; mutating them after construction changes
     // later encrypt/decrypt outputs.
     return {
-        encrypt(plaintext, output) {
-            // xsalsa20poly1305 optimizes by calculating auth key during the same call as encryption.
-            // Unfortunately, makes it hard to separate tag calculation & encryption itself,
-            // because 32 bytes is half-block of 64-byte salsa.
-            // Need 32 extra bytes up front for the auth-key scratch area described above.
-            output = getOutput(plaintext.length + 32, output, false);
-            // output[0..32] = Poly1305 auth key, output[32..] = plaintext then ciphertext.
-            const authKey = output.subarray(0, 32);
-            const ciphPlaintext = output.subarray(32);
-            output.set(plaintext, 32);
-            // authKey is produced by xoring the first 32 bytes with zeros.
-            clean(authKey);
-            // output = stream ^ output; authKey = stream ^ zeros(32)
-            xsalsa20(key, nonce, output, output);
-            const tag = poly1305(ciphPlaintext, authKey);
-            output.set(tag, 16);
-            // Clean up auth-key remnants and the temporary tag copy.
-            clean(output.subarray(0, 16), tag);
-            // Return output[16..].
-            return output.subarray(16);
-        },
-        decrypt(ciphertext, output) {
-            // tmp part     passed tag    ciphertext
-            // [0..32]      [32..48]      [48..]
-            // Authenticate the ciphertext before decrypting it; on tag failure the scratch/output
-            // buffer may already contain copied ciphertext and derived auth-key material.
-            abytes(ciphertext, undefined, 'data');
-            output = getOutput(ciphertext.length + 32, output, false);
-            // output[0..32] is auth-key scratch, output[32..48] is passed tag,
-            // output[48..] is ciphertext then plaintext.
-            const tmp = output.subarray(0, 32);
-            const passedTag = output.subarray(32, 48);
-            const ciphPlaintext = output.subarray(48);
-            output.set(ciphertext, 32);
-            // authKey is produced by xoring the scratch area with zeros.
-            clean(tmp);
-            const authKey = xsalsa20(key, nonce, tmp, tmp);
-            const tag = poly1305(ciphPlaintext, authKey);
-            if (!equalBytes(passedTag, tag)) {
-                clean(output);
-                throw new Error('invalid tag');
-            }
-            // output = stream ^ output[16..]
-            xsalsa20(key, nonce, output.subarray(16), output.subarray(16));
-            clean(tmp, passedTag, tag);
-            // Return output[48..], skipping zeroized output[0..48].
-            return ciphPlaintext;
-        },
+      encrypt(plaintext, output) {
+        // xsalsa20poly1305 optimizes by calculating auth key during the same call as encryption.
+        // Unfortunately, makes it hard to separate tag calculation & encryption itself,
+        // because 32 bytes is half-block of 64-byte salsa.
+        // Need 32 extra bytes up front for the auth-key scratch area described above.
+        output = getOutput(plaintext.length + 32, output, false);
+        // output[0..32] = Poly1305 auth key, output[32..] = plaintext then ciphertext.
+        const authKey = output.subarray(0, 32);
+        const ciphPlaintext = output.subarray(32);
+        output.set(plaintext, 32);
+        // authKey is produced by xoring the first 32 bytes with zeros.
+        clean(authKey);
+        // output = stream ^ output; authKey = stream ^ zeros(32)
+        xsalsa20(key, nonce, output, output);
+        const tag = poly1305(ciphPlaintext, authKey);
+        output.set(tag, 16);
+        // Clean up auth-key remnants and the temporary tag copy.
+        clean(output.subarray(0, 16), tag);
+        // Return output[16..].
+        return output.subarray(16);
+      },
+      decrypt(ciphertext, output) {
+        // tmp part     passed tag    ciphertext
+        // [0..32]      [32..48]      [48..]
+        // Authenticate the ciphertext before decrypting it; on tag failure the scratch/output
+        // buffer may already contain copied ciphertext and derived auth-key material.
+        abytes(ciphertext, undefined, "data");
+        output = getOutput(ciphertext.length + 32, output, false);
+        // output[0..32] is auth-key scratch, output[32..48] is passed tag,
+        // output[48..] is ciphertext then plaintext.
+        const tmp = output.subarray(0, 32);
+        const passedTag = output.subarray(32, 48);
+        const ciphPlaintext = output.subarray(48);
+        output.set(ciphertext, 32);
+        // authKey is produced by xoring the scratch area with zeros.
+        clean(tmp);
+        const authKey = xsalsa20(key, nonce, tmp, tmp);
+        const tag = poly1305(ciphPlaintext, authKey);
+        if (!equalBytes(passedTag, tag)) {
+          clean(output);
+          throw new Error("invalid tag");
+        }
+        // output = stream ^ output[16..]
+        xsalsa20(key, nonce, output.subarray(16), output.subarray(16));
+        clean(tmp, passedTag, tag);
+        // Return output[48..], skipping zeroized output[0..48].
+        return ciphPlaintext;
+      },
     };
-});
+  },
+);
 /**
  * Alias to `xsalsa20poly1305`, for compatibility with libsodium / nacl.
  * Check out {@link https://github.com/serenity-kit/noble-sodium | noble-sodium}
@@ -296,6 +307,6 @@ export const xsalsa20poly1305 = /* @__PURE__ */ wrapCipher({ blockSize: 64, nonc
  * ```
  */
 export function secretbox(key, nonce) {
-    const xs = xsalsa20poly1305(key, nonce);
-    return { seal: xs.encrypt, open: xs.decrypt };
+  const xs = xsalsa20poly1305(key, nonce);
+  return { seal: xs.encrypt, open: xs.decrypt };
 }

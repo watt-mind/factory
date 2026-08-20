@@ -10,19 +10,21 @@
  * ```
  */
 export function isBytes(a) {
-    // Plain `instanceof Uint8Array` is too strict for some Buffer / proxy / cross-realm cases.
-    // The fallback still requires a real ArrayBuffer view, so plain
-    // JSON-deserialized `{ constructor: ... }` spoofing is rejected, and
-    // `BYTES_PER_ELEMENT === 1` keeps the fallback on byte-oriented views.
-    return (a instanceof Uint8Array ||
-        (ArrayBuffer.isView(a) &&
-            a.constructor.name === 'Uint8Array' &&
-            'BYTES_PER_ELEMENT' in a &&
-            a.BYTES_PER_ELEMENT === 1));
+  // Plain `instanceof Uint8Array` is too strict for some Buffer / proxy / cross-realm cases.
+  // The fallback still requires a real ArrayBuffer view, so plain
+  // JSON-deserialized `{ constructor: ... }` spoofing is rejected, and
+  // `BYTES_PER_ELEMENT === 1` keeps the fallback on byte-oriented views.
+  return (
+    a instanceof Uint8Array ||
+    (ArrayBuffer.isView(a) &&
+      a.constructor.name === "Uint8Array" &&
+      "BYTES_PER_ELEMENT" in a &&
+      a.BYTES_PER_ELEMENT === 1)
+  );
 }
 // Shared error-message prefix builder. Only called on throw paths, so assert
 // success paths never pay for the string concatenation.
-const atitle = (title) => (title ? `"${title}" ` : '');
+const atitle = (title) => (title ? `"${title}" ` : "");
 /**
  * Asserts something is a non-negative integer.
  * @param n - number to validate
@@ -36,12 +38,12 @@ const atitle = (title) => (title ? `"${title}" ` : '');
  * anumber(32, 'length');
  * ```
  */
-export function anumber(n, title = '') {
-    if (typeof n !== 'number')
-        throw new TypeError(atitle(title) + 'expected number, got ' + typeof n);
-    if (!Number.isSafeInteger(n) || n < 0)
-        throw new RangeError(atitle(title) + 'expected integer >= 0, got ' + n);
-    return n;
+export function anumber(n, title = "") {
+  if (typeof n !== "number")
+    throw new TypeError(atitle(title) + "expected number, got " + typeof n);
+  if (!Number.isSafeInteger(n) || n < 0)
+    throw new RangeError(atitle(title) + "expected integer >= 0, got " + n);
+  return n;
 }
 /**
  * Asserts something is a boolean.
@@ -55,10 +57,12 @@ export function anumber(n, title = '') {
  * abool(true, 'enableXOF');
  * ```
  */
-export function abool(value, title = '') {
-    if (typeof value !== 'boolean')
-        throw new TypeError(atitle(title) + 'expected boolean, got type=' + typeof value);
-    return value;
+export function abool(value, title = "") {
+  if (typeof value !== "boolean")
+    throw new TypeError(
+      atitle(title) + "expected boolean, got type=" + typeof value,
+    );
+  return value;
 }
 /**
  * Asserts something is Uint8Array.
@@ -74,21 +78,20 @@ export function abool(value, title = '') {
  * abytes(new Uint8Array([1, 2, 3]));
  * ```
  */
-export function abytes(value, length, title = '') {
-    // Success path first: this runs at the start of every update() / digestInto(), and the
-    // common `abytes(data)` form must not pay for length handling it does not use.
-    if (isBytes(value) && (length === undefined || value.length === length))
-        return value;
-    // Error path: recompute freely to build the exact message.
-    if (length !== undefined)
-        anumber(length, 'length');
-    const bytes = isBytes(value);
-    const ofLen = length !== undefined ? ` of length ${length}` : '';
-    const got = bytes ? `length=${value.length}` : `type=${typeof value}`;
-    const message = atitle(title) + 'expected Uint8Array' + ofLen + ', got ' + got;
-    if (!bytes)
-        throw new TypeError(message);
-    throw new RangeError(message);
+export function abytes(value, length, title = "") {
+  // Success path first: this runs at the start of every update() / digestInto(), and the
+  // common `abytes(data)` form must not pay for length handling it does not use.
+  if (isBytes(value) && (length === undefined || value.length === length))
+    return value;
+  // Error path: recompute freely to build the exact message.
+  if (length !== undefined) anumber(length, "length");
+  const bytes = isBytes(value);
+  const ofLen = length !== undefined ? ` of length ${length}` : "";
+  const got = bytes ? `length=${value.length}` : `type=${typeof value}`;
+  const message =
+    atitle(title) + "expected Uint8Array" + ofLen + ", got " + got;
+  if (!bytes) throw new TypeError(message);
+  throw new RangeError(message);
 }
 /**
  * Copies bytes into a fresh Uint8Array.
@@ -103,9 +106,9 @@ export function abytes(value, length, title = '') {
  * ```
  */
 export function copyBytes(bytes) {
-    // `Uint8Array.from(...)` would also accept arrays / other typed arrays. Keep this helper strict
-    // because callers use it at byte-validation boundaries before mutating the detached copy.
-    return Uint8Array.from(abytes(bytes));
+  // `Uint8Array.from(...)` would also accept arrays / other typed arrays. Keep this helper strict
+  // because callers use it at byte-validation boundaries before mutating the detached copy.
+  return Uint8Array.from(abytes(bytes));
 }
 /**
  * Asserts something is a wrapped hash constructor.
@@ -122,18 +125,22 @@ export function copyBytes(bytes) {
  * ```
  */
 export function ahash(h) {
-    if (typeof h !== 'function' || typeof h.create !== 'function')
-        throw new TypeError('expected hash wrapped by utils.createHasher');
-    anumber(h.outputLen);
-    anumber(h.blockLen);
-    // HMAC and KDF callers treat these as real byte lengths; allowing zero lets fake wrappers pass
-    // validation and can produce empty outputs instead of failing fast.
-    if (h.outputLen < 1 || h.blockLen < 1)
-        throw new Error('hash blockLen / outputLen must be >= 1');
+  if (typeof h !== "function" || typeof h.create !== "function")
+    throw new TypeError("expected hash wrapped by utils.createHasher");
+  anumber(h.outputLen);
+  anumber(h.blockLen);
+  // HMAC and KDF callers treat these as real byte lengths; allowing zero lets fake wrappers pass
+  // validation and can produce empty outputs instead of failing fast.
+  if (h.outputLen < 1 || h.blockLen < 1)
+    throw new Error("hash blockLen / outputLen must be >= 1");
 }
 const aobject = (value, label) => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
-        throw new TypeError((label === 'object' ? '' : `"${label}" `) + 'expected object, got type=' + typeof value);
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError(
+      (label === "object" ? "" : `"${label}" `) +
+        "expected object, got type=" +
+        typeof value,
+    );
 };
 /**
  * Asserts a hash instance has not been destroyed or finished.
@@ -150,12 +157,11 @@ const aobject = (value, label) => {
  * ```
  */
 export function aexists(instance, checkFinished = true) {
-    // Runs on every update()/digestInto(); the flags are library-owned booleans, so only their
-    // truthiness is checked - re-validating their type per call was pure hot-path overhead.
-    if (instance.destroyed)
-        throw new Error('hash was destroyed');
-    if (checkFinished && instance.finished)
-        throw new Error('digest() was already called');
+  // Runs on every update()/digestInto(); the flags are library-owned booleans, so only their
+  // truthiness is checked - re-validating their type per call was pure hot-path overhead.
+  if (instance.destroyed) throw new Error("hash was destroyed");
+  if (checkFinished && instance.finished)
+    throw new Error("digest() was already called");
 }
 /**
  * Asserts output is a sufficiently-sized byte array.
@@ -174,13 +180,13 @@ export function aexists(instance, checkFinished = true) {
  * ```
  */
 export function aoutput(out, instance) {
-    abytes(out, undefined, 'output');
-    // `outputLen` is a library-owned readonly number; the negated comparison keeps failing fast
-    // when it is missing/NaN (comparisons with undefined/NaN are false) without an anumber() call.
-    const min = instance.outputLen;
-    if (!(out.length >= min)) {
-        throw new RangeError('"output" expected length >= ' + min);
-    }
+  abytes(out, undefined, "output");
+  // `outputLen` is a library-owned readonly number; the negated comparison keeps failing fast
+  // when it is missing/NaN (comparisons with undefined/NaN are false) without an anumber() call.
+  const min = instance.outputLen;
+  if (!(out.length >= min)) {
+    throw new RangeError('"output" expected length >= ' + min);
+  }
 }
 /**
  * Casts a typed array view to Uint8Array.
@@ -193,7 +199,7 @@ export function aoutput(out, instance) {
  * ```
  */
 export function u8(arr) {
-    return new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+  return new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
 }
 /**
  * Casts a typed array view to Uint32Array.
@@ -208,7 +214,11 @@ export function u8(arr) {
  * ```
  */
 export function u32(arr) {
-    return new Uint32Array(arr.buffer, arr.byteOffset, Math.floor(arr.byteLength / 4));
+  return new Uint32Array(
+    arr.buffer,
+    arr.byteOffset,
+    Math.floor(arr.byteLength / 4),
+  );
 }
 /**
  * Zeroizes typed arrays in place. Warning: JS provides no guarantees.
@@ -220,9 +230,9 @@ export function u32(arr) {
  * ```
  */
 export function clean(...arrays) {
-    for (let i = 0; i < arrays.length; i++) {
-        arrays[i].fill(0);
-    }
+  for (let i = 0; i < arrays.length; i++) {
+    arrays[i].fill(0);
+  }
 }
 /**
  * Creates a DataView for byte-level manipulation.
@@ -235,7 +245,7 @@ export function clean(...arrays) {
  * ```
  */
 export function createView(arr) {
-    return new DataView(arr.buffer, arr.byteOffset, arr.byteLength);
+  return new DataView(arr.buffer, arr.byteOffset, arr.byteLength);
 }
 /**
  * Rotate-right operation for uint32 values.
@@ -249,7 +259,7 @@ export function createView(arr) {
  * ```
  */
 export function rotr(word, shift) {
-    return (word << (32 - shift)) | (word >>> shift);
+  return (word << (32 - shift)) | (word >>> shift);
 }
 /**
  * Rotate-left operation for uint32 values.
@@ -263,10 +273,11 @@ export function rotr(word, shift) {
  * ```
  */
 export function rotl(word, shift) {
-    return (word << shift) | ((word >>> (32 - shift)) >>> 0);
+  return (word << shift) | ((word >>> (32 - shift)) >>> 0);
 }
 /** Whether the current platform is little-endian. */
-export const isLE = /* @__PURE__ */ (() => new Uint8Array(new Uint32Array([0x11223344]).buffer)[0] === 0x44)();
+export const isLE = /* @__PURE__ */ (() =>
+  new Uint8Array(new Uint32Array([0x11223344]).buffer)[0] === 0x44)();
 /**
  * Byte-swap operation for uint32 values.
  * @param word - source word
@@ -278,10 +289,12 @@ export const isLE = /* @__PURE__ */ (() => new Uint8Array(new Uint32Array([0x112
  * ```
  */
 export function byteSwap(word) {
-    return (((word << 24) & 0xff000000) |
-        ((word << 8) & 0xff0000) |
-        ((word >>> 8) & 0xff00) |
-        ((word >>> 24) & 0xff));
+  return (
+    ((word << 24) & 0xff000000) |
+    ((word << 8) & 0xff0000) |
+    ((word >>> 8) & 0xff00) |
+    ((word >>> 24) & 0xff)
+  );
 }
 /**
  * Conditionally byte-swaps one 32-bit word on big-endian platforms.
@@ -293,9 +306,7 @@ export function byteSwap(word) {
  * swap8IfBE(0x11223344);
  * ```
  */
-export const swap8IfBE = isLE
-    ? (n) => n
-    : (n) => byteSwap(n) >>> 0;
+export const swap8IfBE = isLE ? (n) => n : (n) => byteSwap(n) >>> 0;
 /**
  * Byte-swaps every word of a Uint32Array in place.
  * @param arr - array to mutate
@@ -307,10 +318,10 @@ export const swap8IfBE = isLE
  * ```
  */
 export function byteSwap32(arr) {
-    for (let i = 0; i < arr.length; i++) {
-        arr[i] = byteSwap(arr[i]);
-    }
-    return arr;
+  for (let i = 0; i < arr.length; i++) {
+    arr[i] = byteSwap(arr[i]);
+  }
+  return arr;
 }
 /**
  * Conditionally byte-swaps a Uint32Array on big-endian platforms.
@@ -323,15 +334,16 @@ export function byteSwap32(arr) {
  * swap32IfBE(new Uint32Array([0x11223344]));
  * ```
  */
-export const swap32IfBE = isLE
-    ? (u) => u
-    : byteSwap32;
+export const swap32IfBE = isLE ? (u) => u : byteSwap32;
 // Built-in hex conversion https://caniuse.com/mdn-javascript_builtins_uint8array_fromhex
-const hasHexBuiltin = /* @__PURE__ */ (() => 
-// @ts-ignore
-typeof Uint8Array.from([]).toHex === 'function' && typeof Uint8Array.fromHex === 'function')();
+const hasHexBuiltin = /* @__PURE__ */ (() =>
+  // @ts-ignore
+  typeof Uint8Array.from([]).toHex === "function" &&
+  typeof Uint8Array.fromHex === "function")();
 // Array where index 0xf0 (240) is mapped to string 'f0'
-const hexes = /* @__PURE__ */ Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+const hexes = /* @__PURE__ */ Array.from({ length: 256 }, (_, i) =>
+  i.toString(16).padStart(2, "0"),
+);
 /**
  * Convert byte array to hex string.
  * Uses the built-in function when available and assumes it matches the tested
@@ -346,16 +358,15 @@ const hexes = /* @__PURE__ */ Array.from({ length: 256 }, (_, i) => i.toString(1
  * ```
  */
 export function bytesToHex(bytes) {
-    abytes(bytes);
-    // @ts-ignore
-    if (hasHexBuiltin)
-        return bytes.toHex();
-    // pre-caching improves the speed 6x
-    let hex = '';
-    for (let i = 0; i < bytes.length; i++) {
-        hex += hexes[bytes[i]];
-    }
-    return hex;
+  abytes(bytes);
+  // @ts-ignore
+  if (hasHexBuiltin) return bytes.toHex();
+  // pre-caching improves the speed 6x
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += hexes[bytes[i]];
+  }
+  return hex;
 }
 // Strict ASCII nibble parser: non-ASCII hex lookalikes are rejected as undefined.
 // ASCII codes: '0'..'9' = 48..57, 'A'..'F' = 65..70, 'a'..'f' = 97..102.
@@ -379,33 +390,38 @@ function asciiToBase16(ch) {
  * ```
  */
 export function hexToBytes(hex) {
-    if (typeof hex !== 'string')
-        throw new TypeError('hex string expected, got ' + typeof hex);
-    if (hasHexBuiltin) {
-        try {
-            return Uint8Array.fromHex(hex);
-        }
-        catch (error) {
-            if (error instanceof SyntaxError)
-                throw new RangeError(error.message);
-            throw error;
-        }
+  if (typeof hex !== "string")
+    throw new TypeError("hex string expected, got " + typeof hex);
+  if (hasHexBuiltin) {
+    try {
+      return Uint8Array.fromHex(hex);
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new RangeError(error.message);
+      throw error;
     }
-    const hl = hex.length;
-    const al = hl / 2;
-    if (hl % 2)
-        throw new RangeError('hex string expected, got unpadded hex of length ' + hl);
-    const array = new Uint8Array(al);
-    for (let ai = 0, hi = 0; ai < al; ai++, hi += 2) {
-        const n1 = asciiToBase16(hex.charCodeAt(hi)); // parse first char, multiply it by 16
-        const n2 = asciiToBase16(hex.charCodeAt(hi + 1)); // parse second char
-        if (n1 === undefined || n2 === undefined) {
-            const char = hex[hi] + hex[hi + 1];
-            throw new RangeError('hex string expected, got non-hex character "' + char + '" at index ' + hi);
-        }
-        array[ai] = n1 * 16 + n2; // example: 'A9' => 10*16 + 9
+  }
+  const hl = hex.length;
+  const al = hl / 2;
+  if (hl % 2)
+    throw new RangeError(
+      "hex string expected, got unpadded hex of length " + hl,
+    );
+  const array = new Uint8Array(al);
+  for (let ai = 0, hi = 0; ai < al; ai++, hi += 2) {
+    const n1 = asciiToBase16(hex.charCodeAt(hi)); // parse first char, multiply it by 16
+    const n2 = asciiToBase16(hex.charCodeAt(hi + 1)); // parse second char
+    if (n1 === undefined || n2 === undefined) {
+      const char = hex[hi] + hex[hi + 1];
+      throw new RangeError(
+        'hex string expected, got non-hex character "' +
+          char +
+          '" at index ' +
+          hi,
+      );
     }
-    return array;
+    array[ai] = n1 * 16 + n2; // example: 'A9' => 10*16 + 9
+  }
+  return array;
 }
 /**
  * There is no setImmediate in browser and setTimeout is slow.
@@ -417,7 +433,7 @@ export function hexToBytes(hex) {
  * await nextTick();
  * ```
  */
-export const nextTick = async () => { };
+export const nextTick = async () => {};
 /**
  * Returns control to the Promise/microtask scheduler every `tick`
  * milliseconds to avoid blocking long loops.
@@ -433,22 +449,21 @@ export const nextTick = async () => { };
  * ```
  */
 export async function asyncLoop(iters, tick, cb) {
-    anumber(iters, 'iters');
-    anumber(tick, 'tick');
-    if (typeof cb !== 'function')
-        throw new TypeError('callback must be a function');
-    // Callback is synchronous by contract; asyncLoop only yields between sync work windows.
-    let ts = Date.now();
-    for (let i = 0; i < iters; i++) {
-        cb(i);
-        // Date.now() is not monotonic, so in case if clock goes backwards we return return control too
-        const diff = Date.now() - ts;
-        if (diff >= 0 && diff < tick)
-            continue;
-        await nextTick();
-        // Track only synchronous work time; scheduler delay after yielding is outside our budget.
-        ts += diff;
-    }
+  anumber(iters, "iters");
+  anumber(tick, "tick");
+  if (typeof cb !== "function")
+    throw new TypeError("callback must be a function");
+  // Callback is synchronous by contract; asyncLoop only yields between sync work windows.
+  let ts = Date.now();
+  for (let i = 0; i < iters; i++) {
+    cb(i);
+    // Date.now() is not monotonic, so in case if clock goes backwards we return return control too
+    const diff = Date.now() - ts;
+    if (diff >= 0 && diff < tick) continue;
+    await nextTick();
+    // Track only synchronous work time; scheduler delay after yielding is outside our budget.
+    ts += diff;
+  }
 }
 /**
  * Converts string to bytes using UTF8 encoding.
@@ -464,9 +479,8 @@ export async function asyncLoop(iters, tick, cb) {
  * ```
  */
 export function utf8ToBytes(str) {
-    if (typeof str !== 'string')
-        throw new TypeError('string expected');
-    return new Uint8Array(new TextEncoder().encode(str)); // https://bugzil.la/1681809
+  if (typeof str !== "string") throw new TypeError("string expected");
+  return new Uint8Array(new TextEncoder().encode(str)); // https://bugzil.la/1681809
 }
 /**
  * Helper for KDFs: consumes Uint8Array or string.
@@ -481,10 +495,9 @@ export function utf8ToBytes(str) {
  * kdfInputToBytes('password');
  * ```
  */
-export function kdfInputToBytes(data, errorTitle = '') {
-    if (typeof data === 'string')
-        return utf8ToBytes(data);
-    return abytes(data, undefined, errorTitle);
+export function kdfInputToBytes(data, errorTitle = "") {
+  if (typeof data === "string") return utf8ToBytes(data);
+  return abytes(data, undefined, errorTitle);
 }
 /**
  * Copies several Uint8Arrays into one.
@@ -498,19 +511,19 @@ export function kdfInputToBytes(data, errorTitle = '') {
  * ```
  */
 export function concatBytes(...arrays) {
-    let sum = 0;
-    for (let i = 0; i < arrays.length; i++) {
-        const a = arrays[i];
-        abytes(a);
-        sum += a.length;
-    }
-    const res = new Uint8Array(sum);
-    for (let i = 0, pad = 0; i < arrays.length; i++) {
-        const a = arrays[i];
-        res.set(a, pad);
-        pad += a.length;
-    }
-    return res;
+  let sum = 0;
+  for (let i = 0; i < arrays.length; i++) {
+    const a = arrays[i];
+    abytes(a);
+    sum += a.length;
+  }
+  const res = new Uint8Array(sum);
+  for (let i = 0, pad = 0; i < arrays.length; i++) {
+    const a = arrays[i];
+    res.set(a, pad);
+    pad += a.length;
+  }
+  return res;
 }
 /**
  * Validates declared required and optional field types on a plain object.
@@ -527,30 +540,42 @@ export function concatBytes(...arrays) {
  * validateObject({ N: 1024, dkLen: 32 }, { N: 'number' }, { dkLen: 'number' });
  * ```
  */
-export const validateObject = (object, fields = {}, optFields = {}, title = 'object') => {
-    aobject(object, title);
-    aobject(fields, 'fields');
-    aobject(optFields, 'optFields');
-    function checkField(fieldName, expectedType, isOpt) {
-        const label = title === 'object' ? `param "${String(fieldName)}"` : `"${title}.${String(fieldName)}"`;
-        // Config fields must be explicit own properties. Optional inherited values are rejected too
-        // because callers keep reading the same options object after validation.
-        const val = object[fieldName];
-        // Runtime objects such as Field instances intentionally satisfy required method slots
-        // via their shared prototype.
-        if (!Object.hasOwn(object, fieldName) &&
-            (isOpt ? val !== undefined : expectedType !== 'function')) {
-            throw new TypeError(`${label} is invalid: expected own property`);
-        }
-        if (isOpt && val === undefined)
-            return;
-        const current = typeof val;
-        if (current !== expectedType || val === null)
-            throw new TypeError(`${label} is invalid: expected ${expectedType}, got ${current}`);
+export const validateObject = (
+  object,
+  fields = {},
+  optFields = {},
+  title = "object",
+) => {
+  aobject(object, title);
+  aobject(fields, "fields");
+  aobject(optFields, "optFields");
+  function checkField(fieldName, expectedType, isOpt) {
+    const label =
+      title === "object"
+        ? `param "${String(fieldName)}"`
+        : `"${title}.${String(fieldName)}"`;
+    // Config fields must be explicit own properties. Optional inherited values are rejected too
+    // because callers keep reading the same options object after validation.
+    const val = object[fieldName];
+    // Runtime objects such as Field instances intentionally satisfy required method slots
+    // via their shared prototype.
+    if (
+      !Object.hasOwn(object, fieldName) &&
+      (isOpt ? val !== undefined : expectedType !== "function")
+    ) {
+      throw new TypeError(`${label} is invalid: expected own property`);
     }
-    const iter = (f, isOpt) => Object.entries(f).forEach(([k, v]) => checkField(k, v, isOpt));
-    iter(fields, false);
-    iter(optFields, true);
+    if (isOpt && val === undefined) return;
+    const current = typeof val;
+    if (current !== expectedType || val === null)
+      throw new TypeError(
+        `${label} is invalid: expected ${expectedType}, got ${current}`,
+      );
+  }
+  const iter = (f, isOpt) =>
+    Object.entries(f).forEach(([k, v]) => checkField(k, v, isOpt));
+  iter(fields, false);
+  iter(optFields, true);
 };
 /**
  * Merges default options and passed options.
@@ -565,12 +590,11 @@ export const validateObject = (object, fields = {}, optFields = {}, title = 'obj
  * checkOpts({ dkLen: 32 }, { asyncTick: 10 });
  * ```
  */
-export function checkOpts(defaults, opts, title = 'opts') {
-    aobject(defaults, 'defaults');
-    if (opts !== undefined)
-        aobject(opts, title);
-    const merged = Object.assign(defaults, opts);
-    return merged;
+export function checkOpts(defaults, opts, title = "opts") {
+  aobject(defaults, "defaults");
+  if (opts !== undefined) aobject(opts, title);
+  const merged = Object.assign(defaults, opts);
+  return merged;
 }
 /**
  * Creates a callable hash function from a stateful class constructor.
@@ -591,19 +615,19 @@ export function checkOpts(defaults, opts, title = 'opts') {
  * ```
  */
 export function createHasher(hashCons, info = {}) {
-    if (typeof hashCons !== 'function')
-        throw new TypeError('"hashCons" expected function, got type=' + typeof hashCons);
-    info = checkOpts({}, info, 'info');
-    const hashC = (msg, opts) => hashCons(opts)
-        .update(msg)
-        .digest();
-    const tmp = hashCons(undefined);
-    hashC.outputLen = tmp.outputLen;
-    hashC.blockLen = tmp.blockLen;
-    hashC.canXOF = tmp.canXOF;
-    hashC.create = (opts) => hashCons(opts);
-    Object.assign(hashC, info);
-    return Object.freeze(hashC);
+  if (typeof hashCons !== "function")
+    throw new TypeError(
+      '"hashCons" expected function, got type=' + typeof hashCons,
+    );
+  info = checkOpts({}, info, "info");
+  const hashC = (msg, opts) => hashCons(opts).update(msg).digest();
+  const tmp = hashCons(undefined);
+  hashC.outputLen = tmp.outputLen;
+  hashC.blockLen = tmp.blockLen;
+  hashC.canXOF = tmp.canXOF;
+  hashC.create = (opts) => hashCons(opts);
+  Object.assign(hashC, info);
+  return Object.freeze(hashC);
 }
 /**
  * Cryptographically secure PRNG backed by `crypto.getRandomValues`.
@@ -622,19 +646,19 @@ export function createHasher(hashCons, info = {}) {
  * ```
  */
 export function randomBytes(bytesLength = 32) {
-    // Match the repo's other length-taking helpers instead of relying on Uint8Array coercion.
-    anumber(bytesLength, 'bytesLength');
-    const cr = typeof globalThis === 'object' ? globalThis.crypto : null;
-    if (typeof cr?.getRandomValues !== 'function')
-        throw new Error('crypto.getRandomValues must be defined');
-    // Web Cryptography API Level 2 §10.1.1:
-    // if `byteLength > 65536`, throw `QuotaExceededError`.
-    // Keep the guard explicit so callers can see the quota in code
-    // instead of discovering it by reading the spec or host errors.
-    // This wrapper surfaces the same quota as a stable library RangeError.
-    if (bytesLength > 65536)
-        throw new RangeError(`"bytesLength" expected <= 65536, got ${bytesLength}`);
-    return cr.getRandomValues(new Uint8Array(bytesLength));
+  // Match the repo's other length-taking helpers instead of relying on Uint8Array coercion.
+  anumber(bytesLength, "bytesLength");
+  const cr = typeof globalThis === "object" ? globalThis.crypto : null;
+  if (typeof cr?.getRandomValues !== "function")
+    throw new Error("crypto.getRandomValues must be defined");
+  // Web Cryptography API Level 2 §10.1.1:
+  // if `byteLength > 65536`, throw `QuotaExceededError`.
+  // Keep the guard explicit so callers can see the quota in code
+  // instead of discovering it by reading the spec or host errors.
+  // This wrapper surfaces the same quota as a stable library RangeError.
+  if (bytesLength > 65536)
+    throw new RangeError(`"bytesLength" expected <= 65536, got ${bytesLength}`);
+  return cr.getRandomValues(new Uint8Array(bytesLength));
 }
 /**
  * Creates OID metadata for NIST hashes with prefix `06 09 60 86 48 01 65 03 04 02`.
@@ -649,7 +673,19 @@ export function randomBytes(bytesLength = 32) {
  * ```
  */
 export const oidNist = (suffix) => ({
-    // Current NIST hashAlgs suffixes used here fit in one DER subidentifier octet.
-    // Larger suffix values would need base-128 OID encoding and a different length byte.
-    oid: Uint8Array.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, suffix]),
+  // Current NIST hashAlgs suffixes used here fit in one DER subidentifier octet.
+  // Larger suffix values would need base-128 OID encoding and a different length byte.
+  oid: Uint8Array.from([
+    0x06,
+    0x09,
+    0x60,
+    0x86,
+    0x48,
+    0x01,
+    0x65,
+    0x03,
+    0x04,
+    0x02,
+    suffix,
+  ]),
 });

@@ -37,7 +37,11 @@ async function signedPost({
   return { ok: res.ok, status: res.status, json, text };
 }
 
-export async function postEvent(relayUrl, event, { secretHex, authTagJson, fetchImpl } = {}) {
+export async function postEvent(
+  relayUrl,
+  event,
+  { secretHex, authTagJson, fetchImpl } = {},
+) {
   const body = JSON.stringify(event);
   return signedPost({
     url: joinUrl(relayUrl, "/events"),
@@ -48,7 +52,11 @@ export async function postEvent(relayUrl, event, { secretHex, authTagJson, fetch
   });
 }
 
-export async function queryEvents(relayUrl, filters, { secretHex, authTagJson, fetchImpl } = {}) {
+export async function queryEvents(
+  relayUrl,
+  filters,
+  { secretHex, authTagJson, fetchImpl } = {},
+) {
   const list = Array.isArray(filters) ? filters : [filters];
   const body = JSON.stringify(list);
   return signedPost({

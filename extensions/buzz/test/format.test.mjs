@@ -73,7 +73,10 @@ describe("inbox message", () => {
 
   test("resolved reply names the actor", () => {
     expect(
-      formatResolvedReply({ decidedBy: "alice", response: { optionId: "approve" } }),
+      formatResolvedReply({
+        decidedBy: "alice",
+        response: { optionId: "approve" },
+      }),
     ).toBe("✅ approve by alice");
   });
 });
@@ -100,7 +103,9 @@ describe("reject reason gating", () => {
   test("reject requires a text field; approve does not", () => {
     expect(optionNeedsReason(proposal, "reject")).toBe(true);
     expect(optionNeedsReason(proposal, "approve")).toBe(false);
-    expect(fieldsForOption(proposal, "reject", "nope")).toEqual({ reason: "nope" });
+    expect(fieldsForOption(proposal, "reject", "nope")).toEqual({
+      reason: "nope",
+    });
     expect(fieldsForOption(proposal, "approve", "ignored")).toEqual({});
   });
 });

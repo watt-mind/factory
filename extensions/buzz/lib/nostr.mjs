@@ -5,12 +5,7 @@
 import { schnorr } from "../vendor/curves/secp256k1.js";
 import { sha256 } from "../vendor/hashes/sha2.js";
 import { bech32 } from "../vendor/base/index.js";
-import {
-  bytesToHex,
-  hexToBytes,
-  normalizeHex,
-  utf8ToBytes,
-} from "./bytes.mjs";
+import { bytesToHex, hexToBytes, normalizeHex, utf8ToBytes } from "./bytes.mjs";
 
 export const KIND_TEXT = 1;
 export const KIND_REACTION = 7;
@@ -144,9 +139,7 @@ export function parseAuthTag(raw) {
 
 /** SHA-256 of `nostr:agent-auth:<agent-pubkey>:<conditions>` (NIP-OA preimage). */
 export function nipOaDigest(agentPubkey, conditions) {
-  return sha256(
-    utf8ToBytes(`nostr:agent-auth:${agentPubkey}:${conditions}`),
-  );
+  return sha256(utf8ToBytes(`nostr:agent-auth:${agentPubkey}:${conditions}`));
 }
 
 export function verifyAuthTag(parsed, agentPubkey) {

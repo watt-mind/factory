@@ -23,5 +23,7 @@ import { ghash, polyval } from '@noble/ciphers/_polyval.js';
 ```
  * @module
  */
-throw new Error('root module cannot be imported: import submodules instead. Check out README');
+throw new Error(
+  "root module cannot be imported: import submodules instead. Check out README",
+);
 export {};

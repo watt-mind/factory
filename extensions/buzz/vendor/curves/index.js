@@ -35,5 +35,7 @@ import { bytesToHex, hexToBytes, concatBytes } from '@noble/curves/abstract/util
 import { Field } from '@noble/curves/abstract/modular.js';
 ```
  */
-throw new Error('root module cannot be imported: import submodules instead. Check out README');
+throw new Error(
+  "root module cannot be imported: import submodules instead. Check out README",
+);
 export {};

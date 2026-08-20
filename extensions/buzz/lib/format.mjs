@@ -72,14 +72,17 @@ export function inboxDeepLink(itemId, webUrl) {
 export function formatInboxMessage(item, { webUrl } = {}) {
   const title = String(item?.title ?? "").trim() || "(untitled)";
   const question =
-    typeof item?.decision?.question === "string" && item.decision.question.trim()
+    typeof item?.decision?.question === "string" &&
+    item.decision.question.trim()
       ? item.decision.question.trim()
       : typeof item?.body === "string"
         ? item.body.trim()
         : "";
   const options = formatOptions(item?.decision);
   const link = inboxDeepLink(item?.id ?? "", webUrl);
-  return [title, question, options.line, link].filter((line) => line !== "").join("\n");
+  return [title, question, options.line, link]
+    .filter((line) => line !== "")
+    .join("\n");
 }
 
 export function formatResolvedReply(item) {
@@ -149,5 +152,7 @@ export function parseCommand(content) {
 
 export function isApprover(pubkey, approvers) {
   const hex = String(pubkey ?? "").toLowerCase();
-  return Array.isArray(approvers) && approvers.some((p) => p.toLowerCase() === hex);
+  return (
+    Array.isArray(approvers) && approvers.some((p) => p.toLowerCase() === hex)
+  );
 }

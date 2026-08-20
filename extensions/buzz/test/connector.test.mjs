@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { KIND_CHAT, KIND_GIFT_WRAP, KIND_REACTION, pubkeyFromSecret, signEvent } from "../lib/nostr.mjs";
+import {
+  KIND_CHAT,
+  KIND_GIFT_WRAP,
+  KIND_REACTION,
+  pubkeyFromSecret,
+  signEvent,
+} from "../lib/nostr.mjs";
 import { REJECT_REASON_PROMPT, createBuzzRuntime } from "../lib/runtime.mjs";
 
 const AGENT_SECRET = "0".repeat(63) + "2";
@@ -21,7 +27,9 @@ const proposal = {
     { id: "reject", label: "Reject", effect: "reject_proposal" },
     { id: "dismiss", label: "Not now", effect: "dismiss" },
   ],
-  fields: [{ id: "reason", kind: "text", required: true, whenOption: ["reject"] }],
+  fields: [
+    { id: "reason", kind: "text", required: true, whenOption: ["reject"] },
+  ],
 };
 
 function inboxItem(overrides = {}) {
@@ -42,7 +50,8 @@ function fakeClient({ items = [], onDecide, onInject, onMark } = {}) {
       return { admitted: true, duplicate: false, event: envelope };
     },
     inbox: {
-      list: () => [...store.values()].filter((i) => !i.resolvedAt && !i.decidedAt),
+      list: () =>
+        [...store.values()].filter((i) => !i.resolvedAt && !i.decidedAt),
       get: (id) => store.get(id) ?? null,
       decide: (id, response, { actor } = {}) => {
         onDecide?.({ id, response, actor });
@@ -60,7 +69,11 @@ function fakeClient({ items = [], onDecide, onInject, onMark } = {}) {
       markDelivered: (id, delivery) => {
         onMark?.({ id, delivery });
         const item = store.get(id);
-        if (item) store.set(id, { ...item, delivery: { ...item.delivery, ...delivery } });
+        if (item)
+          store.set(id, {
+            ...item,
+            delivery: { ...item.delivery, ...delivery },
+          });
       },
     },
   };
@@ -69,7 +82,9 @@ function fakeClient({ items = [], onDecide, onInject, onMark } = {}) {
 function header(headers, name) {
   if (!headers) return "";
   if (typeof headers.get === "function") return headers.get(name) ?? "";
-  const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+  const key = Object.keys(headers).find(
+    (k) => k.toLowerCase() === name.toLowerCase(),
+  );
   return key ? String(headers[key]) : "";
 }
 
@@ -94,7 +109,8 @@ function startRelay({ failEvents = 0, extraEvents = [] } = {}) {
     const auth = header(init.headers, "authorization");
     const ua = header(init.headers, "user-agent");
     if (!auth.startsWith("Nostr ")) return jsonResponse(401, "unauthorized");
-    if (!ua.includes("wattmind-factory-buzz")) return jsonResponse(403, "forbidden ua");
+    if (!ua.includes("wattmind-factory-buzz"))
+      return jsonResponse(403, "forbidden ua");
     const body = init.body ?? "";
     if (parsed.pathname === "/events") {
       if (remainingFails > 0) {
@@ -204,7 +220,10 @@ describe("ingress", () => {
   test("👍 from an approver calls inbox.decide approve, idempotent on event id", async () => {
     const decisions = [];
     const item = inboxItem();
-    const client = fakeClient({ items: [item], onDecide: (row) => decisions.push(row) });
+    const client = fakeClient({
+      items: [item],
+      onDecide: (row) => decisions.push(row),
+    });
     const postedId = "a".repeat(64);
     const reaction = signEvent(
       { kind: KIND_REACTION, tags: [["e", postedId]], content: "👍" },
@@ -234,7 +253,10 @@ describe("ingress", () => {
   test("👎 without a reason prompts instead of deciding", async () => {
     const decisions = [];
     const item = inboxItem();
-    const client = fakeClient({ items: [item], onDecide: (row) => decisions.push(row) });
+    const client = fakeClient({
+      items: [item],
+      onDecide: (row) => decisions.push(row),
+    });
     const postedId = "b".repeat(64);
     const reaction = signEvent(
       { kind: KIND_REACTION, tags: [["e", postedId]], content: "👎" },
@@ -256,7 +278,9 @@ describe("ingress", () => {
     });
     await runtime.poll();
     expect(decisions).toHaveLength(0);
-    expect(relay.posted.some((e) => e.content === REJECT_REASON_PROMPT)).toBe(true);
+    expect(relay.posted.some((e) => e.content === REJECT_REASON_PROMPT)).toBe(
+      true,
+    );
   });
 
   test("@factory dispatch injects factory.dispatch.requested; @factory status replies", async () => {
@@ -304,7 +328,9 @@ describe("ingress", () => {
     expect(relay.posted.some((e) => e.content.includes("queued WM-123"))).toBe(
       true,
     );
-    expect(relay.posted.some((e) => e.content.includes("inbox open:"))).toBe(true);
+    expect(relay.posted.some((e) => e.content.includes("inbox open:"))).toBe(
+      true,
+    );
   });
 });
 

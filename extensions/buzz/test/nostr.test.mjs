@@ -16,8 +16,10 @@ import {
 
 const OWNER_SECRET = "0".repeat(63) + "1";
 const AGENT_SECRET = "0".repeat(63) + "2";
-const OWNER_PUB = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-const AGENT_PUB = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const OWNER_PUB =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const AGENT_PUB =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 const AUTH_SIG =
   "8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb2e189eae9f49d72187674c2f5bd244145e10ff86c9f257ffe65a1ee5f108b369";
 const CONDITIONS = "kind=1&created_at<1713957000";
@@ -86,7 +88,9 @@ describe("NIP-98 header", () => {
       body,
     });
     expect(header.startsWith("Nostr ")).toBe(true);
-    const json = Buffer.from(header.slice("Nostr ".length), "base64").toString("utf8");
+    const json = Buffer.from(header.slice("Nostr ".length), "base64").toString(
+      "utf8",
+    );
     const event = JSON.parse(json);
     expect(event.kind).toBe(KIND_HTTP_AUTH);
     expect(event.tags).toEqual(

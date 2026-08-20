@@ -35,14 +35,14 @@ observed end-to-end on Buzz. This connector is additive.
 
 Optional config (non-secret, in the policy `config:` block):
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `relayUrl` | `https://watt-mind.communities.buzz.xyz` | HTTP relay |
-| `channel` | `#general` uuid `91572011-2505-5288-b6f5-4a7d74abf106` | kind-9 `h` tag |
-| `dmBlockedTo` | unset | owner pubkey hex; BLOCKED / CIRCUIT BREAKER / SMOKE RED also NIP-17 DM |
-| `postKinds` | every Decide + Red + Ready inbox kind | which ledger rows to post |
-| `pollSeconds` | 15 | `/query` interval (5–120) |
-| `approvers` | owner pubkey from the auth tag | who may react / command |
+| Key           | Default                                                | Meaning                                                                |
+| ------------- | ------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `relayUrl`    | `https://watt-mind.communities.buzz.xyz`               | HTTP relay                                                             |
+| `channel`     | `#general` uuid `91572011-2505-5288-b6f5-4a7d74abf106` | kind-9 `h` tag                                                         |
+| `dmBlockedTo` | unset                                                  | owner pubkey hex; BLOCKED / CIRCUIT BREAKER / SMOKE RED also NIP-17 DM |
+| `postKinds`   | every Decide + Red + Ready inbox kind                  | which ledger rows to post                                              |
+| `pollSeconds` | 15                                                     | `/query` interval (5–120)                                              |
+| `approvers`   | owner pubkey from the auth tag                         | who may react / command                                                |
 
 ## What it does
 

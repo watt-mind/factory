@@ -1,4 +1,4 @@
-/* eslint-disable */
+ 
 /**
  * HKDF (RFC 5869): extract + expand in one step.
  * See {@link https://soatok.blog/2021/11/17/understanding-hkdf/}.
@@ -23,13 +23,12 @@ import { abytes, ahash, anumber, clean } from "./utils.js";
  * ```
  */
 export function extract(hash, ikm, salt) {
-    ahash(hash);
-    // NOTE: some libraries treat zero-length array as 'not provided';
-    // we don't, since we have undefined as 'not provided'
-    // https://github.com/RustCrypto/KDFs/issues/15
-    if (salt === undefined)
-        salt = new Uint8Array(hash.outputLen);
-    return hmac(hash, salt, ikm);
+  ahash(hash);
+  // NOTE: some libraries treat zero-length array as 'not provided';
+  // we don't, since we have undefined as 'not provided'
+  // https://github.com/RustCrypto/KDFs/issues/15
+  if (salt === undefined) salt = new Uint8Array(hash.outputLen);
+  return hmac(hash, salt, ikm);
 }
 // Shared mutable scratch byte for the RFC 5869 block counter `N`.
 // Safe to reuse because `expand()` is synchronous and resets it with `clean(...)` before returning.
@@ -57,66 +56,58 @@ const EMPTY_BUFFER = /* @__PURE__ */ Uint8Array.of();
  * ```
  */
 export function expand(hash, prk, info, length = 32, _recycled) {
-    ahash(hash);
-    anumber(length, 'length');
-    abytes(prk, undefined, 'prk');
-    const olen = hash.outputLen;
-    // RFC 5869 §2.3: PRK is "a pseudorandom key of at least HashLen octets".
-    if (prk.length < olen)
-        throw new Error('"prk" must be at least HashLen octets');
-    // RFC 5869 §2.3 only bounds `L` by `<= 255*HashLen`; `L=0` is valid and yields empty OKM.
-    if (length > 255 * olen)
-        throw new Error('Length must be <= 255*HashLen');
-    const blocks = Math.ceil(length / olen);
-    if (info === undefined)
-        info = EMPTY_BUFFER;
-    else
-        abytes(info, undefined, 'info');
-    if (!blocks) {
-        if (_recycled)
-            clean(prk); // Full hkdf() owns this intermediate PRK.
-        return new Uint8Array();
-    }
-    // first L(ength) octets of T
-    // The private PRK can become both T and a one-block result after HMAC consumes the key.
-    const okm = _recycled && blocks === 1 ? prk : new Uint8Array(blocks * olen);
-    const { iHash, oHash } = hmac.create(hash, prk);
-    // Driving them directly also skips `_HMAC.digestInto`'s per-digest destroy.
-    const T = _recycled ? prk : new Uint8Array(olen);
-    // Full hkdf() donates one destroyed extract hash; standalone creates one alternating worker.
-    const worker = blocks > 1 ? _recycled?.iHash || hash.create() : undefined;
-    for (let counter = 0; counter < blocks - 1; counter++) {
-        HKDF_COUNTER[0] = counter + 1;
-        const iWork = iHash._cloneInto(worker);
-        // T(0) = empty string (zero length)
-        // T(N) = HMAC-Hash(PRK, T(N-1) | info | N)
-        if (counter)
-            iWork.update(T);
-        iWork.update(info).update(HKDF_COUNTER).digestInto(T);
-        oHash._cloneInto(worker).update(T).digestInto(T);
-        okm.set(T, olen * counter);
-    }
-    // Midstates are key-equivalent: they allow computing HMAC(prk, ...) for any message.
-    HKDF_COUNTER[0] = blocks; // Final block consumes them; retain worker for cleanup.
-    if (blocks > 1)
-        iHash.update(T);
-    iHash.update(info).update(HKDF_COUNTER).digestInto(T);
-    oHash.update(T).digestInto(T);
-    okm.set(T, olen * (blocks - 1));
-    iHash.destroy(); // Raw digests may leave key-derived base/worker state; wipe all explicitly.
-    oHash.destroy();
-    worker?.destroy();
-    if (T !== okm)
-        clean(T); // Wipe private T/PRK; standalone preserves caller-owned PRK.
-    clean(HKDF_COUNTER);
-    // Exact fit: return without the extra copy.
-    if (length === okm.length)
-        return okm;
-    // Copy the requested prefix, then wipe the full buffer: its tail holds
-    // up to HashLen-1 bytes of derived key material past `length`.
-    const res = okm.slice(0, length);
-    clean(okm);
-    return res;
+  ahash(hash);
+  anumber(length, "length");
+  abytes(prk, undefined, "prk");
+  const olen = hash.outputLen;
+  // RFC 5869 §2.3: PRK is "a pseudorandom key of at least HashLen octets".
+  if (prk.length < olen)
+    throw new Error('"prk" must be at least HashLen octets');
+  // RFC 5869 §2.3 only bounds `L` by `<= 255*HashLen`; `L=0` is valid and yields empty OKM.
+  if (length > 255 * olen) throw new Error("Length must be <= 255*HashLen");
+  const blocks = Math.ceil(length / olen);
+  if (info === undefined) info = EMPTY_BUFFER;
+  else abytes(info, undefined, "info");
+  if (!blocks) {
+    if (_recycled) clean(prk); // Full hkdf() owns this intermediate PRK.
+    return new Uint8Array();
+  }
+  // first L(ength) octets of T
+  // The private PRK can become both T and a one-block result after HMAC consumes the key.
+  const okm = _recycled && blocks === 1 ? prk : new Uint8Array(blocks * olen);
+  const { iHash, oHash } = hmac.create(hash, prk);
+  // Driving them directly also skips `_HMAC.digestInto`'s per-digest destroy.
+  const T = _recycled ? prk : new Uint8Array(olen);
+  // Full hkdf() donates one destroyed extract hash; standalone creates one alternating worker.
+  const worker = blocks > 1 ? _recycled?.iHash || hash.create() : undefined;
+  for (let counter = 0; counter < blocks - 1; counter++) {
+    HKDF_COUNTER[0] = counter + 1;
+    const iWork = iHash._cloneInto(worker);
+    // T(0) = empty string (zero length)
+    // T(N) = HMAC-Hash(PRK, T(N-1) | info | N)
+    if (counter) iWork.update(T);
+    iWork.update(info).update(HKDF_COUNTER).digestInto(T);
+    oHash._cloneInto(worker).update(T).digestInto(T);
+    okm.set(T, olen * counter);
+  }
+  // Midstates are key-equivalent: they allow computing HMAC(prk, ...) for any message.
+  HKDF_COUNTER[0] = blocks; // Final block consumes them; retain worker for cleanup.
+  if (blocks > 1) iHash.update(T);
+  iHash.update(info).update(HKDF_COUNTER).digestInto(T);
+  oHash.update(T).digestInto(T);
+  okm.set(T, olen * (blocks - 1));
+  iHash.destroy(); // Raw digests may leave key-derived base/worker state; wipe all explicitly.
+  oHash.destroy();
+  worker?.destroy();
+  if (T !== okm) clean(T); // Wipe private T/PRK; standalone preserves caller-owned PRK.
+  clean(HKDF_COUNTER);
+  // Exact fit: return without the extra copy.
+  if (length === okm.length) return okm;
+  // Copy the requested prefix, then wipe the full buffer: its tail holds
+  // up to HashLen-1 bytes of derived key material past `length`.
+  const res = okm.slice(0, length);
+  clean(okm);
+  return res;
 }
 /**
  * HKDF (RFC 5869): derive keys from an initial input.
@@ -143,11 +134,10 @@ export function expand(hash, prk, info, length = 32, _recycled) {
  * ```
  */
 export const hkdf = (hash, ikm, salt, info, length) => {
-    ahash(hash);
-    if (salt === undefined)
-        salt = new Uint8Array(hash.outputLen);
-    const HMAC = hmac.create(hash, salt).update(ikm);
-    // The intermediate PRK is secret key material; wipe it instead of
-    // leaving it for GC.
-    return expand(hash, HMAC.digest(), info, length, HMAC); // expand() owns and consumes it.
+  ahash(hash);
+  if (salt === undefined) salt = new Uint8Array(hash.outputLen);
+  const HMAC = hmac.create(hash, salt).update(ikm);
+  // The intermediate PRK is secret key material; wipe it instead of
+  // leaving it for GC.
+  return expand(hash, HMAC.digest(), info, length, HMAC); // expand() owns and consumes it.
 };

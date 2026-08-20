@@ -4,7 +4,15 @@
  * @module
  */
 /*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-import { abytes as abytes_, anumber as anumber_, bytesToHex as bytesToHex_, concatBytes as concatBytes_, hexToBytes as hexToBytes_, isBytes as isBytes_, randomBytes as randomBytes_, } from '../hashes/utils.js';
+import {
+  abytes as abytes_,
+  anumber as anumber_,
+  bytesToHex as bytesToHex_,
+  concatBytes as concatBytes_,
+  hexToBytes as hexToBytes_,
+  isBytes as isBytes_,
+  randomBytes as randomBytes_,
+} from "../hashes/utils.js";
 /**
  * Validates that a value is an array, optionally validating each element.
  * @param item - Value to validate.
@@ -18,12 +26,11 @@ import { abytes as abytes_, anumber as anumber_, bytesToHex as bytesToHex_, conc
  * aarray([1n, 2n], 'scalars');
  * ```
  */
-export function aarray(item, title, inner = () => { }) {
-    if (!Array.isArray(item))
-        throw new TypeError(`"${title}" expected array, got type=${typeof item}`);
-    for (let i = 0; i < item.length; i++)
-        inner(item[i], `${title}[${i}]`);
-    return item;
+export function aarray(item, title, inner = () => {}) {
+  if (!Array.isArray(item))
+    throw new TypeError(`"${title}" expected array, got type=${typeof item}`);
+  for (let i = 0; i < item.length; i++) inner(item[i], `${title}[${i}]`);
+  return item;
 }
 /**
  * Validates that a value is a byte array.
@@ -65,12 +72,12 @@ export const anumber = anumber_;
  * astring('example', 'label');
  * ```
  */
-export function astring(value, title = '') {
-    if (typeof value !== 'string') {
-        const prefix = title && `"${title}" `;
-        throw new TypeError(prefix + 'expected string, got type=' + typeof value);
-    }
-    return value;
+export function astring(value, title = "") {
+  if (typeof value !== "string") {
+    const prefix = title && `"${title}" `;
+    throw new TypeError(prefix + "expected string, got type=" + typeof value);
+  }
+  return value;
 }
 /**
  * Asserts something is a plain object-ish value, not null or array.
@@ -85,12 +92,14 @@ export function astring(value, title = '') {
  * aobject({ flag: true });
  * ```
  */
-export function aobject(value, title = 'object') {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
-        throw new TypeError(title === 'object'
-            ? 'expected valid options object'
-            : `"${title}" expected object, got type=${typeof value}`);
-    return value;
+export function aobject(value, title = "object") {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError(
+      title === "object"
+        ? "expected valid options object"
+        : `"${title}" expected object, got type=${typeof value}`,
+    );
+  return value;
 }
 /**
  * Asserts something is a function.
@@ -106,9 +115,11 @@ export function aobject(value, title = 'object') {
  * ```
  */
 export function afunction(value, title) {
-    if (typeof value !== 'function')
-        throw new TypeError(`"${title}" is invalid: expected function, got ${typeof value}`);
-    return value;
+  if (typeof value !== "function")
+    throw new TypeError(
+      `"${title}" is invalid: expected function, got ${typeof value}`,
+    );
+  return value;
 }
 /**
  * Encodes bytes as lowercase hex.
@@ -174,7 +185,7 @@ const _0n = /* @__PURE__ */ BigInt(0);
 const _1n = /* @__PURE__ */ BigInt(1);
 // Shared error-message prefix builder. Only called on throw paths, so assert
 // success paths never pay for the string concatenation.
-const atitle = (title) => (title ? `"${title}" ` : '');
+const atitle = (title) => (title ? `"${title}" ` : "");
 /**
  * Validates that a flag is boolean.
  * @param value - Value to validate.
@@ -188,10 +199,12 @@ const atitle = (title) => (title ? `"${title}" ` : '');
  * abool(true);
  * ```
  */
-export function abool(value, title = '') {
-    if (typeof value !== 'boolean')
-        throw new TypeError(atitle(title) + 'expected boolean, got type=' + typeof value);
-    return value;
+export function abool(value, title = "") {
+  if (typeof value !== "boolean")
+    throw new TypeError(
+      atitle(title) + "expected boolean, got type=" + typeof value,
+    );
+  return value;
 }
 /**
  * Validates that a value is a non-negative bigint or safe integer.
@@ -206,13 +219,11 @@ export function abool(value, title = '') {
  * ```
  */
 export function abignumber(n) {
-    if (typeof n === 'bigint') {
-        if (!isPosBig(n))
-            throw new RangeError('positive bigint expected, got ' + n);
-    }
-    else
-        anumber(n);
-    return n;
+  if (typeof n === "bigint") {
+    if (!isPosBig(n))
+      throw new RangeError("positive bigint expected, got " + n);
+  } else anumber(n);
+  return n;
 }
 /**
  * Validates that a value is a safe integer.
@@ -227,15 +238,15 @@ export function abignumber(n) {
  * asafenumber(1);
  * ```
  */
-export function asafenumber(value, title = '') {
-    if (typeof value !== 'number') {
-        const prefix = title && `"${title}" `;
-        throw new TypeError(prefix + 'expected number, got type=' + typeof value);
-    }
-    if (!Number.isSafeInteger(value)) {
-        const prefix = title && `"${title}" `;
-        throw new RangeError(prefix + 'expected safe integer, got ' + value);
-    }
+export function asafenumber(value, title = "") {
+  if (typeof value !== "number") {
+    const prefix = title && `"${title}" `;
+    throw new TypeError(prefix + "expected number, got type=" + typeof value);
+  }
+  if (!Number.isSafeInteger(value)) {
+    const prefix = title && `"${title}" `;
+    throw new RangeError(prefix + "expected safe integer, got " + value);
+  }
 }
 /**
  * Encodes a bigint into even-length big-endian hex.
@@ -252,8 +263,8 @@ export function asafenumber(value, title = '') {
  * ```
  */
 export function numberToHexUnpadded(num) {
-    const hex = abignumber(num).toString(16);
-    return hex.length & 1 ? '0' + hex : hex;
+  const hex = abignumber(num).toString(16);
+  return hex.length & 1 ? "0" + hex : hex;
 }
 /**
  * Parses a big-endian hex string into bigint.
@@ -270,9 +281,9 @@ export function numberToHexUnpadded(num) {
  * ```
  */
 export function hexToNumber(hex) {
-    if (typeof hex !== 'string')
-        throw new TypeError('hex string expected, got ' + typeof hex);
-    return hex === '' ? _0n : BigInt('0x' + hex); // Big Endian
+  if (typeof hex !== "string")
+    throw new TypeError("hex string expected, got " + typeof hex);
+  return hex === "" ? _0n : BigInt("0x" + hex); // Big Endian
 }
 // BE: Big Endian, LE: Little Endian
 /**
@@ -288,7 +299,7 @@ export function hexToNumber(hex) {
  * ```
  */
 export function bytesToNumberBE(bytes) {
-    return hexToNumber(bytesToHex_(bytes));
+  return hexToNumber(bytesToHex_(bytes));
 }
 /**
  * Parses little-endian bytes into bigint.
@@ -303,7 +314,7 @@ export function bytesToNumberBE(bytes) {
  * ```
  */
 export function bytesToNumberLE(bytes) {
-    return hexToNumber(bytesToHex_(copyBytes(abytes_(bytes)).reverse()));
+  return hexToNumber(bytesToHex_(copyBytes(abytes_(bytes)).reverse()));
 }
 /**
  * Encodes a bigint into fixed-length big-endian bytes.
@@ -320,16 +331,14 @@ export function bytesToNumberLE(bytes) {
  * ```
  */
 export function numberToBytesBE(n, len) {
-    anumber_(len);
-    if (len === 0)
-        throw new Error('zero output length is invalid');
-    n = abignumber(n);
-    const expectedLen = len * 2;
-    const hex = n.toString(16);
-    // Detect overflow before hex parsing so oversized values don't leak the shared odd-hex error.
-    if (hex.length > expectedLen)
-        throw new RangeError('number is too large');
-    return hexToBytes_(hex.padStart(expectedLen, '0'));
+  anumber_(len);
+  if (len === 0) throw new Error("zero output length is invalid");
+  n = abignumber(n);
+  const expectedLen = len * 2;
+  const hex = n.toString(16);
+  // Detect overflow before hex parsing so oversized values don't leak the shared odd-hex error.
+  if (hex.length > expectedLen) throw new RangeError("number is too large");
+  return hexToBytes_(hex.padStart(expectedLen, "0"));
 }
 /**
  * Encodes a bigint into fixed-length little-endian bytes.
@@ -346,7 +355,7 @@ export function numberToBytesBE(n, len) {
  * ```
  */
 export function numberToBytesLE(n, len) {
-    return numberToBytesBE(n, len).reverse();
+  return numberToBytesBE(n, len).reverse();
 }
 // Unpadded, rarely used
 /**
@@ -362,7 +371,7 @@ export function numberToBytesLE(n, len) {
  * ```
  */
 export function numberToVarBytesBE(n) {
-    return hexToBytes_(numberToHexUnpadded(abignumber(n)));
+  return hexToBytes_(numberToHexUnpadded(abignumber(n)));
 }
 // Compares 2 u8a-s in kinda constant time
 /**
@@ -378,14 +387,12 @@ export function numberToVarBytesBE(n) {
  * ```
  */
 export function equalBytes(a, b) {
-    a = abytes(a);
-    b = abytes(b);
-    if (a.length !== b.length)
-        return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++)
-        diff |= a[i] ^ b[i];
-    return diff === 0;
+  a = abytes(a);
+  b = abytes(b);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 /**
  * Copies Uint8Array. We can't use u8a.slice(), because u8a can be Buffer,
@@ -400,9 +407,9 @@ export function equalBytes(a, b) {
  * ```
  */
 export function copyBytes(bytes) {
-    // `Uint8Array.from(...)` would also accept arrays / other typed arrays. Keep this helper strict
-    // because callers use it at byte-validation boundaries before mutating the detached copy.
-    return Uint8Array.from(abytes(bytes));
+  // `Uint8Array.from(...)` would also accept arrays / other typed arrays. Keep this helper strict
+  // because callers use it at byte-validation boundaries before mutating the detached copy.
+  return Uint8Array.from(abytes(bytes));
 }
 /**
  * Decodes 7-bit ASCII string to Uint8Array, throws on non-ascii symbols
@@ -419,15 +426,17 @@ export function copyBytes(bytes) {
  * ```
  */
 export function asciiToBytes(ascii) {
-    if (typeof ascii !== 'string')
-        throw new TypeError('ascii string expected, got ' + typeof ascii);
-    return Uint8Array.from(ascii, (c, i) => {
-        const charCode = c.charCodeAt(0);
-        if (c.length !== 1 || charCode > 127) {
-            throw new RangeError(`string contains non-ASCII character "${ascii[i]}" with code ${charCode} at position ${i}`);
-        }
-        return charCode;
-    });
+  if (typeof ascii !== "string")
+    throw new TypeError("ascii string expected, got " + typeof ascii);
+  return Uint8Array.from(ascii, (c, i) => {
+    const charCode = c.charCodeAt(0);
+    if (c.length !== 1 || charCode > 127) {
+      throw new RangeError(
+        `string contains non-ASCII character "${ascii[i]}" with code ${charCode} at position ${i}`,
+      );
+    }
+    return charCode;
+  });
 }
 /**
  * Checks whether n is non-negative bigint. Historical name.
@@ -441,7 +450,7 @@ export function asciiToBytes(ascii) {
  * ```
  */
 export function isPosBig(n) {
-    return typeof n === 'bigint' && _0n <= n;
+  return typeof n === "bigint" && _0n <= n;
 }
 /**
  * Checks whether a bigint lies inside a half-open range.
@@ -457,7 +466,7 @@ export function isPosBig(n) {
  * ```
  */
 export function inRange(n, min, max) {
-    return isPosBig(n) && isPosBig(min) && isPosBig(max) && min <= n && n < max;
+  return isPosBig(n) && isPosBig(min) && isPosBig(max) && min <= n && n < max;
 }
 /**
  * Asserts `min <= n < max`. NOTE: upper bound is exclusive.
@@ -476,13 +485,15 @@ export function inRange(n, min, max) {
  * ```
  */
 export function aInRange(title, n, min, max) {
-    // Why min <= n < max and not a (min < n < max) OR b (min <= n <= max)?
-    // consider P=256n, min=0n, max=P
-    // - a for min=0 would require -1:          `inRange('x', x, -1n, P)`
-    // - b would commonly require subtraction:  `inRange('x', x, 0n, P - 1n)`
-    // - our way is the cleanest:               `inRange('x', x, 0n, P)
-    if (!inRange(n, min, max))
-        throw new RangeError('expected valid ' + title + ': ' + min + ' <= n < ' + max + ', got ' + n);
+  // Why min <= n < max and not a (min < n < max) OR b (min <= n <= max)?
+  // consider P=256n, min=0n, max=P
+  // - a for min=0 would require -1:          `inRange('x', x, -1n, P)`
+  // - b would commonly require subtraction:  `inRange('x', x, 0n, P - 1n)`
+  // - our way is the cleanest:               `inRange('x', x, 0n, P)
+  if (!inRange(n, min, max))
+    throw new RangeError(
+      "expected valid " + title + ": " + min + " <= n < " + max + ", got " + n,
+    );
 }
 // Bit operations
 /**
@@ -500,12 +511,11 @@ export function aInRange(title, n, min, max) {
  * ```
  */
 export function bitLen(n) {
-    // Size callers in this repo only use non-negative orders / scalars, so negative inputs are a
-    // contract bug and must not silently collapse to zero bits.
-    if (n < _0n)
-        throw new Error('expected non-negative bigint, got ' + n);
-    // Native radix conversion beats a shift loop at every size, and the loop is quadratic in bits.
-    return n === _0n ? 0 : n.toString(2).length;
+  // Size callers in this repo only use non-negative orders / scalars, so negative inputs are a
+  // contract bug and must not silently collapse to zero bits.
+  if (n < _0n) throw new Error("expected non-negative bigint, got " + n);
+  // Native radix conversion beats a shift loop at every size, and the loop is quadratic in bits.
+  return n === _0n ? 0 : n.toString(2).length;
 }
 /**
  * Gets single bit at position.
@@ -524,10 +534,10 @@ export function bitLen(n) {
  * ```
  */
 export function bitGet(n, pos) {
-    if (typeof n !== 'bigint')
-        throw new TypeError('"n" expected bigint, got type=' + typeof n);
-    asafenumber(pos, 'pos');
-    return (n >> BigInt(pos)) & _1n;
+  if (typeof n !== "bigint")
+    throw new TypeError('"n" expected bigint, got type=' + typeof n);
+  asafenumber(pos, "pos");
+  return (n >> BigInt(pos)) & _1n;
 }
 /**
  * Sets single bit at position.
@@ -544,13 +554,13 @@ export function bitGet(n, pos) {
  * ```
  */
 export function bitSet(n, pos, value) {
-    if (typeof n !== 'bigint')
-        throw new TypeError('"n" expected bigint, got type=' + typeof n);
-    asafenumber(pos, 'pos');
-    abool(value, 'value');
-    const mask = _1n << BigInt(pos);
-    // Clearing needs AND-not here; OR with zero leaves an already-set bit untouched.
-    return value ? n | mask : n & ~mask;
+  if (typeof n !== "bigint")
+    throw new TypeError('"n" expected bigint, got type=' + typeof n);
+  asafenumber(pos, "pos");
+  abool(value, "value");
+  const mask = _1n << BigInt(pos);
+  // Clearing needs AND-not here; OR with zero leaves an already-set bit untouched.
+  return value ? n | mask : n & ~mask;
 }
 /**
  * Calculate mask for N bits. Not using ** operator with bigints because of old engines.
@@ -566,8 +576,8 @@ export function bitSet(n, pos, value) {
  * ```
  */
 export const bitMask = (n) => {
-    asafenumber(n, 'n');
-    return (_1n << BigInt(n)) - _1n;
+  asafenumber(n, "n");
+  return (_1n << BigInt(n)) - _1n;
 };
 /**
  * Minimal HMAC-DRBG from NIST 800-90 for RFC6979 sigs.
@@ -592,63 +602,61 @@ export const bitMask = (n) => {
  * ```
  */
 export function createHmacDrbg(hashLen, qByteLen, hmacFn) {
-    anumber_(hashLen, 'hashLen');
-    anumber_(qByteLen, 'qByteLen');
-    if (typeof hmacFn !== 'function')
-        throw new TypeError('hmacFn must be a function');
-    // creates Uint8Array
-    const u8n = (len) => new Uint8Array(len);
-    const NULL = Uint8Array.of();
-    const byte0 = Uint8Array.of(0x00);
-    const byte1 = Uint8Array.of(0x01);
-    const _maxDrbgIters = 1000;
-    // Step B, Step C: set hashLen to 8*ceil(hlen/8).
-    // Minimal non-full-spec HMAC-DRBG from NIST 800-90 for RFC6979 signatures.
-    let v = u8n(hashLen);
-    // Steps B and C of RFC6979 3.2.
-    let k = u8n(hashLen);
-    let i = 0; // Iterations counter, will throw when over 1000
-    const reset = () => {
-        v.fill(1);
-        k.fill(0);
-        i = 0;
-    };
-    // hmac(k)(v, ...values)
-    const h = (...msgs) => hmacFn(k, concatBytes(v, ...msgs));
-    const reseed = (seed = NULL) => {
-        // HMAC-DRBG reseed() function. Steps D-G
-        k = h(byte0, seed); // k = hmac(k || v || 0x00 || seed)
-        v = h(); // v = hmac(k || v)
-        if (seed.length === 0)
-            return;
-        k = h(byte1, seed); // k = hmac(k || v || 0x01 || seed)
-        v = h(); // v = hmac(k || v)
-    };
-    const gen = () => {
-        // HMAC-DRBG generate() function
-        if (i++ >= _maxDrbgIters)
-            throw new Error('drbg: tried max amount of iterations');
-        let len = 0;
-        const out = [];
-        while (len < qByteLen) {
-            v = h();
-            const sl = v.slice();
-            out.push(sl);
-            len += v.length;
-        }
-        return concatBytes(...out);
-    };
-    const genUntil = (seed, pred) => {
-        reset();
-        reseed(seed); // Steps D-G
-        let res = undefined; // Step H: grind until the predicate accepts a candidate.
-        // Falsy values like 0 are valid outputs.
-        while ((res = pred(gen())) === undefined)
-            reseed();
-        reset();
-        return res;
-    };
-    return genUntil;
+  anumber_(hashLen, "hashLen");
+  anumber_(qByteLen, "qByteLen");
+  if (typeof hmacFn !== "function")
+    throw new TypeError("hmacFn must be a function");
+  // creates Uint8Array
+  const u8n = (len) => new Uint8Array(len);
+  const NULL = Uint8Array.of();
+  const byte0 = Uint8Array.of(0x00);
+  const byte1 = Uint8Array.of(0x01);
+  const _maxDrbgIters = 1000;
+  // Step B, Step C: set hashLen to 8*ceil(hlen/8).
+  // Minimal non-full-spec HMAC-DRBG from NIST 800-90 for RFC6979 signatures.
+  let v = u8n(hashLen);
+  // Steps B and C of RFC6979 3.2.
+  let k = u8n(hashLen);
+  let i = 0; // Iterations counter, will throw when over 1000
+  const reset = () => {
+    v.fill(1);
+    k.fill(0);
+    i = 0;
+  };
+  // hmac(k)(v, ...values)
+  const h = (...msgs) => hmacFn(k, concatBytes(v, ...msgs));
+  const reseed = (seed = NULL) => {
+    // HMAC-DRBG reseed() function. Steps D-G
+    k = h(byte0, seed); // k = hmac(k || v || 0x00 || seed)
+    v = h(); // v = hmac(k || v)
+    if (seed.length === 0) return;
+    k = h(byte1, seed); // k = hmac(k || v || 0x01 || seed)
+    v = h(); // v = hmac(k || v)
+  };
+  const gen = () => {
+    // HMAC-DRBG generate() function
+    if (i++ >= _maxDrbgIters)
+      throw new Error("drbg: tried max amount of iterations");
+    let len = 0;
+    const out = [];
+    while (len < qByteLen) {
+      v = h();
+      const sl = v.slice();
+      out.push(sl);
+      len += v.length;
+    }
+    return concatBytes(...out);
+  };
+  const genUntil = (seed, pred) => {
+    reset();
+    reseed(seed); // Steps D-G
+    let res = undefined; // Step H: grind until the predicate accepts a candidate.
+    // Falsy values like 0 are valid outputs.
+    while ((res = pred(gen())) === undefined) reseed();
+    reset();
+    return res;
+  };
+  return genUntil;
 }
 /**
  * Validates declared required and optional field types on a plain object.
@@ -668,30 +676,42 @@ export function createHmacDrbg(hashLen, qByteLen, hmacFn) {
  * validateObject({ flag: true }, { flag: 'boolean' });
  * ```
  */
-export function validateObject(object, fields = {}, optFields = {}, title = 'object') {
-    aobject(object, title);
-    aobject(fields, 'fields');
-    aobject(optFields, 'optFields');
-    function checkField(fieldName, expectedType, isOpt) {
-        const label = title === 'object' ? `param "${String(fieldName)}"` : `"${title}.${String(fieldName)}"`;
-        // Config fields must be explicit own properties. Optional inherited values are rejected too
-        // because callers keep reading the same options object after validation.
-        const val = object[fieldName];
-        // Runtime objects such as Field instances intentionally satisfy required method slots
-        // via their shared prototype.
-        if (!Object.hasOwn(object, fieldName) &&
-            (isOpt ? val !== undefined : expectedType !== 'function')) {
-            throw new TypeError(`${label} is invalid: expected own property`);
-        }
-        if (isOpt && val === undefined)
-            return;
-        const current = typeof val;
-        if (current !== expectedType || val === null)
-            throw new TypeError(`${label} is invalid: expected ${expectedType}, got ${current}`);
+export function validateObject(
+  object,
+  fields = {},
+  optFields = {},
+  title = "object",
+) {
+  aobject(object, title);
+  aobject(fields, "fields");
+  aobject(optFields, "optFields");
+  function checkField(fieldName, expectedType, isOpt) {
+    const label =
+      title === "object"
+        ? `param "${String(fieldName)}"`
+        : `"${title}.${String(fieldName)}"`;
+    // Config fields must be explicit own properties. Optional inherited values are rejected too
+    // because callers keep reading the same options object after validation.
+    const val = object[fieldName];
+    // Runtime objects such as Field instances intentionally satisfy required method slots
+    // via their shared prototype.
+    if (
+      !Object.hasOwn(object, fieldName) &&
+      (isOpt ? val !== undefined : expectedType !== "function")
+    ) {
+      throw new TypeError(`${label} is invalid: expected own property`);
     }
-    const iter = (f, isOpt) => Object.entries(f).forEach(([k, v]) => checkField(k, v, isOpt));
-    iter(fields, false);
-    iter(optFields, true);
+    if (isOpt && val === undefined) return;
+    const current = typeof val;
+    if (current !== expectedType || val === null)
+      throw new TypeError(
+        `${label} is invalid: expected ${expectedType}, got ${current}`,
+      );
+  }
+  const iter = (f, isOpt) =>
+    Object.entries(f).forEach(([k, v]) => checkField(k, v, isOpt));
+  iter(fields, false);
+  iter(optFields, true);
 }
 /**
  * Throws not implemented error.
@@ -707,5 +727,5 @@ export function validateObject(object, fields = {}, optFields = {}, title = 'obj
  * ```
  */
 export const notImplemented = () => {
-    throw new Error('not implemented');
+  throw new Error("not implemented");
 };

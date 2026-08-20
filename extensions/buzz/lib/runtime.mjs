@@ -64,7 +64,14 @@ function decideResponse(item, optionId, text) {
   };
 }
 
-function channelMessage({ secretHex, auth, channel, content, replyTo, createdAt }) {
+function channelMessage({
+  secretHex,
+  auth,
+  channel,
+  content,
+  replyTo,
+  createdAt,
+}) {
   const tags = [["h", channel]];
   if (replyTo) tags.push(["e", replyTo, "", "reply"]);
   return signEvent(
@@ -88,7 +95,8 @@ export function createBuzzRuntime({
   const postKinds = new Set(asList(config.postKinds, DEFAULT_POST_KINDS));
   const pollSeconds = clampInt(config.pollSeconds, 5, 120, 15);
   const dmBlockedTo =
-    typeof config.dmBlockedTo === "string" && /^[0-9a-f]{64}$/i.test(config.dmBlockedTo)
+    typeof config.dmBlockedTo === "string" &&
+    /^[0-9a-f]{64}$/i.test(config.dmBlockedTo)
       ? config.dmBlockedTo.toLowerCase()
       : null;
 
@@ -205,7 +213,9 @@ export function createBuzzRuntime({
     const fn = client?.inbox?.markDelivered;
     if (typeof fn !== "function") return;
     try {
-      await fn(id, { buzz: { eventId: record.eventId, postedAt: record.postedAt } });
+      await fn(id, {
+        buzz: { eventId: record.eventId, postedAt: record.postedAt },
+      });
     } catch (err) {
       log(`markDelivered failed: ${err.message}`);
     }
@@ -245,7 +255,10 @@ export function createBuzzRuntime({
   }
 
   async function decideItem(item, optionId, actor, text) {
-    if (optionNeedsReason(item.decision, optionId) && !String(text ?? "").trim()) {
+    if (
+      optionNeedsReason(item.decision, optionId) &&
+      !String(text ?? "").trim()
+    ) {
       return { needReason: true };
     }
     const response = decideResponse(item, optionId, text);
@@ -321,7 +334,8 @@ export function createBuzzRuntime({
       const item = client.inbox.get(pendingId);
       if (!item) return;
       const optionId =
-        reactionToOptionId("👎", posted.get(pendingId)?.optionMap ?? {}) ?? "reject";
+        reactionToOptionId("👎", posted.get(pendingId)?.optionMap ?? {}) ??
+        "reject";
       await decideItem(item, optionId, identity.npub, event.content);
       pendingReject.delete(rootId);
     }
@@ -356,7 +370,8 @@ export function createBuzzRuntime({
         secretHex: identity.secretHex,
         auth: identity.auth,
         channel,
-        content: "need repo=<name>, e.g. `@factory dispatch WM-123 repo=factory`",
+        content:
+          "need repo=<name>, e.g. `@factory dispatch WM-123 repo=factory`",
         replyTo,
       });
       await publish(event);
@@ -436,7 +451,10 @@ export function createBuzzRuntime({
       const events = Array.isArray(result.json) ? result.json : [];
       let maxCreated = since;
       for (const event of events) {
-        if (typeof event.created_at === "number" && event.created_at > maxCreated) {
+        if (
+          typeof event.created_at === "number" &&
+          event.created_at > maxCreated
+        ) {
           maxCreated = event.created_at;
         }
         if (event.kind === KIND_REACTION) await handleReaction(event);

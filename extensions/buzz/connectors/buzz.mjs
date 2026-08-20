@@ -25,7 +25,9 @@ export default async function start(ctx) {
     runtime.poll().catch((err) => ctx.log?.(`poll failed: ${err.message}`));
   }, runtime.pollSeconds * 1000);
   timer.unref?.();
-  runtime.poll().catch((err) => ctx.log?.(`initial poll failed: ${err.message}`));
+  runtime
+    .poll()
+    .catch((err) => ctx.log?.(`initial poll failed: ${err.message}`));
 
   const onAbort = () => {
     clearInterval(timer);

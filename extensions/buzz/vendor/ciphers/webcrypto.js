@@ -1,4 +1,4 @@
-/* eslint-disable */
+ 
 /**
  * WebCrypto-based AES gcm/ctr/cbc: async wrappers over `crypto.subtle` with the
  * same constructor shape as the sync `aes.ts` modes. Combine with `managedNonce`
@@ -8,10 +8,10 @@
  */
 import { abytes, anumber } from "./utils.js";
 function getWebcryptoSubtle() {
-    const cr = typeof globalThis !== 'undefined' && globalThis.crypto;
-    if (cr && typeof cr.subtle === 'object' && cr.subtle != null)
-        return cr.subtle;
-    throw new Error('crypto.subtle must be defined');
+  const cr = typeof globalThis !== "undefined" && globalThis.crypto;
+  if (cr && typeof cr.subtle === "object" && cr.subtle != null)
+    return cr.subtle;
+  throw new Error("crypto.subtle must be defined");
 }
 /**
  * Internal webcrypto utils. Can be overridden if crypto.subtle is not present,
@@ -20,82 +20,76 @@ function getWebcryptoSubtle() {
  * cache `CryptoKey` objects between operations.
  */
 export const utils = {
-    async encrypt(key, keyParams, cryptParams, plaintext) {
-        const cr = getWebcryptoSubtle();
-        // Non-extractable: the ephemeral CryptoKey is only used for this operation,
-        // so there is no reason to allow exportKey() on it.
-        const iKey = await cr.importKey('raw', key, keyParams, false, ['encrypt']);
-        const ciphertext = await cr.encrypt(cryptParams, iKey, plaintext);
-        return new Uint8Array(ciphertext);
-    },
-    async decrypt(key, keyParams, cryptParams, ciphertext) {
-        const cr = getWebcryptoSubtle();
-        // Non-extractable, same as encrypt() above.
-        const iKey = await cr.importKey('raw', key, keyParams, false, ['decrypt']);
-        const plaintext = await cr.decrypt(cryptParams, iKey, ciphertext);
-        return new Uint8Array(plaintext);
-    },
+  async encrypt(key, keyParams, cryptParams, plaintext) {
+    const cr = getWebcryptoSubtle();
+    // Non-extractable: the ephemeral CryptoKey is only used for this operation,
+    // so there is no reason to allow exportKey() on it.
+    const iKey = await cr.importKey("raw", key, keyParams, false, ["encrypt"]);
+    const ciphertext = await cr.encrypt(cryptParams, iKey, plaintext);
+    return new Uint8Array(ciphertext);
+  },
+  async decrypt(key, keyParams, cryptParams, ciphertext) {
+    const cr = getWebcryptoSubtle();
+    // Non-extractable, same as encrypt() above.
+    const iKey = await cr.importKey("raw", key, keyParams, false, ["decrypt"]);
+    const plaintext = await cr.decrypt(cryptParams, iKey, ciphertext);
+    return new Uint8Array(plaintext);
+  },
 };
 const mode = {
-    CBC: 'AES-CBC',
-    CTR: 'AES-CTR',
-    GCM: 'AES-GCM',
+  CBC: "AES-CBC",
+  CTR: "AES-CTR",
+  GCM: "AES-GCM",
 };
 function getCryptParams(algo, nonce, AAD) {
-    if (algo === mode.CBC)
-        return { name: mode.CBC, iv: nonce };
-    // WebCrypto allows 1..128 counter bits; use the full block to match sync ctr() / Node CTR wrap.
-    if (algo === mode.CTR)
-        return { name: mode.CTR, counter: nonce, length: 128 };
-    if (algo === mode.GCM) {
-        // Rely on the backend default tag length (128 bits) instead of setting it explicitly.
-        if (AAD)
-            return { name: mode.GCM, iv: nonce, additionalData: AAD };
-        else
-            return { name: mode.GCM, iv: nonce };
-    }
-    throw new Error('unknown aes block mode');
+  if (algo === mode.CBC) return { name: mode.CBC, iv: nonce };
+  // WebCrypto allows 1..128 counter bits; use the full block to match sync ctr() / Node CTR wrap.
+  if (algo === mode.CTR) return { name: mode.CTR, counter: nonce, length: 128 };
+  if (algo === mode.GCM) {
+    // Rely on the backend default tag length (128 bits) instead of setting it explicitly.
+    if (AAD) return { name: mode.GCM, iv: nonce, additionalData: AAD };
+    else return { name: mode.GCM, iv: nonce };
+  }
+  throw new Error("unknown aes block mode");
 }
 function generate(algo, nonceLength, withAAD = false) {
-    anumber(nonceLength);
-    const res = (key, nonce, AAD) => {
-        abytes(key, undefined, 'key');
-        abytes(nonce, undefined, 'nonce');
-        // Reject falsy non-byte AAD locally; otherwise false/0/''/null silently become "no AAD".
-        if (AAD !== undefined) {
-            if (!withAAD)
-                throw new Error('AAD not supported');
-            abytes(AAD, undefined, 'AAD');
-        }
-        // Only GCM consumes AAD. CBC/CTR wrappers are typed without it; any runtime
-        // third argument is outside their API and is not passed to WebCrypto params.
-        // Exact nonce-length enforcement and WebCrypto-specific AAD normalization are
-        // delegated to the backend; locally we only require byte-array inputs here.
-        // Keep caller key/nonce/AAD by reference; mutating them after
-        // construction changes later operations.
-        const keyParams = { name: algo, length: key.length * 8 };
-        const cryptParams = getCryptParams(algo, nonce, AAD);
-        let consumed = false;
-        return {
-            // keyLength,
-            encrypt(plaintext) {
-                abytes(plaintext, undefined, 'data');
-                if (consumed)
-                    throw new Error('cannot encrypt() twice with same key + nonce');
-                consumed = true;
-                return utils.encrypt(key, keyParams, cryptParams, plaintext);
-            },
-            decrypt(ciphertext) {
-                abytes(ciphertext, undefined, 'data');
-                return utils.decrypt(key, keyParams, cryptParams, ciphertext);
-            },
-        };
+  anumber(nonceLength);
+  const res = (key, nonce, AAD) => {
+    abytes(key, undefined, "key");
+    abytes(nonce, undefined, "nonce");
+    // Reject falsy non-byte AAD locally; otherwise false/0/''/null silently become "no AAD".
+    if (AAD !== undefined) {
+      if (!withAAD) throw new Error("AAD not supported");
+      abytes(AAD, undefined, "AAD");
+    }
+    // Only GCM consumes AAD. CBC/CTR wrappers are typed without it; any runtime
+    // third argument is outside their API and is not passed to WebCrypto params.
+    // Exact nonce-length enforcement and WebCrypto-specific AAD normalization are
+    // delegated to the backend; locally we only require byte-array inputs here.
+    // Keep caller key/nonce/AAD by reference; mutating them after
+    // construction changes later operations.
+    const keyParams = { name: algo, length: key.length * 8 };
+    const cryptParams = getCryptParams(algo, nonce, AAD);
+    let consumed = false;
+    return {
+      // keyLength,
+      encrypt(plaintext) {
+        abytes(plaintext, undefined, "data");
+        if (consumed)
+          throw new Error("cannot encrypt() twice with same key + nonce");
+        consumed = true;
+        return utils.encrypt(key, keyParams, cryptParams, plaintext);
+      },
+      decrypt(ciphertext) {
+        abytes(ciphertext, undefined, "data");
+        return utils.decrypt(key, keyParams, cryptParams, ciphertext);
+      },
     };
-    res.nonceLength = nonceLength;
-    res.blockSize = 16; // always for AES
-    if (withAAD)
-        res.withAAD = true;
-    return res;
+  };
+  res.nonceLength = nonceLength;
+  res.blockSize = 16; // always for AES
+  if (withAAD) res.withAAD = true;
+  return res;
 }
 /**
  * AES-CBC implemented with WebCrypto.

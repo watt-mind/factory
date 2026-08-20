@@ -1,4 +1,4 @@
-/* eslint-disable */
+ 
 /**
  * Utils for modular division and fields.
  * Field over 11 is a finite (Galois) field is integer number operations `mod 11`.
@@ -6,7 +6,20 @@
  * @module
  */
 /*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-import { aarray, abool, abytes, afunction, anumber, aobject, asafenumber, bitLen, bytesToNumberBE, bytesToNumberLE, numberToBytesBE, numberToBytesLE, } from "../utils.js";
+import {
+  aarray,
+  abool,
+  abytes,
+  afunction,
+  anumber,
+  aobject,
+  asafenumber,
+  bitLen,
+  bytesToNumberBE,
+  bytesToNumberLE,
+  numberToBytesBE,
+  numberToBytesLE,
+} from "../utils.js";
 // Numbers aren't used in x25519 / x448 builds
 // prettier-ignore
 const _0n = /* @__PURE__ */ BigInt(0), _1n = /* @__PURE__ */ BigInt(1), _2n = /* @__PURE__ */ BigInt(2);
@@ -14,10 +27,11 @@ const _0n = /* @__PURE__ */ BigInt(0), _1n = /* @__PURE__ */ BigInt(1), _2n = /*
 const _3n = /* @__PURE__ */ BigInt(3), _4n = /* @__PURE__ */ BigInt(4), _5n = /* @__PURE__ */ BigInt(5);
 // prettier-ignore
 const _7n = /* @__PURE__ */ BigInt(7), _8n = /* @__PURE__ */ BigInt(8), _9n = /* @__PURE__ */ BigInt(9);
-const _15n = /* @__PURE__ */ BigInt(15), _16n = /* @__PURE__ */ BigInt(16);
+const _15n = /* @__PURE__ */ BigInt(15),
+  _16n = /* @__PURE__ */ BigInt(16);
 // 2^64: exponents below this use plain square-and-multiply in pow()/FpPow(); the windowed path's
 // table build (14 multiplications) only pays off for longer exponents (break-even ~50 bits).
-const POW_WINDOWED_MIN = /* @__PURE__ */ BigInt('0x10000000000000000');
+const POW_WINDOWED_MIN = /* @__PURE__ */ BigInt("0x10000000000000000");
 /**
  * @param a - Dividend value.
  * @param b - Positive modulus.
@@ -31,10 +45,9 @@ const POW_WINDOWED_MIN = /* @__PURE__ */ BigInt('0x10000000000000000');
  * ```
  */
 export function mod(a, b) {
-    if (b <= _0n)
-        throw new Error('mod: expected positive modulus, got ' + b);
-    const result = a % b;
-    return result >= _0n ? result : b + result;
+  if (b <= _0n) throw new Error("mod: expected positive modulus, got " + b);
+  const result = a % b;
+  return result >= _0n ? result : b + result;
 }
 /**
  * Efficiently raise num to a power with modular reduction.
@@ -54,57 +67,52 @@ export function mod(a, b) {
  * ```
  */
 export function pow(num, power, modulo) {
-    if (modulo <= _1n)
-        throw new Error('pow: expected modulus > 1, got ' + modulo);
-    // Non-bigint exponents coerce every comparison below to false and would silently return 1.
-    if (typeof power !== 'bigint')
-        throw new TypeError('invalid exponent: expected bigint, got ' + typeof power);
-    if (power < _0n)
-        throw new Error('invalid exponent, negatives unsupported');
-    if (power === _0n)
-        return _1n;
-    if (power === _1n)
-        return num;
-    let d = num % modulo;
-    if (d < _0n)
-        d += modulo;
-    // Control flow in both branches below depends only on the exponent, never on `num` — invertCt()
-    // relies on that for its (public-exponent) secret-independence guarantee.
-    if (power < POW_WINDOWED_MIN) {
-        // Square-and-multiply: cheaper than the windowed path for short exponents.
-        let p = _1n;
-        while (power > _0n) {
-            if (power & _1n)
-                p = (p * d) % modulo;
-            d = (d * d) % modulo;
-            power >>= _1n;
-        }
-        return p;
-    }
-    // Fixed 4-bit windows, MSB-first: a 14-multiplication table drops per-window cost to <1
-    // multiplication (vs ~2 per window for square-and-multiply), ~25-30% faster for the dense
-    // 256-bit exponents of sqrt / Legendre / invertCt.
-    const digits = [];
+  if (modulo <= _1n)
+    throw new Error("pow: expected modulus > 1, got " + modulo);
+  // Non-bigint exponents coerce every comparison below to false and would silently return 1.
+  if (typeof power !== "bigint")
+    throw new TypeError(
+      "invalid exponent: expected bigint, got " + typeof power,
+    );
+  if (power < _0n) throw new Error("invalid exponent, negatives unsupported");
+  if (power === _0n) return _1n;
+  if (power === _1n) return num;
+  let d = num % modulo;
+  if (d < _0n) d += modulo;
+  // Control flow in both branches below depends only on the exponent, never on `num` — invertCt()
+  // relies on that for its (public-exponent) secret-independence guarantee.
+  if (power < POW_WINDOWED_MIN) {
+    // Square-and-multiply: cheaper than the windowed path for short exponents.
+    let p = _1n;
     while (power > _0n) {
-        digits.push(Number(power & _15n));
-        power >>= _4n;
-    }
-    const table = new Array(16);
-    table[0] = _1n;
-    table[1] = d;
-    for (let i = 2; i < 16; i++)
-        table[i] = (table[i - 1] * d) % modulo;
-    let p = table[digits[digits.length - 1]]; // top digit is nonzero: the loop above stops on 0
-    for (let w = digits.length - 2; w >= 0; w--) {
-        p = (p * p) % modulo;
-        p = (p * p) % modulo;
-        p = (p * p) % modulo;
-        p = (p * p) % modulo;
-        const digit = digits[w];
-        if (digit !== 0)
-            p = (p * table[digit]) % modulo;
+      if (power & _1n) p = (p * d) % modulo;
+      d = (d * d) % modulo;
+      power >>= _1n;
     }
     return p;
+  }
+  // Fixed 4-bit windows, MSB-first: a 14-multiplication table drops per-window cost to <1
+  // multiplication (vs ~2 per window for square-and-multiply), ~25-30% faster for the dense
+  // 256-bit exponents of sqrt / Legendre / invertCt.
+  const digits = [];
+  while (power > _0n) {
+    digits.push(Number(power & _15n));
+    power >>= _4n;
+  }
+  const table = new Array(16);
+  table[0] = _1n;
+  table[1] = d;
+  for (let i = 2; i < 16; i++) table[i] = (table[i - 1] * d) % modulo;
+  let p = table[digits[digits.length - 1]]; // top digit is nonzero: the loop above stops on 0
+  for (let w = digits.length - 2; w >= 0; w--) {
+    p = (p * p) % modulo;
+    p = (p * p) % modulo;
+    p = (p * p) % modulo;
+    p = (p * p) % modulo;
+    const digit = digits[w];
+    if (digit !== 0) p = (p * table[digit]) % modulo;
+  }
+  return p;
 }
 /**
  * Does `x^(2^power)` mod p. `pow2(30, 4)` == `30^(2^4)`.
@@ -123,16 +131,16 @@ export function pow(num, power, modulo) {
  * ```
  */
 export function pow2(x, power, modulo) {
-    if (modulo <= _1n)
-        throw new Error('pow2: expected modulus > 1, got ' + modulo);
-    if (power < _0n)
-        throw new Error('pow2: expected non-negative exponent, got ' + power);
-    let res = x;
-    while (power-- > _0n) {
-        res *= res;
-        res %= modulo;
-    }
-    return res;
+  if (modulo <= _1n)
+    throw new Error("pow2: expected modulus > 1, got " + modulo);
+  if (power < _0n)
+    throw new Error("pow2: expected non-negative exponent, got " + power);
+  let res = x;
+  while (power-- > _0n) {
+    res *= res;
+    res %= modulo;
+  }
+  return res;
 }
 /**
  * Inverses number over modulo.
@@ -149,31 +157,29 @@ export function pow2(x, power, modulo) {
  * ```
  */
 export function invert(number, modulo) {
-    if (number === _0n)
-        throw new Error('invert: expected non-zero number');
-    // modulo = 1 is the zero ring: gcd(x, 1) = 1 makes the loop below "succeed" and return the
-    // useless inverse 0. Reject it like pow() and invertCt() do.
-    if (modulo <= _1n)
-        throw new Error('invert: expected modulus > 1, got ' + modulo);
-    // This is variable-time: the loop count depends on `number`. For a secret-independent
-    // (Fermat) alternative over a prime modulus, see {@link invertCt} (~4x slower).
-    let a = mod(number, modulo);
-    let b = modulo;
-    // Only the Bézout coefficient of `number` (x/u chain) is tracked; the coefficient of `modulo`
-    // never affects the output, so it is not computed.
+  if (number === _0n) throw new Error("invert: expected non-zero number");
+  // modulo = 1 is the zero ring: gcd(x, 1) = 1 makes the loop below "succeed" and return the
+  // useless inverse 0. Reject it like pow() and invertCt() do.
+  if (modulo <= _1n)
+    throw new Error("invert: expected modulus > 1, got " + modulo);
+  // This is variable-time: the loop count depends on `number`. For a secret-independent
+  // (Fermat) alternative over a prime modulus, see {@link invertCt} (~4x slower).
+  let a = mod(number, modulo);
+  let b = modulo;
+  // Only the Bézout coefficient of `number` (x/u chain) is tracked; the coefficient of `modulo`
+  // never affects the output, so it is not computed.
+  // prettier-ignore
+  let x = _0n, u = _1n;
+  while (a !== _0n) {
+    const q = b / a;
+    const r = b - a * q;
+    const m = x - u * q;
     // prettier-ignore
-    let x = _0n, u = _1n;
-    while (a !== _0n) {
-        const q = b / a;
-        const r = b - a * q;
-        const m = x - u * q;
-        // prettier-ignore
-        b = a, a = r, x = u, u = m;
-    }
-    const gcd = b;
-    if (gcd !== _1n)
-        throw new Error('invert: does not exist');
-    return mod(x, modulo);
+    b = a, a = r, x = u, u = m;
+  }
+  const gcd = b;
+  if (gcd !== _1n) throw new Error("invert: does not exist");
+  return mod(x, modulo);
 }
 /**
  * Inverses number over modulo using Fermat's little theorem: `a^(p-2) ≡ a⁻¹ (mod p)`.
@@ -201,22 +207,20 @@ export function invert(number, modulo) {
  * ```
  */
 export function invertCt(a, prime) {
-    if (prime <= _1n)
-        throw new Error('invertCt: expected prime modulus > 1, got ' + prime);
-    const an = mod(a, prime);
-    if (an === _0n)
-        throw new Error('invertCt: expected non-zero number');
-    // Exponent (prime - 2) is public, so FpPow's square-and-multiply is secret-independent.
-    const inverse = pow(an, prime - _2n, prime);
-    // O(1) safety net: verifies the inverse and rejects composite moduli where a^(p-2) is not one.
-    if (mod(an * inverse, prime) !== _1n)
-        throw new Error('invertCt: does not exist');
-    return inverse;
+  if (prime <= _1n)
+    throw new Error("invertCt: expected prime modulus > 1, got " + prime);
+  const an = mod(a, prime);
+  if (an === _0n) throw new Error("invertCt: expected non-zero number");
+  // Exponent (prime - 2) is public, so FpPow's square-and-multiply is secret-independent.
+  const inverse = pow(an, prime - _2n, prime);
+  // O(1) safety net: verifies the inverse and rejects composite moduli where a^(p-2) is not one.
+  if (mod(an * inverse, prime) !== _1n)
+    throw new Error("invertCt: does not exist");
+  return inverse;
 }
 function assertIsSquare(Fp, root, n) {
-    const F = Fp;
-    if (!F.eql(F.sqr(root), n))
-        throw new Error('Cannot find square root');
+  const F = Fp;
+  if (!F.eql(F.sqr(root), n)) throw new Error("Cannot find square root");
 }
 // The Legendre symbol and every sqrt variant here are only defined over an odd (prime) modulus.
 // An even ORDER makes their integer divisions — (p-1)/2, (p+1)/4, (p-5)/8, (p+7)/16 — truncate and
@@ -224,32 +228,32 @@ function assertIsSquare(Fp, root, n) {
 // cheap necessary-condition check, not a primality test (composite odd moduli are caught later by
 // the Legendre-result / assertIsSquare checks).
 function aoddModulus(order, fnName) {
-    if ((order & _1n) === _0n)
-        throw new Error(fnName + ': expected odd modulus, got ' + order);
+  if ((order & _1n) === _0n)
+    throw new Error(fnName + ": expected odd modulus, got " + order);
 }
 // Not all roots are possible! Example which will throw:
 // const NUM =
 // n = 72057594037927816n;
 // Fp = Field(BigInt('0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab'));
 function sqrt3mod4(Fp, n) {
-    const F = Fp;
-    const p1div4 = (F.ORDER + _1n) / _4n;
-    const root = F.pow(n, p1div4);
-    assertIsSquare(F, root, n);
-    return root;
+  const F = Fp;
+  const p1div4 = (F.ORDER + _1n) / _4n;
+  const root = F.pow(n, p1div4);
+  assertIsSquare(F, root, n);
+  return root;
 }
 // Equivalent `q = 5 (mod 8)` square-root formula (Atkin-style), not the RFC Appendix I.2 CMOV
 // pseudocode verbatim.
 function sqrt5mod8(Fp, n) {
-    const F = Fp;
-    const p5div8 = (F.ORDER - _5n) / _8n;
-    const n2 = F.mul(n, _2n);
-    const v = F.pow(n2, p5div8);
-    const nv = F.mul(n, v);
-    const i = F.mul(F.mul(nv, _2n), v);
-    const root = F.mul(nv, F.sub(i, F.ONE));
-    assertIsSquare(F, root, n);
-    return root;
+  const F = Fp;
+  const p5div8 = (F.ORDER - _5n) / _8n;
+  const n2 = F.mul(n, _2n);
+  const v = F.pow(n2, p5div8);
+  const nv = F.mul(n, v);
+  const i = F.mul(F.mul(nv, _2n), v);
+  const root = F.mul(nv, F.sub(i, F.ONE));
+  assertIsSquare(F, root, n);
+  return root;
 }
 // Based on RFC9380, Kong algorithm
 // prettier-ignore
@@ -295,73 +299,68 @@ function sqrt9mod16(P) {
  * ```
  */
 export function tonelliShanks(P) {
-    // Initialization (precomputation).
-    // Caching initialization could boost perf by 7%.
-    if (P < _3n)
-        throw new Error('sqrt is not defined for small field');
-    aoddModulus(P, 'tonelliShanks');
-    // Factor P - 1 = Q * 2^S, where Q is odd
-    let Q = P - _1n;
-    let S = 0;
-    while (Q % _2n === _0n) {
-        Q /= _2n;
-        S++;
+  // Initialization (precomputation).
+  // Caching initialization could boost perf by 7%.
+  if (P < _3n) throw new Error("sqrt is not defined for small field");
+  aoddModulus(P, "tonelliShanks");
+  // Factor P - 1 = Q * 2^S, where Q is odd
+  let Q = P - _1n;
+  let S = 0;
+  while (Q % _2n === _0n) {
+    Q /= _2n;
+    S++;
+  }
+  // Find the first quadratic non-residue Z >= 2
+  let Z = _2n;
+  const _Fp = Field(P);
+  while (FpLegendre(_Fp, Z) === 1) {
+    // Basic primality test for P. After x iterations, chance of
+    // not finding quadratic non-residue is 2^x, so 2^1000.
+    if (Z++ > 1000)
+      throw new Error("Cannot find square root: probably non-prime P");
+  }
+  // Fast-path; usually done before Z, but we do "primality test".
+  if (S === 1) return sqrt3mod4;
+  // Slow-path
+  // TODO: test on Fp2 and others
+  let cc = _Fp.pow(Z, Q); // c = z^Q
+  const Q1div2 = (Q + _1n) / _2n;
+  return function tonelliSlow(Fp, n) {
+    const F = Fp;
+    if (F.is0(n)) return n;
+    // Check if n is a quadratic residue using Legendre symbol
+    if (FpLegendre(F, n) !== 1) throw new Error("Cannot find square root");
+    // Initialize variables for the main loop
+    let M = S;
+    let c = F.mul(F.ONE, cc); // c = z^Q, move cc from field _Fp into field Fp
+    let t = F.pow(n, Q); // t = n^Q, first guess at the fudge factor
+    let R = F.pow(n, Q1div2); // R = n^((Q+1)/2), first guess at the square root
+    // Main loop
+    // while t != 1
+    while (!F.eql(t, F.ONE)) {
+      // Unreachable over a genuine field (no zero divisors; n=0 already returned above). A zero t
+      // means composite ORDER, where a fabricated root would be wrong: fail closed instead.
+      if (F.is0(t))
+        throw new Error("Cannot find square root: probably non-prime P");
+      let i = 1;
+      // Find the smallest i >= 1 such that t^(2^i) ≡ 1 (mod P)
+      let t_tmp = F.sqr(t); // t^(2^1)
+      while (!F.eql(t_tmp, F.ONE)) {
+        i++;
+        t_tmp = F.sqr(t_tmp); // t^(2^2)...
+        if (i === M) throw new Error("Cannot find square root");
+      }
+      // Calculate the exponent for b: 2^(M - i - 1)
+      const exponent = _1n << BigInt(M - i - 1); // bigint is important
+      const b = F.pow(c, exponent); // b = 2^(M - i - 1)
+      // Update variables
+      M = i;
+      c = F.sqr(b); // c = b^2
+      t = F.mul(t, c); // t = (t * b^2)
+      R = F.mul(R, b); // R = R*b
     }
-    // Find the first quadratic non-residue Z >= 2
-    let Z = _2n;
-    const _Fp = Field(P);
-    while (FpLegendre(_Fp, Z) === 1) {
-        // Basic primality test for P. After x iterations, chance of
-        // not finding quadratic non-residue is 2^x, so 2^1000.
-        if (Z++ > 1000)
-            throw new Error('Cannot find square root: probably non-prime P');
-    }
-    // Fast-path; usually done before Z, but we do "primality test".
-    if (S === 1)
-        return sqrt3mod4;
-    // Slow-path
-    // TODO: test on Fp2 and others
-    let cc = _Fp.pow(Z, Q); // c = z^Q
-    const Q1div2 = (Q + _1n) / _2n;
-    return function tonelliSlow(Fp, n) {
-        const F = Fp;
-        if (F.is0(n))
-            return n;
-        // Check if n is a quadratic residue using Legendre symbol
-        if (FpLegendre(F, n) !== 1)
-            throw new Error('Cannot find square root');
-        // Initialize variables for the main loop
-        let M = S;
-        let c = F.mul(F.ONE, cc); // c = z^Q, move cc from field _Fp into field Fp
-        let t = F.pow(n, Q); // t = n^Q, first guess at the fudge factor
-        let R = F.pow(n, Q1div2); // R = n^((Q+1)/2), first guess at the square root
-        // Main loop
-        // while t != 1
-        while (!F.eql(t, F.ONE)) {
-            // Unreachable over a genuine field (no zero divisors; n=0 already returned above). A zero t
-            // means composite ORDER, where a fabricated root would be wrong: fail closed instead.
-            if (F.is0(t))
-                throw new Error('Cannot find square root: probably non-prime P');
-            let i = 1;
-            // Find the smallest i >= 1 such that t^(2^i) ≡ 1 (mod P)
-            let t_tmp = F.sqr(t); // t^(2^1)
-            while (!F.eql(t_tmp, F.ONE)) {
-                i++;
-                t_tmp = F.sqr(t_tmp); // t^(2^2)...
-                if (i === M)
-                    throw new Error('Cannot find square root');
-            }
-            // Calculate the exponent for b: 2^(M - i - 1)
-            const exponent = _1n << BigInt(M - i - 1); // bigint is important
-            const b = F.pow(c, exponent); // b = 2^(M - i - 1)
-            // Update variables
-            M = i;
-            c = F.sqr(b); // c = b^2
-            t = F.mul(t, c); // t = (t * b^2)
-            R = F.mul(R, b); // R = R*b
-        }
-        return R;
-    };
+    return R;
+  };
 }
 /**
  * Square root for a finite field. Will try optimized versions first:
@@ -388,18 +387,15 @@ export function tonelliShanks(P) {
  * ```
  */
 export function FpSqrt(P) {
-    aoddModulus(P, 'Fp.sqrt');
-    // P ≡ 3 (mod 4) => √n = n^((P+1)/4)
-    if (P % _4n === _3n)
-        return sqrt3mod4;
-    // P ≡ 5 (mod 8) => Atkin algorithm, page 10 of https://eprint.iacr.org/2012/685.pdf
-    if (P % _8n === _5n)
-        return sqrt5mod8;
-    // P ≡ 9 (mod 16) => Kong algorithm, page 11 of https://eprint.iacr.org/2012/685.pdf (algorithm 4)
-    if (P % _16n === _9n)
-        return sqrt9mod16(P);
-    // Tonelli-Shanks algorithm
-    return tonelliShanks(P);
+  aoddModulus(P, "Fp.sqrt");
+  // P ≡ 3 (mod 4) => √n = n^((P+1)/4)
+  if (P % _4n === _3n) return sqrt3mod4;
+  // P ≡ 5 (mod 8) => Atkin algorithm, page 10 of https://eprint.iacr.org/2012/685.pdf
+  if (P % _8n === _5n) return sqrt5mod8;
+  // P ≡ 9 (mod 16) => Kong algorithm, page 11 of https://eprint.iacr.org/2012/685.pdf (algorithm 4)
+  if (P % _16n === _9n) return sqrt9mod16(P);
+  // Tonelli-Shanks algorithm
+  return tonelliShanks(P);
 }
 /**
  * @param num - Value to inspect.
@@ -438,22 +434,23 @@ const FIELD_FIELDS = [
  * ```
  */
 export function validateField(field) {
-    aobject(field, 'field');
-    if (typeof field.ORDER !== 'bigint')
-        throw new TypeError('param "ORDER" is invalid: expected bigint, got ' + typeof field.ORDER);
-    // Runtime field implementations must expose real integer byte/bit sizes; fractional / NaN /
-    // infinite metadata breaks encoders and caches.
-    asafenumber(field.BYTES, 'BYTES');
-    asafenumber(field.BITS, 'BITS');
-    for (const name of FIELD_FIELDS)
-        afunction(field[name], 'field.' + name);
-    // Runtime field implementations must expose positive byte/bit sizes; zero leaks through the
-    // numeric shape checks above but still breaks encoding helpers and cached-length assumptions.
-    if (field.BYTES < 1 || field.BITS < 1)
-        throw new Error('invalid field: expected BYTES/BITS > 0');
-    if (field.ORDER <= _1n)
-        throw new Error('invalid field: expected ORDER > 1, got ' + field.ORDER);
-    return field;
+  aobject(field, "field");
+  if (typeof field.ORDER !== "bigint")
+    throw new TypeError(
+      'param "ORDER" is invalid: expected bigint, got ' + typeof field.ORDER,
+    );
+  // Runtime field implementations must expose real integer byte/bit sizes; fractional / NaN /
+  // infinite metadata breaks encoders and caches.
+  asafenumber(field.BYTES, "BYTES");
+  asafenumber(field.BITS, "BITS");
+  for (const name of FIELD_FIELDS) afunction(field[name], "field." + name);
+  // Runtime field implementations must expose positive byte/bit sizes; zero leaks through the
+  // numeric shape checks above but still breaks encoding helpers and cached-length assumptions.
+  if (field.BYTES < 1 || field.BITS < 1)
+    throw new Error("invalid field: expected BYTES/BITS > 0");
+  if (field.ORDER <= _1n)
+    throw new Error("invalid field: expected ORDER > 1, got " + field.ORDER);
+  return field;
 }
 // Generic field functions
 /**
@@ -474,76 +471,70 @@ export function validateField(field) {
  * ```
  */
 export function FpPow(Fp, num, power) {
-    validateField(Fp);
-    const F = Fp;
-    // Non-bigint exponents (e.g. an accidental field element) coerce every comparison below to
-    // false and would silently return ONE.
-    if (typeof power !== 'bigint')
-        throw new TypeError('invalid exponent: expected bigint, got ' + typeof power);
-    if (power < _0n)
-        throw new Error('invalid exponent, negatives unsupported');
-    if (power === _0n)
-        return F.ONE;
-    if (power === _1n)
-        return num;
-    if (power < POW_WINDOWED_MIN) {
-        // Square-and-multiply: cheaper than the windowed path for short exponents (e.g. poseidon
-        // sbox x^5), which would waste the 14-multiplication table build.
-        let p = F.ONE;
-        let d = num;
-        while (power > _0n) {
-            if (power & _1n)
-                p = F.mul(p, d);
-            d = F.sqr(d);
-            power >>= _1n;
-        }
-        return p;
-    }
-    // Fixed 4-bit windows, MSB-first — same shape as pow() above, over generic field ops.
-    // Speeds up dense long exponents (extension-field sqrt / Legendre, e.g. Fp2 decompression).
-    const digits = [];
+  validateField(Fp);
+  const F = Fp;
+  // Non-bigint exponents (e.g. an accidental field element) coerce every comparison below to
+  // false and would silently return ONE.
+  if (typeof power !== "bigint")
+    throw new TypeError(
+      "invalid exponent: expected bigint, got " + typeof power,
+    );
+  if (power < _0n) throw new Error("invalid exponent, negatives unsupported");
+  if (power === _0n) return F.ONE;
+  if (power === _1n) return num;
+  if (power < POW_WINDOWED_MIN) {
+    // Square-and-multiply: cheaper than the windowed path for short exponents (e.g. poseidon
+    // sbox x^5), which would waste the 14-multiplication table build.
+    let p = F.ONE;
+    let d = num;
     while (power > _0n) {
-        digits.push(Number(power & _15n));
-        power >>= _4n;
-    }
-    const table = new Array(16);
-    table[0] = F.ONE;
-    table[1] = num;
-    for (let i = 2; i < 16; i++)
-        table[i] = F.mul(table[i - 1], num);
-    let p = table[digits[digits.length - 1]]; // top digit is nonzero: the loop above stops on 0
-    for (let w = digits.length - 2; w >= 0; w--) {
-        p = F.sqr(F.sqr(F.sqr(F.sqr(p))));
-        const digit = digits[w];
-        if (digit !== 0)
-            p = F.mul(p, table[digit]);
+      if (power & _1n) p = F.mul(p, d);
+      d = F.sqr(d);
+      power >>= _1n;
     }
     return p;
+  }
+  // Fixed 4-bit windows, MSB-first — same shape as pow() above, over generic field ops.
+  // Speeds up dense long exponents (extension-field sqrt / Legendre, e.g. Fp2 decompression).
+  const digits = [];
+  while (power > _0n) {
+    digits.push(Number(power & _15n));
+    power >>= _4n;
+  }
+  const table = new Array(16);
+  table[0] = F.ONE;
+  table[1] = num;
+  for (let i = 2; i < 16; i++) table[i] = F.mul(table[i - 1], num);
+  let p = table[digits[digits.length - 1]]; // top digit is nonzero: the loop above stops on 0
+  for (let w = digits.length - 2; w >= 0; w--) {
+    p = F.sqr(F.sqr(F.sqr(F.sqr(p))));
+    const digit = digits[w];
+    if (digit !== 0) p = F.mul(p, table[digit]);
+  }
+  return p;
 }
 export function FpInvertBatch(Fp, nums, passZero = false) {
-    validateField(Fp);
-    aarray(nums, 'nums');
-    abool(passZero, 'passZero');
-    const F = Fp;
-    const inverted = new Array(nums.length).fill(passZero ? F.ZERO : undefined);
-    // Walk from first to last, multiply them by each other MOD p
-    const multipliedAcc = nums.reduce((acc, num, i) => {
-        if (F.is0(num))
-            return acc;
-        inverted[i] = acc;
-        return F.mul(acc, num);
-    }, F.ONE);
-    // Invert last element
-    const invertedAcc = F.inv(multipliedAcc);
-    // Walk from last to first, multiply them by inverted each other MOD p
-    nums.reduceRight((acc, num, i) => {
-        if (F.is0(num))
-            return acc;
-        // Non-zero `num` means the forward pass already stored a defined prefix product at index i.
-        inverted[i] = F.mul(acc, inverted[i]);
-        return F.mul(acc, num);
-    }, invertedAcc);
-    return inverted;
+  validateField(Fp);
+  aarray(nums, "nums");
+  abool(passZero, "passZero");
+  const F = Fp;
+  const inverted = new Array(nums.length).fill(passZero ? F.ZERO : undefined);
+  // Walk from first to last, multiply them by each other MOD p
+  const multipliedAcc = nums.reduce((acc, num, i) => {
+    if (F.is0(num)) return acc;
+    inverted[i] = acc;
+    return F.mul(acc, num);
+  }, F.ONE);
+  // Invert last element
+  const invertedAcc = F.inv(multipliedAcc);
+  // Walk from last to first, multiply them by inverted each other MOD p
+  nums.reduceRight((acc, num, i) => {
+    if (F.is0(num)) return acc;
+    // Non-zero `num` means the forward pass already stored a defined prefix product at index i.
+    inverted[i] = F.mul(acc, inverted[i]);
+    return F.mul(acc, num);
+  }, invertedAcc);
+  return inverted;
 }
 /**
  * @param Fp - Field implementation.
@@ -561,9 +552,12 @@ export function FpInvertBatch(Fp, nums, passZero = false) {
  * ```
  */
 export function FpDiv(Fp, lhs, rhs) {
-    validateField(Fp);
-    const F = Fp;
-    return F.mul(lhs, typeof rhs === 'bigint' ? invert(rhs, F.ORDER) : F.inv(rhs));
+  validateField(Fp);
+  const F = Fp;
+  return F.mul(
+    lhs,
+    typeof rhs === "bigint" ? invert(rhs, F.ORDER) : F.inv(rhs),
+  );
 }
 /**
  * Legendre symbol.
@@ -587,19 +581,18 @@ export function FpDiv(Fp, lhs, rhs) {
  * ```
  */
 export function FpLegendre(Fp, n) {
-    validateField(Fp);
-    const F = Fp;
-    aoddModulus(F.ORDER, 'FpLegendre');
-    // We can use 3rd argument as optional cache of this value
-    // but seems unneeded for now. The operation is very fast.
-    const p1mod2 = (F.ORDER - _1n) / _2n;
-    const powered = F.pow(n, p1mod2);
-    const yes = F.eql(powered, F.ONE);
-    const zero = F.eql(powered, F.ZERO);
-    const no = F.eql(powered, F.neg(F.ONE));
-    if (!yes && !zero && !no)
-        throw new Error('invalid Legendre symbol result');
-    return yes ? 1 : zero ? 0 : -1;
+  validateField(Fp);
+  const F = Fp;
+  aoddModulus(F.ORDER, "FpLegendre");
+  // We can use 3rd argument as optional cache of this value
+  // but seems unneeded for now. The operation is very fast.
+  const p1mod2 = (F.ORDER - _1n) / _2n;
+  const powered = F.pow(n, p1mod2);
+  const yes = F.eql(powered, F.ONE);
+  const zero = F.eql(powered, F.ZERO);
+  const no = F.eql(powered, F.neg(F.ONE));
+  if (!yes && !zero && !no) throw new Error("invalid Legendre symbol result");
+  return yes ? 1 : zero ? 0 : -1;
 }
 /**
  * @param Fp - Field implementation.
@@ -617,9 +610,9 @@ export function FpLegendre(Fp, n) {
  * ```
  */
 export function FpIsSquare(Fp, n) {
-    const l = FpLegendre(Fp, n);
-    // Zero is a square too: 0 = 0^2, and Fp.sqrt(0) already returns 0.
-    return l !== -1;
+  const l = FpLegendre(Fp, n);
+  // Zero is a square too: 0 = 0^2, and Fp.sqrt(0) already returns 0.
+  return l !== -1;
 }
 /**
  * @param n - Curve order. Callers are expected to pass a positive order.
@@ -635,177 +628,199 @@ export function FpIsSquare(Fp, n) {
  * ```
  */
 export function nLength(n, nBitLength) {
-    // Bit size, byte size of CURVE.n
-    if (nBitLength !== undefined)
-        anumber(nBitLength);
-    if (n <= _0n)
-        throw new Error('invalid n length: expected positive n, got ' + n);
-    if (nBitLength !== undefined && nBitLength < 1)
-        throw new Error('invalid n length: expected positive bit length, got ' + nBitLength);
-    const bits = bitLen(n);
-    // Cached bit lengths smaller than ORDER would truncate serialized scalars/elements and poison
-    // any math that relies on the derived field metadata.
-    if (nBitLength !== undefined && nBitLength < bits)
-        throw new Error(`invalid n length: expected nBitLength (${nBitLength}) >= bitLen(n) (${bits})`);
-    const _nBitLength = nBitLength !== undefined ? nBitLength : bits;
-    const nByteLength = Math.ceil(_nBitLength / 8);
-    return { nBitLength: _nBitLength, nByteLength };
+  // Bit size, byte size of CURVE.n
+  if (nBitLength !== undefined) anumber(nBitLength);
+  if (n <= _0n)
+    throw new Error("invalid n length: expected positive n, got " + n);
+  if (nBitLength !== undefined && nBitLength < 1)
+    throw new Error(
+      "invalid n length: expected positive bit length, got " + nBitLength,
+    );
+  const bits = bitLen(n);
+  // Cached bit lengths smaller than ORDER would truncate serialized scalars/elements and poison
+  // any math that relies on the derived field metadata.
+  if (nBitLength !== undefined && nBitLength < bits)
+    throw new Error(
+      `invalid n length: expected nBitLength (${nBitLength}) >= bitLen(n) (${bits})`,
+    );
+  const _nBitLength = nBitLength !== undefined ? nBitLength : bits;
+  const nByteLength = Math.ceil(_nBitLength / 8);
+  return { nBitLength: _nBitLength, nByteLength };
 }
 // Keep the lazy sqrt cache off-instance so Field(...) can return a frozen object. Otherwise the
 // cached helper write would keep the field surface externally mutable.
 const FIELD_SQRT = new WeakMap();
 class _Field {
-    ORDER;
-    BITS;
-    BYTES;
-    isLE;
-    ZERO = _0n;
-    ONE = _1n;
-    _lengths;
-    _mod;
-    constructor(ORDER, opts = {}) {
-        // ORDER <= 1 is degenerate: ONE would not be a valid field element and helpers like pow/inv
-        // would stop modeling field arithmetic.
-        if (ORDER <= _1n)
-            throw new Error('invalid field: expected ORDER > 1, got ' + ORDER);
-        let _nbitLength = undefined;
-        this.isLE = false;
-        if (opts != null && typeof opts === 'object') {
-            // Cached bit lengths are trusted here and should already be positive / consistent with ORDER.
-            if (typeof opts.BITS === 'number')
-                _nbitLength = opts.BITS;
-            if (typeof opts.sqrt === 'function')
-                // `_Field.prototype` is frozen below, so custom sqrt hooks must become own properties
-                // explicitly instead of relying on writable prototype shadowing via assignment.
-                Object.defineProperty(this, 'sqrt', { value: opts.sqrt, enumerable: true });
-            if (typeof opts.isLE === 'boolean')
-                this.isLE = opts.isLE;
-            if (opts.allowedLengths)
-                this._lengths = Object.freeze(opts.allowedLengths.slice());
-            if (typeof opts.modFromBytes === 'boolean')
-                this._mod = opts.modFromBytes;
-        }
-        const { nBitLength, nByteLength } = nLength(ORDER, _nbitLength);
-        if (nByteLength > 2048)
-            throw new Error('invalid field: expected ORDER of <= 2048 bytes');
-        this.ORDER = ORDER;
-        this.BITS = nBitLength;
-        this.BYTES = nByteLength;
-        Object.freeze(this);
+  ORDER;
+  BITS;
+  BYTES;
+  isLE;
+  ZERO = _0n;
+  ONE = _1n;
+  _lengths;
+  _mod;
+  constructor(ORDER, opts = {}) {
+    // ORDER <= 1 is degenerate: ONE would not be a valid field element and helpers like pow/inv
+    // would stop modeling field arithmetic.
+    if (ORDER <= _1n)
+      throw new Error("invalid field: expected ORDER > 1, got " + ORDER);
+    let _nbitLength = undefined;
+    this.isLE = false;
+    if (opts != null && typeof opts === "object") {
+      // Cached bit lengths are trusted here and should already be positive / consistent with ORDER.
+      if (typeof opts.BITS === "number") _nbitLength = opts.BITS;
+      if (typeof opts.sqrt === "function")
+        // `_Field.prototype` is frozen below, so custom sqrt hooks must become own properties
+        // explicitly instead of relying on writable prototype shadowing via assignment.
+        Object.defineProperty(this, "sqrt", {
+          value: opts.sqrt,
+          enumerable: true,
+        });
+      if (typeof opts.isLE === "boolean") this.isLE = opts.isLE;
+      if (opts.allowedLengths)
+        this._lengths = Object.freeze(opts.allowedLengths.slice());
+      if (typeof opts.modFromBytes === "boolean") this._mod = opts.modFromBytes;
     }
-    create(num) {
-        return mod(num, this.ORDER);
+    const { nBitLength, nByteLength } = nLength(ORDER, _nbitLength);
+    if (nByteLength > 2048)
+      throw new Error("invalid field: expected ORDER of <= 2048 bytes");
+    this.ORDER = ORDER;
+    this.BITS = nBitLength;
+    this.BYTES = nByteLength;
+    Object.freeze(this);
+  }
+  create(num) {
+    return mod(num, this.ORDER);
+  }
+  isValid(num) {
+    if (typeof num !== "bigint")
+      throw new TypeError(
+        "invalid field element: expected bigint, got " + typeof num,
+      );
+    return _0n <= num && num < this.ORDER; // 0 is valid element, but it's not invertible
+  }
+  is0(num) {
+    return num === _0n;
+  }
+  // is valid and invertible
+  isValidNot0(num) {
+    return !this.is0(num) && this.isValid(num);
+  }
+  isOdd(num) {
+    return (num & _1n) === _1n;
+  }
+  neg(num) {
+    return mod(-num, this.ORDER);
+  }
+  eql(lhs, rhs) {
+    return lhs === rhs;
+  }
+  sqr(num) {
+    return mod(num * num, this.ORDER);
+  }
+  add(lhs, rhs) {
+    return mod(lhs + rhs, this.ORDER);
+  }
+  sub(lhs, rhs) {
+    return mod(lhs - rhs, this.ORDER);
+  }
+  mul(lhs, rhs) {
+    return mod(lhs * rhs, this.ORDER);
+  }
+  pow(num, power) {
+    return pow(num, power, this.ORDER);
+  }
+  div(lhs, rhs) {
+    return mod(lhs * invert(rhs, this.ORDER), this.ORDER);
+  }
+  // Same as above, but doesn't normalize
+  sqrN(num) {
+    return num * num;
+  }
+  addN(lhs, rhs) {
+    return lhs + rhs;
+  }
+  subN(lhs, rhs) {
+    return lhs - rhs;
+  }
+  mulN(lhs, rhs) {
+    return lhs * rhs;
+  }
+  inv(num) {
+    return invert(num, this.ORDER);
+  }
+  sqrt(num) {
+    // Caching sqrt helpers speeds up sqrt9mod16 by 5x and Tonelli-Shanks by about 10% without keeping
+    // the field instance itself mutable.
+    let sqrt = FIELD_SQRT.get(this);
+    if (!sqrt) FIELD_SQRT.set(this, (sqrt = FpSqrt(this.ORDER)));
+    return sqrt(this, num);
+  }
+  toBytes(num) {
+    // Serialize fixed-width limbs without re-validating the field range. Callers that need a
+    // canonical encoding must pass a valid element; some protocols intentionally serialize raw
+    // residues here and reduce or validate them elsewhere.
+    return this.isLE
+      ? numberToBytesLE(num, this.BYTES)
+      : numberToBytesBE(num, this.BYTES);
+  }
+  fromBytes(bytes, skipValidation = false) {
+    abytes(bytes);
+    const {
+      _lengths: allowedLengths,
+      BYTES,
+      isLE,
+      ORDER,
+      _mod: modFromBytes,
+    } = this;
+    if (allowedLengths) {
+      // `allowedLengths` must list real positive byte lengths; otherwise empty input would get
+      // padded into zero and silently decode as a field element.
+      if (
+        bytes.length < 1 ||
+        !allowedLengths.includes(bytes.length) ||
+        bytes.length > BYTES
+      ) {
+        throw new Error(
+          "Field.fromBytes: expected " +
+            allowedLengths +
+            " bytes, got " +
+            bytes.length,
+        );
+      }
+      const padded = new Uint8Array(BYTES);
+      // isLE add 0 to right, !isLE to the left.
+      padded.set(bytes, isLE ? 0 : padded.length - bytes.length);
+      bytes = padded;
     }
-    isValid(num) {
-        if (typeof num !== 'bigint')
-            throw new TypeError('invalid field element: expected bigint, got ' + typeof num);
-        return _0n <= num && num < this.ORDER; // 0 is valid element, but it's not invertible
-    }
-    is0(num) {
-        return num === _0n;
-    }
-    // is valid and invertible
-    isValidNot0(num) {
-        return !this.is0(num) && this.isValid(num);
-    }
-    isOdd(num) {
-        return (num & _1n) === _1n;
-    }
-    neg(num) {
-        return mod(-num, this.ORDER);
-    }
-    eql(lhs, rhs) {
-        return lhs === rhs;
-    }
-    sqr(num) {
-        return mod(num * num, this.ORDER);
-    }
-    add(lhs, rhs) {
-        return mod(lhs + rhs, this.ORDER);
-    }
-    sub(lhs, rhs) {
-        return mod(lhs - rhs, this.ORDER);
-    }
-    mul(lhs, rhs) {
-        return mod(lhs * rhs, this.ORDER);
-    }
-    pow(num, power) {
-        return pow(num, power, this.ORDER);
-    }
-    div(lhs, rhs) {
-        return mod(lhs * invert(rhs, this.ORDER), this.ORDER);
-    }
-    // Same as above, but doesn't normalize
-    sqrN(num) {
-        return num * num;
-    }
-    addN(lhs, rhs) {
-        return lhs + rhs;
-    }
-    subN(lhs, rhs) {
-        return lhs - rhs;
-    }
-    mulN(lhs, rhs) {
-        return lhs * rhs;
-    }
-    inv(num) {
-        return invert(num, this.ORDER);
-    }
-    sqrt(num) {
-        // Caching sqrt helpers speeds up sqrt9mod16 by 5x and Tonelli-Shanks by about 10% without keeping
-        // the field instance itself mutable.
-        let sqrt = FIELD_SQRT.get(this);
-        if (!sqrt)
-            FIELD_SQRT.set(this, (sqrt = FpSqrt(this.ORDER)));
-        return sqrt(this, num);
-    }
-    toBytes(num) {
-        // Serialize fixed-width limbs without re-validating the field range. Callers that need a
-        // canonical encoding must pass a valid element; some protocols intentionally serialize raw
-        // residues here and reduce or validate them elsewhere.
-        return this.isLE ? numberToBytesLE(num, this.BYTES) : numberToBytesBE(num, this.BYTES);
-    }
-    fromBytes(bytes, skipValidation = false) {
-        abytes(bytes);
-        const { _lengths: allowedLengths, BYTES, isLE, ORDER, _mod: modFromBytes } = this;
-        if (allowedLengths) {
-            // `allowedLengths` must list real positive byte lengths; otherwise empty input would get
-            // padded into zero and silently decode as a field element.
-            if (bytes.length < 1 || !allowedLengths.includes(bytes.length) || bytes.length > BYTES) {
-                throw new Error('Field.fromBytes: expected ' + allowedLengths + ' bytes, got ' + bytes.length);
-            }
-            const padded = new Uint8Array(BYTES);
-            // isLE add 0 to right, !isLE to the left.
-            padded.set(bytes, isLE ? 0 : padded.length - bytes.length);
-            bytes = padded;
-        }
-        if (bytes.length !== BYTES)
-            throw new Error('Field.fromBytes: expected ' + BYTES + ' bytes, got ' + bytes.length);
-        let scalar = isLE ? bytesToNumberLE(bytes) : bytesToNumberBE(bytes);
-        if (modFromBytes)
-            scalar = mod(scalar, ORDER);
-        if (!skipValidation)
-            if (!this.isValid(scalar))
-                throw new Error('invalid field element: outside of range 0..ORDER');
-        // Range validation is optional here because some protocols intentionally decode raw residues
-        // and reduce or validate them elsewhere.
-        return scalar;
-    }
-    // TODO: we don't need it here, move out to separate fn
-    invertBatch(lst) {
-        // `passZero` keeps the `bigint[]` contract honest: zero inputs map to `0` instead of leaking
-        // `undefined` into a `bigint[]`. Callers that must distinguish non-invertible inputs should use
-        // `FpInvertBatch` directly, whose default omits `passZero` and returns `(bigint | undefined)[]`.
-        return FpInvertBatch(this, lst, true);
-    }
-    // We can't move this out because Fp6, Fp12 implement it
-    // and it's unclear what to return in there.
-    cmov(a, b, condition) {
-        // Field elements have `isValid(...)`; the CMOV branch bit is a direct runtime input, so reject
-        // non-boolean selectors here instead of letting JS truthiness silently change arithmetic.
-        abool(condition, 'condition');
-        return condition ? b : a;
-    }
+    if (bytes.length !== BYTES)
+      throw new Error(
+        "Field.fromBytes: expected " + BYTES + " bytes, got " + bytes.length,
+      );
+    let scalar = isLE ? bytesToNumberLE(bytes) : bytesToNumberBE(bytes);
+    if (modFromBytes) scalar = mod(scalar, ORDER);
+    if (!skipValidation)
+      if (!this.isValid(scalar))
+        throw new Error("invalid field element: outside of range 0..ORDER");
+    // Range validation is optional here because some protocols intentionally decode raw residues
+    // and reduce or validate them elsewhere.
+    return scalar;
+  }
+  // TODO: we don't need it here, move out to separate fn
+  invertBatch(lst) {
+    // `passZero` keeps the `bigint[]` contract honest: zero inputs map to `0` instead of leaking
+    // `undefined` into a `bigint[]`. Callers that must distinguish non-invertible inputs should use
+    // `FpInvertBatch` directly, whose default omits `passZero` and returns `(bigint | undefined)[]`.
+    return FpInvertBatch(this, lst, true);
+  }
+  // We can't move this out because Fp6, Fp12 implement it
+  // and it's unclear what to return in there.
+  cmov(a, b, condition) {
+    // Field elements have `isValid(...)`; the CMOV branch bit is a direct runtime input, so reject
+    // non-boolean selectors here instead of letting JS truthiness silently change arithmetic.
+    abool(condition, "condition");
+    return condition ? b : a;
+  }
 }
 /**
  * Creates a finite field. Major performance optimizations:
@@ -834,12 +849,12 @@ class _Field {
  * ```
  */
 export function Field(ORDER, opts = {}) {
-    // Freeze the shared method surface before any instance is reachable; otherwise callers can
-    // poison every Field instance by monkey-patching `_Field.prototype` even if each instance is
-    // frozen. Freezing here instead of module scope keeps `_Field` tree-shakeable for importers
-    // that never construct a field; the call is idempotent and cheap.
-    Object.freeze(_Field.prototype);
-    return new _Field(ORDER, opts);
+  // Freeze the shared method surface before any instance is reachable; otherwise callers can
+  // poison every Field instance by monkey-patching `_Field.prototype` even if each instance is
+  // frozen. Freezing here instead of module scope keeps `_Field` tree-shakeable for importers
+  // that never construct a field; the call is idempotent and cheap.
+  Object.freeze(_Field.prototype);
+  return new _Field(ORDER, opts);
 }
 /**
  * @param Fp - Field implementation.
@@ -857,12 +872,11 @@ export function Field(ORDER, opts = {}) {
  * ```
  */
 export function FpSqrtOdd(Fp, elm) {
-    validateField(Fp);
-    const F = Fp;
-    if (!F.isOdd)
-        throw new Error("Field doesn't have isOdd");
-    const root = F.sqrt(elm);
-    return F.isOdd(root) ? root : F.neg(root);
+  validateField(Fp);
+  const F = Fp;
+  if (!F.isOdd) throw new Error("Field doesn't have isOdd");
+  const root = F.sqrt(elm);
+  return F.isOdd(root) ? root : F.neg(root);
 }
 /**
  * @param Fp - Field implementation.
@@ -879,12 +893,11 @@ export function FpSqrtOdd(Fp, elm) {
  * ```
  */
 export function FpSqrtEven(Fp, elm) {
-    validateField(Fp);
-    const F = Fp;
-    if (!F.isOdd)
-        throw new Error("Field doesn't have isOdd");
-    const root = F.sqrt(elm);
-    return F.isOdd(root) ? F.neg(root) : root;
+  validateField(Fp);
+  const F = Fp;
+  if (!F.isOdd) throw new Error("Field doesn't have isOdd");
+  const root = F.sqrt(elm);
+  return F.isOdd(root) ? F.neg(root) : root;
 }
 /**
  * Returns total number of bytes consumed by the field element.
@@ -901,14 +914,13 @@ export function FpSqrtEven(Fp, elm) {
  * ```
  */
 export function getFieldBytesLength(fieldOrder) {
-    if (typeof fieldOrder !== 'bigint')
-        throw new Error('field order must be bigint');
-    // Valid field elements are in 0..ORDER-1, so ORDER <= 1 would make the encoded range degenerate.
-    if (fieldOrder <= _1n)
-        throw new Error('field order must be greater than 1');
-    // Valid field elements are < ORDER, so the maximal encoded element is ORDER - 1.
-    const bitLength = bitLen(fieldOrder - _1n);
-    return Math.ceil(bitLength / 8);
+  if (typeof fieldOrder !== "bigint")
+    throw new Error("field order must be bigint");
+  // Valid field elements are in 0..ORDER-1, so ORDER <= 1 would make the encoded range degenerate.
+  if (fieldOrder <= _1n) throw new Error("field order must be greater than 1");
+  // Valid field elements are < ORDER, so the maximal encoded element is ORDER - 1.
+  const bitLength = bitLen(fieldOrder - _1n);
+  return Math.ceil(bitLength / 8);
 }
 /**
  * Returns minimal amount of bytes that can be safely reduced
@@ -927,8 +939,8 @@ export function getFieldBytesLength(fieldOrder) {
  * ```
  */
 export function getMinHashLength(fieldOrder) {
-    const length = getFieldBytesLength(fieldOrder);
-    return length + Math.ceil(length / 2);
+  const length = getFieldBytesLength(fieldOrder);
+  return length + Math.ceil(length / 2);
 }
 /**
  * "Constant-time" private key generation utility.
@@ -954,20 +966,22 @@ export function getMinHashLength(fieldOrder) {
  * ```
  */
 export function mapHashToField(key, fieldOrder, isLE = false) {
-    abytes(key);
-    const len = key.length;
-    const fieldLen = getFieldBytesLength(fieldOrder);
-    const minLen = Math.max(getMinHashLength(fieldOrder), 16);
-    // No toy-small inputs: the helper is for real scalar derivation, not tiny test curves. No huge
-    // inputs: easier to reason about JS timing / allocation behavior.
-    if (len < minLen || len > 1024)
-        throw new Error('expected ' + minLen + '-1024 bytes of input, got ' + len);
-    const num = isLE ? bytesToNumberLE(key) : bytesToNumberBE(key);
-    // Map into the non-zero scalar range [1, fieldOrder-1]: reduce mod (fieldOrder-1) to land in
-    // [0, fieldOrder-2], then add 1. This shifts the range off zero; it is NOT equal to
-    // `mod(num, fieldOrder)` (which spans [0, fieldOrder-1] and can be 0). A residual modulo bias
-    // remains but is negligible (~2^-(nBits/2), e.g. ~2^-128 for a 256-bit order) because `key` is
-    // required to be at least `getMinHashLength(fieldOrder)` (~1.5x field size) bytes of input.
-    const reduced = mod(num, fieldOrder - _1n) + _1n;
-    return isLE ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
+  abytes(key);
+  const len = key.length;
+  const fieldLen = getFieldBytesLength(fieldOrder);
+  const minLen = Math.max(getMinHashLength(fieldOrder), 16);
+  // No toy-small inputs: the helper is for real scalar derivation, not tiny test curves. No huge
+  // inputs: easier to reason about JS timing / allocation behavior.
+  if (len < minLen || len > 1024)
+    throw new Error("expected " + minLen + "-1024 bytes of input, got " + len);
+  const num = isLE ? bytesToNumberLE(key) : bytesToNumberBE(key);
+  // Map into the non-zero scalar range [1, fieldOrder-1]: reduce mod (fieldOrder-1) to land in
+  // [0, fieldOrder-2], then add 1. This shifts the range off zero; it is NOT equal to
+  // `mod(num, fieldOrder)` (which spans [0, fieldOrder-1] and can be 0). A residual modulo bias
+  // remains but is negligible (~2^-(nBits/2), e.g. ~2^-128 for a 256-bit order) because `key` is
+  // required to be at least `getMinHashLength(fieldOrder)` (~1.5x field size) bytes of input.
+  const reduced = mod(num, fieldOrder - _1n) + _1n;
+  return isLE
+    ? numberToBytesLE(reduced, fieldLen)
+    : numberToBytesBE(reduced, fieldLen);
 }

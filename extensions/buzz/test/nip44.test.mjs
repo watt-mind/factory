@@ -7,13 +7,16 @@ import {
   encrypt,
 } from "../lib/nip44.mjs";
 import { giftWrapDm } from "../lib/nip17.mjs";
-import { KIND_GIFT_WRAP, pubkeyFromSecret, verifyEvent } from "../lib/nostr.mjs";
+import {
+  KIND_GIFT_WRAP,
+  pubkeyFromSecret,
+  verifyEvent,
+} from "../lib/nostr.mjs";
 
 const SEC1 = "0".repeat(63) + "1";
 const SEC2 = "0".repeat(63) + "2";
 const PUB2 = pubkeyFromSecret(SEC2);
-const CONV =
-  "c41c775356fd92eadc63ff5a0dc1da211b268cbea22316767095b2871ea1412d";
+const CONV = "c41c775356fd92eadc63ff5a0dc1da211b268cbea22316767095b2871ea1412d";
 const PAYLOAD =
   "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb";
 

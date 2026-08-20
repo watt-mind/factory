@@ -1,7 +1,12 @@
 /**
  * NIP-17 gift-wrapped DMs: unsigned kind-14 rumor → kind-13 seal → kind-1059 wrap.
  */
-import { KIND_DM_RUMOR, KIND_GIFT_WRAP, KIND_SEAL, signEvent } from "./nostr.mjs";
+import {
+  KIND_DM_RUMOR,
+  KIND_GIFT_WRAP,
+  KIND_SEAL,
+  signEvent,
+} from "./nostr.mjs";
 import { conversationKey, encrypt } from "./nip44.mjs";
 import { bytesToHex, randomBytes } from "./bytes.mjs";
 
@@ -19,7 +24,12 @@ function rumorJson({ pubkey, created_at, content, tags }) {
  * Build a kind-1059 gift wrap addressed to `recipientHex` carrying `content`.
  * The wrap is signed by an ephemeral key; the rumor is authored by `secretHex`.
  */
-export function giftWrapDm(secretHex, recipientHex, content, { createdAt } = {}) {
+export function giftWrapDm(
+  secretHex,
+  recipientHex,
+  content,
+  { createdAt } = {},
+) {
   const created_at = createdAt ?? Math.floor(Date.now() / 1000);
   const senderPub = signEvent(
     { kind: KIND_DM_RUMOR, tags: [], content: "" },
@@ -46,7 +56,10 @@ export function giftWrapDm(secretHex, recipientHex, content, { createdAt } = {})
     {
       kind: KIND_GIFT_WRAP,
       tags: [["p", recipientHex]],
-      content: encrypt(JSON.stringify(seal), conversationKey(wrapSecret, recipientHex)),
+      content: encrypt(
+        JSON.stringify(seal),
+        conversationKey(wrapSecret, recipientHex),
+      ),
     },
     wrapSecret,
     { createdAt: created_at },

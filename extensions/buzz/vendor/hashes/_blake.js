@@ -1,4 +1,4 @@
-/* eslint-disable */
+ 
 /**
  * Internal helpers for blake hash.
  * @module
@@ -42,19 +42,19 @@ export const BSIGMA = /* @__PURE__ */ Uint8Array.from([
 // Parameter `x` is the RFC 7693 first-half message word, or Blake1's pre-mixed
 // `m[sigma[r][2i]] ^ u[sigma[r][2i+1]]` addend in the 32-bit path.
 export function G1s(a, b, c, d, x) {
-    a = (a + b + x) | 0;
-    d = rotr(d ^ a, 16);
-    c = (c + d) | 0;
-    b = rotr(b ^ c, 12);
-    return { a, b, c, d };
+  a = (a + b + x) | 0;
+  d = rotr(d ^ a, 16);
+  c = (c + d) | 0;
+  b = rotr(b ^ c, 12);
+  return { a, b, c, d };
 }
 // 32-bit / BLAKE2s second half of G.
 // Parameter `x` is the RFC 7693 second-half (`y`) message word, or Blake1's pre-mixed
 // `m[sigma[r][2i + 1]] ^ u[sigma[r][2i]]` addend in the 32-bit path.
 export function G2s(a, b, c, d, x) {
-    a = (a + b + x) | 0;
-    d = rotr(d ^ a, 8);
-    c = (c + d) | 0;
-    b = rotr(b ^ c, 7);
-    return { a, b, c, d };
+  a = (a + b + x) | 0;
+  d = rotr(d ^ a, 8);
+  c = (c + d) | 0;
+  b = rotr(b ^ c, 7);
+  return { a, b, c, d };
 }

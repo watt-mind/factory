@@ -73,7 +73,8 @@ function pad(plaintext) {
 }
 
 function hmacAad(key, message, aad) {
-  if (aad.length !== 32) throw new Error("AAD associated data must be 32 bytes");
+  if (aad.length !== 32)
+    throw new Error("AAD associated data must be 32 bytes");
   return hmac(sha256, key, concatBytes(aad, message));
 }
 
@@ -107,7 +108,11 @@ export function decrypt(payload, conversation) {
 
 function unpad(padded) {
   if (padded.length < 2) throw new Error("invalid padding");
-  const view = new DataView(padded.buffer, padded.byteOffset, padded.byteLength);
+  const view = new DataView(
+    padded.buffer,
+    padded.byteOffset,
+    padded.byteLength,
+  );
   const firstTwo = view.getUint16(0);
   let unpaddedLen;
   let prefixLen;

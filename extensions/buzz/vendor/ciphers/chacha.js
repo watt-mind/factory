@@ -19,7 +19,16 @@
  */
 import { createCipher, createPRG, rotl } from "./_arx.js";
 import { poly1305 } from "./_poly1305.js";
-import { abytes, clean, equalBytes, getOutput, isLE, swap32IfBE, u64Lengths, wrapCipher, } from "./utils.js";
+import {
+  abytes,
+  clean,
+  equalBytes,
+  getOutput,
+  isLE,
+  swap32IfBE,
+  u64Lengths,
+  wrapCipher,
+} from "./utils.js";
 /**
  * ChaCha core function. Uses an unrolled loop (chachaCore, hchacha) - 4x
  * faster than a simple loop, but larger & harder to read. A simple-loop
@@ -190,9 +199,9 @@ export function hchacha(s, k, i, out) {
  * ```
  */
 export const chacha20orig = /* @__PURE__ */ createCipher(chachaCore, {
-    counterRight: false,
-    counterLength: 8,
-    allowShortKeys: true,
+  counterRight: false,
+  counterLength: 8,
+  allowShortKeys: true,
 });
 /**
  * ChaCha stream cipher. Conforms to RFC 8439 (IETF, TLS). 12-byte nonce, 4-byte counter.
@@ -215,9 +224,9 @@ export const chacha20orig = /* @__PURE__ */ createCipher(chachaCore, {
  * ```
  */
 export const chacha20 = /* @__PURE__ */ createCipher(chachaCore, {
-    counterRight: false,
-    counterLength: 4,
-    allowShortKeys: false,
+  counterRight: false,
+  counterLength: 4,
+  allowShortKeys: false,
 });
 /**
  * XChaCha eXtended-nonce ChaCha. With 24-byte nonce, it's safe to make it random (CSPRNG).
@@ -243,10 +252,10 @@ export const chacha20 = /* @__PURE__ */ createCipher(chachaCore, {
  * ```
  */
 export const xchacha20 = /* @__PURE__ */ createCipher(chachaCore, {
-    counterRight: false,
-    counterLength: 8,
-    extendNonceFn: hchacha,
-    allowShortKeys: false,
+  counterRight: false,
+  counterLength: 8,
+  extendNonceFn: hchacha,
+  allowShortKeys: false,
 });
 /**
  * Reduced 8-round chacha, described in original paper.
@@ -268,9 +277,9 @@ export const xchacha20 = /* @__PURE__ */ createCipher(chachaCore, {
  * ```
  */
 export const chacha8 = /* @__PURE__ */ createCipher(chachaCore, {
-    counterRight: false,
-    counterLength: 4,
-    rounds: 8,
+  counterRight: false,
+  counterLength: 4,
+  rounds: 8,
 });
 /**
  * Reduced 12-round chacha, described in original paper.
@@ -292,9 +301,9 @@ export const chacha8 = /* @__PURE__ */ createCipher(chachaCore, {
  * ```
  */
 export const chacha12 = /* @__PURE__ */ createCipher(chachaCore, {
-    counterRight: false,
-    counterLength: 4,
-    rounds: 12,
+  counterRight: false,
+  counterLength: 4,
+  rounds: 12,
 });
 // Test-only hook: exposes the unrolled production core so tests can compare it
 // with the simple/reference core from `test/misc/micro-ciphers.ts`.
@@ -303,32 +312,29 @@ export const __TESTS = /* @__PURE__ */ Object.freeze({ chachaCore });
 const ZEROS16 = /* @__PURE__ */ new Uint8Array(16);
 // RFC 8439 §2.8 / §2.8.1: aligned inputs add nothing, otherwise append 16-(len%16) zero bytes.
 const updatePadded = (h, msg) => {
-    h.update(msg);
-    const leftover = msg.length % 16;
-    if (leftover)
-        h.update(ZEROS16.subarray(leftover));
+  h.update(msg);
+  const leftover = msg.length % 16;
+  if (leftover) h.update(ZEROS16.subarray(leftover));
 };
 // RFC 8439 §2.6.1 poly1305_key_gen returns `block[0..31]`, so AEAD key
 // generation only needs 32 zero bytes.
 const ZEROS32 = /* @__PURE__ */ new Uint8Array(32);
 function computeTag(fn, key, nonce, ciphertext, AAD) {
-    if (AAD !== undefined)
-        abytes(AAD, undefined, 'AAD');
-    // RFC 8439 §2.6 / §2.8: derive the Poly1305 one-time key from counter 0,
-    // then MAC AAD || pad16(AAD) || ciphertext || pad16(ciphertext) || len(AAD) || len(ciphertext).
-    const authKey = fn(key, nonce, ZEROS32);
-    const lengths = u64Lengths(ciphertext.length, AAD ? AAD.length : 0, true);
-    // Methods below can be replaced with
-    // `return poly1305_computeTag_small(authKey, lengths, ciphertext, AAD)`
-    // from `test/misc/micro-ciphers.ts`.
-    const h = poly1305.create(authKey);
-    if (AAD)
-        updatePadded(h, AAD);
-    updatePadded(h, ciphertext);
-    h.update(lengths);
-    const res = h.digest();
-    clean(authKey, lengths);
-    return res;
+  if (AAD !== undefined) abytes(AAD, undefined, "AAD");
+  // RFC 8439 §2.6 / §2.8: derive the Poly1305 one-time key from counter 0,
+  // then MAC AAD || pad16(AAD) || ciphertext || pad16(ciphertext) || len(AAD) || len(ciphertext).
+  const authKey = fn(key, nonce, ZEROS32);
+  const lengths = u64Lengths(ciphertext.length, AAD ? AAD.length : 0, true);
+  // Methods below can be replaced with
+  // `return poly1305_computeTag_small(authKey, lengths, ciphertext, AAD)`
+  // from `test/misc/micro-ciphers.ts`.
+  const h = poly1305.create(authKey);
+  if (AAD) updatePadded(h, AAD);
+  updatePadded(h, ciphertext);
+  h.update(lengths);
+  const res = h.digest();
+  clean(authKey, lengths);
+  return res;
 }
 /**
  * AEAD algorithm from RFC 8439.
@@ -338,40 +344,40 @@ function computeTag(fn, key, nonce, ciphertext, AAD) {
  * In chacha, authKey can't be computed inside computeTag, it modifies the counter.
  */
 export const _poly1305_aead = (xorStream) => (key, nonce, AAD) => {
-    // This borrows caller key/nonce/AAD buffers by reference; mutating them after construction
-    // changes future encrypt/decrypt results.
-    const tagLength = 16;
-    return {
-        encrypt(plaintext, output) {
-            const plength = plaintext.length;
-            output = getOutput(plength + tagLength, output, false);
-            output.set(plaintext);
-            const oPlain = output.subarray(0, -tagLength);
-            // RFC 8439 §2.8: payload encryption starts at counter 1 because counter 0 produced the OTK.
-            xorStream(key, nonce, oPlain, oPlain, 1);
-            const tag = computeTag(xorStream, key, nonce, oPlain, AAD);
-            output.set(tag, plength); // append tag
-            clean(tag);
-            return output;
-        },
-        decrypt(ciphertext, output) {
-            output = getOutput(ciphertext.length - tagLength, output, false);
-            const data = ciphertext.subarray(0, -tagLength);
-            const passedTag = ciphertext.subarray(-tagLength);
-            const tag = computeTag(xorStream, key, nonce, data, AAD);
-            // RFC 8439 §2.8 / §4: authenticate ciphertext before decrypting it, and compare tags with
-            // the constant-time equalBytes() helper rather than decrypting speculative plaintext first.
-            if (!equalBytes(passedTag, tag)) {
-                clean(tag);
-                throw new Error('invalid tag');
-            }
-            output.set(ciphertext.subarray(0, -tagLength));
-            // Actual decryption
-            xorStream(key, nonce, output, output, 1); // start stream with i=1
-            clean(tag);
-            return output;
-        },
-    };
+  // This borrows caller key/nonce/AAD buffers by reference; mutating them after construction
+  // changes future encrypt/decrypt results.
+  const tagLength = 16;
+  return {
+    encrypt(plaintext, output) {
+      const plength = plaintext.length;
+      output = getOutput(plength + tagLength, output, false);
+      output.set(plaintext);
+      const oPlain = output.subarray(0, -tagLength);
+      // RFC 8439 §2.8: payload encryption starts at counter 1 because counter 0 produced the OTK.
+      xorStream(key, nonce, oPlain, oPlain, 1);
+      const tag = computeTag(xorStream, key, nonce, oPlain, AAD);
+      output.set(tag, plength); // append tag
+      clean(tag);
+      return output;
+    },
+    decrypt(ciphertext, output) {
+      output = getOutput(ciphertext.length - tagLength, output, false);
+      const data = ciphertext.subarray(0, -tagLength);
+      const passedTag = ciphertext.subarray(-tagLength);
+      const tag = computeTag(xorStream, key, nonce, data, AAD);
+      // RFC 8439 §2.8 / §4: authenticate ciphertext before decrypting it, and compare tags with
+      // the constant-time equalBytes() helper rather than decrypting speculative plaintext first.
+      if (!equalBytes(passedTag, tag)) {
+        clean(tag);
+        throw new Error("invalid tag");
+      }
+      output.set(ciphertext.subarray(0, -tagLength));
+      // Actual decryption
+      xorStream(key, nonce, output, output, 1); // start stream with i=1
+      clean(tag);
+      return output;
+    },
+  };
 };
 /**
  * ChaCha20-Poly1305 from RFC 8439.
@@ -395,8 +401,10 @@ export const _poly1305_aead = (xorStream) => (key, nonce, AAD) => {
  * cipher.encrypt(new Uint8Array([1, 2, 3]));
  * ```
  */
-export const chacha20poly1305 = /* @__PURE__ */ wrapCipher({ blockSize: 64, nonceLength: 12, tagLength: 16, withAAD: true }, 
-/* @__PURE__ */ _poly1305_aead(chacha20));
+export const chacha20poly1305 = /* @__PURE__ */ wrapCipher(
+  { blockSize: 64, nonceLength: 12, tagLength: 16, withAAD: true },
+  /* @__PURE__ */ _poly1305_aead(chacha20),
+);
 /**
  * XChaCha20-Poly1305 extended-nonce chacha.
  *
@@ -419,8 +427,10 @@ export const chacha20poly1305 = /* @__PURE__ */ wrapCipher({ blockSize: 64, nonc
  * cipher.encrypt(new Uint8Array([1, 2, 3]));
  * ```
  */
-export const xchacha20poly1305 = /* @__PURE__ */ wrapCipher({ blockSize: 64, nonceLength: 24, tagLength: 16, withAAD: true }, 
-/* @__PURE__ */ _poly1305_aead(xchacha20));
+export const xchacha20poly1305 = /* @__PURE__ */ wrapCipher(
+  { blockSize: 64, nonceLength: 24, tagLength: 16, withAAD: true },
+  /* @__PURE__ */ _poly1305_aead(xchacha20),
+);
 /**
  * Chacha20 CSPRNG (cryptographically secure pseudorandom number generator).
  * It's best to limit usage to non-production, non-critical cases: for example, test-only.
