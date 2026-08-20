@@ -23,4 +23,8 @@ regexes = [
   # literal "tokens" adjacent to "p95_execution" trips the generic-api-key
   # rule keyed on the word "token".
   '''tokens",\s*"p95_execution"''',
+  # extensions/buzz/test/nostr.test.mjs: NIP-01/NIP-OA deterministic test
+  # vectors (WM-905/WM-921) — a published Schnorr signature hex for the
+  # secret key 0x…01, not a credential.
+  '''8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb''',
 ]
