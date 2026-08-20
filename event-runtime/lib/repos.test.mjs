@@ -461,7 +461,10 @@ describe("reposView is what the control API serves", () => {
   });
 
   test("repos.mjs does not import planner.mjs (WM-755)", () => {
-    const source = readFileSync(new URL("./repos.mjs", import.meta.url), "utf8");
+    const source = readFileSync(
+      new URL("./repos.mjs", import.meta.url),
+      "utf8",
+    );
     expect(source).not.toMatch(/from ["']\.\/planner\.mjs["']/);
   });
 
