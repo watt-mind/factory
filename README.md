@@ -101,6 +101,28 @@ setup (clone, `bun install`, checks) is in [CONTRIBUTING.md](CONTRIBUTING.md).
 First-time harness links and the event-runtime daemon are in
 [SETUP.md](SETUP.md).
 
+## Operator UI
+
+The web console the operator uses while loops run — live intake, runs, events,
+agents, the runtime graph, and a ticket journey. Additional stills live in
+[`docs/screenshots/`](docs/screenshots/).
+
+![Overview — intake, execution, and fleet on one screen](docs/screenshots/01-overview.jpg)
+
+![Runs — active and completed agent work](docs/screenshots/06-runs.jpg)
+
+![Events — admitted work and what the runtime did with it](docs/screenshots/07-events.jpg)
+
+![Agents — roster, adapters, and capabilities](docs/screenshots/12-agents.jpg)
+
+![Graph — registered routes and recommendation edges](docs/screenshots/15-graph.jpg)
+
+![Run detail — one agent session end to end](docs/screenshots/19-run-full.jpg)
+
+![Ticket journey — Linear ticket through dispatch, PR, and CI](docs/screenshots/20-ticket-journey.jpg)
+
+![Command palette — jump anywhere from the keyboard](docs/screenshots/27-command-palette.jpg)
+
 ## Fork your factory
 
 Fork an instance, not the kernel. The
