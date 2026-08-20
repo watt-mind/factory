@@ -244,4 +244,4 @@ notify:
 extensions:
   - path: extensions/buzz
     config:
-      channel: "91572011-2505-5288-b6f5-4a7d74abf106" # #general
+      channel: "ea70b81e-0b0c-4b48-82da-5f78c167a12b" # #ops-factory
