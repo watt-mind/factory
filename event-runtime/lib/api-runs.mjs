@@ -1,7 +1,8 @@
 /** Event, proposal, run, journal, outbox, and worker-action endpoints. */
 import { ControlPlaneError } from "../../lib/control-plane/types.mjs";
 import { artifactHead } from "./api-artifacts.mjs";
-import { FACTORY_ROOT } from "./config.mjs";
+import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
+import { loadRepos, RepoError } from "./repos.mjs";
 import { runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
@@ -999,6 +1000,183 @@ export function ticketIndexView(db, options = {}) {
   return result;
 }
 
+const WORK_PLAN_RECOMMENDATIONS = new Set(["DISPATCH", "LOW_SUPPLY", "NOOP"]);
+const STATUS_REPORT_ACTIONS = new Set([
+  "dispatch",
+  "triage",
+  "merge",
+  "unblock",
+  "wait",
+]);
+const WORK_PLAN_NOOPS = new Set(["queue_empty", "cap_full", "all_overlapping"]);
+
+function asCount(value) {
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function isWorkPlanArtifact(artifact) {
+  return (
+    artifact &&
+    typeof artifact === "object" &&
+    !Array.isArray(artifact) &&
+    WORK_PLAN_RECOMMENDATIONS.has(artifact.recommendation) &&
+    typeof artifact.repo === "string" &&
+    artifact.repo !== ""
+  );
+}
+
+function isStatusReportArtifact(artifact) {
+  return (
+    artifact &&
+    typeof artifact === "object" &&
+    !Array.isArray(artifact) &&
+    Array.isArray(artifact.repos) &&
+    STATUS_REPORT_ACTIONS.has(artifact.recommendedAction)
+  );
+}
+
+function laterScan(current, next) {
+  if (!current) return next;
+  if (!next) return current;
+  return String(next.asOf ?? "") > String(current.asOf ?? "") ? next : current;
+}
+
+function deriveRecommendedAction(repos) {
+  let anyTriage = false;
+  let anyBlocked = false;
+  for (const repo of repos) {
+    const ready = repo.ready ?? 0;
+    const cap = repo.cap ?? 0;
+    const inFlight = repo.inFlight ?? 0;
+    if (ready > 0 && (cap === 0 || inFlight < cap)) return "dispatch";
+    if ((repo.triage ?? 0) > 0) anyTriage = true;
+    if ((repo.blocked ?? 0) > 0) anyBlocked = true;
+  }
+  if (anyTriage) return "triage";
+  if (anyBlocked) return "unblock";
+  return "wait";
+}
+
+/**
+ * Latest work-plan and status-report artifacts per configured repo (WM-823).
+ * Counts are null when no scan has produced that figure yet — never invented.
+ */
+export function ticketSupplyView(db, options = {}) {
+  const repoRegistry = options.repos ?? loadRepos();
+  const configured = [...repoRegistry.values()];
+  const configuredNames = new Set(configured.map((repo) => repo.name));
+  const rows = db
+    .query(
+      `SELECT r.run_id, r.spec_json, res.result_json, res.accepted_at
+       FROM results res
+       JOIN runs r ON r.run_id = res.run_id
+       WHERE r.state = 'COMPLETED'
+         AND json_extract(r.spec_json, '$.outputContract') IN (
+           'factory.work-plan/v1',
+           'factory.status-report/v1'
+         )
+       ORDER BY res.accepted_at DESC, res.rowid DESC`,
+    )
+    .all();
+
+  const latestPlanByRepo = new Map();
+  const latestReportByRepo = new Map();
+  let latestReport = null;
+
+  for (const row of rows) {
+    const spec = parseObject(row.spec_json);
+    const result = parseObject(row.result_json);
+    const artifact =
+      result.artifact &&
+      typeof result.artifact === "object" &&
+      !Array.isArray(result.artifact)
+        ? result.artifact
+        : null;
+    if (!artifact) continue;
+    if (result.terminalState && result.terminalState !== "completed") continue;
+    const scan = {
+      artifact,
+      runId: row.run_id,
+      asOf: row.accepted_at,
+    };
+    const contract = spec.outputContract;
+    if (contract === "factory.work-plan/v1" || isWorkPlanArtifact(artifact)) {
+      const name =
+        (typeof artifact.repo === "string" && artifact.repo) ||
+        (typeof spec.input?.repo === "string" && spec.input.repo) ||
+        null;
+      if (!name || !configuredNames.has(name) || latestPlanByRepo.has(name))
+        continue;
+      latestPlanByRepo.set(name, scan);
+      continue;
+    }
+    if (
+      contract === "factory.status-report/v1" ||
+      isStatusReportArtifact(artifact)
+    ) {
+      let touchesConfigured = false;
+      for (const entry of artifact.repos ?? []) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry))
+          continue;
+        if (typeof entry.name !== "string" || entry.name === "") continue;
+        if (!configuredNames.has(entry.name)) continue;
+        touchesConfigured = true;
+        if (latestReportByRepo.has(entry.name)) continue;
+        latestReportByRepo.set(entry.name, {
+          repo: entry,
+          runId: scan.runId,
+          asOf: scan.asOf,
+        });
+      }
+      if (touchesConfigured && !latestReport) latestReport = scan;
+    }
+  }
+
+  const repos = configured.map((repo) => {
+    const plan = latestPlanByRepo.get(repo.name);
+    const report = latestReportByRepo.get(repo.name);
+    const planReady = asCount(plan?.artifact?.readyCandidates);
+    const reportTriage = asCount(report?.repo?.triage);
+    const reportReady = asCount(report?.repo?.agentReady);
+    const planTriage = asCount(plan?.artifact?.triageBacklog);
+    // work-plan leaves triageBacklog at 0 when it skipped the Triage read.
+    const triage =
+      reportTriage ??
+      (planReady != null && planReady > 0 ? null : planTriage) ??
+      null;
+    const ready = planReady ?? reportReady;
+    const inFlight = asCount(report?.repo?.inProgress);
+    const blocked = asCount(report?.repo?.blocked);
+    const noopReason = WORK_PLAN_NOOPS.has(plan?.artifact?.noopReason)
+      ? plan.artifact.noopReason
+      : null;
+    const newest = laterScan(
+      plan ? { runId: plan.runId, asOf: plan.asOf } : null,
+      report ? { runId: report.runId, asOf: report.asOf } : null,
+    );
+    return {
+      name: repo.name,
+      team: repo.team ?? null,
+      triage,
+      ready,
+      inFlight,
+      cap: repo.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT,
+      blocked,
+      noopReason,
+      asOf: newest?.asOf ?? null,
+      sourceRunId: newest?.runId ?? null,
+    };
+  });
+
+  const recommendedAction = STATUS_REPORT_ACTIONS.has(
+    latestReport?.artifact?.recommendedAction,
+  )
+    ? latestReport.artifact.recommendedAction
+    : deriveRecommendedAction(repos);
+
+  return { repos, recommendedAction };
+}
+
 function listFilters(url, { proposal = false, nowMs = Date.now() } = {}) {
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
@@ -1284,6 +1462,7 @@ export async function handleRunApiRoute({
   onEvent,
   policyRoot = FACTORY_ROOT,
   controlPlane,
+  repos: loadReposFn,
 }) {
   if (route === "GET /events") {
     return send(200, {
@@ -1468,6 +1647,17 @@ export async function handleRunApiRoute({
       });
     }
     return send(200, result);
+  }
+
+  if (route === "GET /tickets/supply") {
+    try {
+      const repoRegistry =
+        typeof loadReposFn === "function" ? loadReposFn() : loadRepos();
+      return send(200, ticketSupplyView(db, { repos: repoRegistry }));
+    } catch (err) {
+      if (err instanceof RepoError) return send(500, { error: err.message });
+      throw err;
+    }
   }
 
   if (route === "GET /tickets") {

@@ -35,6 +35,7 @@ import {
   type TimelineItem,
 } from "../subjectJourney";
 import { MarkdownView } from "../components/RunTrace";
+import { SupplyStrip, type TicketSupply } from "../components/SupplyStrip";
 import {
   Ago,
   Button as PrimitiveButton,
@@ -222,6 +223,12 @@ function TicketsHub({
     ...refetchIntervals.fast,
   });
 
+  const supplyQuery = useQuery({
+    queryKey: ["tickets-supply"],
+    queryFn: fetchTicketSupply,
+    ...refetchIntervals.secondary,
+  });
+
   const reposQuery = useQuery({
     queryKey: ["repos"],
     queryFn: api.repos,
@@ -250,8 +257,9 @@ function TicketsHub({
     for (const t of tickets) {
       if (t.state) set.add(t.state);
     }
+    if (stateFilter) set.add(stateFilter);
     return Array.from(set).sort();
-  }, [tickets]);
+  }, [tickets, stateFilter]);
 
   const filteredTickets = useMemo(() => {
     return tickets.filter((t) => {
@@ -424,6 +432,22 @@ function TicketsHub({
               Use an id like WM-542{onNavigatePr ? " or a PR like #541" : ""}.
             </div>
           )}
+          <SupplyStrip
+            supply={supplyQuery.data}
+            pending={supplyQuery.isPending}
+            error={
+              supplyQuery.isError
+                ? ((supplyQuery.error as Error)?.message ?? "unavailable")
+                : null
+            }
+            repoFilter={repoFilter}
+            stateFilter={stateFilter}
+            now={now}
+            onFilter={({ repo, state }) => {
+              setRepoFilter(repo);
+              setStateFilter(state);
+            }}
+          />
           <div className="flex flex-wrap items-center gap-2">
             <FilterInput
               value={searchQuery}
@@ -626,6 +650,28 @@ type JourneyTab = (typeof JOURNEY_TABS)[number];
 
 const EXTERNAL_BUTTON_CLASS =
   "inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 text-[12px] font-medium text-(--text) hover:bg-(--surface-3)";
+
+async function fetchTicketSupply(): Promise<TicketSupply> {
+  const response = await fetch("/api/tickets/supply");
+  if (response.status === 404) {
+    return { repos: [], recommendedAction: null };
+  }
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      message = body.message ?? body.error ?? message;
+    } catch {
+      // Keep the HTTP status when the control API did not return JSON.
+    }
+    throw new Error(message);
+  }
+  const body = await response.json();
+  if (!body || !Array.isArray(body.repos)) {
+    return { repos: [], recommendedAction: null };
+  }
+  return body as TicketSupply;
+}
 
 async function fetchTicketDetail(
   ticketId: string,
