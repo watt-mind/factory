@@ -36,7 +36,11 @@ export function readCellUi(schema: unknown): CellUi | null {
   if (!schema || typeof schema !== "object" || Array.isArray(schema))
     return null;
   const annotation = (schema as Record<string, unknown>)["x-ui"];
-  if (!annotation || typeof annotation !== "object" || Array.isArray(annotation))
+  if (
+    !annotation ||
+    typeof annotation !== "object" ||
+    Array.isArray(annotation)
+  )
     return null;
   const kind = (annotation as Record<string, unknown>).kind;
   return typeof kind === "string" && kind.length > 0 ? { kind } : null;

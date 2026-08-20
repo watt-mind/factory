@@ -480,7 +480,8 @@ export function Events({
     // the top-level eventTypes index.
     for (const agent of registry?.agents ?? []) {
       for (const route of agent.eventTypes) {
-        if (!schemas.has(route.type)) schemas.set(route.type, agent.inputSchema);
+        if (!schemas.has(route.type))
+          schemas.set(route.type, agent.inputSchema);
       }
     }
     return schemas;
