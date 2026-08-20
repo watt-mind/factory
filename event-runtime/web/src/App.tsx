@@ -798,7 +798,10 @@ export function App() {
               </div>
             </div>
           )}
-          <div className="min-h-0 flex-1">
+          <div
+            data-testid="view-slot"
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          >
             <Suspense
               fallback={
                 <div className="p-5 text-(--text-faint)">

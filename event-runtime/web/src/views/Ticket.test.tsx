@@ -1005,4 +1005,26 @@ describe("Tickets hub landing view", () => {
     expect(activityCell.querySelector("div")).toBeNull();
     expect(activityCell.textContent).toMatch(/ago/i);
   });
+
+  test("hub is a height-capped pane so the table scrolls above the status bar (WM-981)", async () => {
+    globalThis.fetch = ticketsFetch();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Ticket ticketId={null} onNavigate={() => {}} />
+      </QueryClientProvider>,
+    );
+
+    const hub = await view.findByTestId("tickets-hub");
+    expect(hub.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["flex", "h-full", "min-w-0"]),
+    );
+    const scroller = hub.querySelector(".overflow-auto");
+    expect(scroller).toBeTruthy();
+    const tokens = scroller!.className.split(/\s+/);
+    expect(tokens).toContain("pb-8");
+    expect(tokens).not.toContain("pb-5");
+  });
 });

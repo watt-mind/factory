@@ -905,6 +905,24 @@ describe("context strip fast jump chords (WM-235)", () => {
     expect(document.activeElement === ticketInput).toBe(true);
   });
 
+  test("view slot is a height-capped flex column so ListPane views scroll inside it (WM-981)", async () => {
+    window.location.hash = "#/tickets";
+    const utils = renderApp();
+    const slot = await utils.findByTestId("view-slot");
+    const tokens = slot.className.split(/\s+/);
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        "flex",
+        "min-h-0",
+        "flex-1",
+        "flex-col",
+        "overflow-hidden",
+      ]),
+    );
+    const hub = await utils.findByTestId("tickets-hub");
+    expect(slot.contains(hub)).toBe(true);
+  });
+
   test("`g` prefix arms and displays GoPrefixHint legend with context chords", async () => {
     const utils = renderApp();
     await waitFor(() => {

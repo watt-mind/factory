@@ -791,7 +791,7 @@ export function ListPane({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="shrink-0 px-5 pt-5 pb-3">{chrome}</div>
-      <div className="min-h-0 flex-1 overflow-auto px-5 pb-5">{children}</div>
+      <div className="min-h-0 flex-1 overflow-auto px-5 pb-8">{children}</div>
     </div>
   );
 }

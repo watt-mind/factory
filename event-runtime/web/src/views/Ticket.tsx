@@ -395,253 +395,256 @@ function TicketsHub({
   };
 
   return (
-    <ListPane
-      chrome={
-        <>
-          <h1 className="display mb-1 text-lg font-semibold">Tickets</h1>
-          <p className="mb-3 text-[11px] text-(--text-faint)">
-            Recent factory ticket activity, journey timelines, and quick search.
-            {onNavigatePr
-              ? " A PR reference (#541) opens that PR's journey."
-              : ""}
-          </p>
-          <form
-            onSubmit={submitJump}
-            className="mb-3 flex flex-wrap items-center gap-2"
-          >
-            <input
-              ref={inputRef}
-              autoFocus
-              value={jumpValue}
-              onChange={(event) => setJumpValue(event.target.value)}
-              placeholder="WM-542 or #541"
-              aria-label="Ticket id"
-              aria-invalid={jumpError}
-              className="mono min-w-48 flex-1 rounded-md border border-(--border-strong) bg-(--surface-1) px-3 py-1.5 text-[13px] outline-none focus:border-(--accent)"
-            />
-            <PrimitiveButton
-              bare
-              type="submit"
-              className="rounded-md bg-(--accent) px-3.5 py-1.5 text-[12px] font-medium text-(--on-accent)"
+    <div className="flex h-full min-w-0" data-testid="tickets-hub">
+      <ListPane
+        chrome={
+          <>
+            <h1 className="display mb-1 text-lg font-semibold">Tickets</h1>
+            <p className="mb-3 text-[11px] text-(--text-faint)">
+              Recent factory ticket activity, journey timelines, and quick
+              search.
+              {onNavigatePr
+                ? " A PR reference (#541) opens that PR's journey."
+                : ""}
+            </p>
+            <form
+              onSubmit={submitJump}
+              className="mb-3 flex flex-wrap items-center gap-2"
             >
-              Open
-            </PrimitiveButton>
-          </form>
-          {jumpError && (
-            <div role="alert" className="mb-3 text-[11px] text-(--hue-err)">
-              Use an id like WM-542{onNavigatePr ? " or a PR like #541" : ""}.
-            </div>
-          )}
-          <SupplyStrip
-            supply={supplyQuery.data}
-            pending={supplyQuery.isPending}
-            error={
-              supplyQuery.isError
-                ? ((supplyQuery.error as Error)?.message ?? "unavailable")
-                : null
-            }
-            repoFilter={repoFilter}
-            stateFilter={stateFilter}
-            now={now}
-            onFilter={({ repo, state }) => {
-              setRepoFilter(repo);
-              setStateFilter(state);
-            }}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <FilterInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Filter tickets…"
-              label="Filter tickets"
-            />
-            <select
-              aria-label="Filter by repo"
-              value={repoFilter}
-              onChange={(e) => setRepoFilter(e.target.value)}
-              className="rounded-md border border-(--border-strong) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text)"
-            >
-              <option value="">All repos</option>
-              {repoOptions.map((repo) => (
-                <option key={repo} value={repo}>
-                  {repo}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="Filter by state"
-              value={stateFilter}
-              onChange={(e) => setStateFilter(e.target.value)}
-              className="rounded-md border border-(--border-strong) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text)"
-            >
-              <option value="">All states</option>
-              {stateOptions.map((state) => (
-                <option key={state} value={state}>
-                  {state}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="mt-2 text-[11px] text-(--text-faint)">
-            Shortcut: <span className="mono">g k</span> to focus jump bar,{" "}
-            <span className="mono">j</span>/<span className="mono">k</span> to
-            navigate, <span className="mono">Enter</span> to open,{" "}
-            <span className="mono">o</span> to open in Linear
-          </div>
-        </>
-      }
-    >
-      <div className="table-wrap">
-        <table className="w-full text-left text-[12px]">
-          <thead>
-            <tr className="border-b border-(--border)">
-              <Th label="Ticket ID" />
-              <Th label="Repo" />
-              <Th label="State" />
-              <Th label="Last Activity" />
-              <Th label="Attempts" />
-              <Th label="PR / CI" />
-            </tr>
-          </thead>
-          <tbody>
-            {filteredTickets.length === 0 ? (
-              <ListEmpty
-                colSpan={6}
-                query={ticketsQuery}
-                filtered={Boolean(searchQuery || repoFilter || stateFilter)}
-                noun="tickets"
-                empty="No tickets found."
-                onClear={() => {
-                  setSearchQuery("");
-                  setRepoFilter("");
-                  setStateFilter("");
-                }}
+              <input
+                ref={inputRef}
+                autoFocus
+                value={jumpValue}
+                onChange={(event) => setJumpValue(event.target.value)}
+                placeholder="WM-542 or #541"
+                aria-label="Ticket id"
+                aria-invalid={jumpError}
+                className="mono min-w-48 flex-1 rounded-md border border-(--border-strong) bg-(--surface-1) px-3 py-1.5 text-[13px] outline-none focus:border-(--accent)"
               />
-            ) : (
-              filteredTickets.map((ticket, index) => {
-                const selected =
-                  index === selectedIndex || ticket.id === selectedId;
-                return (
-                  <tr
-                    key={ticket.id}
-                    data-ticket-id={ticket.id}
-                    aria-selected={selected}
-                    onClick={() => onNavigate(ticket.id)}
-                    className={`cursor-pointer border-b border-(--border) hover:bg-(--surface-1) ${
-                      selected ? "bg-(--surface-1)" : ""
-                    }`}
-                  >
-                    <td className="mono px-3 py-1.5 whitespace-nowrap font-medium">
-                      <span className="inline-flex max-w-xs items-center gap-2">
-                        <a
-                          href={`#/tickets/${encodeURIComponent(ticket.id)}`}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            onNavigate(ticket.id);
-                          }}
-                          className="shrink-0 text-(--accent) hover:underline"
-                        >
-                          {ticket.id}
-                        </a>
-                        {ticket.title && (
-                          <span
-                            className="min-w-0 truncate font-sans text-[11px] font-normal text-(--text-dim)"
-                            title={ticket.title}
+              <PrimitiveButton
+                bare
+                type="submit"
+                className="rounded-md bg-(--accent) px-3.5 py-1.5 text-[12px] font-medium text-(--on-accent)"
+              >
+                Open
+              </PrimitiveButton>
+            </form>
+            {jumpError && (
+              <div role="alert" className="mb-3 text-[11px] text-(--hue-err)">
+                Use an id like WM-542{onNavigatePr ? " or a PR like #541" : ""}.
+              </div>
+            )}
+            <SupplyStrip
+              supply={supplyQuery.data}
+              pending={supplyQuery.isPending}
+              error={
+                supplyQuery.isError
+                  ? ((supplyQuery.error as Error)?.message ?? "unavailable")
+                  : null
+              }
+              repoFilter={repoFilter}
+              stateFilter={stateFilter}
+              now={now}
+              onFilter={({ repo, state }) => {
+                setRepoFilter(repo);
+                setStateFilter(state);
+              }}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <FilterInput
+                value={searchQuery}
+                onChange={setSearchQuery}
+                placeholder="Filter tickets…"
+                label="Filter tickets"
+              />
+              <select
+                aria-label="Filter by repo"
+                value={repoFilter}
+                onChange={(e) => setRepoFilter(e.target.value)}
+                className="rounded-md border border-(--border-strong) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text)"
+              >
+                <option value="">All repos</option>
+                {repoOptions.map((repo) => (
+                  <option key={repo} value={repo}>
+                    {repo}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filter by state"
+                value={stateFilter}
+                onChange={(e) => setStateFilter(e.target.value)}
+                className="rounded-md border border-(--border-strong) bg-(--surface-1) px-2.5 py-1 text-[12px] text-(--text)"
+              >
+                <option value="">All states</option>
+                {stateOptions.map((state) => (
+                  <option key={state} value={state}>
+                    {state}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="mt-2 text-[11px] text-(--text-faint)">
+              Shortcut: <span className="mono">g k</span> to focus jump bar,{" "}
+              <span className="mono">j</span>/<span className="mono">k</span> to
+              navigate, <span className="mono">Enter</span> to open,{" "}
+              <span className="mono">o</span> to open in Linear
+            </div>
+          </>
+        }
+      >
+        <div className="table-wrap">
+          <table className="w-full text-left text-[12px]">
+            <thead>
+              <tr className="border-b border-(--border)">
+                <Th label="Ticket ID" />
+                <Th label="Repo" />
+                <Th label="State" />
+                <Th label="Last Activity" />
+                <Th label="Attempts" />
+                <Th label="PR / CI" />
+              </tr>
+            </thead>
+            <tbody>
+              {filteredTickets.length === 0 ? (
+                <ListEmpty
+                  colSpan={6}
+                  query={ticketsQuery}
+                  filtered={Boolean(searchQuery || repoFilter || stateFilter)}
+                  noun="tickets"
+                  empty="No tickets found."
+                  onClear={() => {
+                    setSearchQuery("");
+                    setRepoFilter("");
+                    setStateFilter("");
+                  }}
+                />
+              ) : (
+                filteredTickets.map((ticket, index) => {
+                  const selected =
+                    index === selectedIndex || ticket.id === selectedId;
+                  return (
+                    <tr
+                      key={ticket.id}
+                      data-ticket-id={ticket.id}
+                      aria-selected={selected}
+                      onClick={() => onNavigate(ticket.id)}
+                      className={`cursor-pointer border-b border-(--border) hover:bg-(--surface-1) ${
+                        selected ? "bg-(--surface-1)" : ""
+                      }`}
+                    >
+                      <td className="mono px-3 py-1.5 whitespace-nowrap font-medium">
+                        <span className="inline-flex max-w-xs items-center gap-2">
+                          <a
+                            href={`#/tickets/${encodeURIComponent(ticket.id)}`}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              onNavigate(ticket.id);
+                            }}
+                            className="shrink-0 text-(--accent) hover:underline"
                           >
-                            {ticket.title}
-                          </span>
-                        )}
-                      </span>
-                    </td>
-                    <td className="mono px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
-                      {ticket.repo || ticket.repos?.join(", ") || "—"}
-                    </td>
-                    <td className="px-3 py-1.5 whitespace-nowrap">
-                      {ticket.state ? (
-                        <StateBadge state={ticket.state} hues={STATE_HUES} />
-                      ) : (
-                        <span className="text-(--text-faint)">—</span>
-                      )}
-                    </td>
-                    <td className="max-w-xs truncate px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
-                      <span>
-                        {ticket.lastActivityDescription ||
-                          ticket.lastActivityKind ||
-                          "—"}
-                      </span>
-                      {ticket.lastActivityAt && (
-                        <span className="ml-2 text-(--text-faint)">
-                          <Ago iso={ticket.lastActivityAt} now={now} />
-                        </span>
-                      )}
-                    </td>
-                    <td className="mono px-3 py-1.5 whitespace-nowrap tabular-nums text-(--text-dim)">
-                      {ticket.attempts != null ? ticket.attempts : "—"}
-                    </td>
-                    <td className="px-3 py-1.5 whitespace-nowrap">
-                      {(() => {
-                        const prNumber =
-                          typeof ticket.pr === "number"
-                            ? ticket.pr
-                            : ticket.pr && typeof ticket.pr === "object"
-                              ? ticket.pr.number
-                              : null;
-                        const prUrl =
-                          typeof ticket.pr === "object" && ticket.pr?.url
-                            ? ticket.pr.url
-                            : ticket.prUrl ||
-                              (prNumber ? `#/prs/${prNumber}` : undefined);
-                        const ci =
-                          typeof ticket.pr === "object" && ticket.pr?.ci
-                            ? ticket.pr.ci
-                            : (ticket.ciStatus ??
-                              (ticket.checksGreen != null
-                                ? ticket.checksGreen
-                                  ? "green"
-                                  : "red"
-                                : null));
-
-                        return prNumber != null ? (
-                          <span className="inline-flex items-center gap-1.5">
-                            <a
-                              href={prUrl || `#/prs/${prNumber}`}
-                              onClick={(e) => {
-                                if (onNavigatePr) {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  onNavigatePr(prNumber);
-                                }
-                              }}
-                              className="mono text-(--accent) hover:underline"
+                            {ticket.id}
+                          </a>
+                          {ticket.title && (
+                            <span
+                              className="min-w-0 truncate font-sans text-[11px] font-normal text-(--text-dim)"
+                              title={ticket.title}
                             >
-                              {`#${prNumber}`}
-                            </a>
-                            {ci && (
-                              <span
-                                className={`inline-block size-2 rounded-full ring-2 ring-(--surface-1) ${
-                                  ci === "green"
-                                    ? "bg-(--hue-ok)"
-                                    : ci === "red"
-                                      ? "bg-(--hue-err)"
-                                      : "bg-(--hue-warn)"
-                                }`}
-                                title={`CI: ${ci}`}
-                              />
-                            )}
-                          </span>
+                              {ticket.title}
+                            </span>
+                          )}
+                        </span>
+                      </td>
+                      <td className="mono px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                        {ticket.repo || ticket.repos?.join(", ") || "—"}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap">
+                        {ticket.state ? (
+                          <StateBadge state={ticket.state} hues={STATE_HUES} />
                         ) : (
                           <span className="text-(--text-faint)">—</span>
-                        );
-                      })()}
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-    </ListPane>
+                        )}
+                      </td>
+                      <td className="max-w-xs truncate px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                        <span>
+                          {ticket.lastActivityDescription ||
+                            ticket.lastActivityKind ||
+                            "—"}
+                        </span>
+                        {ticket.lastActivityAt && (
+                          <span className="ml-2 text-(--text-faint)">
+                            <Ago iso={ticket.lastActivityAt} now={now} />
+                          </span>
+                        )}
+                      </td>
+                      <td className="mono px-3 py-1.5 whitespace-nowrap tabular-nums text-(--text-dim)">
+                        {ticket.attempts != null ? ticket.attempts : "—"}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap">
+                        {(() => {
+                          const prNumber =
+                            typeof ticket.pr === "number"
+                              ? ticket.pr
+                              : ticket.pr && typeof ticket.pr === "object"
+                                ? ticket.pr.number
+                                : null;
+                          const prUrl =
+                            typeof ticket.pr === "object" && ticket.pr?.url
+                              ? ticket.pr.url
+                              : ticket.prUrl ||
+                                (prNumber ? `#/prs/${prNumber}` : undefined);
+                          const ci =
+                            typeof ticket.pr === "object" && ticket.pr?.ci
+                              ? ticket.pr.ci
+                              : (ticket.ciStatus ??
+                                (ticket.checksGreen != null
+                                  ? ticket.checksGreen
+                                    ? "green"
+                                    : "red"
+                                  : null));
+
+                          return prNumber != null ? (
+                            <span className="inline-flex items-center gap-1.5">
+                              <a
+                                href={prUrl || `#/prs/${prNumber}`}
+                                onClick={(e) => {
+                                  if (onNavigatePr) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    onNavigatePr(prNumber);
+                                  }
+                                }}
+                                className="mono text-(--accent) hover:underline"
+                              >
+                                {`#${prNumber}`}
+                              </a>
+                              {ci && (
+                                <span
+                                  className={`inline-block size-2 rounded-full ring-2 ring-(--surface-1) ${
+                                    ci === "green"
+                                      ? "bg-(--hue-ok)"
+                                      : ci === "red"
+                                        ? "bg-(--hue-err)"
+                                        : "bg-(--hue-warn)"
+                                  }`}
+                                  title={`CI: ${ci}`}
+                                />
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-(--text-faint)">—</span>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </ListPane>
+    </div>
   );
 }
 
