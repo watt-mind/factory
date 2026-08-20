@@ -5,7 +5,9 @@ import {
   cpSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -30,7 +32,9 @@ import {
   loadExtensionRoots,
   loadExtensions,
   loadedExtensions,
+  looksLikePackageName,
   resetExtensionSecretsCache,
+  resolveExtensionPackage,
   validateExtensionManifest,
 } from "./extensions.mjs";
 import { createHookRegistry, hookDecisionsFor } from "./hooks.mjs";
@@ -58,6 +62,47 @@ function tempExtension(mutate = () => {}) {
 
 function policyFor(...dirs) {
   return { extensions: dirs.map((p) => ({ path: p })) };
+}
+
+/**
+ * Install the sample fixture as an npm package under a temp factory root
+ * (`node_modules/@test/sample-ext` → realpath of a copy, WM-922).
+ */
+function sampleAsPackage({
+  name = "@test/sample-ext",
+  version = "1.2.3",
+  factoryExtension,
+  mutate,
+} = {}) {
+  const factoryRoot = tmpDir("event-extension-pkgfactory-");
+  const installed = tmpDir("event-extension-pkginstall-");
+  cpSync(SAMPLE_EXTENSION, installed, { recursive: true });
+  const pkg = {
+    name,
+    version,
+    type: "module",
+    engines: { bun: ">=1.3" },
+    keywords: ["factory-extension"],
+    files: [
+      "factory-extension.json",
+      "pack",
+      "adapters",
+      "config.schema.json",
+      "hooks",
+      "connectors",
+      "panels",
+    ],
+  };
+  if (factoryExtension) pkg.factory = { extension: factoryExtension };
+  mutate?.(pkg, installed, factoryRoot);
+  writeFileSync(
+    path.join(installed, "package.json"),
+    JSON.stringify(pkg, null, 2),
+  );
+  const nm = path.join(factoryRoot, "node_modules", ...name.split("/"));
+  mkdirSync(path.dirname(nm), { recursive: true });
+  symlinkSync(installed, nm);
+  return { factoryRoot, installed, nm, name, version };
 }
 
 /** Load with an empty base pack list so the fixture never collides with the checkout's policy. */
@@ -186,7 +231,9 @@ describe("loadExtensionRoots", () => {
       path.join(os.homedir(), "ext"),
     ]);
     expect(out.anomalies).toHaveLength(4);
-    expect(out.anomalies[0]).toMatch(/extensions\[0\] must be an object/);
+    expect(out.anomalies[0]).toMatch(
+      /extensions\[0\] must be an object with path or package/,
+    );
     expect(out.anomalies[1]).toMatch(/extensions\[1\]\.path must be/);
     expect(out.anomalies[2]).toMatch(/unknown field "name"/);
     expect(out.anomalies[3]).toMatch(/duplicate extension path/);
@@ -200,8 +247,36 @@ describe("loadExtensionRoots", () => {
       "extensions:\n  - path: ext/one\n",
     );
     expect(loadExtensionRoots({ root }).roots).toEqual([
-      { path: path.join(root, "ext", "one"), index: 0 },
+      { path: path.join(root, "ext", "one"), index: 0, source: "path" },
     ]);
+  });
+
+  test("path and package together, or neither, are anomalies; version is display-only", () => {
+    const root = tmpDir("event-extension-xor-");
+    const out = loadExtensionRoots({
+      root,
+      policy: {
+        extensions: [
+          { config: { a: 1 } },
+          { path: "vendor/one", package: "@watt-mind/factory-ext-one" },
+          { package: "@watt-mind/factory-ext-missing", version: "9.9.9" },
+          { package: "../not-a-package" },
+          { package: "" },
+        ],
+      },
+    });
+    expect(out.roots).toEqual([]);
+    expect(out.anomalies[0]).toMatch(
+      /extensions\[0\] must have path or package \(entry skipped\)/,
+    );
+    expect(out.anomalies[1]).toMatch(
+      /must have path or package, not both \(entry skipped\)/,
+    );
+    expect(out.anomalies[2]).toMatch(
+      /package "@watt-mind\/factory-ext-missing" is not installed — npm i @watt-mind\/factory-ext-missing/,
+    );
+    expect(out.anomalies[3]).toMatch(/package must be a package name/);
+    expect(out.anomalies[4]).toMatch(/package must be a non-empty string/);
   });
 });
 
@@ -240,6 +315,20 @@ describe("validateExtensionManifest", () => {
     );
   });
 
+  test("a contributed path that is a symlink out of the extension is an escape", () => {
+    const dir = tempExtension();
+    const outside = tmpDir("event-extension-escape-target-");
+    writeFileSync(
+      path.join(outside, "pack.json"),
+      JSON.stringify({ name: "escaped", version: "1.0.0", namespace: "x" }),
+    );
+    rmSync(path.join(dir, "pack"), { recursive: true, force: true });
+    symlinkSync(outside, path.join(dir, "pack"));
+    const out = validateExtensionManifest(dir);
+    expect(out.valid).toBe(false);
+    expect(out.errors.join("\n")).toMatch(/packs\[0\] "\.\/pack" escapes/);
+  });
+
   test("connector paths must exist, stay inside, and match the name pattern", () => {
     const dir = tempExtension((m) => {
       m.contributes.connectors["missing"] = "./connectors/nope.mjs";
@@ -265,6 +354,7 @@ describe("loadExtensions", () => {
         name: "factory/sample",
         version: "1.0.0",
         path: SAMPLE_EXTENSION,
+        source: "path",
         packs: ["sample-ext"],
         adapters: ["echo"],
         hooks: [
@@ -1365,5 +1455,182 @@ describe("contributes.harness (WM-849)", () => {
     expect(out.valid).toBe(false);
     expect(out.errors.join("\n")).toMatch(/harness\.floor .* is not a file/);
     expect(out.errors.join("\n")).toMatch(/harness\.commands .* escapes/);
+  });
+});
+
+describe("extension packages (WM-922)", () => {
+  test("looksLikePackageName accepts @scope/name and unscoped names, not paths", () => {
+    expect(looksLikePackageName("@watt-mind/factory-ext-buzz")).toBe(true);
+    expect(looksLikePackageName("@test/sample-ext")).toBe(true);
+    expect(looksLikePackageName("factory-ext-buzz")).toBe(true);
+    expect(looksLikePackageName("./vendor/ext")).toBe(false);
+    expect(looksLikePackageName("vendor/ext")).toBe(false);
+    expect(looksLikePackageName("~/ext")).toBe(false);
+    expect(looksLikePackageName("../escape")).toBe(false);
+  });
+
+  test("the sample fixture loads as a package via a node_modules symlink", async () => {
+    const { factoryRoot, installed, name, version } = sampleAsPackage();
+    const resolved = resolveExtensionPackage(name, { root: factoryRoot });
+    expect(resolved.source).toBe("package");
+    expect(resolved.package).toBe(name);
+    expect(resolved.packageVersion).toBe(version);
+    expect(resolved.path).toBe(realpathSync(installed));
+
+    const adapterRegistry = createAdapterRegistry();
+    const out = await loadExtensions({
+      root: factoryRoot,
+      policy: {
+        extensions: [{ package: name, version: "ignored-display-only" }],
+      },
+      adapterRegistry,
+      hookRegistry: createHookRegistry(),
+      packRoots: [],
+    });
+    expect(out.anomalies).toEqual([]);
+    expect(out.extensions).toHaveLength(1);
+    expect(out.extensions[0]).toMatchObject({
+      name: "factory/sample",
+      version: "1.0.0",
+      path: realpathSync(installed),
+      source: "package",
+      package: name,
+      packageVersion: version,
+      packs: ["sample-ext"],
+      adapters: ["echo"],
+    });
+    expect(adapterRegistry.has("echo")).toBe(true);
+    expect(loadedExtensions().extensions[0]).toMatchObject({
+      source: "package",
+      package: name,
+      packageVersion: version,
+      path: realpathSync(installed),
+    });
+  });
+
+  test("factory.extension points at a subdir; a subdir that escapes is refused", () => {
+    const nestedRoot = tmpDir("event-extension-nested-pkg-");
+    const pkgDir = tmpDir("event-extension-nested-install-");
+    const extDir = path.join(pkgDir, "ext");
+    cpSync(SAMPLE_EXTENSION, extDir, { recursive: true });
+    writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@test/nested-ext",
+        version: "0.4.0",
+        factory: { extension: "./ext" },
+      }),
+    );
+    mkdirSync(path.join(nestedRoot, "node_modules", "@test"), {
+      recursive: true,
+    });
+    symlinkSync(
+      pkgDir,
+      path.join(nestedRoot, "node_modules", "@test", "nested-ext"),
+    );
+    const resolved = resolveExtensionPackage("@test/nested-ext", {
+      root: nestedRoot,
+    });
+    expect(resolved.path).toBe(realpathSync(extDir));
+    expect(resolved.packageVersion).toBe("0.4.0");
+
+    const escapedRoot = tmpDir("event-extension-escaped-pkg-");
+    const escapedPkg = tmpDir("event-extension-escaped-install-");
+    writeFileSync(
+      path.join(escapedPkg, "package.json"),
+      JSON.stringify({
+        name: "@test/escaped-ext",
+        version: "0.0.1",
+        factory: { extension: "../outside" },
+      }),
+    );
+    mkdirSync(path.join(escapedRoot, "node_modules", "@test"), {
+      recursive: true,
+    });
+    symlinkSync(
+      escapedPkg,
+      path.join(escapedRoot, "node_modules", "@test", "escaped-ext"),
+    );
+    expect(() =>
+      resolveExtensionPackage("@test/escaped-ext", { root: escapedRoot }),
+    ).toThrow(/factory\.extension "\.\.\/outside" escapes/);
+  });
+
+  test("a package whose contributed pack is a symlink out of the package is an escape", () => {
+    const { factoryRoot, installed, name } = sampleAsPackage();
+    const outside = tmpDir("event-extension-pkg-escape-");
+    writeFileSync(
+      path.join(outside, "pack.json"),
+      JSON.stringify({ name: "escaped", version: "1.0.0", namespace: "x" }),
+    );
+    rmSync(path.join(installed, "pack"), { recursive: true, force: true });
+    symlinkSync(outside, path.join(installed, "pack"));
+    const resolved = resolveExtensionPackage(name, { root: factoryRoot });
+    const out = validateExtensionManifest(resolved.path);
+    expect(out.valid).toBe(false);
+    expect(out.errors.join("\n")).toMatch(/packs\[0\] "\.\/pack" escapes/);
+  });
+
+  test("extensions validate accepts a package name via the existing CLI", () => {
+    const { factoryRoot, name } = sampleAsPackage();
+    const ok = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        "event-runtime/cli.mjs",
+        "extensions",
+        "validate",
+        name,
+      ],
+      cwd: path.dirname(RUNTIME_ROOT),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_REPOS_ROOT: factoryRoot },
+    });
+    expect(ok.exitCode).toBe(0);
+    expect(ok.stdout.toString()).toMatch(
+      /factory\/sample@1\.0\.0: valid \(1 pack, 1 adapter, 1 hook, 1 panel, 1 config, config namespace sample\)/,
+    );
+
+    const missing = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        "event-runtime/cli.mjs",
+        "extensions",
+        "validate",
+        "@watt-mind/factory-ext-nope",
+      ],
+      cwd: path.dirname(RUNTIME_ROOT),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_REPOS_ROOT: factoryRoot },
+    });
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr.toString()).toMatch(
+      /is not installed — npm i @watt-mind\/factory-ext-nope/,
+    );
+  });
+
+  test("extensions pack validates then lists npm pack --dry-run files", () => {
+    const dir = tempExtension();
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({
+        name: "@test/pack-ext",
+        version: "0.1.0",
+        type: "module",
+        files: ["factory-extension.json", "pack", "adapters"],
+      }),
+    );
+    const packed = Bun.spawnSync({
+      cmd: [process.execPath, "event-runtime/cli/extensions.mjs", "pack", dir],
+      cwd: path.dirname(RUNTIME_ROOT),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(packed.exitCode).toBe(0);
+    const text = packed.stdout.toString();
+    expect(text).toMatch(/@test\/pack-ext@0\.1\.0: would pack/);
+    expect(text).toMatch(/factory-extension\.json/);
+    expect(text).toMatch(/package\.json/);
   });
 });

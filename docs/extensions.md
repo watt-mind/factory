@@ -120,6 +120,7 @@ Validate a manifest without loading anything:
 
 ```sh
 bun event-runtime/cli.mjs extensions validate ~/.factory/extensions/wattmind-mobile
+bun event-runtime/cli.mjs extensions validate @watt-mind/factory-ext-buzz
 # wattmind/mobile@1.0.0: valid (1 pack, 1 adapter)
 ```
 
@@ -162,8 +163,9 @@ There are two kinds of contribution, and the difference is what runs.
   the extension's other contributions stay loaded.
 
 Two rules follow. Discovery is **allow-listed, never scanned**: the loader reads
-only the directories `policy.yaml` names, in that order — dropping a directory
-into `~/.factory/extensions/` does nothing on its own. And a broken extension is
+only the `path:` directories and `package:` names `policy.yaml` lists, in that
+order — dropping a directory into `~/.factory/extensions/` or installing an
+npm package does nothing on its own. And a broken extension is
 a **configuration anomaly, not a crash**: a missing or malformed manifest, a
 pack the registry would refuse, or an adapter that fails the contract skips
 that extension whole (nothing of it is registered, not even its good parts),
@@ -175,10 +177,14 @@ The one thing that does fail closed is a malformed `extensions:` block itself
 
 ## Enabling an extension
 
-Add its directory to `config/policy.yaml`:
+Add it to `config/policy.yaml` — either a directory (`path:`) or an installed
+npm package (`package:`). Both on one entry, or neither, is a configuration
+anomaly and the entry is skipped. Nothing is auto-discovered from
+`node_modules`.
 
 ```yaml
 extensions:
+  - package: @watt-mind/factory-ext-buzz # resolved from the factory root's node_modules
   - path: ~/.factory/extensions/wattmind-mobile # must contain factory-extension.json
     config: # optional; the shape is the extension's config schema (§Config)
       simulator: iPhone-16
@@ -186,12 +192,22 @@ extensions:
   - path: vendor/another-extension # relative paths resolve from the factory checkout
 ```
 
-Each entry accepts `path` (`~` expands to the home directory) and an optional
-`config` object — anything else is an anomaly and the entry is skipped. Entries
-load after the built-in root and after every `packs:` entry, in policy order:
-`packRoots` handed to the registry is `packs:` first, then each accepted
-extension's packs. Restart `serve` and the workers — extensions are read at
-startup, alongside the registry.
+Each entry accepts **either** `path` (`~` expands to the home directory) **or**
+`package` (`@scope/name` or `name`, resolved with `createRequire` from the
+factory root) and an optional `config` object. `version` on a `package:` entry
+is display-only — the loader records the installed `package.json` version, it
+does not pin or fetch. Anything else is an anomaly and the entry is skipped.
+A `package:` that is not installed is an anomaly naming the `npm i` command,
+never a crash. Entries load after the built-in root and after every `packs:`
+entry, in policy order: `packRoots` handed to the registry is `packs:` first,
+then each accepted extension's packs. Restart `serve` and the workers —
+extensions are read at startup, alongside the registry.
+
+Loaded rows (`extensions list --json`, and the loader snapshot `/config`
+reads) carry `source: "path"` or `source: "package"`, the resolved directory,
+and for packages the installed version. A `node_modules` symlink is realpath'd
+before the inside-the-dir check, so a contributed path cannot escape through
+a linked package.
 
 Inspect what loaded:
 
@@ -757,6 +773,48 @@ nothing until `policy.yaml` names it.
 **Trust.** Harness markdown is the same class as packs — an agent may
 author it — with the operator enablement gate in front. It is not an
 adapter: emit never imports third-party JavaScript.
+
+## Publishing
+
+Distribute an extension as an npm package so another factory install enables
+it with `npm i @watt-mind/factory-ext-<name>` plus one `policy.yaml` line, instead
+of cloning a directory. An extension is already a self-contained directory
+with one manifest, so the package _is_ the extension root — the loader
+resolves `package:` to that directory (§Enabling).
+
+### Package conventions
+
+| Field              | Value                                                                                                                                                                                                                                    |
+| :----------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | `@watt-mind/factory-ext-<name>` (the `@watt-mind` org). Unscoped names resolve too; this is the published convention.                                                                                                                    |
+| `files`            | Whitelist: `factory-extension.json` plus every contributed path the manifest names (`pack/`, `adapters/`, `connectors/`, `hooks/`, `panels/`, `config.schema.json`, harness dirs). Do not ship tests, fixtures, or the factory checkout. |
+| `peerDependencies` | **None.** An extension imports only from the runtime contract via `ctx` (hooks, connectors, adapters). It must not `import` `event-runtime/lib/*` — that is also why connectors receive a client object instead of a DB handle.          |
+| `engines.bun`      | The bun range the extension was tested against (the factory itself is `>=1.3`).                                                                                                                                                          |
+| `keywords`         | Must include `"factory-extension"`.                                                                                                                                                                                                      |
+
+`package.json` may point the loader at a subdirectory with
+`factory.extension: "./ext"` when the package root is not the extension root.
+That path is realpath'd and must stay inside the package.
+
+### Validate and pack
+
+```sh
+bun event-runtime/cli.mjs extensions validate <dir|package>
+bun event-runtime/cli/extensions.mjs pack <dir>
+```
+
+`pack` runs validate, then `npm pack --dry-run`, and lists the files that
+would ship. Use it before the first publish.
+
+### Publish workflow
+
+`.github/workflows/publish-extension.yml` is a manual `workflow_dispatch`
+with an `extension` input (repo-relative directory). It validates, runs
+tests under that directory when they exist, and
+`npm publish --provenance --access public`. The `NPM_TOKEN` repository
+secret must be set — if it is missing the workflow fails loudly rather than
+publishing unauthenticated. The operator adds the token to the `@watt-mind`
+org; the workflow does not create it.
 
 ## Related
 

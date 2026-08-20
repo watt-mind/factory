@@ -11,9 +11,11 @@
  *
  * Three properties this module owns:
  *
- *   1. **Discovery is allow-listed, never scanned.** Only the directories in
+ *   1. **Discovery is allow-listed, never scanned.** Only the entries in
  *      `config/policy.yaml extensions:` are read, in policy order, mirroring
- *      `packs:` — an absent block loads nothing.
+ *      `packs:` — an absent block loads nothing. Each entry is either a
+ *      `path:` (directory) or a `package:` (an installed npm package resolved
+ *      from the factory root). Nothing is auto-discovered from `node_modules`.
  *   2. **Failures are configuration anomalies, not crashes.** A missing or
  *      malformed manifest, a schema violation, a pack the registry would
  *      refuse, or an adapter that fails the contract records a
@@ -73,7 +75,8 @@
  * lib/worker.mjs, and `result.packRoots` must be what `loadRegistry` is
  * given.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -180,8 +183,11 @@ export function formatContributionCounts(counts) {
   ].join(", ");
 }
 
-/** Policy entry fields `extensions[]` accepts besides `path`. */
-const ENTRY_FIELDS = new Set(["path", "config"]);
+/** Policy entry fields `extensions[]` accepts besides the locator. */
+const ENTRY_FIELDS = new Set(["path", "package", "version", "config"]);
+
+/** npm package name: `@scope/name` or `name` (no path separators). */
+const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
 
 /**
  * The last `loadExtensions` result, kept so `getExtensionConfig` (adapters,
@@ -196,6 +202,114 @@ export class ExtensionError extends Error {
     super(message);
     this.name = "ExtensionError";
   }
+}
+
+/** True for `@scope/name` or unscoped `name`; false for filesystem paths. */
+export function looksLikePackageName(value) {
+  if (typeof value !== "string") return false;
+  const name = value.trim();
+  if (!name) return false;
+  if (
+    name.startsWith(".") ||
+    name.startsWith("/") ||
+    name.startsWith("~") ||
+    name.includes("\\") ||
+    name.includes("..")
+  )
+    return false;
+  return PACKAGE_NAME.test(name);
+}
+
+function existingRealpath(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * Resolve an installed npm package from the factory root to the directory
+ * that contains `factory-extension.json`. Follows `node_modules` symlinks
+ * with `realpath` so contributed paths cannot escape via a linked package.
+ *
+ * @param {string} packageName
+ * @param {{ root?: string }} [options]
+ * @returns {{ path: string, package: string, packageVersion: string|null, source: "package" }}
+ */
+export function resolveExtensionPackage(
+  packageName,
+  { root = reposRoot() } = {},
+) {
+  const name = String(packageName ?? "").trim();
+  if (!looksLikePackageName(name)) {
+    throw new ExtensionError(
+      `package must be a package name (@scope/name or name), got "${packageName}"`,
+    );
+  }
+  const require = createRequire(path.join(root, "package.json"));
+  let pkgJsonPath;
+  try {
+    pkgJsonPath = require.resolve(`${name}/package.json`);
+  } catch {
+    throw new ExtensionError(
+      `package "${name}" is not installed — npm i ${name}`,
+    );
+  }
+  const pkgDir = path.dirname(pkgJsonPath);
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+  } catch (err) {
+    throw new ExtensionError(
+      `package "${name}": unreadable package.json — ${err.message}`,
+    );
+  }
+  const rel = pkg.factory?.extension;
+  let extDir = pkgDir;
+  if (rel !== undefined && rel !== null) {
+    if (typeof rel !== "string" || rel.trim() === "") {
+      throw new ExtensionError(
+        `package "${name}": package.json factory.extension must be a relative path`,
+      );
+    }
+    extDir = path.resolve(pkgDir, rel);
+  }
+  const realPkg = existingRealpath(pkgDir);
+  const realExt = existingRealpath(extDir);
+  if (!isInside(realPkg, realExt)) {
+    throw new ExtensionError(
+      `package "${name}": factory.extension "${rel}" escapes the package directory`,
+    );
+  }
+  if (!existsSync(path.join(realExt, EXTENSION_MANIFEST))) {
+    throw new ExtensionError(
+      `package "${name}" has no ${EXTENSION_MANIFEST} in ${realExt}`,
+    );
+  }
+  return {
+    path: realExt,
+    package: name,
+    packageVersion: typeof pkg.version === "string" ? pkg.version : null,
+    source: "package",
+  };
+}
+
+/**
+ * A CLI/`validate` target: an existing filesystem path, or a package name
+ * resolved from the factory root.
+ *
+ * @param {string} spec
+ * @param {{ root?: string }} [options]
+ * @returns {{ path: string, source: "path"|"package", package?: string, packageVersion?: string|null }}
+ */
+export function resolveExtensionTarget(spec, { root = reposRoot() } = {}) {
+  const trimmed = String(spec ?? "").trim();
+  const asPath = path.resolve(expandHome(trimmed));
+  if (trimmed && existsSync(asPath)) return { path: asPath, source: "path" };
+  if (looksLikePackageName(trimmed))
+    return resolveExtensionPackage(trimmed, { root });
+  return { path: asPath, source: "path" };
 }
 
 function policyFile(root) {
@@ -221,9 +335,12 @@ function readPolicy(root) {
  * is reported per entry so one typo does not hide the other extensions.
  *
  * @param {{ root?: string, policy?: object }} [options]
- * @returns {{ roots: Array<{ path: string, index: number, config?: object }>, anomalies: string[] }}
+ * @returns {{ roots: Array<{ path: string, index: number, source: "path"|"package", package?: string, packageVersion?: string|null, config?: object }>, anomalies: string[] }}
  *   `config` is the operator's raw values for the extension (validated by
  *   `loadExtensions` against the schema the manifest declares).
+ *   `source` is `"path"` or `"package"`; package rows also carry the name
+ *   and the installed `package.json` version (`version:` on the entry is
+ *   display-only and is not compared).
  */
 export function loadExtensionRoots({ root = reposRoot(), policy } = {}) {
   const parsed = policy ?? readPolicy(root);
@@ -240,7 +357,9 @@ export function loadExtensionRoots({ root = reposRoot(), policy } = {}) {
   configured.forEach((entry, index) => {
     const at = `${file}: extensions[${index}]`;
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      anomalies.push(`${at} must be an object with path (entry skipped)`);
+      anomalies.push(
+        `${at} must be an object with path or package (entry skipped)`,
+      );
       return;
     }
     const unknown = Object.keys(entry).filter((key) => !ENTRY_FIELDS.has(key));
@@ -250,8 +369,25 @@ export function loadExtensionRoots({ root = reposRoot(), policy } = {}) {
       );
       return;
     }
-    if (typeof entry.path !== "string" || entry.path.trim() === "") {
-      anomalies.push(`${at}.path must be a non-empty string (entry skipped)`);
+    const hasPath = Object.hasOwn(entry, "path");
+    const hasPackage = Object.hasOwn(entry, "package");
+    if (hasPath && hasPackage) {
+      anomalies.push(
+        `${at} must have path or package, not both (entry skipped)`,
+      );
+      return;
+    }
+    if (!hasPath && !hasPackage) {
+      anomalies.push(`${at} must have path or package (entry skipped)`);
+      return;
+    }
+    if (
+      Object.hasOwn(entry, "version") &&
+      (typeof entry.version !== "string" || entry.version.trim() === "")
+    ) {
+      anomalies.push(
+        `${at}.version must be a non-empty string (display only; entry skipped)`,
+      );
       return;
     }
     if (
@@ -263,15 +399,49 @@ export function loadExtensionRoots({ root = reposRoot(), policy } = {}) {
       anomalies.push(`${at}.config must be an object (entry skipped)`);
       return;
     }
-    const resolved = path.resolve(root, expandHome(entry.path));
-    if (seen.has(resolved)) {
-      anomalies.push(`${at}: duplicate extension path ${resolved} (skipped)`);
+
+    let located;
+    if (hasPath) {
+      if (typeof entry.path !== "string" || entry.path.trim() === "") {
+        anomalies.push(`${at}.path must be a non-empty string (entry skipped)`);
+        return;
+      }
+      located = {
+        path: path.resolve(root, expandHome(entry.path)),
+        source: "path",
+      };
+    } else {
+      if (typeof entry.package !== "string" || entry.package.trim() === "") {
+        anomalies.push(
+          `${at}.package must be a non-empty string (entry skipped)`,
+        );
+        return;
+      }
+      try {
+        located = resolveExtensionPackage(entry.package, { root });
+      } catch (err) {
+        anomalies.push(`${at}: ${err.message} (entry skipped)`);
+        return;
+      }
+    }
+
+    if (seen.has(located.path)) {
+      anomalies.push(
+        `${at}: duplicate extension path ${located.path} (skipped)`,
+      );
       return;
     }
-    seen.add(resolved);
+    seen.add(located.path);
     roots.push({
-      path: resolved,
+      path: located.path,
       index,
+      source: located.source,
+      ...(located.package
+        ? {
+            package: located.package,
+            packageVersion: located.packageVersion ?? null,
+          }
+        : {}),
       ...(Object.hasOwn(entry, "config") ? { config: entry.config } : {}),
     });
   });
@@ -285,14 +455,25 @@ export function loadExtensionRoots({ root = reposRoot(), policy } = {}) {
  * and no adapter module is imported — that is what `extensions validate` in
  * the CLI promises.
  *
- * @param {string} dir - the extension directory (the manifest's parent)
+ * @param {string} dir - the extension directory (the manifest's parent), or a package name
+ * @param {{ root?: string }} [options] - factory root used when `dir` is a package name
  * @returns {{ valid: boolean, errors: string[], warnings: string[], manifest: object|null, file: string }}
  */
-export function validateExtensionManifest(dir) {
-  const root = path.resolve(dir);
-  const file = path.join(root, EXTENSION_MANIFEST);
+export function validateExtensionManifest(dir, { root = reposRoot() } = {}) {
   const errors = [];
   const warnings = [];
+  let resolvedDir;
+  try {
+    resolvedDir = resolveExtensionTarget(dir, { root }).path;
+  } catch (err) {
+    const file = String(dir);
+    if (err instanceof ExtensionError) {
+      errors.push(err.message);
+      return { valid: false, errors, warnings, manifest: null, file };
+    }
+    throw err;
+  }
+  const file = path.join(resolvedDir, EXTENSION_MANIFEST);
   const result = (manifest) => ({
     valid: errors.length === 0,
     errors,
@@ -301,7 +482,7 @@ export function validateExtensionManifest(dir) {
     file,
   });
   if (!existsSync(file)) {
-    errors.push(`missing ${EXTENSION_MANIFEST} in ${root}`);
+    errors.push(`missing ${EXTENSION_MANIFEST} in ${resolvedDir}`);
     return result(null);
   }
   let manifest;
@@ -327,8 +508,8 @@ export function validateExtensionManifest(dir) {
   }
   const packs = new Set();
   for (const [i, rel] of (contributes.packs ?? []).entries()) {
-    const abs = path.resolve(root, rel);
-    if (!isInside(root, abs)) {
+    const abs = path.resolve(resolvedDir, rel);
+    if (!isInside(resolvedDir, abs)) {
       errors.push(
         `${file}: contributes.packs[${i}] "${rel}" escapes the extension directory`,
       );
@@ -352,8 +533,8 @@ export function validateExtensionManifest(dir) {
       );
       continue;
     }
-    const abs = path.resolve(root, rel);
-    if (!isInside(root, abs)) {
+    const abs = path.resolve(resolvedDir, rel);
+    if (!isInside(resolvedDir, abs)) {
       errors.push(
         `${file}: contributes.adapters.${name} "${rel}" escapes the extension directory`,
       );
@@ -372,8 +553,8 @@ export function validateExtensionManifest(dir) {
       );
       continue;
     }
-    const abs = path.resolve(root, rel);
-    if (!isInside(root, abs)) {
+    const abs = path.resolve(resolvedDir, rel);
+    if (!isInside(resolvedDir, abs)) {
       errors.push(
         `${file}: contributes.connectors.${name} "${rel}" escapes the extension directory`,
       );
@@ -392,8 +573,8 @@ export function validateExtensionManifest(dir) {
       );
       continue;
     }
-    const abs = path.resolve(root, rel);
-    if (!isInside(root, abs)) {
+    const abs = path.resolve(resolvedDir, rel);
+    if (!isInside(resolvedDir, abs)) {
       errors.push(
         `${file}: contributes.hooks["${point}"] "${rel}" escapes the extension directory`,
       );
@@ -407,8 +588,8 @@ export function validateExtensionManifest(dir) {
   }
   if (contributes.config) {
     const rel = contributes.config.schema;
-    const abs = path.resolve(root, rel);
-    if (!isInside(root, abs)) {
+    const abs = path.resolve(resolvedDir, rel);
+    if (!isInside(resolvedDir, abs)) {
       errors.push(
         `${file}: contributes.config.schema "${rel}" escapes the extension directory`,
       );
@@ -418,8 +599,8 @@ export function validateExtensionManifest(dir) {
       );
     }
   }
-  errors.push(...panelDirErrors(root, file, contributes.panels));
-  errors.push(...harnessPathErrors(root, file, contributes.harness));
+  errors.push(...panelDirErrors(resolvedDir, file, contributes.panels));
+  errors.push(...harnessPathErrors(resolvedDir, file, contributes.harness));
   return result(manifest);
 }
 
@@ -940,7 +1121,7 @@ export function collectHarnessRoots({
 }
 
 function isInside(root, abs) {
-  const rel = path.relative(root, abs);
+  const rel = path.relative(existingRealpath(root), existingRealpath(abs));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -1026,7 +1207,13 @@ export async function loadExtensions({
       packRoots: candidates,
     });
 
-  for (const { path: dir, config: values } of roots) {
+  for (const {
+    path: dir,
+    config: values,
+    source = "path",
+    package: packageName,
+    packageVersion,
+  } of roots) {
     const checked = validateExtensionManifest(dir);
     const skip = (reason) => {
       anomalies.push(`extension ${dir}: ${reason} (extension skipped)`);
@@ -1236,6 +1423,10 @@ export async function loadExtensions({
       name: manifest.name,
       version: manifest.version,
       path: dir,
+      source,
+      ...(source === "package"
+        ? { package: packageName, packageVersion: packageVersion ?? null }
+        : {}),
       packs: extPackRoots.map((p) => p.name),
       adapters: modules.map((m) => m.name),
       hooks: hookModules.map(({ point, id }) => ({ point, id })),
@@ -1253,6 +1444,10 @@ export async function loadExtensions({
       name: manifest.name,
       version: manifest.version,
       path: dir,
+      source,
+      ...(source === "package"
+        ? { package: packageName, packageVersion: packageVersion ?? null }
+        : {}),
       config: config ? { ...publicConfig, schemaJson, secretMeta } : null,
     });
   }
