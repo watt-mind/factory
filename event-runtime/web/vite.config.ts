@@ -112,7 +112,16 @@ function vendorChunk(id: string): string | undefined {
 // (hovercards and proposal health features) brought the entry chunk to ~603 kB.
 // Vendor split verified unchanged: xyflow still 197.04 kB, elk still its own
 // chunk. Slack ~22 kB (3.5%).
-const ENTRY_CHUNK_BUDGET_BYTES = 625 * 1000;
+//
+// WM-976 re-baselined to 650 kB on 2026-08-20. Runs pagination (cursor state
+// and the trimmed run-summary shape in api.ts/types.ts/Runs.tsx — Runs stays
+// an eager view by design, per above) took the entry from ~603 kB to
+// 624.98-625.01 kB measured locally vs. in CI: the WM-769 baseline had ~0 kB
+// of real slack left, so ordinary build nondeterminism (same source, same as
+// the WM-332 note) tipped CI over the line while a local build stayed just
+// under it. Vendor split verified unchanged: xyflow still 197.04 kB, elk
+// still its own chunk. Slack ~25 kB (4%), back in line with prior raises.
+const ENTRY_CHUNK_BUDGET_BYTES = 650 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {
