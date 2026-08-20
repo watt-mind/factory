@@ -1,0 +1,8 @@
+# Every scheduled loop starts disabled. Enable one only after an operator has
+# reviewed its command, admission gate, and expected effects.
+defaults:
+  repo: example-app
+  harness: pi
+  run_at_load: false
+
+jobs: []

@@ -1,0 +1,24 @@
+# Instance policy. Keep this file free of credentials and secrets.
+packs: []
+
+forge:
+  kind: github
+
+controlPlane:
+  kind: linear
+
+concurrency:
+  max_in_flight_per_repo: 1
+  max_concurrent_merges: 1
+
+dispatch:
+  owned_paths_collision: strict
+  owned_paths_conformance: strict
+
+escalation:
+  never_auto_merge:
+    - auth / authz
+    - payments / money movement
+    - credential and secret handling
+    - destructive DB migrations
+    - production infra config

@@ -101,6 +101,18 @@ setup (clone, `bun install`, checks) is in [CONTRIBUTING.md](CONTRIBUTING.md).
 First-time harness links and the event-runtime daemon are in
 [SETUP.md](SETUP.md).
 
+## Fork your factory
+
+Fork an instance, not the kernel. The
+[`factory-starter`](templates/starter/) scaffold keeps your repository routing,
+local policy, schedules, and optional packs in a repository that pins Factory
+as a dependency. That lets your organization improve its own factory without
+diverging from the shared runtime.
+
+Read [docs/instances.md](docs/instances.md) for the kernel/instance boundary,
+an intentional upgrade path, and how to send reusable kernel improvements
+upstream as proposals and pull requests.
+
 ## The loop
 
 ```

@@ -1,0 +1,14 @@
+{
+  "name": "factory-starter",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A forkable Factory instance: configuration, packs, and local policy.",
+  "type": "module",
+  "scripts": {
+    "factory": "bun node_modules/@watt-mind/factory/bin/factory",
+    "check": "bun scripts/check.mjs"
+  },
+  "dependencies": {
+    "@watt-mind/factory": "github:watt-mind/factory#4336a1633f432e5473ba237116628b64ceb66537"
+  }
+}

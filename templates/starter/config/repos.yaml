@@ -1,0 +1,15 @@
+# Repository facts for this Factory instance. Replace the example before
+# enabling dispatch. A repository needs its own worktree lifecycle scripts
+# before it can safely run concurrent ticket agents.
+repos:
+  - name: example-app
+    path: ~/Develop/example-app
+    github: your-org/example-app
+    team: ENG
+    base: main
+    deploy_branch: main
+    report_only: true
+    worktree_up: bin/worktree-up.sh
+    worktree_down: bin/worktree-down.sh
+    verify: bun test
+    escalate_paths: []
