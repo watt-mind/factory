@@ -1089,7 +1089,9 @@ describe("Tickets hub landing view", () => {
     expect(within(supply).getByText("factory")).toBeTruthy();
     expect(within(supply).getByText("2")).toBeTruthy();
     expect(within(supply).getAllByText("dispatch").length).toBeGreaterThan(0);
-    expect(within(supply).getByRole("table").textContent).not.toContain("ghost");
+    expect(within(supply).getByRole("table").textContent).not.toContain(
+      "ghost",
+    );
     expect(within(supply).getByText(/without a snapshot/)).toBeTruthy();
 
     fireEvent.click(within(supply).getByText("Refresh"));
