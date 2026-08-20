@@ -138,6 +138,15 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(
         (await (await fetch(`${base}/artifacts?limit=1`)).json()).artifacts,
       ).toHaveLength(1);
+      const firstPage = await (await fetch(`${base}/artifacts?limit=2`)).json();
+      expect(typeof firstPage.nextBefore).toBe("string");
+      const secondPage = await (
+        await fetch(
+          `${base}/artifacts?limit=2&before=${encodeURIComponent(firstPage.nextBefore)}`,
+        )
+      ).json();
+      expect(secondPage.artifacts).toHaveLength(1);
+      expect(secondPage.nextBefore).toBeNull();
       expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
       expect((await fetch(`${base}/artifacts?limit=0`)).status).toBe(422);
 

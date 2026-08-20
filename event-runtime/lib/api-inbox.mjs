@@ -3,7 +3,7 @@ import {
   ackInboxItem,
   createInboxItem,
   deliverInboxItem,
-  listInboxItems,
+  listInboxPage,
   resolveInboxItem,
 } from "./inbox.mjs";
 
@@ -62,7 +62,7 @@ export async function handleInboxApiRoute({
   if (route === "GET /inbox") {
     const status = url.searchParams.get("status") ?? "open";
     try {
-      return send(200, { items: listInboxItems(db, { status }) });
+      return send(200, listInboxPage(db, { status, ...listPage(url) }));
     } catch (err) {
       return send(422, { error: err.message });
     }
@@ -114,4 +114,34 @@ export async function handleInboxApiRoute({
   }
 
   return false;
+}
+
+const LIST_DEFAULT_LIMIT = 100;
+const LIST_MAX_LIMIT = 200;
+
+function listPage(url) {
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? LIST_DEFAULT_LIMIT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > LIST_MAX_LIMIT) {
+    throw new Error(`limit must be an integer between 1 and ${LIST_MAX_LIMIT}`);
+  }
+  const rawBefore = url.searchParams.get("before");
+  if (!rawBefore) return { limit, before: null };
+  try {
+    const before = JSON.parse(
+      Buffer.from(rawBefore, "base64url").toString("utf8"),
+    );
+    if (
+      !before ||
+      typeof before.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(before.createdAt)) ||
+      !Number.isSafeInteger(before.rowid) ||
+      before.rowid < 1
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return { limit, before };
+  } catch {
+    throw new Error("invalid before cursor");
+  }
 }

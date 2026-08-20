@@ -44,6 +44,38 @@ const makeServer = async (...args) => {
 };
 
 describe("human inbox API (WM-285)", () => {
+  test("GET /inbox applies a default keyset page", async () => {
+    const s = await makeServer({ now: () => 1_700_000_000_000 });
+    try {
+      for (const title of ["a", "b", "c"]) {
+        await fetch(s.url("/inbox"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            kind: "BLOCKED",
+            title,
+            source: "agent:test",
+          }),
+        });
+      }
+      const first = await (await fetch(s.url("/inbox?limit=2"))).json();
+      expect(first.items).toHaveLength(2);
+      expect(typeof first.nextBefore).toBe("string");
+      const second = await (
+        await fetch(
+          s.url(
+            `/inbox?limit=2&before=${encodeURIComponent(first.nextBefore)}`,
+          ),
+        )
+      ).json();
+      expect(second.items).toHaveLength(1);
+      expect(second.nextBefore).toBeNull();
+      expect((await fetch(s.url("/inbox?limit=201"))).status).toBe(422);
+    } finally {
+      s.close();
+    }
+  });
+
   test("POST writes before a failed delivery, rejects unknown kinds, and GET/ack/resolve filter rows", async () => {
     const delivered = [];
     const s = await makeServer({

@@ -152,11 +152,18 @@ export type RunListResponse = {
   nextBefore?: string | null;
 };
 
+export type CursorPage<T, Key extends string> = Record<Key, T[]> & {
+  /** Opaque cursor returned by the preceding newest-first page. */
+  nextBefore?: string | null;
+};
+
 export type ProposalListFilters = {
   from?: string;
   to?: string;
   population?: "decision";
   decisionStatus?: string;
+  limit?: number;
+  before?: string;
 };
 
 function withQuery(path: string, values: Record<string, string | undefined>) {
@@ -174,7 +181,7 @@ export function fetchProposalHistory(
   status = "all",
   filters: ProposalListFilters = {},
 ) {
-  return call<{ proposals: Proposal[] }>(
+  return call<CursorPage<Proposal, "proposals">>(
     "GET",
     withQuery("/proposals", {
       status,
@@ -182,6 +189,18 @@ export function fetchProposalHistory(
       to: filters.to,
       population: filters.population,
       decisionStatus: filters.decisionStatus,
+      limit: filters.limit == null ? undefined : String(filters.limit),
+      before: filters.before,
+    }),
+  );
+}
+
+export function fetchProposals(page: { limit?: number; before?: string } = {}) {
+  return call<CursorPage<Proposal, "proposals">>(
+    "GET",
+    withQuery("/proposals", {
+      limit: page.limit == null ? undefined : String(page.limit),
+      before: page.before,
     }),
   );
 }
@@ -261,14 +280,18 @@ export function fetchArtifacts(filters?: {
   kind?: string;
   orphan?: boolean;
   search?: string;
+  limit?: number;
+  before?: string;
 }) {
   const query = new URLSearchParams();
   if (filters?.kind) query.set("kind", filters.kind);
   if (filters?.orphan !== undefined)
     query.set("orphan", String(filters.orphan));
   if (filters?.search) query.set("search", filters.search);
+  if (filters?.limit != null) query.set("limit", String(filters.limit));
+  if (filters?.before) query.set("before", filters.before);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return call<{ artifacts: ArtifactInventoryItem[] }>(
+  return call<CursorPage<ArtifactInventoryItem, "artifacts">>(
     "GET",
     `/artifacts${suffix}`,
   );
@@ -294,12 +317,16 @@ export const api = {
       "/health",
     ),
   status: () => call<StatusView>("GET", "/status"),
-  events: (status?: string) =>
-    call<{ events: AdmittedEvent[] }>(
+  events: (status?: string, page: { limit?: number; before?: string } = {}) =>
+    call<CursorPage<AdmittedEvent, "events">>(
       "GET",
-      `/events${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+      withQuery("/events", {
+        status,
+        limit: page.limit == null ? undefined : String(page.limit),
+        before: page.before,
+      }),
     ),
-  proposals: () => call<{ proposals: Proposal[] }>("GET", "/proposals"),
+  proposals: () => fetchProposals(),
   // Full decision history (?status=all), newest first — read-only audit view.
   proposalHistory: (status = "all", filters: ProposalListFilters = {}) =>
     fetchProposalHistory(status, filters),
@@ -437,10 +464,17 @@ export const api = {
   // The worker registry: which processes are alive, where, and what they run.
   workers: () => call<{ workers: Worker[] }>("GET", "/workers"),
   // Human inbox ledger (WM-285): everything waiting on the operator, by status.
-  inbox: (status: InboxStatus = "open") =>
-    call<{ items: InboxItem[] }>(
+  inbox: (
+    status: InboxStatus = "open",
+    page: { limit?: number; before?: string } = {},
+  ) =>
+    call<CursorPage<InboxItem, "items">>(
       "GET",
-      `/inbox?status=${encodeURIComponent(status)}`,
+      withQuery("/inbox", {
+        status,
+        limit: page.limit == null ? undefined : String(page.limit),
+        before: page.before,
+      }),
     ),
   // Ack = "seen"; 404 unknown item, 409 already resolved.
   ackInbox: (id: string) =>

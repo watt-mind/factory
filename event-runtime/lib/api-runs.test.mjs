@@ -489,6 +489,34 @@ describe("list views carry repos[] (OPS-356)", () => {
       s.close();
     }
   });
+
+  test("GET /events defaults to a cursor page and walks tied timestamps", async () => {
+    const s = await makeServer({ now: () => 1_700_000_000_000 });
+    try {
+      for (const eventId of [
+        "events-page-a",
+        "events-page-b",
+        "events-page-c",
+      ]) {
+        await s.client.replay(envelope({ eventId, payload: {} }));
+      }
+      const first = await (await fetch(s.url("/events?limit=2"))).json();
+      expect(first.events).toHaveLength(2);
+      expect(typeof first.nextBefore).toBe("string");
+      const second = await (
+        await fetch(
+          s.url(
+            `/events?limit=2&before=${encodeURIComponent(first.nextBefore)}`,
+          ),
+        )
+      ).json();
+      expect(second.events).toHaveLength(1);
+      expect(second.nextBefore).toBeNull();
+      expect((await fetch(s.url("/events?limit=0"))).status).toBe(422);
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("ticket journey join (WM-595)", () => {

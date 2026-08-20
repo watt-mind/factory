@@ -857,6 +857,18 @@ export function retryInboxDecision(db, id, options = {}) {
 }
 
 export function listInboxItems(db, { status = "open" } = {}) {
+  return listInboxPage(db, { status, limit: Number.MAX_SAFE_INTEGER }).items;
+}
+
+/**
+ * Newest-first keyset page for the inbox ledger.  Keep listInboxItems above
+ * for internal callers that intentionally need the complete local ledger;
+ * the HTTP surface always uses this bounded projection.
+ */
+export function listInboxPage(
+  db,
+  { status = "open", limit = 100, before = null } = {},
+) {
   if (!STATUSES.has(status)) throw new Error(`unknown inbox status: ${status}`);
   const where = {
     open: "resolved_at IS NULL AND acked_at IS NULL",
@@ -864,12 +876,34 @@ export function listInboxItems(db, { status = "open" } = {}) {
     resolved: "resolved_at IS NOT NULL",
     all: "1 = 1",
   }[status];
-  return db
+  const cursor = before
+    ? " AND (created_at < ? OR (created_at = ? AND rowid < ?))"
+    : "";
+  const params = before
+    ? [before.createdAt, before.createdAt, before.rowid, limit + 1]
+    : [limit + 1];
+  const rows = db
     .query(
-      `SELECT * FROM inbox_items WHERE ${where} ORDER BY created_at DESC, rowid DESC`,
+      `SELECT *, rowid AS list_rowid FROM inbox_items
+       WHERE ${where}${cursor}
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT ?`,
     )
-    .all()
-    .map(itemView);
+    .all(...params);
+  const hasNextPage = rows.length > limit;
+  const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
+  const last = pageRows.at(-1);
+  return {
+    items: pageRows.map(itemView),
+    nextBefore: hasNextPage
+      ? Buffer.from(
+          JSON.stringify({
+            createdAt: last.created_at,
+            rowid: last.list_rowid,
+          }),
+        ).toString("base64url")
+      : null,
+  };
 }
 
 /**

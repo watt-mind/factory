@@ -302,7 +302,21 @@ export function listArtifacts(
   storeRoot,
   { orphan, kind, search, limit } = {},
 ) {
-  if (!existsSync(storeRoot)) return [];
+  return listArtifactPage(db, storeRoot, {
+    orphan,
+    kind,
+    search,
+    limit: limit ?? Number.MAX_SAFE_INTEGER,
+  }).artifacts;
+}
+
+/** Newest-first cursor page for the artifact catalogue HTTP projection. */
+export function listArtifactPage(
+  db,
+  storeRoot,
+  { orphan, kind, search, limit = 100, before = null } = {},
+) {
+  if (!existsSync(storeRoot)) return { artifacts: [], nextBefore: null };
 
   const references = new Map();
   const rows = db
@@ -352,9 +366,9 @@ export function listArtifacts(
 
   const term = typeof search === "string" ? search.toLowerCase() : null;
   const inventory = [];
-  for (const sha256 of readdirSync(storeRoot)
-    .filter((name) => HEX64.test(name))
-    .sort()) {
+  for (const sha256 of readdirSync(storeRoot).filter((name) =>
+    HEX64.test(name),
+  )) {
     const stat = statSync(path.join(storeRoot, sha256));
     if (!stat.isFile()) continue;
     const refs = references.get(sha256) ?? [];
@@ -380,9 +394,30 @@ export function listArtifacts(
       referenced,
       references: refs,
     });
-    if (limit !== undefined && inventory.length >= limit) break;
   }
-  return inventory;
+  inventory.sort(
+    (a, b) =>
+      b.mtime.localeCompare(a.mtime) || a.sha256.localeCompare(b.sha256),
+  );
+  const afterCursor = before
+    ? inventory.filter(
+        (item) =>
+          item.mtime < before.mtime ||
+          (item.mtime === before.mtime && item.sha256 > before.sha256),
+      )
+    : inventory;
+  const page = afterCursor.slice(0, limit + 1);
+  const hasNextPage = page.length > limit;
+  const artifacts = hasNextPage ? page.slice(0, -1) : page;
+  const last = artifacts.at(-1);
+  return {
+    artifacts,
+    nextBefore: hasNextPage
+      ? Buffer.from(
+          JSON.stringify({ mtime: last.mtime, sha256: last.sha256 }),
+        ).toString("base64url")
+      : null,
+  };
 }
 
 /**

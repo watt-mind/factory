@@ -7,11 +7,7 @@ import { runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
-import {
-  approveProposal,
-  openProposals,
-  rejectProposal,
-} from "./proposals.mjs";
+import { approveProposal, rejectProposal } from "./proposals.mjs";
 import { traceOf } from "./trace.mjs";
 import {
   attemptDeadline,
@@ -76,28 +72,48 @@ function proposalView(row, registry) {
   };
 }
 
-function proposalHistory(db, status, filters = {}) {
+function proposalHistory(
+  db,
+  status,
+  filters = {},
+  page = { limit: Number.MAX_SAFE_INTEGER, before: null },
+) {
   const filteredDecision = filters.population === "decision";
-  const rows =
-    status && !filteredDecision
-      ? db
-          .query(
-            `SELECT * FROM proposals WHERE status = ? ORDER BY created_at DESC, rowid DESC`,
-          )
-          .all(status)
-      : db
-          .query(`SELECT * FROM proposals ORDER BY created_at DESC, rowid DESC`)
-          .all();
-  return rows.flatMap((row) => {
+  const clauses = [];
+  const params = [];
+  if (status && !filteredDecision) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+  if (page.before) {
+    clauses.push("(created_at < ? OR (created_at = ? AND rowid < ?))");
+    params.push(
+      page.before.createdAt,
+      page.before.createdAt,
+      page.before.rowid,
+    );
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db
+    .query(
+      `SELECT *, rowid AS list_rowid FROM proposals ${where}
+       ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    )
+    .all(...params, page.limit + 1);
+  const hasNextPage = rows.length > page.limit;
+  const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
+  const proposals = pageRows.flatMap((row) => {
     let decisionAt = row.decided_at ?? null;
     let effectiveStatus = row.status;
-    if (filteredDecision && row.status === "open") {
-      const expiresAt =
-        Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
-      if (Number.isFinite(expiresAt) && expiresAt < filters.nowMs) {
-        decisionAt = new Date(expiresAt).toISOString();
-        effectiveStatus = "expired";
-      }
+    const expiresAt =
+      Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
+    const expired =
+      row.status === "open" &&
+      Number.isFinite(expiresAt) &&
+      expiresAt < (filters.nowMs ?? Date.now());
+    if (filteredDecision && expired) {
+      decisionAt = new Date(expiresAt).toISOString();
+      effectiveStatus = "expired";
     }
     if (filteredDecision) {
       const at = Date.parse(decisionAt ?? "");
@@ -112,18 +128,27 @@ function proposalHistory(db, status, filters = {}) {
           ...row,
           status: effectiveStatus,
           decided_at: decisionAt,
-          expired: effectiveStatus === "expired",
+          expired,
           spec: row.spec_json ? JSON.parse(row.spec_json) : null,
         },
         filters.registry,
       ),
     ];
   });
+  const last = pageRows.at(-1);
+  return {
+    proposals,
+    nextBefore: hasNextPage ? encodeListCursor(last) : null,
+  };
 }
 
-function eventsView(db, status) {
+function eventsView(
+  db,
+  status,
+  page = { limit: Number.MAX_SAFE_INTEGER, before: null },
+) {
   const sql = `
-    SELECT e.*, p.id AS proposal_id, p.run_id AS run_id
+    SELECT e.*, e.rowid AS list_rowid, p.id AS proposal_id, p.run_id AS run_id
     FROM events e
     LEFT JOIN proposals p ON p.rowid = (
       SELECT p2.rowid FROM proposals p2
@@ -131,10 +156,19 @@ function eventsView(db, status) {
       ORDER BY p2.created_at DESC, p2.rowid DESC
       LIMIT 1
     )
-    ${status ? "WHERE e.status = ?" : ""}
-    ORDER BY e.admitted_at DESC, e.rowid DESC`;
-  const rows = status ? db.query(sql).all(status) : db.query(sql).all();
-  return rows.map((row) => {
+    ${status ? "WHERE e.status = ?" : ""}${page.before ? `${status ? " AND" : " WHERE"} (e.admitted_at < ? OR (e.admitted_at = ? AND e.rowid < ?))` : ""}
+    ORDER BY e.admitted_at DESC, e.rowid DESC LIMIT ?`;
+  const params = status ? [status] : [];
+  if (page.before)
+    params.push(
+      page.before.createdAt,
+      page.before.createdAt,
+      page.before.rowid,
+    );
+  const rows = db.query(sql).all(...params, page.limit + 1);
+  const hasNextPage = rows.length > page.limit;
+  const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
+  const events = pageRows.map((row) => {
     const envelope = JSON.parse(row.envelope_json);
     return {
       source: row.source,
@@ -155,6 +189,12 @@ function eventsView(db, status) {
       repos: repoNamesFromInput(envelope.payload),
     };
   });
+  return {
+    events,
+    nextBefore: hasNextPage
+      ? encodeListCursor(pageRows.at(-1), "admitted_at")
+      : null,
+  };
 }
 
 const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
@@ -332,10 +372,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     }
   }
 
-  const matchedEvents = eventsView(db).filter((event) =>
+  const matchedEvents = eventsView(db).events.filter((event) =>
     events.has(`${event.source}\0${event.eventId}`),
   );
-  const matchedProposals = proposalHistory(db).filter((proposal) =>
+  const matchedProposals = proposalHistory(db).proposals.filter((proposal) =>
     proposals.has(proposal.id),
   );
   const matchedRuns = [...runs]
@@ -519,6 +559,45 @@ class ListQueryError extends Error {
   constructor(error, details = {}) {
     super(error);
     this.body = { error, ...details };
+  }
+}
+
+function encodeListCursor(row, timestampKey = "created_at") {
+  return Buffer.from(
+    JSON.stringify({
+      createdAt: row[timestampKey],
+      rowid: row.list_rowid ?? row.rowid,
+    }),
+  ).toString("base64url");
+}
+
+/** Shared WM-976 cursor convention for newest-first table collections. */
+function collectionPage(url) {
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? RUN_LIST_DEFAULT_LIMIT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > RUN_LIST_MAX_LIMIT) {
+    throw new ListQueryError("invalid_limit", {
+      message: `limit must be an integer between 1 and ${RUN_LIST_MAX_LIMIT}`,
+    });
+  }
+  const rawBefore = url.searchParams.get("before");
+  if (!rawBefore) return { limit, before: null };
+  try {
+    const before = JSON.parse(
+      Buffer.from(rawBefore, "base64url").toString("utf8"),
+    );
+    if (
+      !before ||
+      typeof before.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(before.createdAt)) ||
+      !Number.isSafeInteger(before.rowid) ||
+      before.rowid < 1
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return { limit, before };
+  } catch {
+    throw new ListQueryError("invalid_before");
   }
 }
 
@@ -1212,33 +1291,7 @@ function encodeRunCursor(row) {
 }
 
 function runPage(url) {
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit === null ? RUN_LIST_DEFAULT_LIMIT : Number(rawLimit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > RUN_LIST_MAX_LIMIT) {
-    throw new ListQueryError("invalid_limit", {
-      message: `limit must be an integer between 1 and ${RUN_LIST_MAX_LIMIT}`,
-    });
-  }
-
-  const before = url.searchParams.get("before");
-  if (!before) return { limit, before: null };
-  try {
-    const cursor = JSON.parse(
-      Buffer.from(before, "base64url").toString("utf8"),
-    );
-    if (
-      !cursor ||
-      typeof cursor.createdAt !== "string" ||
-      !Number.isFinite(Date.parse(cursor.createdAt)) ||
-      !Number.isSafeInteger(cursor.rowid) ||
-      cursor.rowid < 1
-    ) {
-      throw new Error("invalid cursor");
-    }
-    return { limit, before: cursor };
-  } catch {
-    throw new ListQueryError("invalid_before");
-  }
+  return collectionPage(url);
 }
 
 function runsView(db, filters = {}, page = {}) {
@@ -1494,9 +1547,15 @@ export async function handleRunApiRoute({
   repos: loadReposFn,
 }) {
   if (route === "GET /events") {
-    return send(200, {
-      events: eventsView(db, url.searchParams.get("status")),
-    });
+    try {
+      return send(
+        200,
+        eventsView(db, url.searchParams.get("status"), collectionPage(url)),
+      );
+    } catch (err) {
+      if (err instanceof ListQueryError) return send(422, err.body);
+      throw err;
+    }
   }
 
   if (route === "GET /proposals") {
@@ -1507,19 +1566,16 @@ export async function handleRunApiRoute({
         decisionStatus: url.searchParams.get("decisionStatus") ?? undefined,
         registry,
       };
-      if (status || filters.population)
-        return send(200, {
-          proposals: proposalHistory(
-            db,
-            status === "all" ? null : status,
-            filters,
-          ),
-        });
-      return send(200, {
-        proposals: openProposals(db, { now: nowMs }).map((row) =>
-          proposalView(row, registry),
+      const page = collectionPage(url);
+      return send(
+        200,
+        proposalHistory(
+          db,
+          status === "all" ? null : (status ?? "open"),
+          filters,
+          page,
         ),
-      });
+      );
     } catch (err) {
       if (err instanceof ListQueryError) return send(422, err.body);
       throw err;

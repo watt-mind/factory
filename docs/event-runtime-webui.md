@@ -252,6 +252,21 @@ idempotency key. In particular it never embeds `spec_json`; callers open
 The Runs view moves through pages with its **Older** control, preserving
 the existing row selection and inspect/detail links.
 
+### List endpoint pagination convention
+
+Live ledger/catalogue collections use the same newest-first page contract:
+`limit` defaults to 100 and is capped at 200; a response returns its collection
+key plus `nextBefore`, an opaque cursor to pass as `before` for the next page.
+A bare request remains valid JSON and returns the newest bounded page. This
+applies to `/runs`, `/events`, `/proposals`, `/inbox`, and `/artifacts`.
+`/chains`, `/journal`, `/outbox`, `/tickets`, metrics series/breakdowns,
+`/memos`, schedules, panels, registries, status, and config are already
+bounded by a fixed time window, sequence limit, explicit/default top-N, exact
+subject cap, or finite declarative configuration; they retain their existing
+response shapes. List rows stay summaries wherever an item detail route exists
+(`/runs/:id`, `/proposals/:id`, `/inbox/:id`, `/artifacts/:sha256`, and
+`/chain/:id`).
+
 Runtime retention is an explicit maintenance sweep, dry by default:
 `bun event-runtime/lib/janitor.mjs retention [--apply] [--trace-days N]
 [--artifact-days N]`. It reports the trace-row and artifact-file counts it

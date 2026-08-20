@@ -10,7 +10,7 @@ import {
 import {
   findArtifact,
   hashFile,
-  listArtifacts,
+  listArtifactPage,
   pruneArtifacts,
 } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
@@ -68,14 +68,33 @@ export async function handleArtifactApiRoute({
       return send(422, { error: "orphan must be true or false" });
     }
     const limitParam = url.searchParams.get("limit");
-    const limit = limitParam === null ? undefined : Number(limitParam);
+    const limit = limitParam === null ? 100 : Number(limitParam);
     if (
       limit !== undefined &&
       (!Number.isInteger(limit) || limit < 1 || limit > 500)
     ) {
       return send(422, { error: "limit must be an integer between 1 and 500" });
     }
-    const artifacts = listArtifacts(db, artifactsRoot(env.home), {
+    const rawBefore = url.searchParams.get("before");
+    let before = null;
+    if (rawBefore) {
+      try {
+        before = JSON.parse(
+          Buffer.from(rawBefore, "base64url").toString("utf8"),
+        );
+        if (
+          !before ||
+          typeof before.mtime !== "string" ||
+          !Number.isFinite(Date.parse(before.mtime)) ||
+          !/^[0-9a-f]{64}$/.test(before.sha256)
+        ) {
+          throw new Error("invalid cursor");
+        }
+      } catch {
+        return send(422, { error: "invalid before cursor" });
+      }
+    }
+    const page = listArtifactPage(db, artifactsRoot(env.home), {
       orphan: orphanParam === null ? undefined : orphanParam === "true",
       kind: url.searchParams.has("kind")
         ? url.searchParams.get("kind")
@@ -84,8 +103,9 @@ export async function handleArtifactApiRoute({
         ? url.searchParams.get("search")
         : undefined,
       limit,
+      before,
     });
-    return send(200, { artifacts });
+    return send(200, page);
   }
 
   if (route === "POST /artifacts/prune") {

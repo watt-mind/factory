@@ -13,6 +13,7 @@ import {
   TRANSCRIPT_MODEL_SCAN_BYTES,
 } from "./api-artifacts.mjs";
 import { handleInboxApiRoute } from "./api-inbox.mjs";
+import { handleMemosApiRoute } from "./api-memos.mjs";
 import {
   isLoopbackHost,
   isLoopbackOrigin,
@@ -242,6 +243,13 @@ export function createApi({
           now: nowMs,
           registryLoadedAt,
         });
+      }
+      if (route === "GET /memos") {
+        const result = handleMemosApiRoute({
+          ...common,
+          artifactsDir: artifactsRoot(env?.home),
+        });
+        if (result !== false) return result;
       }
       if (
         url.pathname === "/metrics" ||
