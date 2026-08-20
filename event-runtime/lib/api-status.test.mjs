@@ -1,5 +1,5 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-status-test-mjs";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cpSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { attachConnectorStatus, connectorsStatus } from "./api-status.mjs";
@@ -36,6 +36,16 @@ async function loadSample() {
 }
 
 describe("GET /status.connectors projection (WM-919)", () => {
+  // Connectors only run their real start() in the "live" environment
+  // (WM-988's environmentGatedConnectorModule gate) — opt in explicitly so
+  // these tests still see real start/stop behavior.
+  beforeEach(() => {
+    process.env.FACTORY_EVENT_ENV = "live";
+  });
+  afterEach(() => {
+    delete process.env.FACTORY_EVENT_ENV;
+  });
+
   test("attachConnectorStatus adds connectors: [{ extension, name, ok, detail, lastEventAt, startedAt }]", async () => {
     await loadSample();
     await startConnectors({
