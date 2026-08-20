@@ -17,9 +17,12 @@ import {
   IN_PROGRESS_LABEL,
   loadControlPlane,
 } from "../../lib/control-plane/index.mjs";
+import * as controlPlaneIndex from "../../lib/control-plane/index.mjs";
+import { githubControlPlane as githubControlPlaneFromAdapter } from "../../lib/control-plane/github.mjs";
 import { memoryControlPlane } from "../../lib/control-plane/memory.mjs";
 
 const TEAM = "WM";
+const GH_REPO = "acme/widget";
 const RAW_PING = "query { ping }";
 
 function freshSeed() {
@@ -522,4 +525,133 @@ describe("loadControlPlane selection", () => {
   test("the repo's own policy.yaml selects linear", () => {
     expect(loadControlPlane().kind).toBe("linear");
   });
+
+  test("re-exports githubControlPlane from the adapter", () => {
+    expect(controlPlaneIndex.githubControlPlane).toBe(
+      githubControlPlaneFromAdapter,
+    );
+  });
+
+  test("CONTROL_PLANE_KINDS includes github", () => {
+    expect(CONTROL_PLANE_KINDS).toContain("github");
+  });
+
+  test("selects github from an explicit kind and runs getTicket / listDispatchable", async () => {
+    const seed = githubSelectionSeed();
+    const api = fakeGithubApi(seed);
+    const cp = loadControlPlane({
+      kind: "github",
+      api,
+      repo: GH_REPO,
+      teams: { [TEAM]: GH_REPO },
+    });
+    expect(cp.kind).toBe("github");
+    const ticket = await cp.getTicket(`${GH_REPO}#1`);
+    expect(ticket.identifier).toBe(`${GH_REPO}#1`);
+    expect(ticket.title).toBe("ready ticket");
+    expect(ticket.state.name).toBe("Todo");
+    expect(
+      (await cp.listDispatchable({ team: TEAM })).map((t) => t.identifier),
+    ).toEqual([`${GH_REPO}#1`]);
+  });
+
+  test("selects github from policy.yaml and passes root options through", async () => {
+    const root = withPolicy(
+      [
+        "controlPlane:",
+        "  kind: github",
+        "  github:",
+        `    repo: ${GH_REPO}`,
+        "    teams:",
+        `      ${TEAM}: ${GH_REPO}`,
+        "    project: Factory",
+        "",
+      ].join("\n"),
+    );
+    expect(controlPlaneKindFromPolicy(root)).toBe("github");
+    const seed = githubSelectionSeed();
+    const api = fakeGithubApi(seed);
+    const cp = loadControlPlane({ root, api });
+    expect(cp.kind).toBe("github");
+    expect(
+      (await cp.listDispatchable({ team: TEAM })).map((t) => t.identifier),
+    ).toEqual([`${GH_REPO}#1`]);
+  });
 });
+
+function githubSelectionSeed() {
+  return {
+    repo: GH_REPO,
+    issue: {
+      id: 101,
+      node_id: "I_1",
+      number: 1,
+      title: "ready ticket",
+      body: "",
+      html_url: `https://github.com/${GH_REPO}/issues/1`,
+      state: "open",
+      assignee: null,
+      labels: [{ id: 10, name: AGENT_READY_LABEL }],
+      comments: [],
+    },
+    project: {
+      id: "PVT_1",
+      title: "Factory",
+      field: {
+        id: "FIELD_status",
+        name: "Status",
+        options: [{ id: "opt-todo", name: "Todo" }],
+      },
+    },
+    items: [
+      {
+        id: "PVTI_1",
+        content: {
+          id: "I_1",
+          number: 1,
+          repository: { nameWithOwner: GH_REPO },
+        },
+        fieldValueByName: { name: "Todo" },
+      },
+    ],
+  };
+}
+
+function fakeGithubApi(seed) {
+  const api = (method, pathName, { body, query } = {}) => {
+    api.calls.push({ method, pathName, body, query });
+    const pathOnly = String(pathName).replace(/^\//, "").split("?")[0];
+    if (pathOnly === "graphql") {
+      const q = body?.query ?? "";
+      if (q.includes("FindRepoProject") || q.includes("FindViewerProject")) {
+        const node = {
+          id: seed.project.id,
+          title: seed.project.title,
+          field: seed.project.field,
+        };
+        return {
+          data: {
+            repository: { projectsV2: { nodes: [node] } },
+            viewer: { projectsV2: { nodes: [node] } },
+          },
+        };
+      }
+      if (q.includes("ProjectItems")) {
+        return { data: { node: { items: { nodes: seed.items } } } };
+      }
+      throw new ControlPlaneError("raw query not seeded");
+    }
+    const one = pathOnly.match(/^repos\/([^/]+\/[^/]+)\/issues\/(\d+)$/);
+    if (one && method === "GET") {
+      if (one[1] !== seed.repo || Number(one[2]) !== seed.issue.number) {
+        throw new ControlPlaneError("github api: Not Found", { status: 404 });
+      }
+      return seed.issue;
+    }
+    const list = pathOnly.match(/^repos\/([^/]+\/[^/]+)\/issues$/);
+    if (list && method === "GET") return [seed.issue];
+    throw new ControlPlaneError(`unknown github api ${method} ${pathName}`);
+  };
+  api.calls = [];
+  return api;
+}

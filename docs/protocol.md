@@ -12,10 +12,10 @@ reference tables and the sections the floor points at** — routing, the
 five-section template, the filing bar, adapter verbs — never instead of the
 floor, and never the whole file when one section answers the question.
 
-Call `loadControlPlane({ root })` for Linear/memory. The GitHub Issues adapter
-is `githubControlPlane()` in `lib/control-plane/github.mjs` (wiring
-`kind: github` into `loadControlPlane()` is a follow-up so WM-798 stayed
-inside its Owned Paths). Selection is `config/policy.yaml`:
+Call `loadControlPlane({ root })` to select Linear, memory, or GitHub Issues.
+`controlPlane.kind: github` is fully wired (WM-955): it constructs
+`githubControlPlane()` with the `controlPlane.github` options (`repo`,
+`teams`, `project`, `statusField`). Selection is `config/policy.yaml`:
 
 ```yaml
 controlPlane:
