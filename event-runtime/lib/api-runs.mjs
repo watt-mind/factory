@@ -2,6 +2,7 @@
 import { ControlPlaneError } from "../../lib/control-plane/types.mjs";
 import { artifactHead } from "./api-artifacts.mjs";
 import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
+import { STALE_SCAN_MS, loadLinearSupply } from "./linear.mjs";
 import { loadRepos, RepoError } from "./repos.mjs";
 import { runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
@@ -1143,7 +1144,7 @@ function deriveRecommendedAction(repos) {
  * Latest work-plan and status-report artifacts per configured repo (WM-823).
  * Counts are null when no scan has produced that figure yet — never invented.
  */
-export function ticketSupplyView(db, options = {}) {
+export function scanTicketSupply(db, options = {}) {
   const repoRegistry = options.repos ?? loadRepos();
   const configured = [...repoRegistry.values()];
   const configuredNames = new Set(configured.map((repo) => repo.name));
@@ -1257,6 +1258,77 @@ export function ticketSupplyView(db, options = {}) {
     : deriveRecommendedAction(repos);
 
   return { repos, recommendedAction };
+}
+
+/**
+ * Overlay a Linear snapshot onto scan figures. Linear counts win when the
+ * fetch succeeded; otherwise the scan remains and stale (>1h) scan age is
+ * flagged so it is not confused with Linear freshness (WM-824).
+ */
+export function mergeTicketSupply(scan, linear, { nowMs = Date.now() } = {}) {
+  if (linear?.ok) {
+    const repos = scan.repos.map((repo) => {
+      const live = linear.byRepo?.[repo.name];
+      if (!live) {
+        return { ...repo, source: repo.asOf ? "scan" : null };
+      }
+      return {
+        ...repo,
+        triage: live.triage,
+        ready: live.ready,
+        inFlight: live.inFlight,
+        blocked: live.blocked,
+        asOf: linear.asOf,
+        sourceRunId: null,
+        source: "linear",
+      };
+    });
+    return {
+      repos,
+      recommendedAction: deriveRecommendedAction(repos),
+      source: "linear",
+      asOf: linear.asOf ?? null,
+      stale: false,
+      linearError: null,
+      budget: linear.budget ?? null,
+      cached: linear.cached === true,
+    };
+  }
+
+  let newest = null;
+  for (const repo of scan.repos ?? []) {
+    if (repo.asOf && (!newest || repo.asOf > newest)) newest = repo.asOf;
+  }
+  const ageMs = newest ? nowMs - Date.parse(newest) : null;
+  const stale = Number.isFinite(ageMs) && ageMs > STALE_SCAN_MS;
+  return {
+    ...scan,
+    repos: (scan.repos ?? []).map((repo) => ({
+      ...repo,
+      source: repo.asOf ? "scan" : null,
+    })),
+    source: "scan",
+    asOf: newest,
+    stale,
+    linearError: linear?.error ?? "linear_unavailable",
+    budget: linear?.budget ?? null,
+    cached: false,
+  };
+}
+
+/**
+ * Operator supply for GET /tickets/supply: Linear on demand, scan fallback.
+ */
+export async function ticketSupplyView(db, options = {}) {
+  const scan = scanTicketSupply(db, options);
+  const linear = await loadLinearSupply(options.repos ?? loadRepos(), {
+    refresh: options.refresh === true,
+    nowMs: options.nowMs,
+    gql: options.gql,
+  });
+  return mergeTicketSupply(scan, linear, {
+    nowMs: options.nowMs ?? Date.now(),
+  });
 }
 
 function listFilters(url, { proposal = false, nowMs = Date.now() } = {}) {
@@ -1738,7 +1810,15 @@ export async function handleRunApiRoute({
     try {
       const repoRegistry =
         typeof loadReposFn === "function" ? loadReposFn() : loadRepos();
-      return send(200, ticketSupplyView(db, { repos: repoRegistry }));
+      const refresh = url.searchParams.get("refresh") === "1";
+      return send(
+        200,
+        await ticketSupplyView(db, {
+          repos: repoRegistry,
+          refresh,
+          nowMs,
+        }),
+      );
     } catch (err) {
       if (err instanceof RepoError) return send(500, { error: err.message });
       throw err;

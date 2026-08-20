@@ -1,4 +1,4 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useEffect,
   useMemo,
@@ -209,8 +209,10 @@ function TicketsHub({
   const [repoFilter, setRepoFilter] = useState("");
   const [stateFilter, setStateFilter] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [supplyRefreshing, setSupplyRefreshing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const now = useNow();
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => inputRef.current?.focus());
@@ -225,8 +227,7 @@ function TicketsHub({
 
   const supplyQuery = useQuery({
     queryKey: ["tickets-supply"],
-    queryFn: fetchTicketSupply,
-    ...refetchIntervals.secondary,
+    queryFn: () => fetchTicketSupply(false),
   });
 
   const reposQuery = useQuery({
@@ -437,6 +438,7 @@ function TicketsHub({
             <SupplyStrip
               supply={supplyQuery.data}
               pending={supplyQuery.isPending}
+              refreshing={supplyRefreshing}
               error={
                 supplyQuery.isError
                   ? ((supplyQuery.error as Error)?.message ?? "unavailable")
@@ -448,6 +450,17 @@ function TicketsHub({
               onFilter={({ repo, state }) => {
                 setRepoFilter(repo);
                 setStateFilter(state);
+              }}
+              onRefresh={() => {
+                void (async () => {
+                  setSupplyRefreshing(true);
+                  try {
+                    const data = await fetchTicketSupply(true);
+                    queryClient.setQueryData(["tickets-supply"], data);
+                  } finally {
+                    setSupplyRefreshing(false);
+                  }
+                })();
               }}
             />
             <div className="flex flex-wrap items-center gap-2">
@@ -654,8 +667,9 @@ type JourneyTab = (typeof JOURNEY_TABS)[number];
 const EXTERNAL_BUTTON_CLASS =
   "inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-md border border-(--border-strong) bg-(--surface-2) px-2.5 text-[12px] font-medium text-(--text) hover:bg-(--surface-3)";
 
-async function fetchTicketSupply(): Promise<TicketSupply> {
-  const response = await fetch("/api/tickets/supply");
+async function fetchTicketSupply(refresh = false): Promise<TicketSupply> {
+  const query = refresh ? "?refresh=1" : "";
+  const response = await fetch(`/api/tickets/supply${query}`);
   if (response.status === 404) {
     return { repos: [], recommendedAction: null };
   }

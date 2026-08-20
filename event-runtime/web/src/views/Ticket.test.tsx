@@ -759,6 +759,43 @@ describe("Tickets hub landing view", () => {
           ],
         });
       }
+      if (/\/api\/tickets\/supply/.test(url)) {
+        return json({
+          repos: [
+            {
+              name: "factory",
+              team: "WM",
+              triage: 2,
+              ready: 1,
+              inFlight: 0,
+              cap: 2,
+              blocked: 0,
+              noopReason: null,
+              asOf: "2026-08-20T18:00:00.000Z",
+              sourceRunId: null,
+              source: "linear",
+            },
+            {
+              name: "ghost",
+              team: "OPS",
+              triage: null,
+              ready: null,
+              inFlight: null,
+              cap: 2,
+              blocked: null,
+              noopReason: null,
+              asOf: null,
+              sourceRunId: null,
+              source: null,
+            },
+          ],
+          recommendedAction: "dispatch",
+          source: "linear",
+          asOf: "2026-08-20T18:00:00.000Z",
+          stale: false,
+          linearError: null,
+        });
+      }
       if (/\/api\/tickets/.test(url)) {
         return json({ tickets: data });
       }
@@ -1026,5 +1063,40 @@ describe("Tickets hub landing view", () => {
     const tokens = scroller!.className.split(/\s+/);
     expect(tokens).toContain("pb-8");
     expect(tokens).not.toContain("pb-5");
+  });
+
+  test("supply matrix refreshes Linear on demand and collapses repos without a snapshot (WM-824)", async () => {
+    const urls: string[] = [];
+    const base = ticketsFetch();
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      urls.push(String(input));
+      return base(input, init);
+    }) as typeof fetch;
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Ticket ticketId={null} onNavigate={() => {}} />
+      </QueryClientProvider>,
+    );
+
+    const supply = await view.findByTestId("ticket-supply");
+    expect(within(supply).getByText("Refresh")).toBeTruthy();
+    expect(within(supply).getByText("factory")).toBeTruthy();
+    expect(within(supply).getByText("2")).toBeTruthy();
+    expect(within(supply).getAllByText("dispatch").length).toBeGreaterThan(0);
+    expect(within(supply).getByRole("table").textContent).not.toContain("ghost");
+    expect(within(supply).getByText(/without a snapshot/)).toBeTruthy();
+
+    fireEvent.click(within(supply).getByText("Refresh"));
+    await waitFor(() => {
+      expect(
+        urls.some((url) => url.includes("/api/tickets/supply?refresh=1")),
+      ).toBe(true);
+    });
   });
 });

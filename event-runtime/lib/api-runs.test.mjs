@@ -14,8 +14,11 @@ import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
   TICKET_DETAIL_CACHE_TTL_MS,
   clearTicketDetailCache,
+  mergeTicketSupply,
+  scanTicketSupply,
   setTicketDetailControlPlane,
   ticketIndexView,
+  ticketSupplyView,
 } from "./api-runs.mjs";
 import {
   GH_SECRET,
@@ -1631,6 +1634,173 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
       const body = await down.json();
       expect(body.error).toBe("tracker_unavailable");
       expect(body.message).toBe("network down");
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("GET /tickets/supply (WM-824)", () => {
+  afterEach(async () => {
+    const {
+      clearLinearSupplyCache,
+      setLinearSupplyGql,
+      setLinearSupplyBudget,
+    } = await import("./linear.mjs");
+    clearLinearSupplyCache();
+    setLinearSupplyGql(null);
+    setLinearSupplyBudget(undefined);
+  });
+
+  function repoMap(rows) {
+    return new Map(
+      rows.map((row) => [
+        row.name,
+        {
+          maxInFlight: 2,
+          team: "WM",
+          project: "Factory",
+          ...row,
+        },
+      ]),
+    );
+  }
+
+  test("merge overlays Linear counts and keeps scan fallback when Linear fails", () => {
+    const scan = {
+      repos: [
+        {
+          name: "factory",
+          team: "WM",
+          triage: 9,
+          ready: 1,
+          inFlight: 0,
+          cap: 2,
+          blocked: 0,
+          noopReason: null,
+          asOf: "2026-08-20T10:00:00.000Z",
+          sourceRunId: "run_scan",
+        },
+      ],
+      recommendedAction: "triage",
+    };
+    const live = mergeTicketSupply(scan, {
+      ok: true,
+      asOf: "2026-08-20T18:00:00.000Z",
+      byRepo: {
+        factory: {
+          triage: 3,
+          ready: 2,
+          inFlight: 1,
+          blocked: 0,
+          inReview: 0,
+        },
+      },
+      budget: { remaining: 2000, limit: 2500 },
+      cached: false,
+    });
+    expect(live.source).toBe("linear");
+    expect(live.stale).toBe(false);
+    expect(live.repos[0]).toMatchObject({
+      triage: 3,
+      ready: 2,
+      inFlight: 1,
+      asOf: "2026-08-20T18:00:00.000Z",
+      sourceRunId: null,
+      source: "linear",
+    });
+    expect(live.recommendedAction).toBe("dispatch");
+
+    const fallback = mergeTicketSupply(
+      scan,
+      {
+        ok: false,
+        error: "RATELIMITED",
+        budget: { remaining: 0, limit: 2500 },
+      },
+      { nowMs: Date.parse("2026-08-20T10:30:00.000Z") },
+    );
+    expect(fallback.source).toBe("scan");
+    expect(fallback.stale).toBe(false);
+    expect(fallback.linearError).toBe("RATELIMITED");
+    expect(fallback.repos[0].triage).toBe(9);
+    expect(fallback.repos[0].source).toBe("scan");
+
+    const stale = mergeTicketSupply(
+      scan,
+      { ok: false, error: "linear_unavailable" },
+      { nowMs: Date.parse("2026-08-20T12:00:00.000Z") },
+    );
+    expect(stale.stale).toBe(true);
+  });
+
+  test("GET /tickets/supply queries Linear on demand and honors refresh=1", async () => {
+    const { setLinearSupplyGql, clearLinearSupplyCache } =
+      await import("./linear.mjs");
+    clearLinearSupplyCache();
+    let calls = 0;
+    setLinearSupplyGql(async () => {
+      calls += 1;
+      return {
+        issues: {
+          nodes: [
+            {
+              state: { name: "Triage" },
+              assignee: null,
+              labels: { nodes: [] },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      };
+    });
+    const repos = repoMap([{ name: "factory" }]);
+    const s = await makeServer({ repos: () => repos });
+    try {
+      const first = await fetch(s.url("/tickets/supply"));
+      expect(first.status).toBe(200);
+      const body = await first.json();
+      expect(body.source).toBe("linear");
+      expect(body.repos).toEqual([
+        expect.objectContaining({
+          name: "factory",
+          triage: 1,
+          ready: 0,
+          source: "linear",
+        }),
+      ]);
+      expect(calls).toBe(1);
+
+      await fetch(s.url("/tickets/supply"));
+      expect(calls).toBe(1);
+
+      await fetch(s.url("/tickets/supply?refresh=1"));
+      expect(calls).toBe(2);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("scanTicketSupply still reads work-plan / status-report artifacts", async () => {
+    const s = await makeServer();
+    try {
+      const repos = repoMap([{ name: "factory" }]);
+      const empty = scanTicketSupply(s.db, { repos });
+      expect(empty.repos[0]).toMatchObject({
+        name: "factory",
+        triage: null,
+        ready: null,
+        asOf: null,
+      });
+      const merged = await ticketSupplyView(s.db, {
+        repos,
+        gql: async () => {
+          throw new Error("no linear");
+        },
+        nowMs: Date.parse("2026-08-20T12:00:00.000Z"),
+      });
+      expect(merged.source).toBe("scan");
+      expect(merged.linearError).toBe("no linear");
     } finally {
       s.close();
     }
