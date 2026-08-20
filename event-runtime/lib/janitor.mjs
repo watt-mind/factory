@@ -1,10 +1,5 @@
 import { spawn } from "node:child_process";
-import {
-  existsSync,
-  readdirSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { artifactsRoot, runtimeHome } from "./config.mjs";
 import { openDb } from "./db.mjs";
@@ -96,7 +91,11 @@ export function sweepRuntimeRetention(
       if (!SHA256.test(name)) continue;
       const file = path.join(storeRoot, name);
       const stat = statSync(file);
-      if (!stat.isFile() || referenced.has(name) || stat.mtimeMs >= artifactCutoffMs) {
+      if (
+        !stat.isFile() ||
+        referenced.has(name) ||
+        stat.mtimeMs >= artifactCutoffMs
+      ) {
         retained += 1;
         continue;
       }

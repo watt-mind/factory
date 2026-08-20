@@ -269,7 +269,15 @@ describe("run list deadlines (WM-692)", () => {
       }
       const { runs } = await s.client.runs();
       const byState = Object.fromEntries(runs.map((r) => [r.state, r]));
-      for (const state of ["LEASED", "RUNNING", "VERIFYING", "COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"]) {
+      for (const state of [
+        "LEASED",
+        "RUNNING",
+        "VERIFYING",
+        "COMPLETED",
+        "FAILED",
+        "TIMED_OUT",
+        "CANCELLED",
+      ]) {
         expect(byState[state]).toMatchObject({
           runId: `run-list-${state}`,
           state,
@@ -324,13 +332,13 @@ describe("run list deadlines (WM-692)", () => {
       expect(typeof firstPage.nextBefore).toBe("string");
 
       const second = await fetch(
-        s.url(`/runs?limit=2&before=${encodeURIComponent(firstPage.nextBefore)}`),
+        s.url(
+          `/runs?limit=2&before=${encodeURIComponent(firstPage.nextBefore)}`,
+        ),
       );
       expect(second.status).toBe(200);
-      expect((await second.json())).toEqual({
-        runs: [
-          expect.objectContaining({ runId: "run-page-a" }),
-        ],
+      expect(await second.json()).toEqual({
+        runs: [expect.objectContaining({ runId: "run-page-a" })],
         nextBefore: null,
       });
       for (const query of ["limit=0", "limit=201", "before=not-a-cursor"]) {

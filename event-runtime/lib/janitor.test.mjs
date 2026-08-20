@@ -71,7 +71,11 @@ describe("runtime retention", () => {
         db.query(
           `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
            VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
-        ).run(runId, JSON.stringify({ artifacts: [{ sha256: hash }] }), createdAt);
+        ).run(
+          runId,
+          JSON.stringify({ artifacts: [{ sha256: hash }] }),
+          createdAt,
+        );
       }
       db.query(
         `INSERT INTO attempt_trace (run_id, attempt, ts, kind, payload_json)
@@ -92,7 +96,9 @@ describe("runtime retention", () => {
         trace: { deleted: 1, dryRun: true },
         artifacts: { deleted: 2, dryRun: true },
       });
-      expect(db.query(`SELECT COUNT(*) AS count FROM attempt_trace`).get().count).toBe(2);
+      expect(
+        db.query(`SELECT COUNT(*) AS count FROM attempt_trace`).get().count,
+      ).toBe(2);
       expect(() => Bun.file(path.join(store, stale)).text()).not.toThrow();
 
       const applied = sweepRuntimeRetention(db, store, { now, apply: true });
@@ -100,7 +106,9 @@ describe("runtime retention", () => {
       expect(Bun.file(path.join(store, kept)).size).toBeGreaterThan(0);
       expect(Bun.file(path.join(store, stale)).size).toBe(0);
       expect(Bun.file(path.join(store, orphan)).size).toBe(0);
-      expect(db.query(`SELECT COUNT(*) AS count FROM attempt_trace`).get().count).toBe(1);
+      expect(
+        db.query(`SELECT COUNT(*) AS count FROM attempt_trace`).get().count,
+      ).toBe(1);
     } finally {
       db.close();
     }

@@ -1503,7 +1503,9 @@ export function Runs({
             {nextBefore && (
               <tr>
                 <td>
-                  <button onClick={() => setRunCursor(nextBefore)}>Older</button>
+                  <button onClick={() => setRunCursor(nextBefore)}>
+                    Older
+                  </button>
                 </td>
               </tr>
             )}

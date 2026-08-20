@@ -1308,9 +1308,7 @@ function runsView(db, filters = {}, page = {}) {
     params.push(from, to);
   }
   if (page.before) {
-    clauses.push(
-      "(r.created_at < ? OR (r.created_at = ? AND r.rowid < ?))",
-    );
+    clauses.push("(r.created_at < ? OR (r.created_at = ? AND r.rowid < ?))");
     params.push(
       page.before.createdAt,
       page.before.createdAt,
@@ -1334,19 +1332,19 @@ function runsView(db, filters = {}, page = {}) {
   const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
   return {
     runs: pageRows.map((row) => {
-    const spec = JSON.parse(row.spec_json);
-    return {
-      runId: row.run_id,
-      state: row.state,
-      attempts: row.attempts,
-      agent: spec.agent,
-      adapter: spec.adapter,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      modelTier: spec.modelTier ?? null,
-      model: spec.model ?? null,
-      idempotencyKey: row.idempotency_key,
-    };
+      const spec = JSON.parse(row.spec_json);
+      return {
+        runId: row.run_id,
+        state: row.state,
+        attempts: row.attempts,
+        agent: spec.agent,
+        adapter: spec.adapter,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        modelTier: spec.modelTier ?? null,
+        model: spec.model ?? null,
+        idempotencyKey: row.idempotency_key,
+      };
     }),
     nextBefore: hasNextPage ? encodeRunCursor(pageRows.at(-1)) : null,
   };
