@@ -226,6 +226,7 @@ export interface MetricsView {
 
 export interface MetricsBreakdownView {
   window: MetricsWindow;
+  /** Dimension key: agent, adapter, model, repo, source, reason_code, event_type, edge. */
   by: string;
   metric: string;
   limit: number | null;

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { Metrics, METRICS_WINDOW_KEY, metricsAreEmpty } from "./Metrics";
-import type { MetricsView } from "../types";
+import type { MetricsBreakdownView, MetricsView } from "../types";
 
 const populated: MetricsView = {
   window: "24h",
@@ -32,6 +32,28 @@ const populated: MetricsView = {
     "events.intake": { admitted: [2, 2] },
     "attempts.retries": { total: [0, 1] },
   },
+};
+
+const adapterBreakdown: MetricsBreakdownView = {
+  window: "24h",
+  by: "adapter",
+  metric: "runs",
+  limit: 8,
+  rows: [
+    { key: "claude", value: 3 },
+    { key: "pi", value: 1 },
+  ],
+};
+
+const modelBreakdown: MetricsBreakdownView = {
+  window: "24h",
+  by: "model",
+  metric: "tokens",
+  limit: 8,
+  rows: [
+    { key: "model-fixture-1", value: 250 },
+    { key: "gpt-4o", value: 50 },
+  ],
 };
 
 function emptyMetrics(): MetricsView {
@@ -85,7 +107,19 @@ beforeEach(() => {
   requests = [];
   response = Response.json(populated);
   globalThis.fetch = (async (input: RequestInfo | URL) => {
-    requests.push(String(input));
+    const url = String(input);
+    requests.push(url);
+    if (url.includes("/metrics/breakdown")) {
+      if (url.includes("by=adapter")) return Response.json(adapterBreakdown);
+      if (url.includes("by=model")) return Response.json(modelBreakdown);
+      return Response.json({
+        window: "24h",
+        by: "unknown",
+        metric: "runs",
+        limit: 8,
+        rows: [],
+      });
+    }
     return response.clone();
   }) as typeof fetch;
 });
@@ -102,6 +136,8 @@ describe("Metrics", () => {
     for (const section of ["Latency", "Spend", "Approval gate"]) {
       expect(view.getByRole("heading", { name: section })).toBeTruthy();
     }
+    expect(view.getByRole("heading", { name: "Harness share" })).toBeTruthy();
+    expect(view.getByRole("heading", { name: "Model share" })).toBeTruthy();
     const failed = view.getByRole("link", { name: /1 failed run in/i });
     expect(failed.getAttribute("href")).toContain("#/runs?");
     expect(failed.getAttribute("href")).toContain("population=terminal");
@@ -113,23 +149,46 @@ describe("Metrics", () => {
     ).toBe(true);
   });
 
-  test("Retry rate and Token volume share Outcome mix card geometry", async () => {
+  test("Retry rate and Token volume share Outcome mix card geometry as stacked bars", async () => {
     const view = renderMetrics();
     const outcome = await view.findByRole("img", { name: /Outcome mix:/ });
     const retry = view.getByRole("img", { name: /Retry rate by/ });
-    const tokens = view.getByRole("img", { name: /recorded tokens/ });
+    const tokens = view.getByRole("img", { name: /Token volume by agent/ });
     for (const chart of [outcome, retry, tokens]) {
       expect(chart.getAttribute("viewBox")).toBe("0 0 600 180");
       expect(chart.getAttribute("preserveAspectRatio")).toBe("none");
+      expect(chart.querySelector("polyline")).toBeNull();
+      expect(
+        chart.querySelectorAll("rect[data-segment]").length,
+      ).toBeGreaterThan(0);
     }
-    const retryLine = retry.querySelector("polyline");
-    expect(retryLine).toBeTruthy();
-    const xs = retryLine!
-      .getAttribute("points")!
-      .split(" ")
-      .map((point) => Number(point.split(",")[0]));
-    expect(xs[0]).toBe(4);
-    expect(xs.at(-1)).toBe(596);
+    const retried = view.getByRole("link", { name: /1 retried run in/i });
+    expect(retried.getAttribute("href")).toContain("population=retried");
+    const retryBar = retry.querySelector(
+      '[data-bar="2026-08-18T09:00:00.000Z"]',
+    );
+    expect(retryBar?.querySelector('[data-segment="retries"]')).toBeTruthy();
+    expect(retryBar?.querySelector('[data-segment="first"]')).toBeTruthy();
+  });
+
+  test("Harness and Model share cards render ranked bars with window drilldown", async () => {
+    const view = renderMetrics();
+    const harness = await view.findByRole("img", {
+      name: /Harness share by adapter/,
+    });
+    const models = await view.findByRole("img", {
+      name: /Model share of recorded tokens/,
+    });
+    expect(harness.querySelector('[data-share-row="claude"]')).toBeTruthy();
+    expect(
+      models.querySelector('[data-share-row="model-fixture-1"]'),
+    ).toBeTruthy();
+    const claude = view.getByRole("link", { name: "claude: 3" });
+    expect(claude.getAttribute("href")).toContain("population=created");
+    expect(claude.getAttribute("href")).toContain("adapter=claude");
+    const sonnet = view.getByRole("link", { name: "model-fixture-1: 250" });
+    expect(sonnet.getAttribute("href")).toContain("population=usage");
+    expect(sonnet.getAttribute("href")).toContain("model=model-fixture-1");
   });
 
   test("switches and persists the selected window", async () => {

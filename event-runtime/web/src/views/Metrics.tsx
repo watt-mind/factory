@@ -1,16 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { fetchMetrics } from "../api";
+import { fetchMetrics, fetchMetricsBreakdown } from "../api";
 import {
   Band,
-  Sparkline,
+  ShareBars,
   StackedBars,
   type BandDatum,
   type ChartLink,
+  type ShareBarRow,
   type StackedBarDatum,
 } from "../components/Charts";
-import { SegmentMeter } from "./Overview";
-import type { MetricsView, MetricsWindow } from "../types";
+import type {
+  MetricsBreakdownView,
+  MetricsView,
+  MetricsWindow,
+} from "../types";
 
 export const METRICS_WINDOW_KEY = "evrt-metrics-window";
 const WINDOWS: MetricsWindow[] = ["1h", "24h", "7d", "30d"];
@@ -48,6 +52,12 @@ const DECISION_HUES: Record<string, string> = {
   expired: "var(--hue-warn)",
   superseded: "var(--hue-verify)",
 };
+const SERIES_HUES = [
+  "var(--hue-info)",
+  "var(--hue-verify)",
+  "var(--hue-ok)",
+  "var(--hue-warn)",
+] as const;
 
 function readWindow(): MetricsWindow {
   try {
@@ -103,6 +113,20 @@ function drilldown(
 ): string {
   const range = timeRange(data, index);
   const query = new URLSearchParams({ from: range.from, to: range.to });
+  for (const [key, value] of Object.entries(values))
+    if (value) query.set(key, value);
+  return `#/${view}?${query.toString()}`;
+}
+
+function windowDrilldown(
+  view: "runs",
+  data: MetricsView,
+  values: Record<string, string | undefined>,
+): string {
+  if (data.buckets.length === 0) return `#/${view}`;
+  const from = data.buckets[0]!;
+  const to = timeRange(data, data.buckets.length - 1).to;
+  const query = new URLSearchParams({ from, to });
   for (const [key, value] of Object.entries(values))
     if (value) query.set(key, value);
   return `#/${view}?${query.toString()}`;
@@ -193,6 +217,54 @@ function TimeAxis({ data }: { data: MetricsView }) {
       <span>{bucketLabel(data.buckets[0]!, data.window)}</span>
       <span>{bucketLabel(last, data.window)}</span>
     </div>
+  );
+}
+
+function BreakdownCard({
+  title,
+  value,
+  pending,
+  error,
+  rows,
+  label,
+  format,
+  caption,
+}: {
+  title: string;
+  value?: string;
+  pending: boolean;
+  error: boolean;
+  rows: ShareBarRow[];
+  label: string;
+  format?: (value: number) => string;
+  caption?: string;
+}) {
+  return (
+    <Card title={title} value={value}>
+      {pending ? (
+        <div
+          role="status"
+          className="flex h-44 items-center justify-center text-[12px] text-(--text-faint)"
+        >
+          Loading breakdown…
+        </div>
+      ) : error ? (
+        <div
+          role="alert"
+          className="flex h-44 items-center justify-center px-4 text-center text-[12px]"
+          style={{ color: "var(--hue-err)" }}
+        >
+          Breakdown API unreachable
+        </div>
+      ) : (
+        <>
+          <ShareBars rows={rows} label={label} format={format} />
+          {caption ? (
+            <p className="mt-2 text-[11px] text-(--text-faint)">{caption}</p>
+          ) : null}
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -309,12 +381,6 @@ function spendBars(data: MetricsView): StackedBarDatum[] {
   const agents = Object.keys(series).sort(
     (a, b) => sum(series[b]) - sum(series[a]),
   );
-  const hues = [
-    "var(--hue-info)",
-    "var(--hue-verify)",
-    "var(--hue-ok)",
-    "var(--hue-warn)",
-  ];
   return data.buckets.map((bucket, index) => ({
     key: bucket,
     label: bucketLabel(bucket, data.window),
@@ -324,7 +390,7 @@ function spendBars(data: MetricsView): StackedBarDatum[] {
         key: agent,
         label: agent,
         value,
-        hue: hues[agentIndex % hues.length]!,
+        hue: SERIES_HUES[agentIndex % SERIES_HUES.length]!,
         link:
           value > 0
             ? {
@@ -338,6 +404,106 @@ function spendBars(data: MetricsView): StackedBarDatum[] {
       };
     }),
   }));
+}
+
+function retryBars(data: MetricsView): StackedBarDatum[] {
+  const started = data.series["runs.started"]?.total ?? [];
+  const retries = data.series["attempts.retries"]?.total ?? [];
+  return data.buckets.map((bucket, index) => {
+    const startedCount = started[index] ?? 0;
+    const retryCount = retries[index] ?? 0;
+    const first = Math.max(0, startedCount - retryCount);
+    const label = bucketLabel(bucket, data.window);
+    return {
+      key: bucket,
+      label,
+      segments: [
+        {
+          key: "retries",
+          label: "retries",
+          value: retryCount,
+          hue: "var(--hue-warn)",
+          link:
+            retryCount > 0
+              ? {
+                  href: drilldown("runs", data, index, {
+                    population: "retried",
+                  }),
+                  label: `${retryCount} retried run${retryCount === 1 ? "" : "s"} in ${label}`,
+                }
+              : null,
+        },
+        {
+          key: "first",
+          label: "first attempts",
+          value: first,
+          hue: "var(--hue-ok)",
+          link:
+            first > 0
+              ? {
+                  href: drilldown("runs", data, index, {
+                    population: "started",
+                  }),
+                  label: `${first} first attempt${first === 1 ? "" : "s"} in ${label}`,
+                }
+              : null,
+        },
+      ],
+    };
+  });
+}
+
+function tokenBars(data: MetricsView): StackedBarDatum[] {
+  const series = data.series["spend.tokens"] ?? {};
+  const agents = Object.keys(series).sort(
+    (a, b) => sum(series[b]) - sum(series[a]),
+  );
+  return data.buckets.map((bucket, index) => ({
+    key: bucket,
+    label: bucketLabel(bucket, data.window),
+    segments: agents.map((agent, agentIndex) => {
+      const value = series[agent]?.[index] ?? 0;
+      return {
+        key: agent,
+        label: agent,
+        value,
+        hue: SERIES_HUES[agentIndex % SERIES_HUES.length]!,
+        link:
+          value > 0
+            ? {
+                href: drilldown("runs", data, index, {
+                  population: "usage",
+                  agent,
+                }),
+                label: `${new Intl.NumberFormat().format(value)} tokens by ${agent} in ${bucketLabel(bucket, data.window)}`,
+              }
+            : null,
+      };
+    }),
+  }));
+}
+
+function shareRows(
+  breakdown: MetricsBreakdownView | undefined,
+  data: MetricsView,
+  population: "created" | "usage",
+  dimension: "adapter" | "model",
+): ShareBarRow[] {
+  return (breakdown?.rows ?? [])
+    .filter((row) => row.value > 0)
+    .map((row, index) => ({
+      key: row.key,
+      label: row.key,
+      value: row.value,
+      hue: SERIES_HUES[index % SERIES_HUES.length]!,
+      link: {
+        href: windowDrilldown("runs", data, {
+          population,
+          [dimension]: row.key,
+        }),
+        label: `${row.key}: ${row.value}`,
+      },
+    }));
 }
 
 function bandValues(
@@ -382,6 +548,21 @@ export function Metrics() {
   }, [window]);
 
   const data = query.data;
+  const chartsReady = query.isSuccess && data != null && !metricsAreEmpty(data);
+  const adapterQuery = useQuery({
+    queryKey: ["metrics-breakdown", window, "adapter", "runs"],
+    queryFn: () => fetchMetricsBreakdown(window, "adapter", "runs", 8),
+    enabled: chartsReady,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const modelQuery = useQuery({
+    queryKey: ["metrics-breakdown", window, "model", "tokens"],
+    queryFn: () => fetchMetricsBreakdown(window, "model", "tokens", 8),
+    enabled: chartsReady,
+    refetchInterval: 30_000,
+    retry: false,
+  });
   const derived = useMemo(() => {
     if (!data) return null;
     const outcomes = OUTCOMES.map((state) => ({
@@ -396,17 +577,6 @@ export function Metrics() {
     }));
     const started = sum(data.series["runs.started"]?.total);
     const retries = sum(data.series["attempts.retries"]?.total);
-    const retryRate = data.buckets.map((_, index) => {
-      const denominator = data.series["runs.started"]?.total?.[index] ?? 0;
-      const numerator = data.series["attempts.retries"]?.total?.[index] ?? 0;
-      return denominator === 0 ? 0 : (numerator / denominator) * 100;
-    });
-    const tokens = data.buckets.map((_, index) =>
-      Object.values(data.series["spend.tokens"] ?? {}).reduce(
-        (total, values) => total + (values[index] ?? 0),
-        0,
-      ),
-    );
     const agents = Object.entries(data.series["spend.cost"] ?? {})
       .map(([agent, values]) => ({
         label: agent,
@@ -415,14 +585,35 @@ export function Metrics() {
       .sort((a, b) => b.value - a.value)
       .map((item, index) => ({
         ...item,
-        hue: [
-          "var(--hue-info)",
-          "var(--hue-verify)",
-          "var(--hue-ok)",
-          "var(--hue-warn)",
-        ][index % 4]!,
+        hue: SERIES_HUES[index % SERIES_HUES.length]!,
       }));
-    return { outcomes, decisions, started, retries, retryRate, tokens, agents };
+    const tokenAgents = Object.entries(data.series["spend.tokens"] ?? {})
+      .map(([agent, values]) => ({
+        label: agent,
+        value: sum(values),
+      }))
+      .sort((a, b) => b.value - a.value)
+      .map((item, index) => ({
+        ...item,
+        hue: SERIES_HUES[index % SERIES_HUES.length]!,
+      }));
+    const tokens = sum(
+      data.buckets.map((_, index) =>
+        Object.values(data.series["spend.tokens"] ?? {}).reduce(
+          (total, values) => total + (values[index] ?? 0),
+          0,
+        ),
+      ),
+    );
+    return {
+      outcomes,
+      decisions,
+      started,
+      retries,
+      agents,
+      tokenAgents,
+      tokens,
+    };
   }, [data]);
 
   return (
@@ -501,7 +692,7 @@ export function Metrics() {
           <>
             <Section
               title="Reliability"
-              description="Terminal outcome mix and retries per run start. Every mark opens the exact bucket population."
+              description="Terminal outcome mix, retries per run start, and harness share. Every mark opens the matching run population."
             >
               <Card
                 title="Outcome mix"
@@ -522,40 +713,37 @@ export function Metrics() {
                     : "—"
                 }
               >
-                <Sparkline
-                  values={derived.retryRate}
+                <StackedBars
+                  bars={retryBars(data)}
                   label={`Retry rate by ${data.bucket} bucket; ${derived.retries} retries across ${derived.started} starts`}
-                  hue="var(--hue-warn)"
-                  linkForPoint={(index, value) => ({
-                    href: drilldown("runs", data, index, {
-                      population: "retried",
-                    }),
-                    label: `${value.toFixed(1)}% retry rate in ${bucketLabel(data.buckets[index]!, data.window)}`,
-                  })}
                 />
                 <TimeAxis data={data} />
-                <div className="mt-4">
-                  <SegmentMeter
-                    segments={[
-                      {
-                        key: "retry",
-                        label: "Retries",
-                        value: derived.retries,
-                        hue: "var(--hue-warn)",
-                      },
-                      {
-                        key: "first",
-                        label: "First attempts",
-                        value: Math.max(0, derived.started - derived.retries),
-                        hue: "var(--hue-ok)",
-                      },
-                    ]}
-                  />
-                  <p className="mt-2 text-[11px] text-(--text-faint)">
-                    {derived.retries} retries · {derived.started} run starts
-                  </p>
-                </div>
+                {legend([
+                  {
+                    label: "retries",
+                    value: derived.retries,
+                    hue: "var(--hue-warn)",
+                  },
+                  {
+                    label: "first attempts",
+                    value: Math.max(0, derived.started - derived.retries),
+                    hue: "var(--hue-ok)",
+                  },
+                ])}
               </Card>
+              <BreakdownCard
+                title="Harness share"
+                value={`${new Intl.NumberFormat().format(adapterQuery.data?.rows.reduce((total, row) => total + row.value, 0) ?? derived.started)} runs`}
+                pending={adapterQuery.isPending}
+                error={adapterQuery.isError}
+                rows={shareRows(adapterQuery.data, data, "created", "adapter")}
+                label={`Harness share by adapter: ${
+                  (adapterQuery.data?.rows ?? [])
+                    .map((row) => `${row.value} ${row.key}`)
+                    .join(", ") || "none"
+                }`}
+                caption="Runs in this window grouped by adapter (claude, pi, cursor, …)"
+              />
             </Section>
 
             <Section
@@ -596,7 +784,7 @@ export function Metrics() {
 
             <Section
               title="Spend"
-              description="Recorded cost and token volume by agent. Click through to runs with usage recorded in that bucket."
+              description="Recorded cost, token volume, and model share. Click through to runs with usage recorded in that bucket."
             >
               <Card
                 title="Cost by agent"
@@ -613,25 +801,36 @@ export function Metrics() {
               </Card>
               <Card
                 title="Token volume"
-                value={new Intl.NumberFormat().format(sum(derived.tokens))}
+                value={new Intl.NumberFormat().format(derived.tokens)}
               >
-                <Sparkline
-                  values={derived.tokens}
-                  label={`${new Intl.NumberFormat().format(sum(derived.tokens))} recorded tokens across the window`}
-                  hue="var(--hue-info)"
-                  linkForPoint={(index, value) => ({
-                    href: drilldown("runs", data, index, {
-                      population: "usage",
-                    }),
-                    label: `${new Intl.NumberFormat().format(value)} tokens in ${bucketLabel(data.buckets[index]!, data.window)}`,
-                  })}
+                <StackedBars
+                  bars={tokenBars(data)}
+                  label={`Token volume by agent: ${derived.tokenAgents.map((item) => `${item.label} ${new Intl.NumberFormat().format(item.value)}`).join(", ") || "none"}`}
                 />
                 <TimeAxis data={data} />
-                <p className="mt-4 text-[11px] text-(--text-faint)">
-                  Input, output, cache creation, and cache-read tokens recorded
-                  by the runtime
-                </p>
+                {legend(derived.tokenAgents, (value) =>
+                  new Intl.NumberFormat().format(value),
+                )}
               </Card>
+              <BreakdownCard
+                title="Model share"
+                value={new Intl.NumberFormat().format(
+                  modelQuery.data?.rows.reduce(
+                    (total, row) => total + row.value,
+                    0,
+                  ) ?? derived.tokens,
+                )}
+                pending={modelQuery.isPending}
+                error={modelQuery.isError}
+                rows={shareRows(modelQuery.data, data, "usage", "model")}
+                label={`Model share of recorded tokens: ${
+                  (modelQuery.data?.rows ?? [])
+                    .map((row) => `${row.key} ${row.value}`)
+                    .join(", ") || "none"
+                }`}
+                format={(value) => new Intl.NumberFormat().format(value)}
+                caption="Token volume grouped by observed or pinned model"
+              />
             </Section>
 
             <Section

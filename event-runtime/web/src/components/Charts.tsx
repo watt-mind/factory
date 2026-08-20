@@ -189,6 +189,78 @@ export function StackedBars({
   );
 }
 
+export interface ShareBarRow {
+  key: string;
+  label: string;
+  value: number;
+  hue: string;
+  link?: ChartLink | null;
+}
+
+/** Ranked full-card distribution; fills the same h-44 slot as StackedBars. */
+export function ShareBars({
+  rows,
+  label,
+  format = (value) => String(value),
+}: {
+  rows: ShareBarRow[];
+  label: string;
+  format?: (value: number) => string;
+}) {
+  const max = Math.max(0, ...rows.map((row) => Math.max(0, row.value)));
+  if (rows.length === 0 || max === 0) {
+    return (
+      <div
+        role="img"
+        aria-label={label}
+        data-empty="true"
+        className="flex h-44 items-center justify-center rounded-md border border-dashed border-(--border) bg-(--surface-0) px-4 text-center text-[12px] text-(--text-faint)"
+      >
+        No values in this window.
+      </div>
+    );
+  }
+  return (
+    <div
+      role="img"
+      aria-label={label}
+      className="flex h-44 flex-col justify-start gap-1.5 overflow-y-auto"
+    >
+      {rows.map((row) => {
+        const value = Math.max(0, row.value);
+        return (
+          <LinkedMark key={row.key} link={row.link}>
+            <div
+              data-share-row={row.key}
+              className={
+                row.link ? "cursor-pointer hover:opacity-80" : undefined
+              }
+            >
+              <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                <span className="min-w-0 truncate text-(--text-dim)">
+                  {row.label}
+                </span>
+                <span className="mono shrink-0 tabular-nums text-(--text-dim)">
+                  {format(value)}
+                </span>
+              </div>
+              <div className="mt-0.5 h-2 overflow-hidden rounded-sm bg-(--surface-2)">
+                <div
+                  className="h-full rounded-sm"
+                  style={{
+                    width: `${(value / max) * 100}%`,
+                    background: row.hue,
+                  }}
+                />
+              </div>
+            </div>
+          </LinkedMark>
+        );
+      })}
+    </div>
+  );
+}
+
 export interface BandDatum {
   p50: number | null;
   p95: number | null;
