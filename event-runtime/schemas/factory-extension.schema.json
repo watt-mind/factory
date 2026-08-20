@@ -1,6 +1,6 @@
 {
   "title": "factory-extension.json — the manifest of one factory extension (docs/extensions.md)",
-  "description": "One extension declares everything it contributes in a single manifest. Paths under `contributes` are relative to the manifest's directory. `connectors` and `views` are reserved keys: the loader accepts them and records a \"not supported yet\" configuration anomaly instead of rejecting the manifest, so a manifest written for a later runtime still loads its packs and adapters here. Adapter names are additionally checked against the adapter registry's name pattern by lib/extensions.mjs, because lib/schema.mjs has no patternProperties.",
+  "description": "One extension declares everything it contributes in a single manifest. Paths under `contributes` are relative to the manifest's directory. `views` is reserved: the loader accepts it and records a \"not supported yet\" configuration anomaly instead of rejecting the manifest, so a manifest written for a later runtime still loads its packs, adapters and connectors here. Adapter and connector names are additionally checked against the adapter registry's name pattern by lib/extensions.mjs, because lib/schema.mjs has no patternProperties.",
   "type": "object",
   "required": ["name", "version"],
   "additionalProperties": false,
@@ -48,7 +48,12 @@
           }
         },
         "connectors": {
-          "description": "reserved — tracker/forge/notifier connectors; not supported yet"
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "\\.mjs$",
+            "description": "relative path to an ES module satisfying the connector contract (docs/extensions.md § Connectors): export const id and export default async function start(ctx) → { stop(), health() }"
+          }
         },
         "views": {
           "description": "reserved — web views; not supported yet"

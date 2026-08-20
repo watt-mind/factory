@@ -118,6 +118,21 @@ describe("factory-extension.json schema", () => {
     }
   });
 
+  test("contributes.connectors is an object of name → .mjs path", () => {
+    const ok = {
+      name: "a/b",
+      version: "0.0.1",
+      contributes: { connectors: { echo: "./connectors/echo.mjs" } },
+    };
+    expect(validate(EXTENSION_SCHEMA, ok)).toEqual({ valid: true, errors: [] });
+    expect(
+      validate(EXTENSION_SCHEMA, {
+        ...ok,
+        contributes: { connectors: { echo: "./echo.js" } },
+      }).errors.join(),
+    ).toMatch(/connectors\.echo: does not match pattern/);
+  });
+
   test("contributes.harness accepts floor/commands/skills/subagents and rejects extras", () => {
     const ok = {
       name: "factory/core",
@@ -217,9 +232,24 @@ describe("validateExtensionManifest", () => {
       /packs\[1\] ".\/missing" has no pack.json/,
     );
     expect(out.errors.join("\n")).toMatch(/packs\[2\] "..\/escape" escapes/);
+    expect(out.errors.join("\n")).toMatch(/key "Bad Name" must match/);
     expect(out.errors.join("\n")).toMatch(
       /adapters\.bad-path .* is not a file/,
     );
+  });
+
+  test("connector paths must exist, stay inside, and match the name pattern", () => {
+    const dir = tempExtension((m) => {
+      m.contributes.connectors["missing"] = "./connectors/nope.mjs";
+      m.contributes.connectors["escaped"] = "../escape.mjs";
+      m.contributes.connectors["Bad Name"] = "./connectors/echo.mjs";
+    });
+    const out = validateExtensionManifest(dir);
+    expect(out.valid).toBe(false);
+    expect(out.errors.join("\n")).toMatch(
+      /connectors\.missing .* is not a file/,
+    );
+    expect(out.errors.join("\n")).toMatch(/connectors\.escaped .* escapes/);
     expect(out.errors.join("\n")).toMatch(/key "Bad Name" must match/);
   });
 });
@@ -238,6 +268,7 @@ describe("loadExtensions", () => {
         hooks: [
           { point: "approve.before", id: "factory/sample:approve-before" },
         ],
+        connectors: [{ name: "echo", id: "factory/sample:echo" }],
         panels: [path.join(SAMPLE_EXTENSION, "panels")],
         reserved: [],
         config: {
@@ -432,6 +463,9 @@ describe("loadExtensions", () => {
     const out = await load(policyFor(dir));
     expect(out.extensions[0].reserved).toEqual(["views"]);
     expect(out.extensions[0].adapters).toEqual(["echo"]);
+    expect(out.extensions[0].connectors).toEqual([
+      { name: "echo", id: "factory/sample:echo" },
+    ]);
     expect(out.packRoots.map((p) => p.name)).toEqual(["sample-ext"]);
     expect(out.anomalies).toEqual([
       expect.stringMatching(/contributes\.views is not supported yet/),
@@ -444,7 +478,38 @@ describe("loadExtensions", () => {
       packRoots: [],
     });
     expect(out.extensions[0].adapters).toEqual(["echo"]);
+    expect(out.extensions[0].connectors).toEqual([
+      { name: "echo", id: "factory/sample:echo" },
+    ]);
     expect(out.anomalies).toEqual([]);
+  });
+
+  test("a bad connector module skips the whole extension; a views key still only warns", async () => {
+    const noDefault = tempExtension((m, dir) => {
+      m.name = "factory/no-start";
+      writeFileSync(
+        path.join(dir, "connectors", "echo.mjs"),
+        'export const id = "factory/no-start:echo";\n',
+      );
+    });
+    const skipped = await load(policyFor(noDefault));
+    expect(skipped.extensions).toEqual([]);
+    expect(skipped.anomalies[0]).toMatch(
+      /connector "echo".*must export a default async function start/,
+    );
+
+    const noId = tempExtension((m, dir) => {
+      m.name = "factory/no-id";
+      writeFileSync(
+        path.join(dir, "connectors", "echo.mjs"),
+        "export default async function start() { return { stop() {}, health() { return { ok: true }; } }; }\n",
+      );
+    });
+    const skippedId = await load(policyFor(noId));
+    expect(skippedId.extensions).toEqual([]);
+    expect(skippedId.anomalies[0]).toMatch(
+      /connector "echo".*must export a string id/,
+    );
   });
 
   test("an unreadable policy.yaml extensions block fails closed", async () => {
@@ -1110,6 +1175,9 @@ describe("cli extensions", () => {
     const parsed = JSON.parse(json.stdout.toString());
     expect(parsed.extensions[0].name).toBe("factory/sample");
     expect(parsed.extensions[0].config.namespace).toBe("sample");
+    expect(parsed.extensions[0].connectors).toEqual([
+      { name: "echo", id: "factory/sample:echo" },
+    ]);
     expect(parsed.anomalies).toHaveLength(1);
   });
 });

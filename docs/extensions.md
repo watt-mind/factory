@@ -26,6 +26,10 @@ Today an extension can contribute:
 - **hooks** — decision-returning modules run at a named point of the runtime,
   today `approve.before` (immediately before each chain auto-approval); a
   fail-closed waterfall whose every decision is persisted (§Hooks below);
+- **connectors** — long-running processes the runtime starts with `serve`
+  and stops on shutdown; they talk to the outside world (Buzz, Telegram, a
+  tracker) through a narrow loopback client and never hold a DB handle
+  (§Connectors below);
 - **panels** — declarative `factory.panel-view/v1` Overview tiles
   ([`event-runtime-artifact-views.md` §2.6](event-runtime-artifact-views.md#26-panels--factorypanel-viewv1-wm-840));
   data only, drawn by the web's existing artifact-view renderer, bound to an
@@ -34,9 +38,9 @@ Today an extension can contribute:
   `build/emit.mjs` packages for Claude Code, Codex, Gemini, Cursor and Pi
   (§Harness below). `shared/` is the built-in `factory/core` pack.
 
-The manifest also **reserves** `connectors` and `views` for the tickets that
-land them. A
-manifest that carries a reserved key loads its packs and adapters and records a
+The manifest also **reserves** `views` for the ticket that lands it. A
+manifest that carries a reserved key loads its packs, adapters, connectors
+and the rest and records a
 "not supported yet" configuration anomaly for the rest — it is accepted, not
 rejected, so an extension written for a later runtime still does what this one
 understands.
@@ -55,6 +59,8 @@ Implementation: `event-runtime/lib/extensions.mjs`, schema
     argent.mjs                # an adapter module (execute + SANDBOX_SUPPORT)
   hooks/
     no-infra-merges.mjs       # an approve.before hook (id + default (ctx) => decision) (§Hooks)
+  connectors/
+    buzz.mjs                  # a connector (id + default start(ctx) => { stop, health }) (§Connectors)
   config.schema.json          # the shape of the extension's operator config (§Config)
   panels/
     blocked-tickets.panel.json  # a factory.panel-view/v1 panel
@@ -82,6 +88,7 @@ directory, and must stay inside it.
     "adapters": { "argent": "./adapters/argent.mjs" },
     "config": { "namespace": "mobile", "schema": "./config.schema.json" },
     "hooks": { "approve.before": "./hooks/no-infra-merges.mjs" },
+    "connectors": { "buzz": "./connectors/buzz.mjs" },
     "panels": ["./panels"],
     "harness": {
       "floor": "./harness/floor.md",
@@ -93,19 +100,20 @@ directory, and must stay inside it.
 }
 ```
 
-| Key                                | Required | Meaning                                                                                                                                                                                                                                                      |
-| :--------------------------------- | :------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`                             | yes      | `publisher/extension`, matching `^[a-z0-9-]+/[a-z0-9-]+$`. Recorded as the `source` of every adapter the extension registers, so `bun event-runtime/cli.mjs adapters` can say where an adapter came from.                                                    |
-| `version`                          | yes      | Semver (`MAJOR.MINOR.PATCH`, optional pre-release/build).                                                                                                                                                                                                    |
-| `description`                      | no       | Up to 200 characters, for listings.                                                                                                                                                                                                                          |
-| `factory.min`                      | no       | The oldest factory the extension was written for. Informational until the runtime carries a version; the loader records it and does not enforce it.                                                                                                          |
-| `contributes.packs`                | no       | Array of relative directories, each containing a `pack.json`. The pack's `name` and `namespace` come from its own `pack.json` (`docs/kernel-and-packs.md` § Pack format) — the policy entry names the extension, not the pack.                               |
-| `contributes.adapters`             | no       | Object `name → relative .mjs path`. Names must match the adapter pattern `^[a-z][a-z0-9-]*$`; the module must export `execute` and `SANDBOX_SUPPORT`. An extension may not replace an existing adapter (built-in or from an earlier extension).              |
-| `contributes.config`               | no       | Object `{ namespace, schema }`: the name the extension's operator values are published under (`^[a-z][a-z0-9-]*$`, unique across loaded extensions) and the relative path of the JSON-schema those values must satisfy. See § Config.                        |
-| `contributes.hooks`                | no       | Object `hook point → relative .mjs path`. The only point today is `approve.before`; an unknown key is a schema violation. The module must export a string `id` and a default `(ctx) => decision` function. See § Hooks.                                      |
-| `contributes.panels`               | no       | Array of relative directories; every `*.panel.json` directly inside is a `factory.panel-view/v1` panel (§Panels). The manifest check proves the directories exist inside the extension; the registry validates each panel at load and skips a bad one alone. |
-| `contributes.harness`              | no       | Object `{ floor?, commands?, skills?, subagents? }`: relative file/directory of harness-neutral markdown emit packages (§Harness). The built-in pack is `shared/` (`factory/core`).                                                                          |
-| `contributes.connectors`, `.views` | no       | **Reserved.** Accepted by the schema, ignored by the loader, reported as a configuration anomaly `contributes.<key> is not supported yet`.                                                                                                                   |
+| Key                      | Required | Meaning                                                                                                                                                                                                                                                      |
+| :----------------------- | :------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                   | yes      | `publisher/extension`, matching `^[a-z0-9-]+/[a-z0-9-]+$`. Recorded as the `source` of every adapter the extension registers, so `bun event-runtime/cli.mjs adapters` can say where an adapter came from.                                                    |
+| `version`                | yes      | Semver (`MAJOR.MINOR.PATCH`, optional pre-release/build).                                                                                                                                                                                                    |
+| `description`            | no       | Up to 200 characters, for listings.                                                                                                                                                                                                                          |
+| `factory.min`            | no       | The oldest factory the extension was written for. Informational until the runtime carries a version; the loader records it and does not enforce it.                                                                                                          |
+| `contributes.packs`      | no       | Array of relative directories, each containing a `pack.json`. The pack's `name` and `namespace` come from its own `pack.json` (`docs/kernel-and-packs.md` § Pack format) — the policy entry names the extension, not the pack.                               |
+| `contributes.adapters`   | no       | Object `name → relative .mjs path`. Names must match the adapter pattern `^[a-z][a-z0-9-]*$`; the module must export `execute` and `SANDBOX_SUPPORT`. An extension may not replace an existing adapter (built-in or from an earlier extension).              |
+| `contributes.config`     | no       | Object `{ namespace, schema }`: the name the extension's operator values are published under (`^[a-z][a-z0-9-]*$`, unique across loaded extensions) and the relative path of the JSON-schema those values must satisfy. See § Config.                        |
+| `contributes.hooks`      | no       | Object `hook point → relative .mjs path`. The only point today is `approve.before`; an unknown key is a schema violation. The module must export a string `id` and a default `(ctx) => decision` function. See § Hooks.                                      |
+| `contributes.connectors` | no       | Object `name → relative .mjs path`. Names match the adapter pattern `^[a-z][a-z0-9-]*$`; the module must export a string `id` and a default `start(ctx) → { stop, health }`. See § Connectors.                                                               |
+| `contributes.panels`     | no       | Array of relative directories; every `*.panel.json` directly inside is a `factory.panel-view/v1` panel (§Panels). The manifest check proves the directories exist inside the extension; the registry validates each panel at load and skips a bad one alone. |
+| `contributes.harness`    | no       | Object `{ floor?, commands?, skills?, subagents? }`: relative file/directory of harness-neutral markdown emit packages (§Harness). The built-in pack is `shared/` (`factory/core`).                                                                          |
+| `contributes.views`      | no       | **Reserved.** Accepted by the schema, ignored by the loader, reported as a configuration anomaly `contributes.views is not supported yet`.                                                                                                                   |
 
 Unknown top-level keys and unknown `contributes` keys are schema violations.
 Validate a manifest without loading anything:
@@ -116,11 +124,11 @@ bun event-runtime/cli.mjs extensions validate ~/.factory/extensions/wattmind-mob
 ```
 
 `validate` checks the schema, that every contributed path exists and stays
-inside the extension directory, and that adapter names and hook points are
-well-formed. It does not load a pack, import an adapter or hook module, or
-read a panel document — running third-party code is what enabling does, and
-panel documents are validated by the registry at load (an invalid one is a
-`/status` anomaly).
+inside the extension directory, and that adapter names, connector names and
+hook points are well-formed. It does not load a pack, import an adapter,
+hook or connector module, or read a panel document — running third-party
+code is what enabling does, and panel documents are validated by the registry
+at load (an invalid one is a `/status` anomaly).
 
 ## Trust model
 
@@ -140,14 +148,18 @@ There are two kinds of contribution, and the difference is what runs.
   is why the fixture pack is a copy of `test-support/packs/sample`.
 - **Operator-installed code.** An adapter is an ES module the worker imports
   and calls; a hook is an ES module `serve` imports and calls inside the
-  approval pass. Enabling an extension that contributes either is running that
-  code in the runtime process with its credentials. Only the operator
+  approval pass; a connector is an ES module `serve` starts after the
+  registry loads and stops on shutdown. Enabling an extension that contributes
+  any of them is running that code in the runtime process with its credentials.
+  Only the operator
   enables extensions — by editing `config/policy.yaml`, a committed file —
   and nothing an agent does at runtime can add one. The registry still puts
   every adapter behind the sandbox seam (an `unsupported` adapter is refused
   for a sandboxed definition before its code runs, WM-313/WM-837), and it
   refuses a module that does not satisfy the contract at load time rather
-  than mid-run.
+  than mid-run. A connector that fails `start()` is the one exception to
+  all-or-nothing: that connector is disabled with a configuration anomaly and
+  the extension's other contributions stay loaded.
 
 Two rules follow. Discovery is **allow-listed, never scanned**: the loader reads
 only the directories `policy.yaml` names, in that order — dropping a directory
@@ -212,11 +224,14 @@ message naming both packs; fix the pack (or the order) and restart.
 5. If the extension gates unattended work, add an `approve.before` hook
    (§Hooks); the smallest conformant module is
    `event-runtime/test-support/extensions/sample/hooks/approve-before.mjs`.
-6. Add panels as `panels/<slug>.panel.json` (§Panels); the fixture's
+6. If the extension talks to an external system (Buzz, a tracker, a
+   notifier), add a connector (§Connectors); the smallest conformant module
+   is `event-runtime/test-support/extensions/sample/connectors/echo.mjs`.
+7. Add panels as `panels/<slug>.panel.json` (§Panels); the fixture's
    `panels/open-proposals.panel.json` is a complete one.
-7. Add harness content as `contributes.harness` (§Harness) when the
+8. Add harness content as `contributes.harness` (§Harness) when the
    extension ships slash commands, skills, subagents or a floor block.
-8. `bun event-runtime/cli.mjs extensions validate <dir>` until it is clean,
+9. `bun event-runtime/cli.mjs extensions validate <dir>` until it is clean,
    enable it, `extensions list`, restart.
 
 The fixture `event-runtime/test-support/extensions/sample/` is a complete,
@@ -573,6 +588,120 @@ allows unless the extension config says `greeting: "deny"` (proving
 files there (`throws.mjs`, `hangs.mjs`, `async-deny.mjs`, `no-id.mjs`,
 `no-default.mjs`) exercise each failure mode in `hooks.test.mjs` and
 `extensions.test.mjs`.
+
+## Connectors
+
+_Shipped in WM-919. Implementation: `event-runtime/lib/connectors.mjs`
+(`validateConnectorModule`, `createConnectorClient`, `startConnectors`,
+`stopConnectors`, `connectorStatus`), load-time import in
+`event-runtime/lib/extensions.mjs`, start/stop in `event-runtime/cli/serve.mjs`,
+status projection in `event-runtime/lib/api-status.mjs`, fixture
+`event-runtime/test-support/extensions/sample/connectors/echo.mjs`._
+
+A **connector** is how an extension talks to an external system without
+editing the kernel: Buzz, a tracker, a notifier that is not the hard-wired
+Telegram path in `lib/notify.mjs`. It is operator-installed **code** — the
+same trust class as adapters and hooks, allow-listed in `policy.yaml`, never
+scanned. The connector talks to the runtime only through a narrow client;
+it never receives a DB handle and cannot mutate the registry.
+
+```json
+"contributes": {
+  "connectors": { "buzz": "./connectors/buzz.mjs" }
+}
+```
+
+Names match the adapter pattern `^[a-z][a-z0-9-]*$`. Paths are relative to
+the manifest and must stay inside the extension.
+
+### Contract
+
+```js
+// contributes.connectors: { "echo": "./connectors/echo.mjs" }
+export const id = "factory/sample:echo"; // publisher[/extension]:name
+
+export default async function start(ctx) {
+  // ctx: { config, secrets, client, log, signal }
+  const unsubscribe = ctx.client.inbox.subscribe((event) => {
+    ctx.log(`inbox ${event.type} ${event.item?.id ?? ""}`);
+  });
+  ctx.signal.addEventListener("abort", () => unsubscribe(), { once: true });
+  return {
+    async stop() {
+      unsubscribe();
+    },
+    health() {
+      return { ok: true, detail: "subscribed", lastEventAt: undefined };
+    },
+  };
+}
+```
+
+| `ctx` field | What it is                                                                                                                                                                                                                                                            |
+| :---------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config`    | The extension's effective config with secret values stripped. Read settings from here, not from `policy.yaml`. Never contains secret values.                                                                                                                          |
+| `secrets`   | Values the loader resolved from `FACTORY_EXT_<NAMESPACE>_<KEY>` (process env, then `~/.factory/secrets.env`) for every `format: "secret"` property, plus remaining keys matching `/nsec\|token\|secret\|key\|password/i`. Absent keys are missing, not empty strings. |
+| `client`    | The narrow loopback client (below).                                                                                                                                                                                                                                   |
+| `log`       | `(message) => void` — prefixed `connector <ext>/<name>:` on the serve log.                                                                                                                                                                                            |
+| `signal`    | An `AbortSignal`. Aborted when `serve` shuts down, when `start()` overruns 10 s, and when that connector is otherwise stopped.                                                                                                                                        |
+
+`start` may be sync or async. Its return value must be `{ stop, health }`:
+
+| Method     | Contract                                                                                                             |
+| :--------- | :------------------------------------------------------------------------------------------------------------------- |
+| `stop()`   | May be async. Isolated: a throw does not fail shutdown or other connectors.                                          |
+| `health()` | Sync. `{ ok: boolean, detail?: string, lastEventAt?: string }`. A throw is reported as `ok: false` with the message. |
+
+### Client
+
+The connector never holds the database. `client` is the only runtime surface:
+
+| Method                                  | What it does                                                                                                                                                                                                 |
+| :-------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `inject(envelope)`                      | Same intake as `cli inject` (`admitExternalEvent`). Overwrites `source` to `connector:<ext>/<name>`. The event follows the normal planner/approval path — a connector cannot approve a proposal it injected. |
+| `inbox.list({ status })`                | Open/acked/resolved/all inbox items.                                                                                                                                                                         |
+| `inbox.get(id)`                         | One inbox item, or `null`.                                                                                                                                                                                   |
+| `inbox.decide(id, response, { actor })` | Records `decidedBy: "connector:<ext>/<name>:<actor>"` (`unknown` when actor is omitted).                                                                                                                     |
+| `inbox.subscribe(cb)`                   | `cb({ type, item, at })` on new-item / changed. Returns an unsubscribe function.                                                                                                                             |
+| `proposals.get(id)`                     | One proposal, or `null`.                                                                                                                                                                                     |
+| `runs.get(id)`                          | One run (`runId`, `state`, `attempts`, `spec`, …), or `null`.                                                                                                                                                |
+
+There is no `approve`, no registry write, no raw SQL.
+
+### Semantics
+
+- **Load is all-or-nothing; start is not.** Each connector module is imported
+  and contract-checked before the extension is accepted. A module that fails
+  the contract (missing `default` function, bad `id`, import error) disables
+  the extension whole — like a bad adapter. After the registry loads, `serve`
+  calls `start()` with an `AbortSignal`. A `start()` that throws, rejects, or
+  does not return `{ stop, health }` within **10 seconds** records
+  `connector <ext>/<name> failed to start: <msg>` under
+  `/status.anomalies.configuration` and **leaves the extension's other
+  contributions loaded**. Connectors are the one contribution that may fail
+  independently. Other connectors of the same extension still start.
+- **Secrets never sit in `policy.yaml`.** Every `format: "secret"` property
+  (WM-920) is read from `FACTORY_EXT_<NAMESPACE>_<KEY>` (upper-snake) and
+  never from the policy entry. A secret present in `policy.yaml` disables the
+  extension. Until a schema declares `format: "secret"`, keys matching
+  `/nsec|token|secret|key|password/i` are treated as secrets for `ctx` (moved
+  out of `config` into `secrets`). `/config` publishes `{ set, source }` for
+  declared secret fields, never the value.
+- **Attribution.** `inject` stamps `source: "connector:<ext>/<name>"`.
+  `inbox.decide` records `decidedBy: "connector:<ext>/<name>:<external actor>"`.
+- **Status.** `connectorStatus()` / `attachConnectorStatus()` project
+  `connectors: [{ extension, name, ok, detail, lastEventAt, startedAt }]`.
+  Start-failure anomalies already appear on `/status.anomalies.configuration`
+  via `registry.anomalies`. Wiring the `connectors` array onto `GET /status`,
+  one doctor line per connector, and a CONNECTORS column on `extensions list`
+  is a follow-up — those files sit outside this ticket's Owned Paths.
+  `extensions list --json` already includes the `connectors` array the loader
+  records.
+
+The fixture `event-runtime/test-support/extensions/sample/connectors/echo.mjs`
+subscribes to inbox writes, logs them, and exposes health so
+`extensions.test.mjs`, `connectors.test.mjs` and `api-status.test.mjs` can
+watch load/start/stop/anomaly/secrets without an external network.
 
 ## Harness
 

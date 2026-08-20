@@ -21,9 +21,9 @@
  *      registry.mjs) and skips *that* extension whole — nothing of it is
  *      registered — while every other extension still loads. `serve`/`work`
  *      never fail to start because a third-party manifest is broken.
- *   3. **Reserved manifest keys are accepted, not rejected.** `connectors`,
- *      `views` belong to follow-up tickets; a manifest that carries them
- *      loads its packs, adapters, config, hooks and panels here and
+ *   3. **Reserved manifest keys are accepted, not rejected.** `views`
+ *      belongs to a follow-up ticket; a manifest that carries it loads its
+ *      packs, adapters, config, hooks, panels and connectors here and
  *      records a "not supported yet" anomaly for the rest. `panels` (WM-840)
  *      contributes directories of `*.panel.json`; the manifest check only
  *      proves they exist inside the extension, and lib/registry.mjs loads
@@ -58,6 +58,15 @@
  *      byte-identical. Every other contributing root emits under its
  *      `publisher-extension` slug; a non-core pack may not take plugin name
  *      `core` or reuse another pack's slug (the later extension is skipped).
+ *   7. **Connectors start after the registry, and may fail independently
+ *      (WM-919).** `contributes.connectors` maps a name to a module; each is
+ *      imported and contract-checked (`default` start function + string `id`,
+ *      lib/connectors.mjs) before the extension is accepted — a bad module
+ *      disables the extension, like a bad hook. `serve` then calls
+ *      `startConnectors`: a `start()` that throws or overruns 10s is a
+ *      configuration anomaly for *that connector* and the extension's other
+ *      contributions stay loaded. `ctx.secrets` is resolved here from
+ *      `format: "secret"` / env; `ctx.config` never contains those values.
  *
  * Ordering matters for callers: `adapterRegistry.toMap()` is a snapshot, so
  * `loadExtensions` must run before a CLI takes the map it hands to
@@ -73,6 +82,12 @@ import {
   validateAdapterContract,
 } from "./adapters/index.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
+import {
+  CONNECTOR_NAME_PATTERN,
+  setLoadedConnectors,
+  splitConfigSecrets,
+  validateConnectorModule,
+} from "./connectors.mjs";
 import {
   HOOK_POINTS,
   defaultHookRegistry,
@@ -101,7 +116,7 @@ export const EXTENSION_SCHEMA = JSON.parse(
 );
 
 /** Manifest keys the schema accepts today but no ticket has implemented yet. */
-export const RESERVED_CONTRIBUTIONS = Object.freeze(["connectors", "views"]);
+export const RESERVED_CONTRIBUTIONS = Object.freeze(["views"]);
 
 /** The `source` a hook registered by an extension carries (lib/hooks.mjs). */
 export function extensionHookSource(name) {
@@ -293,6 +308,26 @@ export function validateExtensionManifest(dir) {
       );
     }
   }
+  for (const [name, rel] of Object.entries(contributes.connectors ?? {})) {
+    if (!CONNECTOR_NAME_PATTERN.test(name)) {
+      errors.push(
+        `${file}: contributes.connectors key "${name}" must match ${CONNECTOR_NAME_PATTERN}`,
+      );
+      continue;
+    }
+    const abs = path.resolve(root, rel);
+    if (!isInside(root, abs)) {
+      errors.push(
+        `${file}: contributes.connectors.${name} "${rel}" escapes the extension directory`,
+      );
+      continue;
+    }
+    if (!existsSync(abs) || !statSync(abs).isFile()) {
+      errors.push(
+        `${file}: contributes.connectors.${name} "${rel}" is not a file (${abs})`,
+      );
+    }
+  }
   for (const [point, rel] of Object.entries(contributes.hooks ?? {})) {
     if (!HOOK_POINTS.includes(point)) {
       errors.push(
@@ -447,6 +482,15 @@ function deleteAt(obj, keyPath) {
     node = node[key];
   }
   delete node[keyPath[keyPath.length - 1]];
+}
+
+/** Public config vs secrets bag for a connector's `ctx`. */
+function connectorCtxConfig(config) {
+  if (!config) return { config: {}, secrets: {} };
+  return splitConfigSecrets(
+    config.values,
+    collectSecretFields(config.schemaJson ?? {}),
+  );
 }
 
 function parseDotenv(text) {
@@ -875,7 +919,7 @@ function packRootFor(extensionRoot, rel) {
  * @param {Array<object>} [options.packRoots] - the policy `packs:` roots the extension packs join (default: loadPackRoots({ root }))
  * @param {string} [options.registryRoot] - the built-in registry root the dry load uses (tests point it at a copy)
  * @returns {Promise<{
- *   extensions: Array<{ name: string, version: string, path: string, packs: string[], adapters: string[], hooks: Array<{ point: string, id: string }>, panels: string[], reserved: string[], config: { namespace: string, schema: string, values: object }|null }>,
+ *   extensions: Array<{ name: string, version: string, path: string, packs: string[], adapters: string[], hooks: Array<{ point: string, id: string }>, connectors: Array<{ name: string, id: string }>, panels: string[], reserved: string[], config: { namespace: string, schema: string, values: object }|null }>,
  *   panelRoots: Array<{ dir: string, origin: string, base: string }>,
  *   harnessRoots: Array<object>,
  *   packRoots: Array<object>,
@@ -905,6 +949,7 @@ export async function loadExtensions({
     if (hook.source.startsWith(extensionHookSource("")))
       hookRegistry.unregister(hook.id);
   }
+  setLoadedConnectors([]);
   const { roots, anomalies } = loadExtensionRoots({ root, policy });
   const extensions = [];
   const panelRoots = [];
@@ -917,6 +962,7 @@ export async function loadExtensions({
   const acceptedHarnessNames = new Set();
   const disabled = [];
   const loaded = [];
+  const loadedConnectorModules = [];
   const dryLoad = (candidates) =>
     loadRegistry({
       ...(registryRoot ? { root: registryRoot } : {}),
@@ -1037,6 +1083,34 @@ export async function loadExtensions({
       skip(`${label}: ${hookFault}`);
       continue;
     }
+
+    // Connectors: import and contract-check (default start function + id).
+    // Registered for serve to start only once the extension is accepted; a
+    // later start() failure is a per-connector anomaly, not a skip here.
+    const connectorModules = [];
+    let connectorFault = null;
+    for (const [name, rel] of Object.entries(contributes.connectors ?? {})) {
+      const file = path.resolve(dir, rel);
+      let module;
+      try {
+        module = await import(pathToFileURL(file).href);
+      } catch (err) {
+        connectorFault = `connector "${name}" failed to import from ${file}: ${err.message}`;
+        break;
+      }
+      let contract;
+      try {
+        contract = validateConnectorModule(module);
+      } catch (err) {
+        connectorFault = `connector "${name}" (${rel}): ${err.message}`;
+        break;
+      }
+      connectorModules.push({ name, id: contract.id, module });
+    }
+    if (connectorFault) {
+      skip(`${label}: ${connectorFault}`);
+      continue;
+    }
     if (config && acceptedNamespaces.has(config.namespace)) {
       skip(
         `${label}: config namespace "${config.namespace}" is already used by ${acceptedNamespaces.get(config.namespace)}`,
@@ -1079,6 +1153,18 @@ export async function loadExtensions({
         config: () => getExtensionConfig(manifest.name),
       });
     }
+    const { config: connectorConfig, secrets: connectorSecrets } =
+      connectorCtxConfig(config);
+    for (const { name, id, module } of connectorModules) {
+      loadedConnectorModules.push({
+        extension: manifest.name,
+        name,
+        id,
+        module,
+        config: connectorConfig,
+        secrets: connectorSecrets,
+      });
+    }
     for (const warning of checked.warnings) anomalies.push(warning);
     if (config) acceptedNamespaces.set(config.namespace, manifest.name);
     const { schemaJson, secretMeta, ...publicConfig } = config ?? {};
@@ -1096,6 +1182,7 @@ export async function loadExtensions({
       packs: extPackRoots.map((p) => p.name),
       adapters: modules.map((m) => m.name),
       hooks: hookModules.map(({ point, id }) => ({ point, id })),
+      connectors: connectorModules.map(({ name, id }) => ({ name, id })),
       panels: extPanelRoots.map((p) => p.dir),
       reserved: RESERVED_CONTRIBUTIONS.filter((key) =>
         Object.hasOwn(contributes, key),
@@ -1114,6 +1201,7 @@ export async function loadExtensions({
   }
 
   LOADED = { extensions: loaded, disabled };
+  setLoadedConnectors(loadedConnectorModules);
   return {
     extensions,
     packRoots: accepted,

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createAdapterRegistry } from "../lib/adapters/index.mjs";
 import { loadExtensions } from "../lib/extensions.mjs";
+import { startConnectors, stopConnectors } from "../lib/connectors.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
@@ -332,6 +333,8 @@ export default async function serve(args) {
     panelRoots: extensions.panelRoots,
   });
   registry.anomalies.push(...extensions.anomalies);
+  const startedConnectors = await startConnectors({ db, registry, log });
+  registry.anomalies.push(...startedConnectors.anomalies);
   const pv = policyVersion();
   const owner = newWorkerId();
 
@@ -479,8 +482,13 @@ export default async function serve(args) {
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
     releaseServeLock(home);
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 1000).unref?.();
+    const finish = () => {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 1000).unref?.();
+    };
+    Promise.resolve(stopConnectors())
+      .catch((err) => log(`connector stop: ${err.message}`))
+      .finally(finish);
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
