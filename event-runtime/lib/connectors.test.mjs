@@ -1,5 +1,5 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-connectors-test-mjs";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createAdapterRegistry } from "./adapters/index.mjs";
@@ -112,6 +112,18 @@ describe("connector attribution", () => {
 });
 
 describe("startConnectors / stopConnectors", () => {
+  // The gate in extensions.mjs (environmentGatedConnectorModule) only invokes
+  // a connector's real start() in the "live" environment (WM-988); these
+  // tests opt in explicitly so they still exercise real start/stop behavior.
+  // See "connectors stay healthy but do not start outside the live
+  // environment" below for the non-live regression coverage.
+  beforeEach(() => {
+    process.env.FACTORY_EVENT_ENV = "live";
+  });
+  afterEach(() => {
+    delete process.env.FACTORY_EVENT_ENV;
+  });
+
   test("loads the echo fixture, starts, reports health, stops", async () => {
     await load(policyFor(SAMPLE_EXTENSION));
     expect(loadedConnectors().map((c) => c.name)).toEqual(["echo"]);
