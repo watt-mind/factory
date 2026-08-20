@@ -27,6 +27,8 @@ import {
   parseAuthTag,
   pubkeyFromSecret,
   signEvent,
+  verifyAuthTag,
+  verifyEvent,
   withAuthTag,
 } from "./nostr.mjs";
 import { postEvent, queryEvents } from "./relay.mjs";
@@ -46,9 +48,11 @@ export function resolveIdentity({ secrets = {}, config = {} } = {}) {
     config.approvers,
     auth?.owner ? [auth.owner] : [],
   ).map((p) => p.toLowerCase());
+  const authValid = auth && pubkey ? verifyAuthTag(auth, pubkey) : null;
   return {
     secretHex,
     auth,
+    authValid,
     pubkey,
     approvers,
     npub: pubkey ? encodeNpub(pubkey) : null,
@@ -103,11 +107,13 @@ export function createBuzzRuntime({
   const identity = resolveIdentity({ secrets, config });
   const posted = new Map(); // itemId -> { eventId, postedAt, optionMap, kind }
   const seenIngress = new Set();
-  const pendingReject = new Map(); // rootEventId -> itemId
+  const pendingReject = new Map(); // rootEventId -> { itemId, optionId }
   const queue = [];
   let lastRelayAt = null;
   let lastPollAt = null;
   let lastError = null;
+  let lastErrorStatus = null;
+  let droppedPosts = 0;
   let since = Math.floor(now() / 1000) - 60;
 
   const relayOpts = () => ({
@@ -124,6 +130,20 @@ export function createBuzzRuntime({
         lastEventAt: lastRelayAt,
       };
     }
+    if (identity.auth && identity.authValid === false) {
+      return {
+        ok: false,
+        detail: "FACTORY_EXT_BUZZ_AUTH_TAG failed verification",
+        lastEventAt: lastRelayAt ?? lastPollAt,
+      };
+    }
+    if (identity.approvers.length === 0) {
+      return {
+        ok: false,
+        detail: "no approvers configured",
+        lastEventAt: lastRelayAt ?? lastPollAt,
+      };
+    }
     if (lastError && !lastRelayAt) {
       return { ok: false, detail: lastError, lastEventAt: lastPollAt };
     }
@@ -136,7 +156,7 @@ export function createBuzzRuntime({
     }
     return {
       ok: true,
-      detail: `relay ok; posted ${posted.size}; queue ${queue.length}; last poll ${lastPollAt ?? "never"}`,
+      detail: `relay ok; posted ${posted.size}; queue ${queue.length}; dropped ${droppedPosts}; last poll ${lastPollAt ?? "never"}`,
       lastEventAt: lastRelayAt ?? lastPollAt,
     };
   }
@@ -144,16 +164,24 @@ export function createBuzzRuntime({
   async function publish(event) {
     const result = await postEvent(relayUrl, event, relayOpts());
     if (!result.ok) {
+      lastErrorStatus = result.status;
       lastError = `relay POST /events ${result.status}: ${String(result.text).slice(0, 180)}`;
       throw new Error(lastError);
     }
     lastError = null;
+    lastErrorStatus = null;
     lastRelayAt = new Date(now()).toISOString();
     return event;
   }
 
   function enqueue(job) {
-    if (queue.length >= QUEUE_LIMIT) queue.shift();
+    if (queue.length >= QUEUE_LIMIT) {
+      queue.shift();
+      droppedPosts += 1;
+      log(
+        `outage queue overflow: dropped oldest post (limit ${QUEUE_LIMIT}, dropped total ${droppedPosts})`,
+      );
+    }
     queue.push(job);
   }
 
@@ -282,6 +310,32 @@ export function createBuzzRuntime({
     return null;
   }
 
+  function optionLabel(item, optionId) {
+    const options = Array.isArray(item?.decision?.options)
+      ? item.decision.options
+      : [];
+    return options.find((o) => o.id === optionId)?.label ?? optionId;
+  }
+
+  function reasonPrompt(item, optionId) {
+    return `reply with a reason to ${String(optionLabel(item, optionId)).toLowerCase()}`;
+  }
+
+  async function replyInThread(replyTo, content) {
+    const reply = channelMessage({
+      secretHex: identity.secretHex,
+      auth: identity.auth,
+      channel,
+      content,
+      replyTo,
+    });
+    try {
+      await publish(reply);
+    } catch {
+      enqueue(() => publish(reply));
+    }
+  }
+
   async function handleReaction(event) {
     if (seenIngress.has(event.id)) return;
     seenIngress.add(event.id);
@@ -294,19 +348,21 @@ export function createBuzzRuntime({
     if (!optionId) return;
     const decided = await decideItem(found.item, optionId, identity.npub);
     if (decided.needReason) {
-      pendingReject.set(found.record.eventId, found.id);
-      const reply = channelMessage({
-        secretHex: identity.secretHex,
-        auth: identity.auth,
-        channel,
-        content: REJECT_REASON_PROMPT,
-        replyTo: found.record.eventId,
+      pendingReject.set(found.record.eventId, {
+        itemId: found.id,
+        optionId,
       });
-      try {
-        await publish(reply);
-      } catch {
-        enqueue(() => publish(reply));
-      }
+      await replyInThread(
+        found.record.eventId,
+        reasonPrompt(found.item, optionId),
+      );
+      return;
+    }
+    if (decided.error) {
+      await replyInThread(
+        found.record.eventId,
+        `decide failed: ${decided.error}`,
+      );
     }
   }
 
@@ -329,15 +385,20 @@ export function createBuzzRuntime({
       return;
     }
 
-    const pendingId = pendingReject.get(rootId);
-    if (pendingId) {
-      const item = client.inbox.get(pendingId);
+    const pending = pendingReject.get(rootId);
+    if (pending) {
+      const item = client.inbox.get(pending.itemId);
       if (!item) return;
-      const optionId =
-        reactionToOptionId("👎", posted.get(pendingId)?.optionMap ?? {}) ??
-        "reject";
-      await decideItem(item, optionId, identity.npub, event.content);
+      const decided = await decideItem(
+        item,
+        pending.optionId,
+        identity.npub,
+        event.content,
+      );
       pendingReject.delete(rootId);
+      if (decided.error) {
+        await replyInThread(rootId, `decide failed: ${decided.error}`);
+      }
     }
   }
 
@@ -349,9 +410,14 @@ export function createBuzzRuntime({
       open = -1;
     }
     const h = health();
+    const statusSuffix = h.ok
+      ? ""
+      : lastErrorStatus
+        ? ` (status ${lastErrorStatus})`
+        : "";
     const content = [
       `inbox open: ${open < 0 ? "?" : open}`,
-      `connector: ${h.ok ? "ok" : "down"} ${h.detail}`,
+      `connector: ${h.ok ? "ok" : "down"}${statusSuffix}`,
       `in-flight: not visible through connector client`,
     ].join("\n");
     const event = channelMessage({
@@ -437,20 +503,26 @@ export function createBuzzRuntime({
       const postedIds = [...posted.values()].map((r) => r.eventId);
       const filters = [];
       if (postedIds.length > 0) {
-        filters.push({ kinds: [KIND_REACTION], "#e": postedIds, since });
-        filters.push({ kinds: [KIND_CHAT], "#e": postedIds, since });
+        // Idempotent on the reaction/reply event id (seenIngress), so these
+        // are not bounded by `since` — a reaction posted during downtime
+        // must not be lost when the connector restarts.
+        filters.push({ kinds: [KIND_REACTION], "#e": postedIds });
+        filters.push({ kinds: [KIND_CHAT], "#e": postedIds });
       }
       filters.push({ kinds: [KIND_CHAT], "#h": [channel], since });
       const result = await queryEvents(relayUrl, filters, relayOpts());
       if (!result.ok) {
+        lastErrorStatus = result.status;
         lastError = `relay POST /query ${result.status}: ${String(result.text).slice(0, 180)}`;
         return;
       }
       lastError = null;
+      lastErrorStatus = null;
       lastRelayAt = lastPollAt;
       const events = Array.isArray(result.json) ? result.json : [];
       let maxCreated = since;
       for (const event of events) {
+        if (!verifyEvent(event)) continue;
         if (
           typeof event.created_at === "number" &&
           event.created_at > maxCreated

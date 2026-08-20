@@ -59,8 +59,12 @@ Optional config (non-secret, in the policy `config:` block):
   - `@factory dispatch WM-123 repo=factory` → `factory.dispatch.requested`
   - `@factory status` → inbox open count + this connector's health
   - anything else is ignored
-- **Outage.** Failed POSTs sit on a bounded in-memory queue and retry. Ingress
-  resumes with `since`. `health()` reports the last successful relay round-trip.
+- **Outage.** Failed POSTs sit on a bounded in-memory queue and retry; a queue
+  overflow is logged and counted in `health().detail`. Reaction/reply queries
+  are not bounded by `since` (idempotent on event id via `seenIngress`), so a
+  reaction that lands during downtime is not lost on restart — only the broad
+  channel-wide command query resumes with `since`. `health()` reports the last
+  successful relay round-trip.
 
 ## Verify
 

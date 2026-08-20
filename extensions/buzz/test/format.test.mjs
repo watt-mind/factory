@@ -9,6 +9,7 @@ import {
   optionNeedsReason,
   parseCommand,
   reactionToOptionId,
+  truncateBody,
 } from "../lib/format.mjs";
 
 const proposal = {
@@ -78,6 +79,22 @@ describe("inbox message", () => {
         response: { optionId: "approve" },
       }),
     ).toBe("✅ approve by alice");
+  });
+
+  test("long question/body fallback is capped at ~300 chars with ellipsis, deep link kept", () => {
+    const long = "x".repeat(500);
+    const body = formatInboxMessage(
+      { id: "inbox_1", title: "t", body: long },
+      { webUrl: "http://127.0.0.1:7382" },
+    );
+    const lines = body.split("\n");
+    expect(lines[1].length).toBeLessThanOrEqual(301);
+    expect(lines[1].endsWith("…")).toBe(true);
+    expect(body).toContain("http://127.0.0.1:7382/#/inbox/inbox_1");
+  });
+
+  test("truncateBody leaves short text untouched", () => {
+    expect(truncateBody("short")).toBe("short");
   });
 });
 

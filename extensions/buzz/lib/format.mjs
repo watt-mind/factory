@@ -69,6 +69,14 @@ export function inboxDeepLink(itemId, webUrl) {
   return hash;
 }
 
+const MESSAGE_BODY_LIMIT = 300;
+
+export function truncateBody(text, limit = MESSAGE_BODY_LIMIT) {
+  const value = String(text ?? "");
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit).trimEnd()}…`;
+}
+
 export function formatInboxMessage(item, { webUrl } = {}) {
   const title = String(item?.title ?? "").trim() || "(untitled)";
   const question =
@@ -80,7 +88,7 @@ export function formatInboxMessage(item, { webUrl } = {}) {
         : "";
   const options = formatOptions(item?.decision);
   const link = inboxDeepLink(item?.id ?? "", webUrl);
-  return [title, question, options.line, link]
+  return [title, truncateBody(question), options.line, link]
     .filter((line) => line !== "")
     .join("\n");
 }

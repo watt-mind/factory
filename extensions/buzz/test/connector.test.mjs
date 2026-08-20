@@ -6,7 +6,12 @@ import {
   pubkeyFromSecret,
   signEvent,
 } from "../lib/nostr.mjs";
-import { REJECT_REASON_PROMPT, createBuzzRuntime } from "../lib/runtime.mjs";
+import {
+  QUEUE_LIMIT,
+  REJECT_REASON_PROMPT,
+  createBuzzRuntime,
+  resolveIdentity,
+} from "../lib/runtime.mjs";
 
 const AGENT_SECRET = "0".repeat(63) + "2";
 const OWNER_SECRET = "0".repeat(63) + "1";
@@ -332,6 +337,198 @@ describe("ingress", () => {
       true,
     );
   });
+
+  test("a tampered signature on an otherwise-valid reaction is dropped before decide", async () => {
+    const decisions = [];
+    const item = inboxItem();
+    const client = fakeClient({
+      items: [item],
+      onDecide: (row) => decisions.push(row),
+    });
+    const postedId = "c".repeat(64);
+    const reaction = signEvent(
+      { kind: KIND_REACTION, tags: [["e", postedId]], content: "👍" },
+      OWNER_SECRET,
+      { createdAt: 1_700_000_010 },
+    );
+    const tampered = { ...reaction, sig: "0".repeat(128) };
+    const relay = startRelay({ extraEvents: [tampered] });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client,
+      fetchImpl: relay.fetchImpl,
+    });
+    runtime.posted.set("inbox_1", {
+      eventId: postedId,
+      postedAt: "2026-08-20T00:00:00.000Z",
+      optionMap: { "👍": "approve", "👎": "reject", "💤": "dismiss" },
+      kind: "decision_needed",
+    });
+    await runtime.poll();
+    expect(decisions).toHaveLength(0);
+  });
+
+  test("a tampered id on an otherwise-valid reaction is dropped before decide", async () => {
+    const decisions = [];
+    const item = inboxItem();
+    const client = fakeClient({
+      items: [item],
+      onDecide: (row) => decisions.push(row),
+    });
+    const postedId = "d".repeat(64);
+    const reaction = signEvent(
+      { kind: KIND_REACTION, tags: [["e", postedId]], content: "👍" },
+      OWNER_SECRET,
+      { createdAt: 1_700_000_011 },
+    );
+    const tampered = { ...reaction, id: "1".repeat(64) };
+    const relay = startRelay({ extraEvents: [tampered] });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client,
+      fetchImpl: relay.fetchImpl,
+    });
+    runtime.posted.set("inbox_1", {
+      eventId: postedId,
+      postedAt: "2026-08-20T00:00:00.000Z",
+      optionMap: { "👍": "approve", "👎": "reject", "💤": "dismiss" },
+      kind: "decision_needed",
+    });
+    await runtime.poll();
+    expect(decisions).toHaveLength(0);
+  });
+
+  test("answer-option reject on a numbered decision records the chosen option, not a hardcoded reject", async () => {
+    const decisions = [];
+    const numberedDecision = {
+      schemaVersion: "factory.decision-request/v1",
+      question: "Pick one",
+      options: [
+        { id: "a", label: "One" },
+        { id: "b", label: "Two" },
+        { id: "needs-note", label: "Needs a note" },
+        { id: "d", label: "Four" },
+      ],
+      fields: [
+        {
+          id: "note",
+          kind: "text",
+          required: true,
+          whenOption: ["needs-note"],
+        },
+      ],
+    };
+    const item = inboxItem({
+      id: "inbox_numbered",
+      decision: numberedDecision,
+    });
+    const client = fakeClient({
+      items: [item],
+      onDecide: (row) => decisions.push(row),
+    });
+    const postedId = "e".repeat(64);
+    const optionMap = { 1: "a", 2: "b", 3: "needs-note", 4: "d" };
+    const reaction = signEvent(
+      { kind: KIND_REACTION, tags: [["e", postedId]], content: "3" },
+      OWNER_SECRET,
+      { createdAt: 1_700_000_012 },
+    );
+    const relay = startRelay({ extraEvents: [reaction] });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client,
+      fetchImpl: relay.fetchImpl,
+    });
+    runtime.posted.set("inbox_numbered", {
+      eventId: postedId,
+      postedAt: "2026-08-20T00:00:00.000Z",
+      optionMap,
+      kind: "decision_needed",
+    });
+    await runtime.poll();
+    expect(decisions).toHaveLength(0);
+    expect(runtime.pendingReject.get(postedId)).toEqual({
+      itemId: "inbox_numbered",
+      optionId: "needs-note",
+    });
+    expect(
+      relay.posted.some((e) =>
+        e.content.includes("reply with a reason to needs a note"),
+      ),
+    ).toBe(true);
+
+    const rootId = relay.posted[0].id;
+    const followUp = signEvent(
+      {
+        kind: KIND_CHAT,
+        tags: [["e", rootId, "", "root"]],
+        content: "here is the note",
+      },
+      OWNER_SECRET,
+      { createdAt: 1_700_000_013 },
+    );
+    const relay2 = startRelay({ extraEvents: [followUp] });
+    const runtime2 = createBuzzRuntime({
+      config: { relayUrl: relay2.url, channel: CHANNEL },
+      secrets,
+      client,
+      fetchImpl: relay2.fetchImpl,
+    });
+    runtime2.posted.set("inbox_numbered", {
+      eventId: postedId,
+      postedAt: "2026-08-20T00:00:00.000Z",
+      optionMap,
+      kind: "decision_needed",
+    });
+    runtime2.pendingReject.set(rootId, {
+      itemId: "inbox_numbered",
+      optionId: "needs-note",
+    });
+    await runtime2.poll();
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].response.optionId).toBe("needs-note");
+    expect(decisions[0].response.fields).toEqual({ note: "here is the note" });
+  });
+
+  test("a decide failure on reaction is surfaced as an in-thread reply", async () => {
+    const item = inboxItem();
+    const client = fakeClient({
+      items: [item],
+      onDecide: () => {
+        throw new Error("inbox locked");
+      },
+    });
+    const postedId = "f".repeat(64);
+    const reaction = signEvent(
+      { kind: KIND_REACTION, tags: [["e", postedId]], content: "👍" },
+      OWNER_SECRET,
+      { createdAt: 1_700_000_014 },
+    );
+    const relay = startRelay({ extraEvents: [reaction] });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client,
+      fetchImpl: relay.fetchImpl,
+    });
+    runtime.posted.set("inbox_1", {
+      eventId: postedId,
+      postedAt: "2026-08-20T00:00:00.000Z",
+      optionMap: { "👍": "approve", "👎": "reject", "💤": "dismiss" },
+      kind: "decision_needed",
+    });
+    await runtime.poll();
+    expect(
+      relay.posted.some(
+        (e) =>
+          e.content.includes("decide failed") &&
+          e.content.includes("inbox locked"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("outage queue", () => {
@@ -353,6 +550,33 @@ describe("outage queue", () => {
     expect(runtime.queue.length).toBe(0);
     expect(runtime.health().ok).toBe(true);
   });
+
+  test("overflowing the outage queue logs and is counted in health().detail", async () => {
+    const extraDrops = 2;
+    const items = Array.from({ length: QUEUE_LIMIT + extraDrops }, (_, i) =>
+      inboxItem({ id: `inbox_${i}` }),
+    );
+    const relay = startRelay({ failEvents: items.length });
+    const logs = [];
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client: fakeClient({ items }),
+      fetchImpl: relay.fetchImpl,
+      log: (msg) => logs.push(msg),
+    });
+    for (const item of items) {
+      await runtime.onInboxEvent({ type: "new-item", item });
+    }
+    expect(runtime.queue.length).toBe(QUEUE_LIMIT);
+    expect(logs.some((m) => m.includes("outage queue overflow"))).toBe(true);
+    // Relay recovers: flushing the queue on the next poll should succeed,
+    // and the dropped-post count survives into the healthy detail string.
+    await runtime.poll();
+    expect(runtime.queue.length).toBe(0);
+    expect(runtime.health().ok).toBe(true);
+    expect(runtime.health().detail).toContain(`dropped ${extraDrops}`);
+  });
 });
 
 describe("health without secrets", () => {
@@ -367,5 +591,53 @@ describe("health without secrets", () => {
       detail: "FACTORY_EXT_BUZZ_AGENT_NSEC is unset",
     });
     await runtime.poll();
+  });
+});
+
+describe("identity verification", () => {
+  test("resolveIdentity flags a tampered auth-tag signature", () => {
+    const tampered = JSON.stringify([
+      "auth",
+      OWNER_PUB,
+      "kind=1&created_at<1713957000",
+      "0".repeat(128),
+    ]);
+    const identity = resolveIdentity({
+      secrets: { agentNsec: AGENT_SECRET, authTag: tampered },
+      config: {},
+    });
+    expect(identity.authValid).toBe(false);
+  });
+
+  test("health() is ok:false with a reason when the auth tag fails verification", async () => {
+    const tampered = JSON.stringify([
+      "auth",
+      OWNER_PUB,
+      "kind=1&created_at<1713957000",
+      "0".repeat(128),
+    ]);
+    const relay = startRelay();
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL, approvers: [OWNER_PUB] },
+      secrets: { agentNsec: AGENT_SECRET, authTag: tampered },
+      client: fakeClient(),
+      fetchImpl: relay.fetchImpl,
+    });
+    expect(runtime.health()).toMatchObject({ ok: false });
+    expect(runtime.health().detail).toContain("verification");
+  });
+
+  test("health() is ok:false with a reason when there are no approvers", async () => {
+    const relay = startRelay();
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL, approvers: [] },
+      secrets: { agentNsec: AGENT_SECRET },
+      client: fakeClient(),
+      fetchImpl: relay.fetchImpl,
+    });
+    expect(runtime.health()).toMatchObject({
+      ok: false,
+      detail: "no approvers configured",
+    });
   });
 });
