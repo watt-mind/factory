@@ -1,7 +1,8 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-repos-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import {
   loadRepos,
   proveMergeChecks,
@@ -454,9 +455,14 @@ describe("reposView is what the control API serves", () => {
       maxInFlightSource: "repo",
     });
     expect(rows[1].effective).toEqual({
-      maxInFlight: 3,
+      maxInFlight: DEFAULT_MAX_IN_FLIGHT,
       maxInFlightSource: "default",
     });
+  });
+
+  test("repos.mjs does not import planner.mjs (WM-755)", () => {
+    const source = readFileSync(new URL("./repos.mjs", import.meta.url), "utf8");
+    expect(source).not.toMatch(/from ["']\.\/planner\.mjs["']/);
   });
 
   test("the dispatch/report-only distinction survives the wire", () => {

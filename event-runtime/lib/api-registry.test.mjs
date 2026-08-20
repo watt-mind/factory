@@ -36,6 +36,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -130,7 +131,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         reportOnly: true,
         maxInFlight: null,
         effective: {
-          maxInFlight: 3,
+          maxInFlight: DEFAULT_MAX_IN_FLIGHT,
           maxInFlightSource: "default",
         },
         mergeCi: null,

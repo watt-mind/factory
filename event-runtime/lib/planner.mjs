@@ -32,6 +32,7 @@ import { listMemos } from "./memos.mjs";
 import {
   artifactsRoot,
   DEAD_LETTER_AFTER,
+  DEFAULT_MAX_IN_FLIGHT,
   DEFAULT_PROPOSAL_TTL_SECONDS,
   FACTORY_ROOT,
 } from "./config.mjs";
@@ -80,6 +81,7 @@ import {
 
 /** In-flight issues list is stable across one scan; 60s is the ticket cap. */
 export const IN_FLIGHT_CACHE_TTL_MS = 60_000;
+export { DEFAULT_MAX_IN_FLIGHT };
 
 /**
  * §5.4 idempotency key: agent ref, output contract, then the event type's
@@ -324,9 +326,6 @@ export function buildRunSpec(
     ...(placement ? { placement } : {}),
   };
 }
-
-/** Default cap when neither repo nor policy config supplies one. */
-export const DEFAULT_MAX_IN_FLIGHT = 3;
 
 function resolveNow(now) {
   return typeof now === "function" ? now() : now;

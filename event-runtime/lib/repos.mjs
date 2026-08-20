@@ -14,8 +14,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { FACTORY_ROOT } from "./config.mjs";
-import { DEFAULT_MAX_IN_FLIGHT } from "./planner.mjs";
+import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
 
 export class RepoError extends Error {
   constructor(message) {

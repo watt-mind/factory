@@ -4,13 +4,14 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashJson } from "./canonical.mjs";
-import { DEAD_LETTER_AFTER } from "./config.mjs";
+import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
 import {
   buildRunSpec,
   createLinearReadCache,
+  DEFAULT_MAX_IN_FLIGHT as PLANNER_DEFAULT_MAX_IN_FLIGHT,
   idempotencyKeyFor,
   pinMemos,
   planAdmittedEvents,
@@ -103,6 +104,13 @@ describe("idempotencyKeyFor", () => {
         "sha256:x",
       ),
     ).toThrow(/unknown idempotency scope/);
+  });
+});
+
+describe("DEFAULT_MAX_IN_FLIGHT (WM-755)", () => {
+  test("planner re-exports the config binding so callers keep working", () => {
+    expect(PLANNER_DEFAULT_MAX_IN_FLIGHT).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(DEFAULT_MAX_IN_FLIGHT).toBe(3);
   });
 });
 

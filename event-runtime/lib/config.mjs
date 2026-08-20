@@ -79,6 +79,9 @@ export const TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
 /** Events that fail planning this many times are dead-lettered (§13). */
 export const DEAD_LETTER_AFTER = 3;
 
+/** Default cap when neither repo nor policy config supplies one. */
+export const DEFAULT_MAX_IN_FLIGHT = 3;
+
 export const DEFAULT_PROPOSAL_TTL_SECONDS = 30 * 60;
 
 let cachedPolicyVersion;
