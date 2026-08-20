@@ -84,11 +84,7 @@ import {
   ADAPTER_NAME_PATTERN,
   validateAdapterContract,
 } from "./adapters/index.mjs";
-import {
-  RUNTIME_ROOT,
-  environmentName,
-  resolveConfigPath,
-} from "./config.mjs";
+import { RUNTIME_ROOT, environmentName, resolveConfigPath } from "./config.mjs";
 import {
   CONNECTOR_NAME_PATTERN,
   setLoadedConnectors,
