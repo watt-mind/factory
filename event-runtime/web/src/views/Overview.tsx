@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -423,6 +424,8 @@ export interface AnomalyRow {
   dismissProposalId?: string;
   proposalId?: string;
   proposal?: Proposal;
+  /** False for housekeeping the Approval Gate / Proposals expired chip already cover (WM-979). */
+  surfaceInNeedsYou?: boolean;
 }
 
 /** Collapse dead letters that represent the same operator problem. */
@@ -464,19 +467,24 @@ export function stripAnomalyKindPrefix(
  */
 export function buildAnomalyRows(
   anomalies: StatusView["anomalies"] | undefined,
-  proposalsById: Map<string, Proposal>,
+  _proposalsById: Map<string, Proposal>,
   callbacks: {
     onJumpProposal: (id: string) => void;
     onJumpRuns: (state?: string) => void;
     onJumpEvents: (focus: EventFocus) => void;
     onJumpRun: (runId: string) => void;
     onNavigate: (path: string) => void;
+    onJumpExpired?: () => void;
   },
   s?: StatusView,
   now?: number,
 ): AnomalyRow[] {
   const rows: AnomalyRow[] = [];
   if (!anomalies) return rows;
+  const reviewExpired = () =>
+    callbacks.onJumpExpired
+      ? callbacks.onJumpExpired()
+      : callbacks.onNavigate("proposals");
 
   for (const schedule of anomalies.stoppedSchedules ?? []) {
     rows.push({
@@ -513,16 +521,14 @@ export function buildAnomalyRows(
     });
   }
 
-  for (const id of anomalies.expiredOpenProposals) {
+  const expiredOpen = anomalies.expiredOpenProposals ?? [];
+  if (expiredOpen.length > 0) {
+    const n = expiredOpen.length;
     rows.push({
       kind: "proposal",
-      text: `expired open proposal ${id}`,
-      proposalId: id,
-      proposal: proposalsById.get(id),
-      links: [
-        { label: "View proposal", go: () => callbacks.onJumpProposal(id) },
-      ],
-      dismissProposalId: id,
+      text: n === 1 ? "1 expired open proposal" : `${n} expired open proposals`,
+      links: [{ label: "Review expired", go: reviewExpired }],
+      surfaceInNeedsYou: false,
     });
   }
   if (anomalies.staleLeases > 0) {
@@ -844,7 +850,7 @@ export function Overview({
   onJumpRuns,
   onJumpWorkers,
   onNavigate,
-  onJumpExpired: _onJumpExpired,
+  onJumpExpired,
   onJumpGraph: _onJumpGraph,
   onInject: _onInject,
 }: {
@@ -1038,36 +1044,35 @@ export function Overview({
       notify(`Ack failed: ${(error as Error).message}`, "err"),
   });
 
+  const jumpExpired = useCallback(
+    () => (onJumpExpired ? onJumpExpired() : onNavigate("proposals")),
+    [onJumpExpired, onNavigate],
+  );
   const s = useMemo(() => normalizeStatus(status.data), [status.data]);
   const anomalies = s?.anomalies;
-  const proposalsById = useMemo(() => {
-    return new Map<string, Proposal>(
-      (proposalsForDeck.data?.proposals ?? []).map((p) => [p.id, p]),
-    );
-  }, [proposalsForDeck.data?.proposals]);
-
   const anomalyRows = useMemo(() => {
     return buildAnomalyRows(
       anomalies,
-      proposalsById,
+      new Map(),
       {
         onJumpProposal,
         onJumpRuns,
         onJumpEvents,
         onJumpRun,
         onNavigate,
+        onJumpExpired: jumpExpired,
       },
       s,
       now,
     );
   }, [
     anomalies,
-    proposalsById,
     onJumpProposal,
     onJumpRuns,
     onJumpEvents,
     onJumpRun,
     onNavigate,
+    jumpExpired,
     s,
     now,
   ]);
@@ -1091,13 +1096,15 @@ export function Overview({
   }, [inbox.data?.items]);
   const runtimeNeeds = useMemo(
     () =>
-      anomalyRows.map((row, index) => ({
-        id: `runtime-${index}`,
-        title: row.text,
-        primaryAction: row.links[0]
-          ? { label: row.links[0].label, onClick: row.links[0].go }
-          : undefined,
-      })),
+      anomalyRows
+        .filter((row) => row.surfaceInNeedsYou !== false)
+        .map((row, index) => ({
+          id: `runtime-${index}`,
+          title: row.text,
+          primaryAction: row.links[0]
+            ? { label: row.links[0].label, onClick: row.links[0].go }
+            : undefined,
+        })),
     [anomalyRows],
   );
 
@@ -1330,9 +1337,9 @@ export function Overview({
 
       {/*
         Band A: the anomaly remediation deck (WM-205). Needs-you above surfaces
-        these same anomalies as one-click jumps, but every remediation verb
-        (archive, requeue, release lease, reject) still lives only here. It stays
-        until those actions move onto the Runtime rows.
+        remediatable anomalies as one-click jumps; verbs (archive, requeue,
+        release lease) still live here. Expired-open proposals are not Needs-you
+        (WM-979): they collapse to one Review-expired row that opens Proposals.
       */}
       {hasAnomalies ? (
         <section
@@ -1736,7 +1743,7 @@ export function Overview({
                       value={proposalExpired}
                       hue={proposalExpired > 0 ? "var(--hue-warn)" : undefined}
                       attention={proposalExpired > 0}
-                      onClick={() => onNavigate("proposals")}
+                      onClick={jumpExpired}
                       total={proposalTotal}
                     />
                   </div>

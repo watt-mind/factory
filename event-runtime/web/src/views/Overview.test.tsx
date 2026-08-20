@@ -21,7 +21,7 @@ import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
-import { changeInput, withApi } from "../test-render";
+import { withApi } from "../test-render";
 import type {
   AdmittedEvent,
   EventFocus,
@@ -176,6 +176,7 @@ type OverviewCallbacks = Partial<
     | "onJumpEvents"
     | "onJumpRuns"
     | "onNavigate"
+    | "onJumpExpired"
   >
 >;
 
@@ -192,7 +193,7 @@ function renderOverview(
       onJumpEvents={callbacks.onJumpEvents ?? noop}
       onJumpRuns={callbacks.onJumpRuns ?? noop}
       onNavigate={callbacks.onNavigate ?? noop}
-      onJumpExpired={noop}
+      onJumpExpired={callbacks.onJumpExpired ?? noop}
       onJumpGraph={noop}
       onInject={noop}
     />,
@@ -496,7 +497,7 @@ describe("Overview keyboard navigation (WM-292)", () => {
       await waitFor(() => view.getByText(/Anomalies · 2 active issues/));
 
       const first = deck(view)
-        .getByRole("button", { name: "expired open" })
+        .getByRole("button", { name: "1 expired open proposal" })
         .closest('[tabindex="-1"]');
       const second = deck(view)
         .getByRole("button", { name: /github.*planner failed/ })
@@ -524,36 +525,30 @@ describe("Overview keyboard navigation (WM-292)", () => {
   });
 });
 
-describe("Overview anomaly deck (WM-95)", () => {
-  test("enriches an expired-proposal row with agent, decision/reason, origin, and age; demotes the raw id", async () => {
+describe("Overview anomaly deck (WM-95, WM-979)", () => {
+  test("collapses expired-open proposals to one Review-expired row (WM-979)", async () => {
     const origStatus = api.status;
     const origProposals = api.proposals;
     const origOutbox = api.outbox;
     const origJournal = api.journal;
     api.status = async () =>
-      baseStatus({ expiredOpenProposals: [stubProposal.id] });
+      baseStatus({
+        expiredOpenProposals: [stubProposal.id, "prop_second"],
+      });
     api.proposals = async () => ({ proposals: [stubProposal] });
     api.outbox = async () => ({ outbox: [] });
     api.journal = async () => ({ entries: [], head: 0 });
+    const onJumpExpired = mock(() => {});
 
     try {
-      const { getByText, queryByTitle } = renderOverview();
-
-      await waitFor(() => getByText(/agent: triage-scan/));
-
-      expect(getByText(/agent: triage-scan/)).toBeTruthy();
-      expect(getByText(/human_needed/)).toBeTruthy();
-      expect(getByText(/ambiguous repo pin/)).toBeTruthy();
-      const originId = queryByTitle("evt-789");
-      expect(originId).toBeTruthy();
-      expect(originId?.parentElement?.textContent).toBe(
-        "origin github/evt-789",
+      const view = renderOverview({ kind: "all" }, { onJumpExpired });
+      const row = await waitFor(() =>
+        deck(view).getByRole("button", { name: "2 expired open proposals" }),
       );
-
-      // Raw id is demoted to secondary, copyable text rather than the primary label.
-      const idNode = queryByTitle(`${stubProposal.id} — click to copy`);
-      expect(idNode).toBeTruthy();
-      expect(idNode?.textContent).toBe(shortId(stubProposal.id));
+      expect(view.queryByText(/agent: triage-scan/)).toBeNull();
+      expect(view.queryByRole("button", { name: "Reject…" })).toBeNull();
+      fireEvent.click(row);
+      expect(onJumpExpired).toHaveBeenCalledTimes(1);
     } finally {
       api.status = origStatus;
       api.proposals = origProposals;
@@ -562,81 +557,94 @@ describe("Overview anomaly deck (WM-95)", () => {
     }
   });
 
-  test("rejects an expired proposal only after collecting a non-empty reason", async () => {
+  test("does not list expired-open proposals under Needs you Runtime", async () => {
     const origStatus = api.status;
     const origProposals = api.proposals;
     const origOutbox = api.outbox;
     const origJournal = api.journal;
-    const origReject = api.reject;
     api.status = async () =>
-      baseStatus({ expiredOpenProposals: [stubProposal.id] });
+      baseStatus({
+        expiredOpenProposals: [stubProposal.id],
+        staleLeases: 1,
+      });
     api.proposals = async () => ({ proposals: [stubProposal] });
     api.outbox = async () => ({ outbox: [] });
     api.journal = async () => ({ entries: [], head: 0 });
-
-    const rejectedCalls: { id: string; why?: string }[] = [];
-    api.reject = async (id: string, why?: string) => {
-      rejectedCalls.push({ id, why });
-      return { rejected: true };
-    };
 
     try {
       const view = renderOverview();
-      const reject = await waitFor(() =>
-        view.getByRole("button", { name: "Reject…" }),
-      );
-
-      expect(view.queryByRole("button", { name: "Dismiss" })).toBeNull();
-      fireEvent.click(reject);
-
-      const confirm = view.getByRole("button", {
-        name: "Reject proposal",
-      }) as HTMLButtonElement;
-      const reasonInput = view.getByLabelText(
-        "Rejection reason",
-      ) as HTMLInputElement;
-      expect(reasonInput.placeholder).toMatch(/Reason \(required/i);
-      expect(confirm.disabled).toBe(true);
-
-      await act(async () => changeInput(reasonInput, "   "));
-      fireEvent.click(confirm);
-      expect(rejectedCalls).toEqual([]);
-
-      await act(async () => changeInput(reasonInput, " No longer actionable "));
-      await waitFor(() => expect(confirm.disabled).toBe(false));
-      await act(async () => fireEvent.click(confirm));
-      await waitFor(() =>
-        expect(rejectedCalls).toEqual([
-          { id: stubProposal.id, why: "No longer actionable" },
-        ]),
-      );
+      const needsYou = await waitFor(() => view.getByLabelText("Needs you"));
+      expect(within(needsYou).queryByText(/expired open proposal/)).toBeNull();
+      expect(
+        within(needsYou).getByRole("button", { name: "View leased runs" }),
+      ).toBeTruthy();
+      expect(view.getByText(/Anomalies · 2 active issues/)).toBeTruthy();
+      expect(
+        deck(view).getByRole("button", { name: "1 expired open proposal" }),
+      ).toBeTruthy();
     } finally {
       api.status = origStatus;
       api.proposals = origProposals;
       api.outbox = origOutbox;
       api.journal = origJournal;
-      api.reject = origReject;
     }
   });
 
-  test("shows a fallback for a proposal id with no match in the proposals list", async () => {
+  test("Approval Gate expired tile jumps via onJumpExpired", async () => {
+    const origStatus = api.status;
+    const origProposals = api.proposals;
+    const origOutbox = api.outbox;
+    const origJournal = api.journal;
+    api.status = async () => ({
+      ...baseStatus({ expiredOpenProposals: [stubProposal.id] }),
+      proposals: { open: 1, expired: 1 },
+    });
+    api.proposals = async () => ({ proposals: [stubProposal] });
+    api.outbox = async () => ({ outbox: [] });
+    api.journal = async () => ({ entries: [], head: 0 });
+    const onJumpExpired = mock(() => {});
+    const onNavigate = mock((_path: string) => {});
+
+    try {
+      const view = renderOverview(
+        { kind: "all" },
+        { onJumpExpired, onNavigate },
+      );
+      const tile = await waitFor(() =>
+        view.getByRole("button", { name: "proposals · expired: 1" }),
+      );
+      fireEvent.click(tile);
+      expect(onJumpExpired).toHaveBeenCalledTimes(1);
+      expect(onNavigate).not.toHaveBeenCalled();
+    } finally {
+      api.status = origStatus;
+      api.proposals = origProposals;
+      api.outbox = origOutbox;
+      api.journal = origJournal;
+    }
+  });
+
+  test("Needs you is calm when expired-open proposals are the only doctor anomalies", async () => {
     const origStatus = api.status;
     const origProposals = api.proposals;
     const origOutbox = api.outbox;
     const origJournal = api.journal;
     api.status = async () =>
-      baseStatus({ expiredOpenProposals: ["prop_missing"] });
-    api.proposals = async () => ({ proposals: [] });
+      baseStatus({ expiredOpenProposals: [stubProposal.id] });
+    api.proposals = async () => ({ proposals: [stubProposal] });
     api.outbox = async () => ({ outbox: [] });
     api.journal = async () => ({ entries: [], head: 0 });
 
     try {
-      const { getByText, queryByTitle } = renderOverview();
-
-      await waitFor(() => queryByTitle("prop_missing — click to copy"));
-
-      expect(getByText(/agent: —/)).toBeTruthy();
-      expect(getByText(/origin —\/—/)).toBeTruthy();
+      const view = renderOverview();
+      await waitFor(() =>
+        expect(
+          view.getByText(/Nothing needs you · last decision/),
+        ).toBeTruthy(),
+      );
+      expect(
+        deck(view).getByRole("button", { name: "1 expired open proposal" }),
+      ).toBeTruthy();
     } finally {
       api.status = origStatus;
       api.proposals = origProposals;
@@ -1473,8 +1481,10 @@ describe("buildAnomalyRows (WM-205)", () => {
       "ambiguous",
       "capacity",
     ]);
-    expect(rows[0]!.proposalId).toBe("prop_1");
-    expect(rows[0]!.proposal?.agent).toBe("triage-scan");
+    expect(rows[0]!.text).toBe("1 expired open proposal");
+    expect(rows[0]!.surfaceInNeedsYou).toBe(false);
+    expect(rows[0]!.proposalId).toBeUndefined();
+    expect(rows[0]!.links[0]!.label).toBe("Review expired");
     expect(rows[1]!.text).toMatch(/stale leases: 2/);
     expect(rows[2]!.text).toMatch(/unpublished outbox rows: 1/);
     expect(rows[3]!.requeue).toEqual({ source: "github", eventId: "e99" });
@@ -1483,6 +1493,24 @@ describe("buildAnomalyRows (WM-205)", () => {
     expect(rows[4]!.releaseWorker).toEqual({ workerId: "w1", runId: "r1" });
     expect(rows[5]!.text).toMatch(/ambiguous open proposals: 3/);
     expect(rows[6]!.text).toMatch(/4 queued runs and no live worker/);
+  });
+
+  test("collapses many expired-open ids to one Review-expired row (WM-979)", () => {
+    const onJumpExpired = mock(() => {});
+    const rows = buildAnomalyRows(
+      {
+        ...baseStatus().anomalies,
+        expiredOpenProposals: ["prop_a", "prop_b", "prop_c"],
+      },
+      new Map(),
+      { ...callbacks, onJumpExpired },
+    );
+    const expired = rows.filter((row) => row.kind === "proposal");
+    expect(expired).toHaveLength(1);
+    expect(expired[0]!.text).toBe("3 expired open proposals");
+    expect(expired[0]!.surfaceInNeedsYou).toBe(false);
+    expired[0]!.links[0]!.go();
+    expect(onJumpExpired).toHaveBeenCalledTimes(1);
   });
 
   test("maps stopped and late schedules, piling proposals, and configuration warnings", () => {

@@ -91,3 +91,19 @@ the effective adapter's `policy.yaml` `models:` map.
 
 The fleet default still moves by PR. Promoting an overlay into git is WM-889.
 The global `models:` map itself is WM-888. Agents UI on this store is WM-884.
+
+## Overview expired-open proposals (WM-979)
+
+Decided 2026-08-20. TTL-expired open proposals are not a Needs-you decision.
+Approve is disabled once TTL has elapsed; reject and bulk reject live on
+Proposals with the Expired chip (`onJumpExpired`).
+
+Overview therefore:
+
+- Does not list `expiredOpenProposals` in Needs you Runtime (no per-id "View
+  proposal" jumps for a spec that cannot be approved).
+- Collapses them to one Anomalies row whose action is **Review expired**.
+- Wires the Approval Gate expired tile to the same jump.
+
+Inbox `proposal_expired` items remain Needs-you Decide rows when they exist.
+Auto-expiry of leftover chain proposals is WM-445, not this.
