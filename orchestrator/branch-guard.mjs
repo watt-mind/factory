@@ -12,10 +12,9 @@
  *  - Deleting protected branches (base, deploy_branch, develop, master, main)
  *  - Deleting branches that are still the head of other open PRs (WM-17, Legalease #261)
  */
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import path from "node:path";
-import { ROOT } from "../lib/schedule.mjs";
+import { configYamlPath, loadConfigYaml } from "../lib/schedule.mjs";
 import { githubForge, loadForge } from "../lib/forge/index.mjs";
 
 export const EXIT = {
@@ -165,15 +164,16 @@ if (import.meta.main) {
     process.exit(EXIT.CANNOT_EVALUATE);
   }
 
-  const configPath =
-    process.env.FACTORY_BRANCH_GUARD_REPOS_YAML ||
-    path.join(ROOT, "config/repos.yaml");
+  const overrideConfigPath =
+    process.env.FACTORY_BRANCH_GUARD_REPOS_YAML || null;
+  let configPath;
   let cfg;
   try {
-    cfg = Bun.YAML.parse(readFileSync(configPath, "utf8"));
+    configPath = configYamlPath("repos", { configPath: overrideConfigPath });
+    cfg = loadConfigYaml("repos", { configPath: overrideConfigPath });
   } catch (err) {
     console.error(
-      `CANNOT EVALUATE — could not read ${configPath}: ${err.message}`,
+      `CANNOT EVALUATE — could not read ${overrideConfigPath ?? "config/repos.yaml"}: ${err.message}`,
     );
     process.exit(EXIT.CANNOT_EVALUATE);
   }

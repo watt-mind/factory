@@ -31,7 +31,7 @@ import {
 import { spawn, spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { ROOT } from "../lib/schedule.mjs";
+import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import {
   parseOwnedPaths,
@@ -283,12 +283,8 @@ export async function main(argv = process.argv.slice(2)) {
   const ONE = val("--ticket");
 
   const expand = (p) => String(p ?? "").replace(/^~/, homedir());
-  const cfg = Bun.YAML.parse(
-    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
-  );
-  const policy = Bun.YAML.parse(
-    readFileSync(path.join(ROOT, "config/policy.yaml"), "utf8"),
-  );
+  const cfg = loadConfigYaml("repos");
+  const policy = loadConfigYaml("policy");
   const repo = (cfg.repos ?? []).find((r) => r.name === val("--repo"));
   if (!repo) {
     console.error(

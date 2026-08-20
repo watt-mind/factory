@@ -9,10 +9,10 @@
  * Read-only: refreshes remote refs, reads the live factory queue, and, when
  * configured, fetches the public deployment metadata endpoint.
  */
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { ROOT } from "../lib/schedule.mjs";
+import { loadConfigYaml } from "../lib/schedule.mjs";
 import { loadQueueConfig, fetchQueueSummaries } from "../lib/queue-summary.mjs";
 import { recommendNext } from "../lib/next-recommend.mjs";
 import {
@@ -83,9 +83,7 @@ function checkoutMatchesRepo(
 }
 
 function configuredRepo() {
-  const cfg = Bun.YAML.parse(
-    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
-  );
+  const cfg = loadConfigYaml("repos");
   const repos = cfg.repos ?? [];
 
   if (explicitRepo) {
@@ -154,7 +152,7 @@ function factoryQueueAvailability(config) {
 const repoConfig = configuredRepo();
 if (!repoConfig) {
   const names =
-    Bun.YAML.parse(readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"))
+    loadConfigYaml("repos")
       .repos?.map((r) => r.name)
       .join(", ") ?? "";
   console.error(

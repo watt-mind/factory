@@ -12,15 +12,12 @@
  * tuning lives next to schedule/policy and applies on every machine with a
  * factory checkout. (.gitleaks.toml stays in-repo: CI and git hooks need it.)
  */
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { loadConfigYaml } from "../lib/schedule.mjs";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const cfg = Bun.YAML.parse(
-  readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
-);
+const cfg = loadConfigYaml("repos");
 
 const target = realpathSync(process.argv[2] || process.cwd());
 const expand = (p) => realpathSync(p.replace(/^~(?=\/|$)/, homedir()));

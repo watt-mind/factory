@@ -35,12 +35,11 @@
  *                                (only when non-empty — exported-but-empty is
  *                                not an injected answer)
  */
-import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
 import { globsOverlap } from "./owned-paths.mjs";
-import { ROOT } from "../lib/schedule.mjs";
+import { configYamlPath, loadConfigYaml } from "../lib/schedule.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 
 export const EXIT = { CLEAN: 0, ESCALATE: 2, CANNOT_EVALUATE: 3 };
@@ -176,15 +175,15 @@ if (import.meta.main) {
     process.exit(EXIT.CANNOT_EVALUATE);
   }
 
-  const configPath =
-    process.env.FACTORY_ESCALATE_REPOS_YAML ||
-    path.join(ROOT, "config/repos.yaml");
+  const overrideConfigPath = process.env.FACTORY_ESCALATE_REPOS_YAML || null;
+  let configPath;
   let cfg;
   try {
-    cfg = Bun.YAML.parse(readFileSync(configPath, "utf8"));
+    configPath = configYamlPath("repos", { configPath: overrideConfigPath });
+    cfg = loadConfigYaml("repos", { configPath: overrideConfigPath });
   } catch (err) {
     console.error(
-      `CANNOT EVALUATE — could not read ${configPath}: ${err.message}`,
+      `CANNOT EVALUATE — could not read ${overrideConfigPath ?? "config/repos.yaml"}: ${err.message}`,
     );
     console.error(
       `the escalation gate did not run => treat the PR as ESCALATED until it can`,

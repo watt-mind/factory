@@ -3,7 +3,6 @@ import {
   appendFileSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -17,11 +16,10 @@ import {
   resolveChangedFiles,
   resolveEscalateGlobs,
 } from "./escalate.mjs";
+import { loadConfigYaml } from "../lib/schedule.mjs";
 
 const globs = ["app/src/payment/**", "app/src/auth/**", "app/migrations/**"];
-const repos = Bun.YAML.parse(
-  readFileSync(new URL("../config/repos.yaml", import.meta.url), "utf8"),
-).repos;
+const repos = loadConfigYaml("repos").repos;
 const cashsaasGlobs = repos.find(
   (repo) => repo.name === "cashsaas",
 )?.escalate_paths;
@@ -37,6 +35,43 @@ const coachWattzGlobs = repos.find(
 const legaleaseGlobs = repos.find(
   (repo) => repo.name === "legalease",
 )?.escalate_paths;
+
+test("config reader prefers operator-local YAML, warns for an example, and fails closed", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-config-fallback-"));
+  try {
+    const config = path.join(root, "config");
+    mkdirSync(config);
+    writeFileSync(
+      path.join(config, "repos.example.yaml"),
+      "repos: [example]\n",
+    );
+
+    const warnings = [];
+    expect(
+      loadConfigYaml("repos", {
+        root,
+        warn: (message) => warnings.push(message),
+      }),
+    ).toEqual({ repos: ["example"] });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("repos.example.yaml fallback");
+
+    writeFileSync(path.join(config, "repos.yaml"), "repos: [local]\n");
+    expect(
+      loadConfigYaml("repos", {
+        root,
+        warn: (message) => warnings.push(message),
+      }),
+    ).toEqual({ repos: ["local"] });
+    expect(warnings).toHaveLength(1);
+
+    expect(() => loadConfigYaml("policy", { root })).toThrow(
+      "neither it nor config/policy.example.yaml exists",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("wm-home config protects its schema, auth, admin, and deployment boundaries", () => {
   expect(wmHomeGlobs).toBeDefined();
