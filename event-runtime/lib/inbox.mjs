@@ -872,6 +872,38 @@ export function listInboxItems(db, { status = "open" } = {}) {
     .map(itemView);
 }
 
+/**
+ * Merge a connector (or other) projection onto the stored delivery blob
+ * without deciding or resolving the item. Shallow-merge of top-level keys
+ * so `delivery.buzz` can land next to Telegram's `delivery.telegram` and
+ * the ledger's `responseHistory`. Reads the stored JSON, not the view, so
+ * writing back does not drop archived answers.
+ */
+export function markInboxDelivered(db, id, delivery) {
+  requiredString(id, "id");
+  if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) {
+    throw new Error("delivery must be an object");
+  }
+  const row = db
+    .query("SELECT delivery_json FROM inbox_items WHERE id = ?")
+    .get(id);
+  if (!row) throw new Error(`unknown inbox item ${id}`);
+  const stored = parseObject(row.delivery_json);
+  const patch = { ...delivery };
+  delete patch.responseHistory;
+  const next = { ...stored, ...patch };
+  if (Object.hasOwn(stored, "responseHistory")) {
+    next.responseHistory = stored.responseHistory;
+  } else {
+    delete next.responseHistory;
+  }
+  db.query("UPDATE inbox_items SET delivery_json = ? WHERE id = ?").run(
+    JSON.stringify(next),
+    id,
+  );
+  return getInboxItem(db, id);
+}
+
 export function ackInboxItem(db, id, { now = Date.now() } = {}) {
   const row = db
     .query("SELECT resolved_at FROM inbox_items WHERE id = ?")

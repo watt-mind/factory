@@ -13,6 +13,7 @@ import {
   getInboxItem,
   inboxCounts,
   listInboxItems,
+  markInboxDelivered,
   reconcileInbox,
   retryInboxDecision,
   resolveInboxItem,
@@ -504,6 +505,99 @@ describe("human inbox ledger (WM-285)", () => {
       exit_code: 7,
       error: "notifier exited 7",
     });
+  });
+
+  test("markInboxDelivered merges onto delivery_json without deciding", () => {
+    const db = openDb(":memory:");
+    const request = decision();
+    const item = createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "buzz delivery",
+        decision: request,
+      },
+      { id: "inbox_mark" },
+    );
+    expect(item.response).toBeNull();
+    expect(item.decidedAt).toBeNull();
+
+    const withTelegram = markInboxDelivered(db, "inbox_mark", {
+      telegram: {
+        sent_at: "2026-08-20T00:00:00.000Z",
+        exit_code: 0,
+        error: null,
+      },
+    });
+    expect(withTelegram.delivery.telegram.exit_code).toBe(0);
+    expect(withTelegram.response).toBeNull();
+    expect(withTelegram.decidedAt).toBeNull();
+
+    const withBuzz = markInboxDelivered(db, "inbox_mark", {
+      buzz: { eventId: "nevent1abc", postedAt: "2026-08-20T00:01:00.000Z" },
+    });
+    expect(withBuzz.delivery.telegram.exit_code).toBe(0);
+    expect(withBuzz.delivery.buzz).toEqual({
+      eventId: "nevent1abc",
+      postedAt: "2026-08-20T00:01:00.000Z",
+    });
+    expect(withBuzz.response).toBeNull();
+    expect(withBuzz.decidedAt).toBeNull();
+
+    const decided = decideInboxItem(db, "inbox_mark", {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "dismiss",
+      fields: {},
+    });
+    expect(decided.item.decidedBy).toBe("operator");
+    expect(decided.item.delivery.buzz.eventId).toBe("nevent1abc");
+    expect(decided.item.delivery.telegram.exit_code).toBe(0);
+
+    const afterDecide = markInboxDelivered(db, "inbox_mark", {
+      buzz: { eventId: "nevent1def", postedAt: "2026-08-20T00:02:00.000Z" },
+    });
+    expect(afterDecide.delivery.buzz.eventId).toBe("nevent1def");
+    expect(afterDecide.decidedBy).toBe("operator");
+    expect(afterDecide.response.optionId).toBe("dismiss");
+  });
+
+  test("markInboxDelivered rejects a missing id and a non-object delivery", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      { kind: "CI RED", title: "exists" },
+      { id: "inbox_exists" },
+    );
+    expect(() => markInboxDelivered(db, "inbox_missing", { buzz: {} })).toThrow(
+      "unknown inbox item inbox_missing",
+    );
+    expect(() => markInboxDelivered(db, "inbox_exists", null)).toThrow(
+      "delivery must be an object",
+    );
+    expect(() => markInboxDelivered(db, "inbox_exists", [])).toThrow(
+      "delivery must be an object",
+    );
+  });
+
+  test("markInboxDelivered survives reopening the database file", () => {
+    const file = path.join(tmpDir("inbox-mark-"), "runtime.db");
+    const db = openDb(file);
+    createInboxItem(
+      db,
+      { kind: "CI RED", title: "persist me" },
+      { id: "inbox_persist" },
+    );
+    markInboxDelivered(db, "inbox_persist", {
+      buzz: { eventId: "nevent1persist", postedAt: "2026-08-20T00:00:00.000Z" },
+    });
+    db.close();
+    const reopened = openDb(file);
+    expect(getInboxItem(reopened, "inbox_persist").delivery.buzz).toEqual({
+      eventId: "nevent1persist",
+      postedAt: "2026-08-20T00:00:00.000Z",
+    });
+    reopened.close();
   });
 
   test("ack, resolve, filters, and counts distinguish open from acknowledged", () => {

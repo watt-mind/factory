@@ -350,4 +350,61 @@ describe("narrow loopback client", () => {
     expect(client.proposals.get("missing")).toBeNull();
     expect(client.runs.get("missing")).toBeNull();
   });
+
+  test("inbox.markDelivered merges delivery, rejects missing id, leaves decide independent", () => {
+    const db = openDb(":memory:");
+    const client = createConnectorClient({
+      db,
+      registry: loadRegistry(),
+      extension: "factory/sample",
+      name: "echo",
+    });
+    const request = {
+      schemaVersion: "factory.decision-request/v1",
+      question: "Dismiss?",
+      options: [{ id: "dismiss", label: "Not now", effect: "dismiss" }],
+    };
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "mark delivered",
+        decision: request,
+      },
+      { id: "inbox_mark_conn" },
+    );
+
+    const events = [];
+    const unsubscribe = client.inbox.subscribe((event) => events.push(event));
+    const marked = client.inbox.markDelivered("inbox_mark_conn", {
+      buzz: { eventId: "nevent1xyz", postedAt: "2026-08-20T00:00:00.000Z" },
+    });
+    expect(marked.delivery.buzz.eventId).toBe("nevent1xyz");
+    expect(marked.response).toBeNull();
+    expect(marked.decidedAt).toBeNull();
+    expect(getInboxItem(db, "inbox_mark_conn").delivery.buzz).toEqual({
+      eventId: "nevent1xyz",
+      postedAt: "2026-08-20T00:00:00.000Z",
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "changed",
+      item: expect.objectContaining({ id: "inbox_mark_conn" }),
+    });
+    unsubscribe();
+
+    expect(() =>
+      client.inbox.markDelivered("inbox_absent", { buzz: { eventId: "x" } }),
+    ).toThrow("unknown inbox item inbox_absent");
+
+    const decided = client.inbox.decide("inbox_mark_conn", {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "dismiss",
+      fields: {},
+    });
+    expect(decided.item.decidedBy).toBe(
+      "connector:factory/sample/echo:unknown",
+    );
+    expect(decided.item.delivery.buzz.eventId).toBe("nevent1xyz");
+  });
 });

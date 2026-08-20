@@ -21,7 +21,7 @@
  *
  * `ctx = { config, secrets, client, log, signal }`. `client` is the only
  * runtime surface: inject (stamped `source: connector:<ext>/<name>`),
- * inbox list/get/decide/subscribe, proposals.get, runs.get. No DB handle,
+ * inbox list/get/decide/markDelivered/subscribe, proposals.get, runs.get. No DB handle,
  * no registry mutation. A connector cannot approve a proposal it injected;
  * the event follows the normal planner/approval path.
  *
@@ -31,7 +31,12 @@
  * `ctx.secrets`.
  */
 import { ADAPTER_NAME_PATTERN } from "./adapters/index.mjs";
-import { decideInboxItem, getInboxItem, listInboxItems } from "./inbox.mjs";
+import {
+  decideInboxItem,
+  getInboxItem,
+  listInboxItems,
+  markInboxDelivered,
+} from "./inbox.mjs";
 import { admitExternalEvent } from "./intake.mjs";
 import { getProposal } from "./proposals.mjs";
 
@@ -225,6 +230,14 @@ export function createConnectorClient({ db, registry, extension, name }) {
           item: result?.item ?? null,
         });
         return result;
+      },
+      markDelivered(id, delivery) {
+        const item = markInboxDelivered(db, id, delivery);
+        emitInboxChange({
+          type: "changed",
+          item,
+        });
+        return item;
       },
       subscribe(cb) {
         return subscribeInboxWrites(cb);
