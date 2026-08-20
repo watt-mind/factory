@@ -124,10 +124,61 @@ export function redactSecrets(value) {
   );
 }
 
+function contributionLength(value) {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === "object") return Object.keys(value).length;
+  return 0;
+}
+
+function emptyContributions() {
+  return { packs: 0, adapters: 0, connectors: 0, hooks: 0, panels: 0 };
+}
+
+/** Pack / adapter / connector / hook / panel counts from a loaded row or a manifest. */
+function contributionsFrom(source) {
+  if (!source || typeof source !== "object") return emptyContributions();
+  const c =
+    source.contributes && typeof source.contributes === "object"
+      ? source.contributes
+      : source;
+  return {
+    packs: contributionLength(c.packs ?? source.packs),
+    adapters: contributionLength(c.adapters ?? source.adapters),
+    connectors: contributionLength(c.connectors ?? source.connectors),
+    hooks: contributionLength(c.hooks ?? source.hooks),
+    panels: contributionLength(c.panels ?? source.panels),
+  };
+}
+
+/**
+ * `loadedExtensions()` only keeps name/version/path/config. When the row has
+ * no contribution arrays, read factory-extension.json at `ext.path` so GET
+ * /config still publishes counts without widening extensions.mjs.
+ */
+function readManifest(dir) {
+  if (!dir || typeof dir !== "string") return null;
+  const file = path.join(dir, "factory-extension.json");
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function contributionsFor(ext) {
+  const fromFields = contributionsFrom(ext);
+  if (Object.values(fromFields).some((n) => n > 0)) return fromFields;
+  const manifest = readManifest(ext.path);
+  return manifest ? contributionsFrom(manifest) : fromFields;
+}
+
 /**
  * Extension config (WM-841): one row per extension the loader saw — accepted
  * ones with their namespace, schema and effective (defaulted, validated,
  * redacted) values; disabled ones with the anomaly that disabled them.
+ * Contribution counts (WM-856) sit on the same row.
  */
 function extensionsSection({ extensions = [], disabled = [] } = {}) {
   const items = [
@@ -146,6 +197,7 @@ function extensionsSection({ extensions = [], disabled = [] } = {}) {
           )
         : null,
       anomaly: null,
+      contributions: contributionsFor(ext),
     })),
     ...disabled.map((ext) => ({
       name: ext.name,
@@ -156,6 +208,7 @@ function extensionsSection({ extensions = [], disabled = [] } = {}) {
       schema: null,
       values: null,
       anomaly: ext.reason,
+      contributions: contributionsFor(ext),
     })),
   ];
   return {

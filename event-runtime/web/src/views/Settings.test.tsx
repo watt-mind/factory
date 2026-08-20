@@ -2,7 +2,7 @@ import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import type { ConfigView } from "../api";
+import type { ConfigExtension, ConfigView } from "../api";
 import { changeInput, renderWithClient } from "../test-render";
 import { Settings } from "./Settings";
 
@@ -126,7 +126,14 @@ const fixture: ConfigView = {
             pollEvery: "30s",
           },
           anomaly: null,
-        },
+          contributions: {
+            packs: 1,
+            adapters: 2,
+            connectors: 1,
+            hooks: 0,
+            panels: 1,
+          },
+        } as ConfigExtension,
         {
           name: "wattmind/broken",
           version: "2.0.0",
@@ -137,7 +144,14 @@ const fixture: ConfigView = {
           values: null,
           anomaly:
             "wattmind/broken@2.0.0: config does not match ./config.schema.json — $.maxParallel: above maximum 4",
-        },
+          contributions: {
+            packs: 0,
+            adapters: 0,
+            connectors: 0,
+            hooks: 0,
+            panels: 0,
+          },
+        } as ConfigExtension,
       ],
     },
   ],
@@ -245,6 +259,11 @@ describe("Settings", () => {
     // A loaded extension: name, namespace, titles, and typed widgets.
     expect(view.getByText("wattmind/mobile")).toBeTruthy();
     expect(view.getByText("mobile")).toBeTruthy();
+    expect(view.getByText("1 pack")).toBeTruthy();
+    expect(view.getByText("2 adapters")).toBeTruthy();
+    expect(view.getByText("1 connector")).toBeTruthy();
+    expect(view.getByText("1 panel")).toBeTruthy();
+    expect(view.queryByText("0 hooks")).toBeNull();
     expect(view.getByText("Simulator")).toBeTruthy();
     expect(view.getByText("iPhone-16")).toBeTruthy();
     expect(view.getByText("FACTORY_EXT_MOBILE_API_TOKEN")).toBeTruthy();
@@ -295,6 +314,24 @@ describe("Settings", () => {
       expect(view.getByRole("heading", { name: "Extensions" })).toBeTruthy(),
     );
     expect(view.getByText("wattmind/mobile")).toBeTruthy();
+    expect(view.queryByText("wattmind/broken")).toBeNull();
+  });
+
+  test("searches extension contribution chips", async () => {
+    stubConfig();
+    const view = renderWithClient(<StatefulSettings initial="repos" />);
+    await view.findByText("factory.tools.base");
+    act(() =>
+      changeInput(
+        view.getByRole("combobox", { name: "Search settings" }),
+        "2 adapters",
+      ),
+    );
+    await waitFor(() =>
+      expect(view.getByRole("heading", { name: "Extensions" })).toBeTruthy(),
+    );
+    expect(view.getByText("wattmind/mobile")).toBeTruthy();
+    expect(view.getByText("2 adapters")).toBeTruthy();
     expect(view.queryByText("wattmind/broken")).toBeNull();
   });
 });

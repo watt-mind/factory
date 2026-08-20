@@ -243,6 +243,16 @@ describe("GET /config view", () => {
             name: "factory/sample",
             version: "1.0.0",
             path: "/ext/sample",
+            packs: ["sample-ext"],
+            adapters: ["echo"],
+            connectors: [{ name: "echo", id: "factory/sample:echo" }],
+            hooks: [
+              {
+                point: "approve.before",
+                id: "factory/sample:approve-before",
+              },
+            ],
+            panels: ["/ext/sample/panels"],
             config: {
               namespace: "sample",
               schema: "./config.schema.json",
@@ -294,6 +304,13 @@ describe("GET /config view", () => {
           limits: { timeoutSeconds: 30, signingKey: "[redacted]" },
         },
         anomaly: null,
+        contributions: {
+          packs: 1,
+          adapters: 1,
+          connectors: 1,
+          hooks: 1,
+          panels: 1,
+        },
       },
       {
         name: "factory/plain",
@@ -304,6 +321,13 @@ describe("GET /config view", () => {
         schema: null,
         values: null,
         anomaly: null,
+        contributions: {
+          packs: 0,
+          adapters: 0,
+          connectors: 0,
+          hooks: 0,
+          panels: 0,
+        },
       },
       {
         name: "factory/broken",
@@ -314,6 +338,13 @@ describe("GET /config view", () => {
         schema: null,
         values: null,
         anomaly: expect.stringMatching(/\$\.maxParallel: above maximum 4/),
+        contributions: {
+          packs: 0,
+          adapters: 0,
+          connectors: 0,
+          hooks: 0,
+          panels: 0,
+        },
       },
     ]);
     // Entries mirror the same rows so search and generic rendering keep working.
@@ -400,6 +431,13 @@ describe("GET /config view", () => {
     expect(section.extensions[0].schema.properties.apiToken.format).toBe(
       "secret",
     );
+    expect(section.extensions[0].contributions).toEqual({
+      packs: 1,
+      adapters: 1,
+      connectors: 1,
+      hooks: 1,
+      panels: 1,
+    });
   });
 
   test("GET /config over real HTTP: an env-backed secret value never appears in the response body, only { set, source }", async () => {

@@ -109,14 +109,74 @@ function extensionKey(ext: ConfigExtension): string {
   return ext.namespace ?? ext.name ?? ext.path;
 }
 
+const CONTRIBUTION_LABELS = [
+  ["packs", "pack"],
+  ["adapters", "adapter"],
+  ["connectors", "connector"],
+  ["hooks", "hook"],
+  ["panels", "panel"],
+] as const;
+
+type ExtensionContributions = Record<
+  (typeof CONTRIBUTION_LABELS)[number][0],
+  number
+>;
+
+function isContributions(value: unknown): value is ExtensionContributions {
+  if (!value || typeof value !== "object") return false;
+  return CONTRIBUTION_LABELS.every(
+    ([key]) => typeof (value as Record<string, unknown>)[key] === "number",
+  );
+}
+
+/** Wire field lives on ConfigExtension after WM-856; api.ts is outside Owned Paths. */
+function contributionsOf(ext: ConfigExtension): ExtensionContributions | null {
+  const raw = (ext as ConfigExtension & { contributions?: unknown })
+    .contributions;
+  return isContributions(raw) ? raw : null;
+}
+
+function contributionChipLabel(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function contributionHaystack(ext: ConfigExtension): string {
+  const counts = contributionsOf(ext);
+  if (!counts) return "";
+  return CONTRIBUTION_LABELS.map(([key, word]) =>
+    contributionChipLabel(counts[key], word),
+  ).join("\n");
+}
+
 function extensionHaystack(ext: ConfigExtension): string {
   return [
     ext.name ?? "",
     ext.namespace ?? "",
     ext.path,
     ext.anomaly ?? "",
+    contributionHaystack(ext),
     schemaSearchText(ext.schema as JsonSchema | null),
   ].join("\n");
+}
+
+function ContributionChips({ ext }: { ext: ConfigExtension }) {
+  const counts = contributionsOf(ext);
+  if (!counts) return null;
+  const chips = CONTRIBUTION_LABELS.filter(([key]) => counts[key] > 0).map(
+    ([key, word]) => {
+      const label = contributionChipLabel(counts[key], word);
+      return (
+        <span
+          key={key}
+          className="mono shrink-0 rounded border border-(--border) bg-(--surface-2) px-1.5 py-0.5 text-xs text-(--text-dim)"
+          title={`${label} contributed`}
+        >
+          {label}
+        </span>
+      );
+    },
+  );
+  return chips.length > 0 ? chips : null;
 }
 
 /**
@@ -150,6 +210,7 @@ function ExtensionRow({
             v{ext.version}
           </span>
         )}
+        <ContributionChips ext={ext} />
         {ext.name && (
           <span
             className="mono min-w-0 truncate text-xs text-(--text-faint)"
