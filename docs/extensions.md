@@ -697,6 +697,13 @@ There is no `approve`, no registry write, no raw SQL.
   `/status.anomalies.configuration` and **leaves the extension's other
   contributions loaded**. Connectors are the one contribution that may fail
   independently. Other connectors of the same extension still start.
+- **Connectors only egress from live.** The loader imports and registers
+  connector modules in every environment, but only invokes their real
+  `start()` function when `environmentName() === "live"`. Worktree, demo,
+  and test runtimes instead log `connector <extension>/<name>: not started:
+non-live environment` once and expose healthy connector status with detail
+  `not started (non-live env)`. This is environmental: do not change a copied
+  `policy.yaml` to disable connectors in a worktree.
 - **Secrets never sit in `policy.yaml`.** Every `format: "secret"` property
   (WM-920) is read from `FACTORY_EXT_<NAMESPACE>_<KEY>` (upper-snake) and
   never from the policy entry. A secret present in `policy.yaml` disables the

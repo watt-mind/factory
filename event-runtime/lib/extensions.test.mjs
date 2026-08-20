@@ -604,6 +604,78 @@ describe("loadExtensions", () => {
     );
   });
 
+  test("connectors stay healthy but do not start outside the live environment", async () => {
+    const dir = tempExtension((m, dirPath) => {
+      m.name = "factory/environment-gate";
+      writeFileSync(
+        path.join(dirPath, "connectors", "echo.mjs"),
+        `export const id = "factory/environment-gate:echo";
+export default async function start() {
+  globalThis.__environmentGateStarts = (globalThis.__environmentGateStarts ?? 0) + 1;
+  return {
+    async stop() {},
+    health() { return { ok: true, detail: "real connector started" }; },
+  };
+}
+`,
+      );
+    });
+    const outcome = (environment) => {
+      const script = `
+import { createAdapterRegistry } from "./event-runtime/lib/adapters/index.mjs";
+import { connectorStatus, startConnectors, stopConnectors } from "./event-runtime/lib/connectors.mjs";
+import { openDb } from "./event-runtime/lib/db.mjs";
+import { loadExtensions } from "./event-runtime/lib/extensions.mjs";
+import { createHookRegistry } from "./event-runtime/lib/hooks.mjs";
+import { loadRegistry } from "./event-runtime/lib/registry.mjs";
+
+await loadExtensions({
+  policy: { extensions: [{ path: ${JSON.stringify(dir)} }] },
+  adapterRegistry: createAdapterRegistry(),
+  hookRegistry: createHookRegistry(),
+  packRoots: [],
+});
+const started = await startConnectors({
+  db: openDb(":memory:"),
+  registry: loadRegistry(),
+});
+console.log(JSON.stringify({
+  starts: globalThis.__environmentGateStarts ?? 0,
+  anomalies: started.anomalies,
+  status: connectorStatus(),
+}));
+await stopConnectors();
+`;
+      const child = Bun.spawnSync({
+        cmd: [process.execPath, "-e", script],
+        cwd: path.dirname(RUNTIME_ROOT),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_EVENT_ENV: environment },
+      });
+      expect(child.exitCode).toBe(0);
+      return JSON.parse(child.stdout.toString());
+    };
+
+    const nonLive = outcome("worktree");
+    expect(nonLive).toMatchObject({ starts: 0, anomalies: [] });
+    expect(nonLive.status).toEqual([
+      expect.objectContaining({
+        extension: "factory/environment-gate",
+        name: "echo",
+        ok: true,
+        detail: "not started (non-live env)",
+      }),
+    ]);
+
+    const live = outcome("live");
+    expect(live).toMatchObject({ starts: 1, anomalies: [] });
+    expect(live.status[0]).toMatchObject({
+      ok: true,
+      detail: "real connector started",
+    });
+  });
+
   test("an unreadable policy.yaml extensions block fails closed", async () => {
     const root = tmpDir("event-extension-policy-");
     mkdirSync(path.join(root, "config"));
