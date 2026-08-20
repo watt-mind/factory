@@ -1,4 +1,3 @@
- 
 /**
  * GHash from AES-GCM and its little-endian "mirror image" Polyval from AES-SIV.
  *

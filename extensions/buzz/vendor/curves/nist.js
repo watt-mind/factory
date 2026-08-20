@@ -1,4 +1,3 @@
- 
 /**
  * NIST P256, P384, P521 curves.
  * https://www.secg.org/sec2-v2.pdf, https://neuromancer.sk/std/nist/P-256

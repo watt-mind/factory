@@ -1,4 +1,3 @@
- 
 /**
  * Blake3 fast hash is Blake2 with reduced security (round count). Can also be used as MAC & KDF.
  *

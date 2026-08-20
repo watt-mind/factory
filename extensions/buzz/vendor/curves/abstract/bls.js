@@ -1,4 +1,3 @@
- 
 /**
  * BLS != BLS.
  * The file implements BLS (Boneh-Lynn-Shacham) signatures.

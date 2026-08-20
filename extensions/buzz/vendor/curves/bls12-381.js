@@ -1,4 +1,3 @@
- 
 /**
  * bls12-381 is pairing-friendly Barreto-Lynn-Scott elliptic curve construction allowing to:
 

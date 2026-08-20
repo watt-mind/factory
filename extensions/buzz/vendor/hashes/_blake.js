@@ -1,4 +1,3 @@
- 
 /**
  * Internal helpers for blake hash.
  * @module

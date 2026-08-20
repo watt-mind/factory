@@ -1,4 +1,3 @@
- 
 /**
  * Methods for elliptic curve multiplication by scalars.
  * Contains wNAF-based ScalarMultiplier, pippenger.

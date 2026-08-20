@@ -1,4 +1,3 @@
- 
 /**
  * Blake1 legacy hash function, one of SHA3 proposals.
  * Rarely used. Check out blake2 or blake3 instead.

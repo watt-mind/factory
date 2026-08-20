@@ -1,4 +1,3 @@
- 
 /**
  * Towered extension fields.
  * Rather than implementing a massive 12th-degree extension directly, it is more efficient

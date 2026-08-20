@@ -1,4 +1,3 @@
- 
 /**
 
 SHA1 (RFC 3174), MD5 (RFC 1321), and RIPEMD160 legacy, weak hash functions.

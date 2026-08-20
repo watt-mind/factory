@@ -1,4 +1,3 @@
- 
 /**
  * Implements [Poseidon](https://www.poseidon-hash.info) ZK-friendly hash.
  *

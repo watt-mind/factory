@@ -1,4 +1,3 @@
- 
 /**
  * blake2b (64-bit) & blake2s (8 to 32-bit) hash functions.
  * b could have been faster, but there is no fast u64 in js, so s is 1.5x faster.

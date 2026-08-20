@@ -1,4 +1,3 @@
- 
 /**
  * ed25519 Twisted Edwards curve with following addons:
  * - X25519 ECDH

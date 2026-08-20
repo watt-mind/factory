@@ -1,4 +1,3 @@
- 
 const U32_MASK64 = /* @__PURE__ */ (() => BigInt(2 ** 32 - 1))();
 const _32n = /* @__PURE__ */ BigInt(32);
 // Split bigint into two 32-bit halves. With `le=true`, returned fields become `{ h: low, l: high

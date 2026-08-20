@@ -1,4 +1,3 @@
- 
 /**
  * Internal Merkle-Damgard hash utils.
  * @module

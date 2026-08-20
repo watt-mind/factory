@@ -1,4 +1,3 @@
- 
 /**
  * SHA3 (keccak) addons.
  *

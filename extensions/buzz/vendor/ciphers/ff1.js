@@ -1,4 +1,3 @@
- 
 /**
  * FPE-FF1 (Format-preserving encryption algorithm) specified in
  * {@link https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-38G.pdf | NIST 800-38G}.

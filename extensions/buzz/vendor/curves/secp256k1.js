@@ -1,4 +1,3 @@
- 
 /**
  * SECG secp256k1. See [pdf](https://www.secg.org/sec2-v2.pdf).
  *

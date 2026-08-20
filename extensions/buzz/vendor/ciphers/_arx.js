@@ -1,4 +1,3 @@
- 
 /**
  * Basic utils for ARX (add-rotate-xor) salsa and chacha ciphers.
 

@@ -1,4 +1,3 @@
- 
 /**
  * ASN.1 DER (Distinguished Encoding Rules) helpers for ECDSA signatures.
  * Only implements the tiny subset needed for `SEQUENCE(INTEGER r, INTEGER s)`.

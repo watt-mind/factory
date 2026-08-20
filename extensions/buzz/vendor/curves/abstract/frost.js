@@ -1,4 +1,3 @@
- 
 /**
  * FROST: Flexible Round-Optimized Schnorr Threshold Protocol for Two-Round Schnorr Signatures.
  *

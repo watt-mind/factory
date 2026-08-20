@@ -1,4 +1,3 @@
- 
 /**
  * bn254, previously known as alt_bn_128, when it had 128-bit security.
 

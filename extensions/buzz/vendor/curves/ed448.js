@@ -1,4 +1,3 @@
- 
 /**
  * Edwards448 (also called Goldilocks) curve with following addons:
  * - X448 ECDH

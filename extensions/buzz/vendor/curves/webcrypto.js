@@ -1,4 +1,3 @@
- 
 /**
  * Friendly wrapper over elliptic curves from built-in WebCrypto. Experimental: API may change.
 

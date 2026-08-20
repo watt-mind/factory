@@ -1,4 +1,3 @@
- 
 /**
  * Experimental implementation of NTT / FFT (Fast Fourier Transform) over finite fields.
  * API may change at any time. The code has not been audited. Feature requests are welcome.

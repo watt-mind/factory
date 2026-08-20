@@ -1,4 +1,3 @@
- 
 /**
  * RFC 9497: Oblivious Pseudorandom Functions (OPRFs) Using Prime-Order Groups.
  * https://www.rfc-editor.org/rfc/rfc9497
