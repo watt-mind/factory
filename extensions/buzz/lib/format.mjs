@@ -80,12 +80,17 @@ export function formatOptions(decision) {
       map,
     };
   }
+  const emojiCounts = new Map();
+  for (const emoji of emojis) {
+    if (!emoji) continue;
+    emojiCounts.set(emoji, (emojiCounts.get(emoji) ?? 0) + 1);
+  }
   const map = {};
   const line = mapped
     .map((o, i) => {
       const n = String(i + 1);
       map[n] = o.id;
-      if (o.emoji) map[o.emoji] = o.id;
+      if (o.emoji && emojiCounts.get(o.emoji) === 1) map[o.emoji] = o.id;
       const label = o.label ?? o.id;
       return o.emoji ? `${n}. ${o.emoji} ${label}` : `${n}. ${label}`;
     })
@@ -166,18 +171,20 @@ export function shouldPost(item, postKinds) {
 }
 
 /**
- * A thread reply selects the recommended option, else `answer`. Never dismiss.
+ * A thread reply selects `answer` when present, else the recommended option.
+ * Never dismiss.
  */
 export function replyOptionId(decision) {
   const options = Array.isArray(decision?.options) ? decision.options : [];
   const byId = (id) => options.find((option) => option.id === id);
-  const recommended = decision?.recommended;
-  if (recommended && byId(recommended)?.effect !== "dismiss")
-    return recommended;
   const answer = options.find(
     (option) => option.effect === "answer" || option.id === "answer",
   );
-  return answer?.id ?? null;
+  if (answer) return answer.id;
+  const recommended = decision?.recommended;
+  const rec = byId(recommended);
+  if (rec && rec.effect !== "dismiss") return rec.id;
+  return null;
 }
 
 export function formatInboxMessage(item, { webUrl } = {}) {

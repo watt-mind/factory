@@ -213,7 +213,6 @@ export function createBuzzRuntime({
       });
       return;
     }
-    if (!postKinds.has(item.kind)) return;
     if (!shouldPost(item, postKinds)) return;
     const content = formatInboxMessage(item, { webUrl: resolvedWebUrl });
     const event = channelMessage({
