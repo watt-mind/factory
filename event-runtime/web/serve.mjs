@@ -82,7 +82,7 @@ Bun.serve({
       });
     const origin = req.headers.get("origin");
     if (origin) {
-      let originHost = null;
+      let originHost;
       try {
         originHost = new URL(origin).hostname;
       } catch {
