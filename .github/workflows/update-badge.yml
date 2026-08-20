@@ -1,0 +1,81 @@
+# Weekly dogfood-in-public badge (WM-958).
+#
+# Rewrites the README marker block from tools/update-dogfood-badge.mjs and
+# commits only when the count changed. Schedule + workflow_dispatch only —
+# never pull_request — so the contents:write token is not exposed to a fork
+# PR. No marketplace `uses:` (WM-573): the shadow fleet 429s on
+# actions/checkout; a plain git fetch of develop is the same checkout.
+name: Update dogfood badge
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-badge
+  cancel-in-progress: true
+
+jobs:
+  update-badge:
+    name: Refresh README dogfood badge
+    runs-on: [self-hosted, shadow]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout develop (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin develop
+          git checkout -q -B develop FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Setup bun (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
+            curl -fsSL https://bun.sh/install | bash
+          fi
+          if [ -x "$HOME/.bun/bin/bun" ]; then
+            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+            "$HOME/.bun/bin/bun" --version
+          else
+            bun --version
+          fi
+
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Update badge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun tools/update-dogfood-badge.mjs --repo "${{ github.repository }}"
+
+      - name: Commit README if the badge changed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "badge unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(oss): refresh dogfood-in-public badge"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git push origin HEAD:develop
