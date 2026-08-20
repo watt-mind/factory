@@ -1259,8 +1259,21 @@ export function Runs({
       >
         <Table
           className="w-full table-fixed border-separate border-spacing-0"
-          style={{ minWidth: `${listCols.length * 112}px` }}
+          style={{
+            minWidth: `${listCols.reduce(
+              (width, c) => width + (c.key === "state" ? 176 : 112),
+              0,
+            )}px`,
+          }}
         >
+          <colgroup>
+            {listCols.map((c) => (
+              <col
+                key={c.key}
+                className={c.key === "state" ? "w-44" : "w-28"}
+              />
+            ))}
+          </colgroup>
           <thead>
             <tr className="text-left">
               {listCols.map((c) => {
@@ -1325,8 +1338,8 @@ export function Runs({
                     to its content instead, which keeps the link fully rendered.
                   */}
                   {show.has("state") && (
-                    <td className="overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
-                      <div className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap">
+                    <td className="min-w-44 border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
                         <StateBadge state={r.state} />
                         {r.state === "PROPOSED" &&
                           (() => {

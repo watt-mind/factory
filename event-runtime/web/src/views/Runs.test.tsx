@@ -350,7 +350,7 @@ describe("Runs Duration column (WM-871)", () => {
           headers.indexOf("Remaining") + 1,
         );
         expect(r.container.querySelector("table")?.style.minWidth).toBe(
-          `${headers.length * 112}px`,
+          `${(headers.length - 1) * 112 + 176}px`,
         );
         expect(cellFor(r, "run_completed", "Duration").textContent).toBe(
           "2m 30s",
@@ -1268,6 +1268,12 @@ describe("Runs copy chords and hints (WM-233)", () => {
         // A capped width plus `truncate` is exactly what clipped the link.
         expect(cls).not.toContain("truncate");
         expect(cls).not.toMatch(/\bmax-w-/);
+        expect(cls).not.toContain("overflow-hidden");
+        // The fixed table layout must reserve room for the badge and link.
+        expect(cls).toMatch(/\bmin-w-/);
+        expect(
+          cell!.closest("table")?.querySelectorAll("col")[1]?.className,
+        ).toContain("w-44");
         // The row must still not wrap — that is the point of this PR.
         expect(cls).toContain("whitespace-nowrap");
 
