@@ -703,6 +703,50 @@ subscribes to inbox writes, logs them, and exposes health so
 `extensions.test.mjs`, `connectors.test.mjs` and `api-status.test.mjs` can
 watch load/start/stop/anomaly/secrets without an external network.
 
+## Worked example: wattmind/buzz
+
+_Shipped in WM-921. Implementation: `extensions/buzz/` (self-contained so it
+can later publish as `@watt-mind/factory-ext-buzz`; the package resolver is
+WM-922)._
+
+The factory appears in Buzz as an agent. Inbox items post to `#general` on
+`https://watt-mind.communities.buzz.xyz`; 👍 / 👎 / 💤 (and numbered
+reactions) plus thread replies map onto `inbox.decide`; `@factory dispatch`
+and `@factory status` are a closed command grammar. Telegram stays the
+blocker channel until a real `BLOCKED` push has been observed end-to-end.
+
+Layout:
+
+```text
+extensions/buzz/
+  factory-extension.json      # name: wattmind/buzz
+  config.schema.json          # namespace buzz; format: secret for nsec + auth tag
+  connectors/buzz.mjs         # id wattmind/buzz:buzz
+  panels/buzz.panel.json      # Overview tile bound to /inbox
+  README.md                   # keygen + secrets.env
+```
+
+Enablement (secrets never in `policy.yaml`):
+
+```yaml
+extensions:
+  - path: extensions/buzz
+    config:
+      channel: "91572011-2505-5288-b6f5-4a7d74abf106" # #general
+```
+
+```bash
+# ~/.factory/secrets.env (chmod 600)
+FACTORY_EXT_BUZZ_AGENT_NSEC=nsec1…
+FACTORY_EXT_BUZZ_AUTH_TAG=["auth","<owner-pubkey>","<conditions>","<sig>"]
+```
+
+Mint the key and the NIP-OA tag with the WM-905 script (`buzz.py keygen` /
+`buzz.py auth-tag`); the owner nsec is read once and never stored. Restart
+`serve`. The connector speaks REST (`POST /events`, `POST /query`) with
+NIP-98 + `x-auth-tag`, the same path as `buzz-cli`. Failed posts sit on a
+bounded in-memory queue; ingress resumes with `since`.
+
 ## Harness
 
 _Shipped in WM-849. Implementation: `contributes.harness` on

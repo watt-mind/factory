@@ -1,0 +1,87 @@
+{
+  "title": "wattmind/buzz config — Buzz relay, channel, and poll settings",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "relayUrl": {
+      "type": "string",
+      "format": "uri",
+      "default": "https://watt-mind.communities.buzz.xyz",
+      "title": "Relay URL",
+      "description": "Buzz HTTP relay (POST /events, POST /query)"
+    },
+    "channel": {
+      "type": "string",
+      "format": "channel-id",
+      "default": "91572011-2505-5288-b6f5-4a7d74abf106",
+      "title": "Inbox channel",
+      "description": "NIP-29 channel uuid for kind-9 posts (`h` tag). Default is #general on the watt-mind relay."
+    },
+    "dmBlockedTo": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "DM blocked-to",
+      "description": "Owner pubkey hex. When set, BLOCKED / CIRCUIT BREAKER / SMOKE RED items are also sent as a NIP-17 DM."
+    },
+    "agentNsec": {
+      "type": "string",
+      "format": "secret",
+      "title": "Agent nsec",
+      "description": "Factory agent secret key (nsec or 64-hex). Resolved from FACTORY_EXT_BUZZ_AGENT_NSEC."
+    },
+    "authTag": {
+      "type": "string",
+      "format": "secret",
+      "title": "NIP-OA auth tag",
+      "description": "JSON array [\"auth\", owner, conditions, sig]. Resolved from FACTORY_EXT_BUZZ_AUTH_TAG."
+    },
+    "postKinds": {
+      "type": "array",
+      "title": "Post kinds",
+      "description": "Inbox kinds posted to the channel. Default is every Decide + Red + Ready kind.",
+      "default": [
+        "BLOCKED",
+        "ESCALATED",
+        "CI RED",
+        "SMOKE RED",
+        "CIRCUIT BREAKER",
+        "RC READY",
+        "human_needed",
+        "decision_needed",
+        "proposal_expired"
+      ],
+      "items": {
+        "type": "string",
+        "enum": [
+          "BLOCKED",
+          "ESCALATED",
+          "CI RED",
+          "SMOKE RED",
+          "CIRCUIT BREAKER",
+          "RC READY",
+          "human_needed",
+          "decision_needed",
+          "proposal_expired"
+        ]
+      }
+    },
+    "pollSeconds": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 120,
+      "default": 15,
+      "title": "Poll interval (seconds)",
+      "description": "How often to query the relay for reactions, replies, and commands."
+    },
+    "approvers": {
+      "type": "array",
+      "title": "Approvers",
+      "description": "Pubkey hex allow-list for reactions, replies, and commands. Empty = owner pubkey from the auth tag.",
+      "default": [],
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  }
+}

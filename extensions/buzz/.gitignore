@@ -1,0 +1,16 @@
+# bun leftover from local `bun install` in this directory. Runtime imports
+# go through ./vendor so CI does not need a nested install.
+node_modules/
+
+# output
+out
+dist
+*.tgz
+
+.eslintcache
+.cache
+*.tsbuildinfo
+.idea
+.DS_Store
+.env
+.env.*

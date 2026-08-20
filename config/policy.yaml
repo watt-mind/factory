@@ -236,3 +236,11 @@ notify:
     - smoke_red
     - circuit_breaker_tripped
     - release_candidate_ready
+
+# Buzz connector (WM-921). Uncomment after FACTORY_EXT_BUZZ_AGENT_NSEC and
+# FACTORY_EXT_BUZZ_AUTH_TAG are in ~/.factory/secrets.env (chmod 600).
+# Telegram stays the blocker channel until a real BLOCKED push is observed.
+# extensions:
+#   - path: extensions/buzz
+#     config:
+#       channel: "91572011-2505-5288-b6f5-4a7d74abf106" # #general

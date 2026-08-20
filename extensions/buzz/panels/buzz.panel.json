@@ -1,0 +1,22 @@
+{
+  "format": "factory.panel-view/v1",
+  "name": "wattmind/buzz:overview",
+  "title": "Buzz inbox",
+  "description": "Open inbox items the Buzz connector posts to #general. Connector health is this extension's GET /status.connectors row.",
+  "source": {
+    "endpoint": "/inbox",
+    "query": { "status": "open" },
+    "path": "/items"
+  },
+  "refreshSeconds": 15,
+  "view": {
+    "sections": [
+      {
+        "path": "",
+        "as": "table",
+        "columns": ["kind", "title", "createdAt"],
+        "formats": { "createdAt": "datetime" }
+      }
+    ]
+  }
+}
