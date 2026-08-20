@@ -27,6 +27,13 @@ import {
   piChromeDevtoolsCheck,
   CHROME_HEADLESS_WRAPPER,
 } from "./doctor-browser.mjs";
+import {
+  compareCliVersions,
+  MIN_BUN_VERSION,
+  MIN_GIT_VERSION,
+  ossOnboardingDiagnostics,
+  parseCliVersion,
+} from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 // The wrapper from THIS checkout, not the installed factory root — a worktree
@@ -40,6 +47,85 @@ const fakeChrome = (dir, body) => {
   chmodSync(p, 0o755);
   return p;
 };
+
+describe("OSS onboarding diagnostics (WM-957)", () => {
+  test("parses and compares ordinary CLI versions", () => {
+    expect(parseCliVersion("bun 1.1.4")).toEqual([1, 1, 4]);
+    expect(parseCliVersion("git version 2.40")).toEqual([2, 40, 0]);
+    expect(parseCliVersion("unknown")).toBeNull();
+    expect(compareCliVersions("1.1.0", MIN_BUN_VERSION)).toBe(0);
+    expect(compareCliVersions("2.39.9", MIN_GIT_VERSION)).toBe(-1);
+    expect(compareCliVersions("2.40.1", MIN_GIT_VERSION)).toBe(1);
+  });
+
+  test("reports versions, GitHub authentication, harnesses, and Docker", () => {
+    const commands = {
+      "bun --version": { status: 0, stdout: "1.1.8\n" },
+      "git --version": { status: 0, stdout: "git version 2.40.1\n" },
+      "gh --version": { status: 0, stdout: "gh version 2.70.0\n" },
+      "gh auth status": { status: 0, stderr: "github.com\n  ✓ Logged in\n" },
+      "claude --version": { status: 0, stdout: "2.0.1\n" },
+      "codex --version": { status: 1 },
+      "gemini --version": { status: 1 },
+      "cursor --version": { status: 1 },
+      "pi --version": { status: 0, stdout: "pi 0.48.0\n" },
+      "docker info --format '{{.ServerVersion}}'": {
+        status: 0,
+        stdout: "28.0.1\n",
+      },
+      "colima status": { status: 1 },
+      "command -v tart || command -v vfkit || command -v limactl": {
+        status: 1,
+      },
+    };
+    const diagnostics = ossOnboardingDiagnostics({
+      run: (command) => commands[command] ?? { status: 1 },
+      controlPlaneKind: "github",
+    });
+    expect(diagnostics.find((d) => d.label === "bun")?.ok).toBe(true);
+    expect(diagnostics.find((d) => d.label === "git")?.ok).toBe(true);
+    expect(
+      diagnostics.find((d) => d.label === "GitHub authentication")?.ok,
+    ).toBe(true);
+    expect(
+      diagnostics.find((d) => d.label === "GitHub control plane")?.ok,
+    ).toBe(true);
+    expect(diagnostics.find((d) => d.label === "harness: pi")?.detail).toBe(
+      "pi 0.48.0",
+    );
+    expect(diagnostics.find((d) => d.label === "harness: codex")?.ok).toBe(
+      "warn",
+    );
+    expect(
+      diagnostics.find((d) => d.label === "worktree isolation")?.detail,
+    ).toBe("Docker engine 28.0.1");
+  });
+
+  test("supplies actionable remediation for old tools, missing auth, Linear, and isolation", () => {
+    const diagnostics = ossOnboardingDiagnostics({
+      run: (command) => {
+        if (command === "bun --version") return { status: 0, stdout: "1.0.0" };
+        if (command === "git --version")
+          return { status: 0, stdout: "git version 2.39.0" };
+        return { status: 1, stderr: "missing" };
+      },
+      controlPlaneKind: "linear",
+      linearConfigured: false,
+    });
+    expect(diagnostics.find((d) => d.label === "bun")).toMatchObject({
+      ok: false,
+    });
+    expect(
+      diagnostics.find((d) => d.label === "GitHub authentication")?.fix,
+    ).toContain("gh auth login");
+    expect(
+      diagnostics.find((d) => d.label === "Linear control plane")?.fix,
+    ).toContain("LINEAR_API_KEY");
+    expect(diagnostics.find((d) => d.label === "worktree isolation")?.ok).toBe(
+      "warn",
+    );
+  });
+});
 
 describe("bin/chrome-headless.sh", () => {
   test("is shipped and executable", () => {
