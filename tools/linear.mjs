@@ -40,32 +40,45 @@
  *
  * NOT A GENERAL LINEAR CLIENT. It covers the verbs the floor's protocol
  * actually names; anything rarer goes through `raw` with explicit GraphQL
- * rather than growing an API surface nobody maintains. It reuses gql() from
- * orchestrator/reaper.mjs — retries, backoff and key loading are solved there,
- * and a second client would be a second set of bugs.
+ * rather than growing an API surface nobody maintains. Verbs run through
+ * `loadControlPlane()` (WM-894); retries, backoff and key loading stay in
+ * `orchestrator/reaper.mjs` as the Linear transport behind the adapter.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
-import { gql as gqlRaw } from "../orchestrator/reaper.mjs";
+import {
+  loadControlPlane,
+  TYPE_LABELS,
+  SOURCE_LABELS,
+  validateLabels,
+  resolveLabelIds,
+  agentLabel,
+  claimLabels,
+  appendIssueDetail,
+} from "../lib/control-plane/index.mjs";
 import {
   parseOwnedPaths,
   ownedPathsClosureGaps,
   readPinManifestRequirements,
   formatOwnedPathClosureGaps,
 } from "../orchestrator/owned-paths.mjs";
-import { BLOCKING_RELATIONS_GQL } from "../orchestrator/blockers.mjs";
 
-// Every verb here is a fresh `bun` process, so nothing in module scope survives
-// between calls — and the protocol calls this constantly (claim, heartbeat
-// comments, state transitions, on up to 3 concurrent tickets per repo). `claim`
-// alone costs 5 API calls, two of which (team states, workspace labels) are
-// reference data that almost never changes. Caching them to disk with a short
-// TTL is what actually cuts call volume; a same-process memo (allLabelsCache
-// below) does nothing here since no verb calls allLabels() twice in one run.
+export {
+  TYPE_LABELS,
+  SOURCE_LABELS,
+  validateLabels,
+  resolveLabelIds,
+  agentLabel,
+  claimLabels,
+  appendIssueDetail,
+};
+
+// Budget capture lives on disk so `doctor` / `linear budget` can read it
+// across process boundaries. The verbs themselves go through the ControlPlane
+// adapter (team states and workspace labels are fetched there).
 const CACHE_DIR = path.join(homedir(), ".factory/cache/linear");
-const CACHE_TTL_MS = 15 * 60 * 1000;
 const BUDGET_FILE = "budget.json";
 const LINEAR_API_HOST = "api.linear.app";
 
@@ -239,130 +252,15 @@ export function installLinearBudgetCapture() {
   };
 }
 
-async function gql(query, variables = {}, retries) {
-  try {
-    return await gqlRaw(query, variables, retries);
-  } catch (err) {
-    if (isLinearRateLimitMessage(err?.message)) {
-      const budget = loadLinearBudget() ?? {};
-      const resetAt =
-        budget.resetAt ?? new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      saveLinearBudget({
-        remaining: 0,
-        limit: budget.limit ?? LINEAR_REQUESTS_LIMIT,
-        resetAt,
-        rateLimited: true,
-      });
-      throw new LinearRateLimitError(resetAt, err);
-    }
-    throw err;
-  }
-}
-
-function cacheGet(key) {
-  if (process.env.LINEAR_NO_CACHE) return null;
-  try {
-    const { at, value } = JSON.parse(
-      readFileSync(path.join(CACHE_DIR, `${key}.json`), "utf8"),
-    );
-    return Date.now() - at < CACHE_TTL_MS ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function cacheSet(key, value) {
-  try {
-    mkdirSync(CACHE_DIR, { recursive: true });
-    writeFileSync(
-      path.join(CACHE_DIR, `${key}.json`),
-      JSON.stringify({ at: Date.now(), value }),
-    );
-  } catch {
-    // Cache is an optimization, never a dependency — a write failure must not fail the verb.
-  }
-}
-
-// The eight values that resolve; `type:chore` fails the mutation. Kept here as
-// well as in the floor because a typo should fail locally with a list of the
-// valid options, not as an opaque API error three seconds later.
-export const TYPE_LABELS = [
-  "bug",
-  "feature",
-  "ui-ux",
-  "security",
-  "performance",
-  "maintenance",
-  "docs",
-  "a11y",
-];
-export const SOURCE_LABELS = ["agent", "human", "sentry", "client-support"];
-
-/** Reject label typos before the API does, with a useful message. */
-export function validateLabels(names) {
-  const bad = [];
-  for (const n of names) {
-    if (n.startsWith("type:") && !TYPE_LABELS.includes(n.slice(5))) {
-      bad.push(`${n} — type:* must be one of ${TYPE_LABELS.join(" ")}`);
-    }
-    if (n.startsWith("source:") && !SOURCE_LABELS.includes(n.slice(7))) {
-      bad.push(`${n} — source:* must be one of ${SOURCE_LABELS.join(" ")}`);
-    }
-  }
-  return bad;
-}
-
-/**
- * The label set after an add/remove, as ids.
- *
- * Linear's issueUpdate takes the COMPLETE label set, not a delta — passing only
- * the labels you want added silently removes every other label on the ticket.
- * That is the sharp edge this function exists to blunt.
- */
-export function resolveLabelIds(
-  currentNames,
-  { add = [], remove = [] },
-  allLabels,
-) {
-  const idOf = (n) => allLabels.find((l) => l.name === n)?.id;
-  const dropped = new Set(remove);
-  const kept = currentNames.filter((n) => !dropped.has(n));
-  return [...new Set([...kept, ...add].map(idOf).filter(Boolean))];
-}
-
-/**
- * Harness name -> the `agent:*` label that exists in the workspace.
- *
- * The Claude harness is `claude` on the command line but `agent:claude-code` in
- * Linear, and nothing enforces that they agree. tick.mjs imports this rather
- * than carrying its own copy: two spellings of the same mapping is precisely
- * the drift this repo exists to prevent, and the failure is silent — tick.mjs
- * filters unresolved label ids out, so a wrong name just means the ticket never
- * says which harness holds it.
- */
-export const agentLabel = (harness) =>
-  `agent:${harness === "claude" ? "claude-code" : harness}`;
-
-/**
- * Claiming drops `ai:agent-ready` and adds `ai:in-progress` + the agent label.
- * agent-ready means "waiting to be picked up" — keeping it alongside
- * ai:in-progress leaves the ticket asserting two lifecycle states at once, and
- * it then survives all the way to Done. One flag, one value.
- */
-export function claimLabels(currentNames, harness) {
-  const mine = agentLabel(harness);
-  return {
-    add: ["ai:in-progress", mine],
-    remove: [
-      "ai:agent-ready",
-      ...currentNames.filter((n) => n.startsWith("agent:") && n !== mine),
-    ],
-  };
+function controlPlane() {
+  return loadControlPlane();
 }
 
 /** Compact ticket rendering — the fields the protocol actually acts on. */
 export function formatTicket(i) {
-  const labels = (i.labels?.nodes ?? []).map((l) => l.name);
+  const labels = Array.isArray(i.labels)
+    ? i.labels.map((l) => l.name)
+    : (i.labels?.nodes ?? []).map((l) => l.name);
   const lines = [
     `${i.identifier}  ${i.title}`,
     `  state     ${i.state?.name ?? "?"}`,
@@ -435,101 +333,7 @@ export function closureCheckMessages(issue) {
   return formatOwnedPathClosureGaps(gaps);
 }
 
-/** Build an idempotent description update for the `detail` verb. */
-export function appendIssueDetail(currentDescription, rawDetail) {
-  const detail = String(rawDetail ?? "").trim();
-  if (!detail) throw new Error("detail must not be empty");
-
-  const current = currentDescription ?? "";
-  if (current.includes(detail))
-    return { description: current, appended: false };
-
-  const separator =
-    current.length === 0 || current.endsWith("\n\n")
-      ? ""
-      : current.endsWith("\n")
-        ? "\n"
-        : "\n\n";
-  return { description: `${current}${separator}${detail}\n`, appended: true };
-}
-
-// --------------------------------------------------------------- helpers ---
-export const ISSUE_FIELDS = `id identifier title url description
-  state{ id name type } assignee{ id name }
-  team{ key } project{ name }
-  labels(first:30){ nodes{ id name } }
-  ${BLOCKING_RELATIONS_GQL}`;
-
-const COMMENTS_FIELDS = `id identifier title
-  comments(first:50){ nodes{ id body createdAt user{ id name } } }`;
-
-async function issueByKey(key) {
-  const d = await gql(`query($k:String!){ issue(id:$k){ ${ISSUE_FIELDS} } }`, {
-    k: key,
-  });
-  if (!d?.issue) throw new Error(`no such issue: ${key}`);
-  return d.issue;
-}
-
-async function issueCommentsByKey(key) {
-  const d = await gql(
-    `query($k:String!){ issue(id:$k){ ${COMMENTS_FIELDS} } }`,
-    { k: key },
-  );
-  if (!d?.issue) throw new Error(`no such issue: ${key}`);
-  return d.issue;
-}
-
-const teamOf = (key) => key.split("-")[0];
-
-async function statesFor(teamKey, force = false) {
-  if (!force) {
-    const cached = cacheGet(`states-${teamKey}`);
-    if (cached) return cached;
-  }
-  const d = await gql(
-    `query($t:String!){ teams(filter:{key:{eq:$t}}, first:1){ nodes{ id states(first:50){ nodes{ id name } } } } }`,
-    { t: teamKey },
-  );
-  const team = d?.teams?.nodes?.[0];
-  if (!team) throw new Error(`no such team: ${teamKey}`);
-  const result = { teamId: team.id, states: team.states?.nodes ?? [] };
-  cacheSet(`states-${teamKey}`, result);
-  return result;
-}
-
-const allLabelsCache = { v: null };
-async function allLabels(force = false) {
-  if (!force) {
-    if (allLabelsCache.v) return allLabelsCache.v;
-    const cached = cacheGet("labels");
-    if (cached) {
-      allLabelsCache.v = cached;
-      return cached;
-    }
-  }
-  const v =
-    (await gql(`query{ issueLabels(first:250){ nodes{ id name } } }`))
-      ?.issueLabels?.nodes ?? [];
-  allLabelsCache.v = v;
-  cacheSet("labels", v);
-  return v;
-}
-
-async function applyLabels(issue, add, remove) {
-  const bad = validateLabels(add);
-  if (bad.length) throw new Error("invalid label(s):\n  " + bad.join("\n  "));
-  let all = await allLabels();
-  let missing = add.filter((n) => !all.some((l) => l.name === n));
-  if (missing.length) all = await allLabels(true); // stale cache? refetch once before failing
-  missing = add.filter((n) => !all.some((l) => l.name === n));
-  if (missing.length)
-    throw new Error(
-      `label(s) do not exist in this workspace: ${missing.join(", ")}`,
-    );
-  const current = (issue.labels?.nodes ?? []).map((l) => l.name);
-  return resolveLabelIds(current, { add, remove }, all);
-}
+const teamOf = (key) => String(key).split("-")[0];
 
 // ------------------------------------------------------------------ verbs ---
 const VALUE_FLAGS = new Set([
@@ -578,85 +382,39 @@ const JSON_OUT = has("json");
 const out = (obj, text) =>
   console.log(JSON_OUT ? JSON.stringify(obj, null, 2) : text);
 
-// Attribution stamp (OPS-76). Factory spawns set FACTORY_RUN_ID to the
-// transcript basename, and the rollup keys on the same string — so stamping it
-// here makes every comment and filed issue joinable back to the exact run that
-// wrote it, without trusting the agent to remember. Skipped when the id is
-// already in the body (an agent that includes it deliberately shouldn't get it
-// twice) and when unset (interactive human use stays clean).
-const stampRun = (body) => {
-  const id = process.env.FACTORY_RUN_ID;
-  if (!id || !body || body.includes(`run:${id}`)) return body;
-  return `${body}\n\nrun:${id}`;
-};
-
 const VERBS = {
   async get() {
-    const issue = await issueByKey(positional[0]);
+    const issue = await controlPlane().getTicket(positional[0]);
     out(issue, formatTicket(issue));
   },
 
   async comments() {
     const key = positional[0];
     if (!key) throw new Error(`usage: comments <ISSUE-ID>`);
-    const issue = await issueCommentsByKey(key);
-    const nodes = issue.comments?.nodes ?? [];
+    const nodes = await controlPlane().listComments(key);
     out(nodes, formatComments(nodes));
   },
 
   async claim() {
     const key = positional[0];
     const harness = flag("agent", "claude");
-    const issue = await issueByKey(key);
-    const { states } = await statesFor(teamOf(key));
-    const inProgress = states.find(
-      (s) => s.name.toLowerCase() === "in progress",
-    );
-    if (!inProgress)
-      throw new Error(`team ${teamOf(key)} has no "In Progress" state`);
-
-    const me = (await gql(`query{ viewer{ id name } }`))?.viewer;
-    const { add, remove } = claimLabels(
-      (issue.labels?.nodes ?? []).map((l) => l.name),
-      harness,
-    );
-    const labelIds = await applyLabels(issue, add, remove);
-
-    await gql(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      {
-        id: issue.id,
-        in: { stateId: inProgress.id, assigneeId: me.id, labelIds },
-      },
-    );
-
-    // Linear has no compare-and-swap, so this read-back IS the concurrency
-    // control. Enforced here rather than asked of the agent in prose: a claim
-    // that skips it is how two agents end up in one worktree.
-    const back = (
-      await gql(`query($id:String!){ issue(id:$id){ assignee{ id name } } }`, {
-        id: issue.id,
-      })
-    )?.issue;
-    const won = back?.assignee?.id === me.id;
+    // Linear has no compare-and-swap; the adapter's read-back IS the
+    // concurrency control. `ok: false` is a lost race, not a transport error.
+    const result = await controlPlane().claim(key, { harness });
     out(
-      { ok: won, identifier: key, assignee: back?.assignee?.name ?? null },
-      won
-        ? `claimed ${key} as ${me.name}`
-        : `LOST RACE on ${key} — now assigned to ${back?.assignee?.name ?? "someone else"}; take the next ticket`,
+      result,
+      result.ok
+        ? `claimed ${key} as ${result.assignee}`
+        : `LOST RACE on ${key} — now assigned to ${result.assignee ?? "someone else"}; take the next ticket`,
     );
-    if (!won) process.exit(1);
+    if (!result.ok) process.exit(1);
   },
 
   async comment() {
     const key = positional[0];
     const body = positional[1];
     if (!body) throw new Error(`usage: comment <ISSUE-ID> "<text>"`);
-    const issue = await issueByKey(key);
-    await gql(
-      `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
-      { in: { issueId: issue.id, body: stampRun(body) } },
-    );
+    await controlPlane().comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
 
@@ -665,27 +423,9 @@ const VERBS = {
     const comment = flag("comment");
     if (!key || comment === null)
       throw new Error(`usage: triage <ISSUE-ID> --comment "<text>"`);
-    const issue = await issueByKey(key);
-    let { states } = await statesFor(teamOf(key));
-    let target = states.find((s) => s.name.toLowerCase() === "triage");
-    if (!target) ({ states } = await statesFor(teamOf(key), true));
-    target = states.find((s) => s.name.toLowerCase() === "triage");
-    if (!target) throw new Error(`team ${teamOf(key)} has no "Triage" state`);
-    const labelIds = await applyLabels(issue, [], ["ai:agent-ready"]);
-    const updated = await gql(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      { id: issue.id, in: { stateId: target.id, labelIds } },
-    );
-    if (!updated?.issueUpdate?.success)
-      throw new Error(`failed to move ${key} to Triage`);
-    if (comment.trim()) {
-      const commented = await gql(
-        `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
-        { in: { issueId: issue.id, body: stampRun(comment) } },
-      );
-      if (!commented?.commentCreate?.success)
-        throw new Error(`failed to comment on ${key}`);
-    }
+    const cp = controlPlane();
+    await cp.transition(key, "Triage", { remove: ["ai:agent-ready"] });
+    if (comment.trim()) await cp.comment(key, comment);
     out({ ok: true, identifier: key }, `${key} -> Triage`);
   },
 
@@ -693,26 +433,11 @@ const VERBS = {
     const key = positional[0];
     const text = positional[1];
     if (!key || !text) throw new Error(`usage: answer <ISSUE-ID> "<text>"`);
-    const issue = await issueByKey(key);
-    if (issue.state?.name?.toLowerCase() === "blocked") {
-      let { states } = await statesFor(teamOf(key));
-      let target = states.find((s) => s.name.toLowerCase() === "todo");
-      if (!target) ({ states } = await statesFor(teamOf(key), true));
-      target = states.find((s) => s.name.toLowerCase() === "todo");
-      if (!target) throw new Error(`team ${teamOf(key)} has no "Todo" state`);
-      const updated = await gql(
-        `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-        { id: issue.id, in: { stateId: target.id } },
-      );
-      if (!updated?.issueUpdate?.success)
-        throw new Error(`failed to move ${key} to Todo`);
-    }
-    const commented = await gql(
-      `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
-      { in: { issueId: issue.id, body: stampRun(text) } },
-    );
-    if (!commented?.commentCreate?.success)
-      throw new Error(`failed to comment on ${key}`);
+    const cp = controlPlane();
+    const issue = await cp.getTicket(key);
+    if (issue.state?.name?.toLowerCase() === "blocked")
+      await cp.transition(key, "Todo");
+    await cp.comment(key, text);
     out({ ok: true, identifier: key }, `answered ${key}`);
   },
 
@@ -721,11 +446,7 @@ const VERBS = {
     const rawDetail = positional[1];
     if (!key || !rawDetail)
       throw new Error(`usage: detail <ISSUE-ID> "<markdown>"`);
-    const issue = await issueByKey(key);
-    const { description, appended } = appendIssueDetail(
-      issue.description,
-      rawDetail,
-    );
+    const { appended } = await controlPlane().appendDetail(key, rawDetail);
     if (!appended) {
       out(
         { ok: true, identifier: key, appended: false },
@@ -733,12 +454,6 @@ const VERBS = {
       );
       return;
     }
-    const updated = await gql(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      { id: issue.id, in: { description } },
-    );
-    if (!updated?.issueUpdate?.success)
-      throw new Error(`failed to append detail to ${key}`);
     out(
       { ok: true, identifier: key, appended: true },
       `${key} detail appended`,
@@ -751,19 +466,16 @@ const VERBS = {
       throw new Error(
         `usage: labels <ISSUE-ID> [--add <label>] [--remove <label>]`,
       );
-    const issue = await issueByKey(key);
+    const cp = controlPlane();
     const add = flagAll("add"),
       remove = flagAll("remove");
     if (!add.length && !remove.length) {
-      const current = (issue.labels?.nodes ?? []).map((l) => l.name);
+      const issue = await cp.getTicket(key);
+      const current = (issue.labels ?? []).map((l) => l.name);
       out(current, current.join(" ") || "(none)");
       return;
     }
-    const labelIds = await applyLabels(issue, add, remove);
-    await gql(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      { id: issue.id, in: { labelIds } },
-    );
+    await cp.setLabels(key, { add, remove });
     out(
       { ok: true, identifier: key, added: add, removed: remove },
       `${key} labels updated`,
@@ -788,24 +500,8 @@ const VERBS = {
         `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label]`,
       );
     }
-    const issue = await issueByKey(key);
-    const input = {};
-    let target = null;
-    if (wanted) {
-      let { states } = await statesFor(teamOf(key));
-      target = states.find(
-        (s) => s.name.toLowerCase() === wanted.toLowerCase(),
-      );
-      if (!target) ({ states } = await statesFor(teamOf(key), true)); // stale cache? refetch once before failing
-      target = states.find(
-        (s) => s.name.toLowerCase() === wanted.toLowerCase(),
-      );
-      if (!target)
-        throw new Error(
-          `no state "${wanted}" on team ${teamOf(key)} — have: ${states.map((s) => s.name).join(", ")}`,
-        );
-      input.stateId = target.id;
-    }
+    const cp = controlPlane();
+    const issue = await cp.getTicket(key);
 
     if (add.includes("ai:agent-ready")) {
       const gaps = closureCheckMessages(issue);
@@ -816,17 +512,14 @@ const VERBS = {
       }
     }
 
-    if (add.length || remove.length)
-      input.labelIds = await applyLabels(issue, add, remove);
-    if (has("unassign")) input.assigneeId = null;
-
-    await gql(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      { id: issue.id, in: input },
-    );
-    const msg = target ? `${key} -> ${target.name}` : `${key} labels updated`;
+    await cp.transition(key, wanted ?? "", {
+      add,
+      remove,
+      unassign: has("unassign"),
+    });
+    const msg = wanted ? `${key} -> ${wanted}` : `${key} labels updated`;
     out(
-      { ok: true, identifier: key, ...(target ? { state: target.name } : {}) },
+      { ok: true, identifier: key, ...(wanted ? { state: wanted } : {}) },
       msg,
     );
   },
@@ -839,13 +532,8 @@ const VERBS = {
         `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
       );
 
-    const { teamId, states } = await statesFor(team);
     // New findings land in Triage unless they already meet the agent-ready bar.
     const stateName = has("todo") ? "Todo" : "Triage";
-    const target = states.find(
-      (s) => s.name.toLowerCase() === stateName.toLowerCase(),
-    );
-
     const wanted = [
       ...(flag("type") ? [`type:${flag("type")}`] : []),
       ...flagAll("area").map((a) => `area:${a}`),
@@ -853,30 +541,14 @@ const VERBS = {
       ...(has("todo") ? ["ai:agent-ready"] : []),
       ...flagAll("label"),
     ];
-    const bad = validateLabels(wanted);
-    if (bad.length) throw new Error("invalid label(s):\n  " + bad.join("\n  "));
-    const all = await allLabels();
-    const missing = wanted.filter((n) => !all.some((l) => l.name === n));
-    if (missing.length)
-      throw new Error(
-        `label(s) do not exist in this workspace: ${missing.join(", ")}`,
-      );
-
-    const d = await gql(
-      `mutation($in:IssueCreateInput!){ issueCreate(input:$in){ success issue{ identifier url } } }`,
-      {
-        in: {
-          teamId,
-          title,
-          description: stampRun(flag("body", "")),
-          stateId: target?.id,
-          labelIds: resolveLabelIds([], { add: wanted }, all),
-          ...(flag("project") ? { projectId: flag("project") } : {}),
-        },
-      },
-    );
-    const created = d?.issueCreate?.issue;
-    if (!created) throw new Error("issueCreate returned no issue");
+    const created = await controlPlane().file({
+      team,
+      title,
+      body: flag("body", ""),
+      labels: wanted,
+      state: stateName,
+      projectId: flag("project") || undefined,
+    });
     out(
       { ok: true, ...created },
       `filed ${created.identifier} in ${stateName}  ${created.url}`,
@@ -888,13 +560,7 @@ const VERBS = {
     if (!team) throw new Error(`usage: queue --team CLNT`);
     // Dispatchable == Todo + ai:agent-ready + unassigned. The same predicate
     // the dispatcher uses; agents must not invent their own.
-    const d = await gql(
-      `query($t:String!){ issues(first:100, filter:{ team:{key:{eq:$t}}, state:{name:{eq:"Todo"}}, assignee:{null:true} }){ nodes{ ${ISSUE_FIELDS} } } }`,
-      { t: team },
-    );
-    const ready = (d?.issues?.nodes ?? []).filter((i) =>
-      (i.labels?.nodes ?? []).some((l) => l.name === "ai:agent-ready"),
-    );
+    const ready = await controlPlane().listDispatchable({ team });
     out(
       ready,
       ready.length
@@ -922,7 +588,9 @@ const VERBS = {
         return [kv.slice(0, i), kv.slice(i + 1)];
       }),
     );
-    console.log(JSON.stringify(await gql(positional[0], vars), null, 2));
+    console.log(
+      JSON.stringify(await controlPlane().raw(positional[0], vars), null, 2),
+    );
   },
 };
 

@@ -50,8 +50,8 @@ import {
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { homedir } from "node:os";
-import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 import { githubForge, loadForge } from "../lib/forge/index.mjs";
 
@@ -252,7 +252,9 @@ export async function survey(
       queryIssues ??
       (async (team, batch) => {
         const q = `query($n:[Float!]){ issues(first:250, filter:{ number:{in:$n}, team:{key:{eq:"${team}"}} }){ nodes{ identifier state{name type} } } }`;
-        return (await gql(q, { n: batch }))?.issues?.nodes ?? [];
+        return (
+          (await loadControlPlane().raw(q, { n: batch }))?.issues?.nodes ?? []
+        );
       });
 
     // Linear caps this connection at 250 nodes. Keep each filter at or below

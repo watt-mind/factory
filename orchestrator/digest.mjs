@@ -16,8 +16,8 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { AI_BLOCKED, blockedLabelIds, holdInfo } from "./reply-detection.mjs";
 
 const argv = process.argv.slice(2);
@@ -97,7 +97,7 @@ let totalAnswered = 0;
 for (const repo of repos) {
   const nodes =
     (
-      await gql(DIGEST_QUERY, {
+      await loadControlPlane().raw(DIGEST_QUERY, {
         team: repo.team,
         project: repo.project,
         label: AI_BLOCKED,

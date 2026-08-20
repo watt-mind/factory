@@ -12,8 +12,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
-import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 
 const c = {
@@ -205,7 +205,7 @@ export async function gatherPulse({
       if (!hasLinearKey()) {
         pulse.supply.error = "LINEAR_API_KEY not configured";
       } else {
-        const d = await gql(
+        const d = await loadControlPlane().raw(
           `query($t:String!){
             issues(first:100, filter:{ team:{key:{eq:$t}}, state:{type:{nin:["completed","canceled"]}} }){
               nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }

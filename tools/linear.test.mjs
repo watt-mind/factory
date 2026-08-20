@@ -10,6 +10,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { test, expect } from "bun:test";
 import {
   resolveLabelIds,
@@ -23,9 +24,7 @@ import {
   parsePositionalArgs,
   closureCheckMessages,
   __resetLinearReposCache,
-  ISSUE_FIELDS,
 } from "./linear.mjs";
-import { BLOCKING_RELATIONS_GQL } from "../orchestrator/blockers.mjs";
 
 const LABELS = [
   { id: "l-ready", name: "ai:agent-ready" },
@@ -140,7 +139,7 @@ test("formatTicket shows the fields the protocol acts on", () => {
     url: "https://linear.app/x/CLNT-616",
     state: { name: "Todo" },
     assignee: null,
-    labels: { nodes: [{ name: "ai:agent-ready" }] },
+    labels: [{ name: "ai:agent-ready" }],
   });
   expect(text).toContain("CLNT-616");
   expect(text).toContain("Todo");
@@ -148,8 +147,13 @@ test("formatTicket shows the fields the protocol acts on", () => {
   expect(text).toContain("ai:agent-ready");
 });
 
-test("issue reads request the shared blocked-by relation fields", () => {
-  expect(ISSUE_FIELDS).toContain(BLOCKING_RELATIONS_GQL);
+test("formatTicket still accepts Linear's { nodes } label wrapper", () => {
+  const text = formatTicket({
+    identifier: "CLNT-1",
+    title: "x",
+    labels: { nodes: [{ name: "type:bug" }] },
+  });
+  expect(text).toContain("type:bug");
 });
 
 // ------------------------------------------------------------- comments ---
@@ -339,4 +343,42 @@ test("closure check blocks ai:agent-ready when Owned Paths closure policy is inc
     __resetLinearReposCache();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------- grep invariant ---
+// Same shape as lib/forge's "nothing outside lib/forge/ spawns gh" check:
+// new Linear GraphQL call sites must go through the adapter, not gql().
+const GQL_IMPORT_ALLOWED = new Set([
+  "lib/control-plane/linear.mjs",
+  "orchestrator/reaper.mjs",
+  // Remaining call sites sit outside this ticket's Owned Paths (WM-962).
+  "orchestrator/reply-detection.mjs",
+]);
+
+test("no new call site imports gql outside lib/control-plane and the reaper transport", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const proc = Bun.spawnSync({
+    cmd: [
+      "git",
+      "grep",
+      "-nE",
+      String.raw`import \{[^}]*\bgql\b`,
+      "--",
+      "orchestrator",
+      "lib",
+      "event-runtime",
+      "tools",
+    ],
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const hits = (proc.stdout?.toString() || "")
+    .split("\n")
+    .filter(Boolean)
+    .filter((line) => {
+      const file = line.split(":")[0];
+      return !GQL_IMPORT_ALLOWED.has(file) && !file.endsWith(".test.mjs");
+    });
+  expect(hits).toEqual([]);
 });

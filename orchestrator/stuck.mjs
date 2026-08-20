@@ -22,8 +22,9 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { gql, isAgentClaim, lastActivity } from "./reaper.mjs";
+import { isAgentClaim, lastActivity } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 import { parseOwnedPaths } from "./owned-paths.mjs";
 import { AI_BLOCKED, answeredHeldTickets } from "./reply-detection.mjs";
@@ -131,8 +132,12 @@ for (const repo of repos) {
   const state = (i) => i.state?.name ?? "?";
 
   const nodes =
-    (await gql(QUERY, { team: repo.team, project: repo.project }))?.issues
-      ?.nodes ?? [];
+    (
+      await loadControlPlane().raw(QUERY, {
+        team: repo.team,
+        project: repo.project,
+      })
+    )?.issues?.nodes ?? [];
 
   const ready = nodes.filter(
     (i) =>

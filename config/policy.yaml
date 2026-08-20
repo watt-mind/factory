@@ -40,6 +40,17 @@ merge:
 forge:
   kind: github
 
+# ControlPlane connector (WM-797 / WM-894): which tracker implementation
+# `lib/control-plane/` loads. Everything that used to call Linear GraphQL
+# directly goes through it now.
+#   linear — wraps `gql()` from orchestrator/reaper.mjs (default when this
+#            stanza is absent)
+#   memory — in-process fake for tests and the offline demo; no network
+# Anything else is a configuration error: a tracker the factory cannot reach
+# must never be silently read as "no tickets". GitHub Issues is WM-798.
+controlPlane:
+  kind: linear
+
 dispatch:
   # Owned Paths collision handling at dispatch (WM-677).
   #   strict   — any overlap with an in-flight ticket refuses dispatch. Fail-closed

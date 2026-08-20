@@ -23,7 +23,7 @@
  *     bun orchestrator/label-guard.mjs --repo legalease
  *     bun orchestrator/label-guard.mjs --repo legalease --apply
  */
-import { gql, fetchTeams } from "./reaper.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import {
   parseOwnedPaths,
@@ -138,38 +138,15 @@ function ownedPathsClosureCheck(description = "", repo, manifestCache) {
   return { messages, gaps };
 }
 
-const QUERY = `
-  query($team: String!, $project: String!) {
-    issues(first: 250, filter: {
-      team: { key: { eq: $team } },
-      project: { name: { eq: $project } },
-      state: { name: { eq: "Todo" } },
-      labels: { name: { eq: "${AI_AGENT_READY}" } },
-      assignee: { null: true }
-    }) {
-      nodes {
-        id identifier title description url
-        labels(first: 20) { nodes { id name } }
-      }
-    }
-  }`;
-
 export async function fetchReadyIssues(repo) {
-  const data = await gql(QUERY, { team: repo.team, project: repo.project });
-  return data?.issues?.nodes ?? [];
+  return loadControlPlane().listDispatchable({
+    team: repo.team,
+    project: repo.project,
+  });
 }
 
-export async function demote(issue, triageStateId, gaps, apply) {
+export async function demote(issue, _triageStateId, gaps, apply) {
   if (!apply) return;
-
-  const keepLabelIds = (issue.labels?.nodes ?? [])
-    .filter((l) => (l.name || "").toLowerCase() !== AI_AGENT_READY)
-    .map((l) => l.id);
-
-  await gql(
-    `mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`,
-    { id: issue.id, input: { stateId: triageStateId, labelIds: keepLabelIds } },
-  );
 
   const body =
     `**Demoted by the \`ai:agent-ready\` template guard.**\n\n` +
@@ -179,10 +156,11 @@ export async function demote(issue, triageStateId, gaps, apply) {
     `\n\nMoved back to \`Triage\` and the label was removed so it isn't picked up for dispatch. ` +
     `A triage pass needs to add the missing section(s) before re-labeling \`ai:agent-ready\`.`;
 
-  await gql(
-    `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`,
-    { input: { issueId: issue.id, body } },
-  );
+  const cp = loadControlPlane();
+  await cp.transition(issue.identifier, "Triage", {
+    remove: [AI_AGENT_READY],
+  });
+  await cp.comment(issue.identifier, body);
 }
 
 export function parseArgs(argv = process.argv.slice(2)) {
@@ -224,7 +202,6 @@ export async function main(argv = process.argv.slice(2)) {
     `=== ai:agent-ready template guard [${args.apply ? "APPLY" : "DRY RUN"}] ===\n`,
   );
 
-  let teams = null;
   let violations = 0;
 
   for (const repo of repos) {
@@ -255,25 +232,15 @@ export async function main(argv = process.argv.slice(2)) {
     if (!bad.length) continue;
     violations += bad.length;
 
-    if (args.apply && !teams) teams = await fetchTeams();
-    const triageStateId = args.apply
-      ? teams?.[repo.team]?.states?.["triage"]
-      : null;
-    if (args.apply && !triageStateId) {
-      console.log(
-        `  ! no 'Triage' state on team ${repo.team}, skipping demotion for this repo`,
-      );
-    }
-
     for (const { issue, gaps } of bad) {
       console.log(
         `  ${issue.identifier.padEnd(10)} ${issue.title.slice(0, 60)}`,
       );
       for (const g of gaps) console.log(`      missing: ${g}`);
 
-      if (args.apply && triageStateId) {
+      if (args.apply) {
         try {
-          await demote(issue, triageStateId, gaps, true);
+          await demote(issue, null, gaps, true);
           console.log(`      -> demoted to Triage, ai:agent-ready removed`);
         } catch (err) {
           console.log(`      ! failed: ${err.message || err}`);

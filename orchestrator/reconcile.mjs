@@ -31,9 +31,10 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { gql, lastActivity } from "./reaper.mjs";
+import { lastActivity } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { githubForge, loadForge } from "../lib/forge/index.mjs";
 
 export function parseArgs(argv) {
@@ -202,7 +203,7 @@ export async function reconcileRepo(
   { apply = false, gate = false, quietMin = 25 } = {},
   deps = {},
 ) {
-  const queryGql = deps.gql ?? gql;
+  const queryGql = deps.gql ?? ((q, v) => loadControlPlane().raw(q, v));
   const getPrState = deps.prState ?? prState;
 
   if (!gate)

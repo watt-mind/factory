@@ -31,8 +31,8 @@ import {
 import { spawn, spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { gql } from "./reaper.mjs";
 import { ROOT } from "../lib/schedule.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import {
   parseOwnedPaths,
   effectiveOwnedPaths,
@@ -40,7 +40,6 @@ import {
 } from "./owned-paths.mjs";
 import { openBlockers, BLOCKING_RELATIONS_GQL } from "./blockers.mjs";
 import { budgetExhausted } from "../lib/spend.mjs";
-import { agentLabel } from "../tools/linear.mjs";
 import {
   LEASE_HEARTBEAT_MS,
   releaseWorkerLease,
@@ -329,10 +328,6 @@ export async function main(argv = process.argv.slice(2)) {
     console.error(`harness "${HARNESS}" is not on PATH`);
     process.exit(2);
   }
-  // linear.md's agent:* taxonomy names the harness that actually holds the
-  // claim (agent:claude-code, agent:gemini, ...) — it must track HARNESS, not
-  // assume claude, or a ticket run on agy gets labelled as if Claude did it.
-  const AGENT_LABEL = agentLabel(HARNESS);
 
   const TIMEOUT_BIN = Bun.which("timeout") ?? Bun.which("gtimeout");
   if (!TIMEOUT_BIN)
@@ -374,7 +369,8 @@ export async function main(argv = process.argv.slice(2)) {
   /** Current queue straight from Linear — never cached, because it changes under us. */
   async function fetchState() {
     const nodes =
-      (await gql(Q, { t: repo.team, p: repo.project }))?.issues?.nodes ?? [];
+      (await loadControlPlane().raw(Q, { t: repo.team, p: repo.project }))
+        ?.issues?.nodes ?? [];
     const has = (i, n) => (i.labels?.nodes ?? []).some((l) => l.name === n);
     return {
       inProgress: nodes.filter((i) => i.state?.name === "In Progress"),
@@ -466,59 +462,28 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   // ----------------------------------------------------------------- claim ----
-  const me = (await gql(`query{ viewer{ id name } }`))?.viewer;
+  const cp = loadControlPlane();
+  const me = (await cp.raw(`query{ viewer{ id name } }`))?.viewer;
   const states =
     (
-      await gql(
+      await cp.raw(
         `query($t:String!){ team(id:$t){ states(first:50){ nodes{ id name } } } }`,
         { t: repo.team },
       )
     )?.team?.states?.nodes ?? [];
-  const inProgressId = states.find(
-    (s) => s.name.toLowerCase() === "in progress",
-  )?.id;
   const todoId = states.find((s) => s.name.toLowerCase() === "todo")?.id;
   const blockedId = states.find((s) => s.name.toLowerCase() === "blocked")?.id;
   const allLabels =
-    (await gql(`query{ issueLabels(first:250){ nodes{ id name } } }`))
+    (await cp.raw(`query{ issueLabels(first:250){ nodes{ id name } } }`))
       ?.issueLabels?.nodes ?? [];
-  const labelId = (n) => allLabels.find((l) => l.name === n)?.id;
-  if (!inProgressId) {
-    console.error("no 'In Progress' state on team " + repo.team);
-    process.exit(1);
-  }
 
   async function claim(t) {
-    // Drop ai:agent-ready on claim. It means "waiting to be picked up", so
-    // keeping it alongside ai:in-progress leaves the ticket asserting two
-    // lifecycle states at once — and it survives all the way to Done, where
-    // CLNT-675 sat carrying both ai:needs-review and ai:agent-ready. One flag,
-    // one value; the same rule the triage hold now follows.
-    const keep = (t.labels?.nodes ?? [])
-      .filter((l) => l.name !== "ai:agent-ready")
-      .map((l) => allLabels.find((x) => x.name === l.name)?.id)
-      .filter(Boolean);
-    const want = [
-      ...new Set(
-        [...keep, labelId("ai:in-progress"), labelId(AGENT_LABEL)].filter(
-          Boolean,
-        ),
-      ),
-    ];
-    await gql(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      {
-        id: t.id,
-        in: { stateId: inProgressId, assigneeId: me.id, labelIds: want },
-      },
-    );
-    // Linear has no compare-and-swap; this read-back IS the concurrency control.
-    const back = (
-      await gql(`query($id:String!){ issue(id:$id){ assignee{id} } }`, {
-        id: t.id,
-      })
-    )?.issue;
-    return back?.assignee?.id === me.id;
+    // Adapter claim: In Progress + assignee + claim labels, then read-back.
+    // `ok: false` is a lost race — another actor won the compare.
+    const result = await cp.claim(t.identifier, {
+      harness: HARNESS,
+    });
+    return result.ok;
   }
 
   /**
@@ -532,7 +497,7 @@ export async function main(argv = process.argv.slice(2)) {
    */
   async function unclaim(t, why, log) {
     const cur = (
-      await gql(
+      await cp.raw(
         `query($id:String!){ issue(id:$id){ state{name} assignee{id} labels(first:20){nodes{id name}} comments(last:10){nodes{body createdAt}} } }`,
         { id: t.id },
       )
@@ -552,7 +517,7 @@ export async function main(argv = process.argv.slice(2)) {
       threshold: DISPATCH_FAILURE_THRESHOLD,
     });
 
-    await gql(
+    await cp.raw(
       `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
       {
         id: t.id,
@@ -563,10 +528,7 @@ export async function main(argv = process.argv.slice(2)) {
         },
       },
     );
-    await gql(
-      `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
-      { in: { issueId: t.id, body: action.commentBody } },
-    );
+    await cp.comment(t.identifier, action.commentBody);
 
     if (action.repeated) {
       console.log(

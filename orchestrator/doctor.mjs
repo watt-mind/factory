@@ -23,8 +23,8 @@ import {
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { homedir } from "node:os";
-import { gql } from "./reaper.mjs";
 import { factoryRoot } from "../lib/factory-root.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 import { harnessGitignoreIsCurrent } from "../lib/factory-gitignore.mjs";
 import {
@@ -386,7 +386,8 @@ for (const repo of repos) {
   try {
     const q = `query($t:String!,$p:String!){ issues(first:1, filter:{ team:{key:{eq:$t}}, project:{name:{eq:$p}} }){ nodes{ identifier } } }`;
     const nodes =
-      (await gql(q, { t: repo.team, p: repo.project }))?.issues?.nodes ?? [];
+      (await loadControlPlane().raw(q, { t: repo.team, p: repo.project }))
+        ?.issues?.nodes ?? [];
     check(
       true,
       "Linear team/project resolves",
