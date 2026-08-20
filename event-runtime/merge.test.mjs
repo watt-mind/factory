@@ -47,14 +47,25 @@ writeFileSync(
     "utf8",
   ).replace("auto_merge_owners: []", "auto_merge_owners: [watt-mind]"),
 );
-const previousChainAutoApprovalReposRoot = process.env.FACTORY_REPOS_ROOT;
-process.env.FACTORY_REPOS_ROOT = chainAutoApprovalFixtureRoot;
 afterAll(() => {
-  if (previousChainAutoApprovalReposRoot === undefined)
-    delete process.env.FACTORY_REPOS_ROOT;
-  else process.env.FACTORY_REPOS_ROOT = previousChainAutoApprovalReposRoot;
   rmSync(chainAutoApprovalFixtureRoot, { recursive: true, force: true });
 });
+
+// planAdmittedEvents is synchronous (no internal await), so this narrow
+// set-call-restore window around FACTORY_REPOS_ROOT never overlaps another
+// test file's execution under concurrent `bun test` — unlike leaving the env
+// var set for this whole file's lifetime, which leaked into unrelated
+// concurrently-running suites (seed.test.mjs reading the wrong repos root).
+function planAdmittedEventsWithMergePolicy(db, registry, opts) {
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  process.env.FACTORY_REPOS_ROOT = chainAutoApprovalFixtureRoot;
+  try {
+    return planAdmittedEvents(db, registry, opts);
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+  }
+}
 
 const registry = loadRegistry();
 const SHA = "a".repeat(40);
@@ -986,7 +997,7 @@ describe("executable merge command safety (WM-412)", () => {
       },
     });
     expect(resolveChains(db, registry).emitted).toBe(1);
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     const apply = db
       .query(
         `SELECT run_id FROM runs WHERE json_extract(spec_json,'$.agent')='merge-apply@2'`,
@@ -1025,7 +1036,7 @@ describe("executable merge command safety (WM-412)", () => {
       }),
       new Date().toISOString(),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       db
         .query(
@@ -1527,7 +1538,7 @@ describe("merge transition chains", () => {
       db.query(`SELECT COUNT(*) AS n FROM events WHERE source='chain'`).get().n,
     ).toBe(4);
 
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       db
         .query(
@@ -1624,7 +1635,7 @@ describe("merge-fix dispatch worktree exclusion (WM-526)", () => {
         ticket,
       });
 
-      planAdmittedEvents(db, registry, { policyVersion: PV });
+      planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
 
       expect(
         db
@@ -1685,7 +1696,7 @@ describe("merge-fix dispatch worktree exclusion (WM-526)", () => {
       ticket: payload.ticket,
     });
 
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
 
     expect(
       db
@@ -1738,7 +1749,7 @@ describe("policy approval and global merge barrier", () => {
         "sensitive",
       ),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       db
         .query(
@@ -1774,7 +1785,7 @@ describe("policy approval and global merge barrier", () => {
         "second",
       ),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       db.query(`SELECT COUNT(*) n FROM runs WHERE state='QUEUED'`).get().n,
     ).toBe(1);
@@ -1814,7 +1825,7 @@ describe("policy approval and global merge barrier", () => {
       registry,
       envelope("factory.merge-landed", landed, "landed", "apply-run"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     const verify = db
       .query(
         `SELECT run_id,state FROM runs WHERE json_extract(spec_json,'$.agent')='merge-verify@1'`,
@@ -1836,7 +1847,7 @@ describe("policy approval and global merge barrier", () => {
         "plan-run",
       ),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     const proposal = openProposals(db, {}).find(
       (p) => p.spec?.agent === "merge-apply@2",
     );
@@ -1870,14 +1881,14 @@ describe("policy approval and global merge barrier", () => {
         registry,
         envelope("factory.merge-fix.requested", payload(round), id),
       );
-      planAdmittedEvents(db, registry, { policyVersion: PV });
+      planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     }
     admitEvent(
       db,
       registry,
       envelope("factory.merge-fix.requested", payload(1), "fix-3-replay"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
 
     const third = openProposals(db, {}).find(
       (proposal) => proposal.event_id === "fix-3-replay",
@@ -1915,7 +1926,7 @@ describe("policy approval and global merge barrier", () => {
       registry,
       envelope("factory.merge-fix.requested", payload(1), "fix89-1"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     // A round-2 emission that is refused (base not auto-mergeable) leaves an
     // open proposal with no run — every merge-scan tick re-emits these.
     admitEvent(
@@ -1927,13 +1938,13 @@ describe("policy approval and global merge barrier", () => {
         "fix89-2-refused",
       ),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     admitEvent(
       db,
       registry,
       envelope("factory.merge-fix.requested", payload(2), "fix89-2"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     const second = openProposals(db, {}).find(
       (proposal) => proposal.event_id === "fix89-2",
     );
@@ -1970,7 +1981,7 @@ describe("policy approval and global merge barrier", () => {
       registry,
       envelope("factory.merge-fix.requested", payload(1), "fix90-1"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     // Round 1 executed; the model does not see run history and emits round 1 again.
     db.query(
       `UPDATE runs SET state='COMPLETED' WHERE json_extract(spec_json,'$.agent')='merge-fix@1' AND json_extract(spec_json,'$.input.pr')=90`,
@@ -1980,7 +1991,7 @@ describe("policy approval and global merge barrier", () => {
       registry,
       envelope("factory.merge-fix.requested", payload(1), "fix90-1-again"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       openProposals(db, {}).find((p) => p.event_id === "fix90-1-again"),
     ).toBeUndefined();
@@ -1993,7 +2004,7 @@ describe("policy approval and global merge barrier", () => {
       registry,
       envelope("factory.merge-fix.requested", payload(2), "fix90-2"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       openProposals(db, {}).find((p) => p.event_id === "fix90-2"),
     ).toBeUndefined();
@@ -2003,7 +2014,7 @@ describe("policy approval and global merge barrier", () => {
       registry,
       envelope("factory.merge-fix.requested", payload(2), "fix90-3"),
     );
-    planAdmittedEvents(db, registry, { policyVersion: PV });
+    planAdmittedEventsWithMergePolicy(db, registry, { policyVersion: PV });
     expect(
       openProposals(db, {}).find((p) => p.event_id === "fix90-3").reason,
     ).toContain("merge_fix_round_not_durable");
