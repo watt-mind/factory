@@ -206,12 +206,12 @@ context, which is precisely why that fallback is not the production setup.
 ## 2c. Adapter registry and contract — **shipped, WM-837**
 
 A worker executes a run through a _harness adapter_ — `claude`, `pi`,
-`cursor`, `agy`, `command`, `actions`, and the test-only `fake`, all in
-`event-runtime/lib/adapters/`. Which adapters a worker carries used to be an
-object literal duplicated in `cli/work.mjs` and `cli/serve.mjs`; both now
-obtain the set from the registry in `event-runtime/lib/adapters/index.mjs`,
-which is also what a future extension loader (packs, out-of-tree adapters)
-registers into.
+`cursor`, `agy`, `command`, `actions`, the test-only `fake`, and the
+experimental `acp` adapter (WM-937), all in `event-runtime/lib/adapters/`.
+Which adapters a worker carries used to be an object literal duplicated in
+`cli/work.mjs` and `cli/serve.mjs`; both now obtain the set from the registry
+in `event-runtime/lib/adapters/index.mjs`, which is also what a future
+extension loader (packs, out-of-tree adapters) registers into.
 
 **The contract.** An adapter is a module (an ES module namespace or any object
 with the same exports) that satisfies all of:
@@ -255,6 +255,20 @@ machine-readable output) prints the registered adapters with their source and
 sandbox support — the same registry a worker builds, so it needs no running
 `serve`.
 
+**Experimental `acp` (WM-937).** `event-runtime/lib/adapters/acp.mjs` is an
+ACP v1 client (`protocolVersion` pinned to `1`) that spawns any Agent Client
+Protocol agent as JSON-RPC NDJSON over stdio. Config is `{ command, args, env }`
+with shipped default `{ command: "claude-code-acp", args: [], env: {} }`. It
+satisfies the contract (`execute` + `SANDBOX_SUPPORT = "unsupported"`) and
+tests register it with `createAdapterRegistry({ builtins: { acp } })`. It is
+not yet in `builtinAdapters()` — wiring `index.mjs` is a follow-up outside
+this spike's Owned Paths. Permission requests for workspace-scoped edits and
+an allow-listed command set are auto-answered; anything else fail-closes
+(`reject_once`) rather than blocking the turn on an inbox `decision_needed`
+item (a human cannot beat the run timeout). Usage arrives as ACP
+`usage_update` (`used` / `size` / optional USD `cost`), not Claude's
+`input_tokens` / `output_tokens` split.
+
 ## 2d. Harness content as a RunSpec input — **shipped, WM-851**
 
 Runtime LLM runs used to acquire skills, slash commands, and subagents from
@@ -291,6 +305,7 @@ The worker materializes that declaration **after** workspace create and
    | Adapter  | skills                                           | commands                       | subagents                 |
    | -------- | ------------------------------------------------ | ------------------------------ | ------------------------- |
    | `claude` | `.claude/skills/<n>/` from `plugins/core/skills` | `.claude/commands/<n>.md`      | `.claude/agents/<n>.md`   |
+   | `acp`    | same as `claude` (experimental, WM-937)          | same as `claude`               | same as `claude`          |
    | `cursor` | **unsupported** (emit has none)                  | `.cursor/commands/<n>.md`      | `.cursor/agents/<n>.md`   |
    | `pi`     | `.pi/agent/skills/<n>/` from `dist/pi/skills`    | `.pi/agent/prompts/<n>.md`     | `.pi/agent/agents/<n>.md` |
    | `agy`    | `.gemini/skills/<n>/` from `dist/gemini/skills`  | same (commands emit as skills) | `.gemini/agents/<n>.md`   |
