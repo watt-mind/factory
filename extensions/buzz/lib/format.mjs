@@ -13,7 +13,15 @@ export const INBOX_KINDS = Object.freeze([
   "proposal_expired",
 ]);
 
-export const DEFAULT_POST_KINDS = INBOX_KINDS;
+/** Interrupt kinds only. Telemetry (run starts, ticket-less FYIs) is WM-975. */
+export const DEFAULT_POST_KINDS = Object.freeze([
+  "ESCALATED",
+  "BLOCKED",
+  "CI RED",
+  "SMOKE RED",
+  "CIRCUIT BREAKER",
+  "RC READY",
+]);
 
 export const DM_KINDS = new Set(["BLOCKED", "CIRCUIT BREAKER", "SMOKE RED"]);
 
@@ -21,13 +29,29 @@ const EMOJI_BY_ID = {
   approve: "👍",
   reject: "👎",
   dismiss: "💤",
+  requeue: "🔁",
+  triage: "📤",
+  answer: "💬",
+  authorise: "🔓",
 };
 const EMOJI_BY_EFFECT = {
   approve_proposal: "👍",
   reject_proposal: "👎",
   dismiss: "💤",
+  requeue: "🔁",
+  send_to_triage: "📤",
+  answer: "💬",
+  authorise: "🔓",
 };
-const SHORT = { "👍": "approve", "👎": "reject", "💤": "not now" };
+const SHORT = {
+  "👍": "approve",
+  "👎": "reject",
+  "💤": "not now",
+  "🔁": "requeue",
+  "📤": "triage",
+  "💬": "answer",
+  "🔓": "authorise",
+};
 
 export function optionEmoji(option) {
   if (!option || typeof option !== "object") return null;
@@ -44,29 +68,42 @@ export function formatOptions(decision) {
   const unique = new Set(emojis.filter(Boolean));
   if (
     options.length > 0 &&
-    options.length <= 3 &&
     unique.size === options.length &&
     emojis.every(Boolean)
   ) {
+    const map = Object.fromEntries(mapped.map((o) => [o.emoji, o.id]));
     return {
       style: "emoji",
-      line: mapped.map((o) => `${o.emoji} ${SHORT[o.emoji]}`).join(" · "),
-      map: Object.fromEntries(mapped.map((o) => [o.emoji, o.id])),
+      line: mapped
+        .map((o) => `${o.emoji} ${SHORT[o.emoji] ?? o.label ?? o.id}`)
+        .join(" · "),
+      map,
     };
   }
-  return {
-    style: "numbered",
-    line: mapped.map((o, i) => `${i + 1}. ${o.label ?? o.id}`).join("\n"),
-    map: Object.fromEntries(mapped.map((o, i) => [String(i + 1), o.id])),
-  };
+  const map = {};
+  const line = mapped
+    .map((o, i) => {
+      const n = String(i + 1);
+      map[n] = o.id;
+      if (o.emoji) map[o.emoji] = o.id;
+      const label = o.label ?? o.id;
+      return o.emoji ? `${n}. ${o.emoji} ${label}` : `${n}. ${label}`;
+    })
+    .join("\n");
+  return { style: "numbered", line, map };
+}
+
+export function absoluteWebUrl(webUrl) {
+  if (typeof webUrl !== "string") return "";
+  const trimmed = webUrl.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return "";
+  return trimmed.replace(/\/$/, "");
 }
 
 export function inboxDeepLink(itemId, webUrl) {
-  const hash = `#/inbox/${encodeURIComponent(itemId)}`;
-  if (typeof webUrl === "string" && webUrl.trim() !== "") {
-    return `${webUrl.replace(/\/$/, "")}/${hash}`;
-  }
-  return hash;
+  const base = absoluteWebUrl(webUrl);
+  if (!base || itemId == null || String(itemId) === "") return "";
+  return `${base}/#/inbox/${encodeURIComponent(itemId)}`;
 }
 
 const MESSAGE_BODY_LIMIT = 300;
@@ -77,20 +114,82 @@ export function truncateBody(text, limit = MESSAGE_BODY_LIMIT) {
   return `${value.slice(0, limit).trimEnd()}…`;
 }
 
-export function formatInboxMessage(item, { webUrl } = {}) {
-  const title = String(item?.title ?? "").trim() || "(untitled)";
+function refText(item, key) {
+  const value = item?.refs?.[key];
+  if (value === undefined || value === null) return "";
+  const text = String(value).trim();
+  return text;
+}
+
+export function formatSubject(item) {
+  const kind = String(item?.kind ?? "").trim();
+  const repo = refText(item, "repo");
+  const ticket = refText(item, "issue");
+  const parts = [kind, repo, ticket].filter(Boolean);
+  if (ticket) return parts.join("  ");
+  const title = String(item?.title ?? "").trim();
+  return title || kind || "(untitled)";
+}
+
+export function formatWhy(item) {
+  const context =
+    typeof item?.decision?.context === "string"
+      ? item.decision.context.trim()
+      : "";
+  if (context) return context;
+  const body = typeof item?.body === "string" ? item.body.trim() : "";
+  if (body) return body;
   const question =
-    typeof item?.decision?.question === "string" &&
-    item.decision.question.trim()
+    typeof item?.decision?.question === "string"
       ? item.decision.question.trim()
-      : typeof item?.body === "string"
-        ? item.body.trim()
-        : "";
+      : "";
+  return question;
+}
+
+export function isDismissOnly(item) {
+  const options = Array.isArray(item?.decision?.options)
+    ? item.decision.options
+    : [];
+  if (options.length === 0) return false;
+  return options.every(
+    (option) => option?.effect === "dismiss" || option?.id === "dismiss",
+  );
+}
+
+export function shouldPost(item, postKinds) {
+  if (!item?.id) return false;
+  const kinds = postKinds instanceof Set ? postKinds : new Set(postKinds ?? []);
+  if (!kinds.has(item.kind)) return false;
+  if (item.kind === "ESCALATED" && !refText(item, "issue")) return false;
+  if (isDismissOnly(item)) return false;
+  return true;
+}
+
+/**
+ * A thread reply selects the recommended option, else `answer`. Never dismiss.
+ */
+export function replyOptionId(decision) {
+  const options = Array.isArray(decision?.options) ? decision.options : [];
+  const byId = (id) => options.find((option) => option.id === id);
+  const recommended = decision?.recommended;
+  if (recommended && byId(recommended)?.effect !== "dismiss")
+    return recommended;
+  const answer = options.find(
+    (option) => option.effect === "answer" || option.id === "answer",
+  );
+  return answer?.id ?? null;
+}
+
+export function formatInboxMessage(item, { webUrl } = {}) {
+  const subject = formatSubject(item);
+  const why = truncateBody(formatWhy(item));
   const options = formatOptions(item?.decision);
   const link = inboxDeepLink(item?.id ?? "", webUrl);
-  return [title, truncateBody(question), options.line, link]
-    .filter((line) => line !== "")
-    .join("\n");
+  const lines = [subject];
+  if (why && why !== subject) lines.push(why);
+  if (options.line) lines.push(options.line);
+  if (link) lines.push(link);
+  return lines.join("\n");
 }
 
 export function formatResolvedReply(item) {

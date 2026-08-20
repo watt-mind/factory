@@ -248,11 +248,19 @@ notify:
     - circuit_breaker_tripped
     - release_candidate_ready
 
-# Buzz connector (WM-921). Enabled 2026-08-20: FACTORY_EXT_BUZZ_AGENT_NSEC and
-# FACTORY_EXT_BUZZ_AUTH_TAG provisioned in ~/.factory/secrets.env (chmod 600);
-# @factory admitted to #general; NIP-OA tag verified against the owner key.
-# Telegram stays the blocker channel until a real BLOCKED push is observed.
+# Buzz connector (WM-921, quieter interrupt cards WM-974). Enabled 2026-08-20:
+# FACTORY_EXT_BUZZ_AGENT_NSEC and FACTORY_EXT_BUZZ_AUTH_TAG in
+# ~/.factory/secrets.env (chmod 600). #ops-factory is the pager; run-start
+# telemetry is WM-975 (#feed-factory). Telegram stays until a real BLOCKED
+# push is observed end-to-end.
 extensions:
   - path: extensions/buzz
     config:
       channel: "ea70b81e-0b0c-4b48-82da-5f78c167a12b" # #ops-factory
+      postKinds:
+        - ESCALATED
+        - BLOCKED
+        - CI RED
+        - SMOKE RED
+        - CIRCUIT BREAKER
+        - RC READY

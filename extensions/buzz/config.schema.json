@@ -35,20 +35,23 @@
       "title": "NIP-OA auth tag",
       "description": "JSON array [\"auth\", owner, conditions, sig]. Resolved from FACTORY_EXT_BUZZ_AUTH_TAG."
     },
+    "webUrl": {
+      "type": "string",
+      "format": "uri",
+      "title": "Factory web URL",
+      "description": "Absolute http(s) origin for inbox deep links. Hash-only #/inbox/… links are never posted."
+    },
     "postKinds": {
       "type": "array",
       "title": "Post kinds",
-      "description": "Inbox kinds posted to the channel. Default is every Decide + Red + Ready kind.",
+      "description": "Inbox kinds posted to the interrupt channel. Default is the pager set only; run-start telemetry is a later #feed-factory channel (WM-975).",
       "default": [
-        "BLOCKED",
         "ESCALATED",
+        "BLOCKED",
         "CI RED",
         "SMOKE RED",
         "CIRCUIT BREAKER",
-        "RC READY",
-        "human_needed",
-        "decision_needed",
-        "proposal_expired"
+        "RC READY"
       ],
       "items": {
         "type": "string",

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_POST_KINDS,
   fieldsForOption,
   formatInboxMessage,
   formatOptions,
@@ -9,6 +10,8 @@ import {
   optionNeedsReason,
   parseCommand,
   reactionToOptionId,
+  replyOptionId,
+  shouldPost,
   truncateBody,
 } from "../lib/format.mjs";
 
@@ -40,7 +43,7 @@ describe("option formatting", () => {
     expect(reactionToOptionId("+", formatted.map)).toBe("approve");
   });
 
-  test("more than three options are numbered", () => {
+  test("more than three options without effects are numbered", () => {
     const formatted = formatOptions({
       options: [
         { id: "a", label: "One" },
@@ -53,6 +56,32 @@ describe("option formatting", () => {
     expect(formatted.line).toBe("1. One\n2. Two\n3. Three\n4. Four");
     expect(reactionToOptionId("2", formatted.map)).toBe("b");
   });
+
+  test("closed-set effects each have a unique reaction emoji", () => {
+    const formatted = formatOptions({
+      options: [
+        { id: "requeue", label: "Requeue the event", effect: "requeue" },
+        {
+          id: "triage",
+          label: "Send back to Triage",
+          effect: "send_to_triage",
+        },
+        { id: "answer", label: "Answer the agent", effect: "answer" },
+        { id: "authorise", label: "Authorise", effect: "authorise" },
+        { id: "dismiss", label: "Not now", effect: "dismiss" },
+      ],
+    });
+    expect(formatted.style).toBe("emoji");
+    expect(formatted.line).toContain("🔁 requeue");
+    expect(formatted.line).toContain("📤 triage");
+    expect(formatted.line).toContain("💬 answer");
+    expect(formatted.line).toContain("🔓 authorise");
+    expect(formatted.line).toContain("💤 not now");
+    expect(reactionToOptionId("🔁", formatted.map)).toBe("requeue");
+    expect(reactionToOptionId("📤", formatted.map)).toBe("triage");
+    expect(reactionToOptionId("💬", formatted.map)).toBe("answer");
+    expect(reactionToOptionId("🔓", formatted.map)).toBe("authorise");
+  });
 });
 
 describe("inbox message", () => {
@@ -60,16 +89,32 @@ describe("inbox message", () => {
     const body = formatInboxMessage(
       {
         id: "inbox_1",
-        title: "Decide proposal prop_1",
-        decision: proposal,
+        kind: "ESCALATED",
+        title: "ESCALATED run_abc: needs_human",
+        refs: { issue: "WM-1", repo: "factory" },
+        decision: {
+          ...proposal,
+          context: "Missing Stripe key on the runner.",
+        },
       },
       { webUrl: "http://127.0.0.1:7382" },
     );
-    expect(body).toStartWith("Decide proposal prop_1\n");
-    expect(body).toContain("Approve dispatch of WM-1?");
+    expect(body).toStartWith("ESCALATED  factory  WM-1\n");
+    expect(body).toContain("Missing Stripe key on the runner.");
     expect(body).toContain("👍 approve · 👎 reject · 💤 not now");
     expect(body).toContain("http://127.0.0.1:7382/#/inbox/inbox_1");
-    expect(inboxDeepLink("x", null)).toBe("#/inbox/x");
+    expect(body).not.toContain("ESCALATED run_abc");
+  });
+
+  test("omits a hash-only inbox link when webUrl is missing", () => {
+    const body = formatInboxMessage({
+      id: "inbox_1",
+      title: "Decide proposal prop_1",
+      decision: proposal,
+    });
+    expect(body).not.toContain("#/inbox/");
+    expect(inboxDeepLink("x", null)).toBe("");
+    expect(inboxDeepLink("x", "#")).toBe("");
   });
 
   test("resolved reply names the actor", () => {
@@ -131,5 +176,92 @@ describe("approvers", () => {
   test("allow-list is case-insensitive hex", () => {
     expect(isApprover("AA", ["aa"])).toBe(true);
     expect(isApprover("bb", ["aa"])).toBe(false);
+  });
+});
+
+describe("shouldPost", () => {
+  const kinds = new Set(DEFAULT_POST_KINDS);
+
+  test("skips dismiss-only cards and ticket-less ESCALATED", () => {
+    expect(
+      shouldPost(
+        {
+          id: "inbox_1",
+          kind: "ESCALATED",
+          refs: { issue: "WM-1" },
+          decision: {
+            options: [{ id: "dismiss", label: "Not now", effect: "dismiss" }],
+          },
+        },
+        kinds,
+      ),
+    ).toBe(false);
+    expect(
+      shouldPost(
+        {
+          id: "inbox_1",
+          kind: "ESCALATED",
+          refs: { runId: "run_1" },
+          decision: proposal,
+        },
+        kinds,
+      ),
+    ).toBe(false);
+  });
+
+  test("posts ESCALATED with a ticket and a real verb", () => {
+    expect(
+      shouldPost(
+        {
+          id: "inbox_1",
+          kind: "ESCALATED",
+          refs: { issue: "WM-1" },
+          decision: proposal,
+        },
+        kinds,
+      ),
+    ).toBe(true);
+  });
+
+  test("posts CI RED even without a decision", () => {
+    expect(shouldPost({ id: "inbox_1", kind: "CI RED" }, kinds)).toBe(true);
+  });
+
+  test("drops kinds outside the interrupt set", () => {
+    expect(
+      shouldPost(
+        { id: "inbox_1", kind: "decision_needed", decision: proposal },
+        kinds,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("replyOptionId", () => {
+  test("selects recommended, else answer, never dismiss", () => {
+    expect(
+      replyOptionId({
+        recommended: "requeue",
+        options: [
+          { id: "requeue", effect: "requeue" },
+          { id: "dismiss", effect: "dismiss" },
+        ],
+      }),
+    ).toBe("requeue");
+    expect(
+      replyOptionId({
+        options: [
+          { id: "triage", effect: "send_to_triage" },
+          { id: "answer", effect: "answer" },
+          { id: "dismiss", effect: "dismiss" },
+        ],
+      }),
+    ).toBe("answer");
+    expect(
+      replyOptionId({
+        recommended: "dismiss",
+        options: [{ id: "dismiss", effect: "dismiss" }],
+      }),
+    ).toBe(null);
   });
 });

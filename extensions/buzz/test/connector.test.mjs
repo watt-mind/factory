@@ -40,8 +40,9 @@ const proposal = {
 function inboxItem(overrides = {}) {
   return {
     id: "inbox_1",
-    kind: "decision_needed",
+    kind: "ESCALATED",
     title: "Decide proposal prop_1",
+    refs: { issue: "WM-1", repo: "factory" },
     decision: proposal,
     ...overrides,
   };
@@ -155,6 +156,7 @@ describe("egress", () => {
       secrets,
       client,
       fetchImpl: relay.fetchImpl,
+      webUrl: "http://127.0.0.1:7382",
     });
     await runtime.onInboxEvent({ type: "new-item", item: inboxItem() });
     expect(relay.posted).toHaveLength(1);
@@ -166,9 +168,10 @@ describe("egress", () => {
         expect.arrayContaining(["auth", OWNER_PUB]),
       ]),
     );
-    expect(event.content).toContain("Decide proposal prop_1");
+    expect(event.content).toContain("ESCALATED  factory  WM-1");
     expect(event.content).toContain("👍 approve · 👎 reject · 💤 not now");
-    expect(event.content).toContain("#/inbox/inbox_1");
+    expect(event.content).toContain("http://127.0.0.1:7382/#/inbox/inbox_1");
+    expect(event.content).not.toContain("\n#/inbox/");
     expect(marked[0].delivery.buzz.eventId).toBe(event.id);
     expect(runtime.posted.get("inbox_1").eventId).toBe(event.id);
   });
@@ -218,6 +221,35 @@ describe("egress", () => {
     expect(relay.posted[1].tags).toEqual(
       expect.arrayContaining([["e", relay.posted[0].id, "", "reply"]]),
     );
+  });
+
+  test("does not post dismiss-only or ticket-less ESCALATED items", async () => {
+    const relay = startRelay();
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client: fakeClient({ items: [] }),
+      fetchImpl: relay.fetchImpl,
+    });
+    await runtime.onInboxEvent({
+      type: "new-item",
+      item: inboxItem({
+        id: "inbox_dismiss",
+        decision: {
+          question: "How should the factory handle this refused run?",
+          options: [{ id: "dismiss", label: "Not now", effect: "dismiss" }],
+        },
+      }),
+    });
+    await runtime.onInboxEvent({
+      type: "new-item",
+      item: inboxItem({
+        id: "inbox_run",
+        title: "ESCALATED run_abc: needs_human",
+        refs: { runId: "run_abc" },
+      }),
+    });
+    expect(relay.posted).toHaveLength(0);
   });
 });
 
@@ -528,6 +560,68 @@ describe("ingress", () => {
           e.content.includes("inbox locked"),
       ),
     ).toBe(true);
+  });
+
+  test("a thread reply selects the recommended option and uses the reply as the field", async () => {
+    const decisions = [];
+    const item = inboxItem({
+      id: "inbox_answer",
+      decision: {
+        schemaVersion: "factory.decision-request/v1",
+        question: "How should the factory proceed with WM-1?",
+        recommended: "answer",
+        options: [
+          {
+            id: "triage",
+            label: "Send back to Triage",
+            effect: "send_to_triage",
+          },
+          { id: "answer", label: "Answer the agent", effect: "answer" },
+          { id: "dismiss", label: "Not now", effect: "dismiss" },
+        ],
+        fields: [
+          {
+            id: "answer",
+            kind: "text",
+            required: true,
+            whenOption: ["answer"],
+          },
+        ],
+      },
+    });
+    const client = fakeClient({
+      items: [item],
+      onDecide: (row) => decisions.push(row),
+    });
+    const postedId = "c".repeat(64);
+    const reply = signEvent(
+      {
+        kind: KIND_CHAT,
+        tags: [["e", postedId, "", "root"]],
+        content: "use the staging Stripe key",
+      },
+      OWNER_SECRET,
+      { createdAt: 1_700_000_020 },
+    );
+    const relay = startRelay({ extraEvents: [reply] });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client,
+      fetchImpl: relay.fetchImpl,
+    });
+    runtime.posted.set("inbox_answer", {
+      eventId: postedId,
+      postedAt: "2026-08-20T00:00:00.000Z",
+      optionMap: { "📤": "triage", "💬": "answer", "💤": "dismiss" },
+      kind: "ESCALATED",
+    });
+    await runtime.poll();
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].response.optionId).toBe("answer");
+    expect(decisions[0].response.fields).toEqual({
+      answer: "use the staging Stripe key",
+    });
   });
 });
 

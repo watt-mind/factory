@@ -5,8 +5,9 @@
  * fake relay and a fake loopback client.
  */
 import {
-  DM_KINDS,
+  absoluteWebUrl,
   DEFAULT_POST_KINDS,
+  DM_KINDS,
   fieldsForOption,
   formatInboxMessage,
   formatOptions,
@@ -16,6 +17,8 @@ import {
   optionNeedsReason,
   parseCommand,
   reactionToOptionId,
+  replyOptionId,
+  shouldPost,
 } from "./format.mjs";
 import { hashJson } from "./hash.mjs";
 import { giftWrapDm } from "./nip17.mjs";
@@ -105,6 +108,7 @@ export function createBuzzRuntime({
       : null;
 
   const identity = resolveIdentity({ secrets, config });
+  const resolvedWebUrl = absoluteWebUrl(config.webUrl ?? webUrl);
   const posted = new Map(); // itemId -> { eventId, postedAt, optionMap, kind }
   const seenIngress = new Set();
   const pendingReject = new Map(); // rootEventId -> { itemId, optionId }
@@ -210,7 +214,8 @@ export function createBuzzRuntime({
       return;
     }
     if (!postKinds.has(item.kind)) return;
-    const content = formatInboxMessage(item, { webUrl });
+    if (!shouldPost(item, postKinds)) return;
+    const content = formatInboxMessage(item, { webUrl: resolvedWebUrl });
     const event = channelMessage({
       secretHex: identity.secretHex,
       auth: identity.auth,
@@ -231,7 +236,7 @@ export function createBuzzRuntime({
       const wrap = giftWrapDm(
         identity.secretHex,
         dmBlockedTo,
-        `${item.kind}: ${item.title}\n${inboxDeepLink(item.id, webUrl)}`,
+        `${item.kind}: ${item.title}\n${inboxDeepLink(item.id, resolvedWebUrl)}`.trim(),
       );
       await publish(wrap);
     }
@@ -399,6 +404,26 @@ export function createBuzzRuntime({
       if (decided.error) {
         await replyInThread(rootId, `decide failed: ${decided.error}`);
       }
+      return;
+    }
+
+    const found = itemForEventId(rootId);
+    if (!found?.item) return;
+    const optionId = replyOptionId(found.item.decision);
+    if (!optionId) return;
+    const decided = await decideItem(
+      found.item,
+      optionId,
+      identity.npub,
+      event.content,
+    );
+    if (decided.needReason) {
+      pendingReject.set(rootId, { itemId: found.id, optionId });
+      await replyInThread(rootId, reasonPrompt(found.item, optionId));
+      return;
+    }
+    if (decided.error) {
+      await replyInThread(rootId, `decide failed: ${decided.error}`);
     }
   }
 
