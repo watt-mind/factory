@@ -317,8 +317,15 @@ for (const t of terminals) {
 const failedCrashProposal = await until(
   "failed-crash run for retry",
   async () => {
+    // GET /runs returns a bounded, spec-free summary per run (WM-976) — it no
+    // longer inlines reasonCode, so look it up from each candidate's latest
+    // attempt via GET /runs/:id.
     const { runs } = await client.runs("FAILED");
-    return runs.find((r) => r.reasonCode === "agent_exit_1");
+    for (const r of runs) {
+      const detail = await client.run(r.runId);
+      if (detail?.attempts?.at(-1)?.reason_code === "agent_exit_1") return r;
+    }
+    return undefined;
   },
 );
 if (failedCrashProposal) {
@@ -802,10 +809,7 @@ log(`${hang.runId} → RUNNING (hang mode; TIMED_OUT after 600s timeout)`);
 
 log("done — seeded comprehensive fixture across all agents & states:");
 const { runs } = await client.runs();
-for (const r of runs)
-  log(
-    `  ${r.runId}  ${r.state}  agent:${r.agent}  repos:[${(r.repos ?? []).join(", ")}]`,
-  );
+for (const r of runs) log(`  ${r.runId}  ${r.state}  agent:${r.agent}`);
 const { proposals } = await client.proposals();
 for (const p of proposals)
   log(

@@ -19,6 +19,7 @@
 import { createHash } from "node:crypto";
 import { apiClient } from "../lib/client.mjs";
 import { loadRegistry } from "../lib/registry.mjs";
+import { repoNamesFromInput } from "../lib/api-runs.mjs";
 
 const args = process.argv.slice(2);
 const i = args.indexOf("--port");
@@ -46,7 +47,32 @@ check("GET /health reports ok: true", health.ok === true);
 check("runtime is in fake adapter mode", health.env?.adapter === "fake");
 
 // 2. Runs listing and state census
-const { runs } = await client.runs();
+//
+// GET /runs returns a bounded, spec-free summary per run (WM-976) — repos,
+// reasonCode, maxAttempts and eventSource are no longer inlined so the list
+// payload stays small under pagination. This verifier still needs them, so
+// hydrate each row from GET /runs/:id (spec + attempts) and from the
+// decision='run' proposal that produced it (eventSource).
+const { runs: runSummaries } = await client.runs();
+const { proposals: runProposalsForEventSource } = await client.proposals("all");
+const eventSourceByRunId = new Map(
+  runProposalsForEventSource
+    .filter((p) => p.decision === "run" && p.runId)
+    .map((p) => [p.runId, p.eventSource]),
+);
+const runs = await Promise.all(
+  runSummaries.map(async (r) => {
+    const detail = await client.run(r.runId);
+    const spec = detail?.run?.spec ?? {};
+    return {
+      ...r,
+      repos: repoNamesFromInput(spec.input),
+      maxAttempts: spec.maxAttempts,
+      reasonCode: detail?.attempts?.at(-1)?.reason_code ?? null,
+      eventSource: eventSourceByRunId.get(r.runId) ?? null,
+    };
+  }),
+);
 const byState = (state) => runs.filter((r) => r.state === state);
 
 check("runs present", runs.length >= 8, `total runs: ${runs.length}`);
