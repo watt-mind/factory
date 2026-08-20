@@ -349,6 +349,7 @@ test("closure check blocks ai:agent-ready when Owned Paths closure policy is inc
 // Same shape as lib/forge's "nothing outside lib/forge/ spawns gh" check:
 // new Linear GraphQL call sites must go through the adapter, not gql().
 const GQL_IMPORT_ALLOWED = new Set([
+  "event-runtime/lib/linear.mjs",
   "lib/control-plane/linear.mjs",
   "orchestrator/reaper.mjs",
   // Remaining call sites sit outside this ticket's Owned Paths (WM-962).
