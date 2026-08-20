@@ -17,6 +17,34 @@ const WEB_PORT = Number(process.env.FACTORY_EVENT_WEB_PORT || 7382);
 const API_PORT = Number(process.env.FACTORY_EVENT_PORT || 7381);
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
 
+// WM-973: extra Host values (beyond loopback) this server will answer for —
+// e.g. a tailnet name published via `tailscale serve`, which proxies to the
+// loopback port so the binding stays 127.0.0.1 and transport auth comes from
+// the tailnet. Hostnames only, comma-separated, compared case-insensitively
+// with any :port stripped. Unset = loopback-only, exactly the old behavior.
+const ALLOWED_HOSTS = new Set(
+  (process.env.FACTORY_EVENT_WEB_ALLOWED_HOSTS || "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+function hostOf(value) {
+  if (typeof value !== "string" || value === "") return null;
+  // Host header / Origin host: strip :port (IPv6 literals keep brackets).
+  const m = value.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (m) return m[1].toLowerCase();
+  return value.replace(/:\d+$/, "").toLowerCase();
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+function hostAllowed(value) {
+  const host = hostOf(value);
+  if (host === null) return false;
+  return LOOPBACK_HOSTS.has(host) || ALLOWED_HOSTS.has(host);
+}
+
 if (!existsSync(path.join(DIST, "index.html"))) {
   console.error(
     `no build at ${DIST} — build it first:\n  cd event-runtime/web && bun install && bun run build`,
@@ -44,13 +72,43 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
+    // WM-973: answer only for loopback and explicitly allowed Hosts, and
+    // reject cross-site Origins at this layer — the API's own loopback guard
+    // stays untouched because the proxy below rewrites Host/Origin.
+    if (!hostAllowed(req.headers.get("host")))
+      return new Response(JSON.stringify({ error: "invalid_host" }), {
+        status: 403,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    const origin = req.headers.get("origin");
+    if (origin) {
+      let originHost = null;
+      try {
+        originHost = new URL(origin).hostname;
+      } catch {
+        originHost = null;
+      }
+      if (originHost === null || !hostAllowed(originHost))
+        return new Response(
+          JSON.stringify({ error: "cross_origin_rejected" }),
+          {
+            status: 403,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          },
+        );
+    }
+
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
       const target = `http://127.0.0.1:${API_PORT}${url.pathname.slice(4) || "/"}${url.search}`;
       // Pass-through, nothing added: the proxy exists only for same-origin.
       // WHATWG fetch rejects GET/HEAD when a body option is present, even when
       // the incoming client supplied one, so omit the option for those methods.
       const bodyless = req.method === "GET" || req.method === "HEAD";
-      const headers = bodyless ? new Headers(req.headers) : req.headers;
+      const headers = new Headers(req.headers);
+      // WM-973: the upstream API enforces a loopback Host and Origin; this
+      // proxy IS the same-origin boundary, so present as loopback upstream.
+      headers.set("host", `127.0.0.1:${API_PORT}`);
+      headers.delete("origin");
       const init = { method: req.method, headers };
       try {
         if (bodyless) {

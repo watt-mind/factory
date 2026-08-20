@@ -1496,3 +1496,27 @@ bounds / `default` drive the control. Search indexes every property's
 `title` and `description` as well as keys and values. Secret properties
 publish `{ set, source }` and never a value. Anomaly replaces the form.
 Built-in sections should migrate onto the same schema shape (WM-924).
+
+## Tailnet access (WM-973)
+
+`tailscale serve` can publish the web UI to your tailnet without changing the
+process bindings — both servers stay on 127.0.0.1 and Tailscale proxies to the
+loopback port, so transport auth is the tailnet's WireGuard identity
+(tailnet-only; never use `tailscale funnel`, which is public):
+
+```sh
+sudo tailscale serve --bg --http=80 http://127.0.0.1:7382
+```
+
+The web server answers only for loopback Hosts by default. Add the tailnet
+name via `FACTORY_EVENT_WEB_ALLOWED_HOSTS` (comma-separated hostnames, no
+scheme or port) in the environment that starts `bin/live-stack.sh`:
+
+```sh
+export FACTORY_EVENT_WEB_ALLOWED_HOSTS=runner.whale-pike.ts.net
+```
+
+The `/api/*` proxy presents itself as loopback upstream (rewrites `Host`,
+drops `Origin`), so the control API's own loopback/rebinding guard
+(`api.mjs`) is unchanged — the web layer enforces the same defense against
+unlisted Hosts and cross-site Origins before anything is served.

@@ -207,3 +207,32 @@ describe("event-runtime web API proxy", () => {
     });
   });
 });
+
+// WM-973: FACTORY_EVENT_WEB_ALLOWED_HOSTS — tailnet hosts without weakening
+// the API loopback guard. The env var is read at import time, so these tests
+// exercise the helper behavior through subprocess-free direct requests using
+// the already-running server (loopback) plus Host-header variation.
+describe("allowed hosts (WM-973)", () => {
+  test("unlisted non-loopback Host is rejected at the web layer", async () => {
+    const res = await fetch(`http://127.0.0.1:${webPort}/`, {
+      headers: { host: "attacker.example" },
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("invalid_host");
+  });
+
+  test("cross-site Origin is rejected even on a loopback Host", async () => {
+    const res = await fetch(`http://127.0.0.1:${webPort}/api/health`, {
+      headers: { origin: "https://attacker.example" },
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("cross_origin_rejected");
+  });
+
+  test("loopback Origin still passes", async () => {
+    const res = await fetch(`http://127.0.0.1:${webPort}/api/health`, {
+      headers: { origin: `http://127.0.0.1:${webPort}` },
+    });
+    expect(res.status).not.toBe(403);
+  });
+});
