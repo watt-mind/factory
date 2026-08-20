@@ -1613,6 +1613,69 @@ function defaultHoldPullRequest({ github, prNumber, body }) {
   return held;
 }
 
+/** Read the live PR base at handoff; dispatch must never rely on GitHub's default branch. */
+function defaultFetchHandoffPullRequest({ github, prNumber }) {
+  if (!github || !Number.isInteger(prNumber)) {
+    throw new Error("handoff PR requires github and a numeric PR number");
+  }
+  return loadForge().prView(github, prNumber, {
+    fields: ["baseRefName"],
+    timeout: workerSubprocessTimeoutMs(),
+  });
+}
+
+function handoffPrNumber(handoff) {
+  if (Number.isInteger(handoff?.prNumber) && handoff.prNumber > 0)
+    return handoff.prNumber;
+  return null;
+}
+
+/**
+ * Fail the handoff closed if GitHub cannot prove that the PR targets the
+ * configured repository base. Kept here, beside the worker's other external
+ * handoff effects, so tests can inject the PR read without a live forge.
+ */
+function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
+  const expected = typeof base === "string" ? base.trim() : "";
+  const prNumber = handoffPrNumber(handoff);
+  if (!expected || !handoff?.github || !prNumber) {
+    throw new ContractViolation(
+      [
+        "pr_base_unverifiable: handoff requires configured base, GitHub repository, and numeric PR number",
+      ],
+      { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  let pr;
+  try {
+    pr = fetchPullRequest({ github: handoff.github, prNumber });
+  } catch (err) {
+    throw new ContractViolation(
+      [
+        `pr_base_unreadable: could not read base for PR #${prNumber}: ${String(err?.message ?? err)}`,
+      ],
+      { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  const actual =
+    typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
+  handoff.prBase = { expected, actual: actual || null };
+  if (!actual) {
+    throw new ContractViolation(
+      [`pr_base_unreadable: PR #${prNumber} has no baseRefName`],
+      { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  if (actual !== expected) {
+    throw new ContractViolation(
+      [
+        `pr_base_mismatch: PR #${prNumber} targets ${actual}, expected configured base ${expected}`,
+      ],
+      { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+}
+
 const BASELINE_COMMENT_MARKER = "wm:baseline:red:";
 
 function baselineFailureSignature({ why, log = null, baseline = null }) {
@@ -1829,6 +1892,8 @@ export async function executeClaimed(
       }));
   const holdPullRequestFn =
     dispatchOpts?.holdPullRequest ?? defaultHoldPullRequest;
+  const fetchHandoffPullRequestFn =
+    dispatchOpts?.fetchHandoffPullRequest ?? defaultFetchHandoffPullRequest;
   let handoffContext = null;
 
   const nowFn = typeof now === "function" ? now : () => now ?? Date.now();
@@ -2677,6 +2742,16 @@ export async function executeClaimed(
         extraArtifacts: RUNTIME_ARTIFACTS,
         worktreeRecord,
       });
+      // `prNumber` was optional on pre-WM-576 dispatch artifacts. Preserve
+      // their accepted handoffs; current dispatch prompts require it, and all
+      // new PR_OPEN artifacts are checked against the configured base here.
+      if (verified.handoff && handoffPrNumber(verified.handoff)) {
+        assertHandoffPullRequestBase({
+          handoff: verified.handoff,
+          base: worktreeRecord?.base,
+          fetchPullRequest: fetchHandoffPullRequestFn,
+        });
+      }
     } catch (err) {
       if (!(err instanceof ContractViolation)) throw err;
       const reasonCode =

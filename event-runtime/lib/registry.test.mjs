@@ -162,8 +162,10 @@ describe("registry", () => {
     // merge-scan enumerator keys on head SHA and re-pins merge-scan.md;
     // registry inputs (agents, edges, event-types).
     // Regenerated (merge-factory clock scan 15m -> 4h in schedules.json).
+    // Regenerated (WM-938): dispatch pins explicit PR bases and merge-scan
+    // surfaces wrong-base PRs; both agent definitions are registry inputs.
     const expected =
-      "sha256:2e66f5a300e4eeeae200dfb850991cd3461e72880f5eaa50c6489c575cf9b127";
+      "sha256:a4ef0ee4d19d5519e291bdbd43594c490862facf4ce247ca5f03830a2a5ac355";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -184,8 +186,9 @@ describe("registry", () => {
     // pin — and therefore this defHash — legitimately moved, exactly as it did
     // for WM-610. Still not a provenance break: `pack` stays non-enumerable.
     // WM-812 adds decision-memo declarations and re-pins the dispatch brief.
+    // WM-938 adds the explicit-base PR command and re-pins dispatch.
     expect(computeDefHash(def)).toBe(
-      "sha256:dc4dc32b31daba9bbb70cf570c78145f5125d0454a99ad62c8b28cf037079eb4",
+      "sha256:eb247d891c24fc2327e65cf8e3713ef6110ab514c33781fbdf99a14379da8bf4",
     );
   });
 

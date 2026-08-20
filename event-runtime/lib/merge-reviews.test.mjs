@@ -340,7 +340,43 @@ describe("merge-scan enumerator (WM-907)", () => {
     expect(result.terminalState).toBe("completed");
     expect(result.artifact.reviews.map((row) => row.pr)).toEqual([11]);
     expect(result.artifact.plan).toEqual([]);
-    expect(result.artifact.recommendation).toBe("REVIEW");
+    expect(result.artifact.recommendation).toBe("ESCALATE");
+    expect(result.artifact.escalate).toEqual([
+      {
+        pr: 13,
+        headSha: HEAD,
+        ticket: "WM-13",
+        reason: "targets master instead of configured base develop",
+      },
+    ]);
+  });
+
+  test("escalates an open non-draft PR that targets the wrong base", () => {
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db: openDb(":memory:"),
+      forge: forgeWith([
+        pr({
+          number: 13,
+          baseRefName: "main",
+          headRefName: "feat/WM-13",
+        }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.recommendation).toBe("ESCALATE");
+    expect(result.artifact.escalate).toEqual([
+      {
+        pr: 13,
+        headSha: HEAD,
+        ticket: "WM-13",
+        reason: "targets main instead of configured base develop",
+      },
+    ]);
+    expect(result.artifact.summary).toContain(
+      "wrong-base PR(s): #13 (main → develop)",
+    );
   });
 
   test("selected scan forces a review even on a ledger hit", () => {

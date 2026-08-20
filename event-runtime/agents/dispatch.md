@@ -100,8 +100,10 @@ shell` means the spawn prompt was defective: correct its path/launch details
 5. **Never `sleep` to wait for anything.** Poll a condition with a real
    command (`gh pr checks <PR> --watch --fail-fast` for CI); a fixed sleep
    wedges the run until the timeout kills it.
-6. **Push and open a PR** against the repo's base branch with
-   `Fixes <TICKET>` in the body. Record its numeric GitHub PR number as
+6. **Push and open a PR** against the configured `base` for this repo in
+   `config/repos.yaml`; never rely on GitHub's default branch. Use the exact
+   shape `gh pr create --base <configured-base> --title "..." --body "Fixes
+<TICKET>"`. Record its numeric GitHub PR number as
    `artifact.prNumber`; this is what scopes the immediate merge review chained
    from a `PR_OPEN` result. For a required UX critique, create the PR as a
    draft first. Run `gh pr ready <PR>` only after an evidence-backed `SHIP`

@@ -38,6 +38,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Verification is a gate, not a formality.** Run the ticket's exact Verification Command. Never advance state, open a PR, or report success on failing output. Never weaken a test or skip a check to get green — if the test is wrong, that's a finding to report, not to edit around.
 
+**PR base is explicit.** Resolve the repository's `base` from `config/repos.yaml` and always create ticket PRs with `gh pr create --base <configured-base> ...`; GitHub's default branch is not a fallback. Read the opened PR's `baseRefName` back before handoff and stop if it differs from the configured base.
+
 **Negative testing and falsifiability.** New regression tests must be observed failing before applying the fix to prove they test the actual failure mode and are not vacuous. Verify that tests distinguish correct implementations from plausible incorrect ones (without using `git stash`; use safe per-file reverts such as `git show <ref>:<path> > <path>`). A test that passes before the fix is applied tests nothing.
 
 **Mandatory `## Handoff` comment.** Before moving a ticket to `In Review`, post a structured `## Handoff` comment on the Linear ticket with these exact fields:

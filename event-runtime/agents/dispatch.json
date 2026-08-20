@@ -13,8 +13,19 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write", "repo:write", "github:write"],
-    "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"]
+    "services": [
+      "linear:write",
+      "repo:write",
+      "github:write"
+    ],
+    "tools": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob"
+    ]
   },
   "limits": {
     "timeout_seconds": 5400,
@@ -28,7 +39,10 @@
         "type": "ticket",
         "id": "$.input.ticket"
       },
-      "kinds": ["postmortem", "decision"],
+      "kinds": [
+        "postmortem",
+        "decision"
+      ],
       "max": 10
     },
     {
@@ -36,12 +50,14 @@
         "type": "repo",
         "id": "$.input.repo"
       },
-      "kinds": ["decision"],
+      "kinds": [
+        "decision"
+      ],
       "max": 10
     }
   ],
   "pins": {
-    "agents/dispatch.md": "sha256:03b4b5aba3d6ae725645a5b7d000938b7948fc608006b6b5fe2bf18212df3757",
+    "agents/dispatch.md": "sha256:04c6f34662c066c5aabb4c82d9718342fddcf04e70573097cd5df1416218610f",
     "schemas/dispatch.input.json": "sha256:7949221631e30ad9c6f8fa8a92d071f6ee88ea03e7fbafcbf3af1dffa432cdee",
     "schemas/dispatch.output.json": "sha256:bc25aee1baa16aa21f50e9a3f8c320e57cec11cbdf31c822baee838d49ddb672"
   }

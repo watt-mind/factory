@@ -499,11 +499,15 @@ export function enumerateMergeScan({
   }
 
   const targets = [];
+  const wrongBase = [];
   for (const entry of listed) {
     const pr = normalizeListedPr(entry.raw, baseSha);
     if (!pr) continue;
     if (pr.isDraft) continue;
-    if (pr.baseRefName && pr.baseRefName !== base) continue;
+    if (pr.baseRefName && pr.baseRefName !== base) {
+      wrongBase.push(pr);
+      continue;
+    }
     targets.push(pr);
   }
   return assemble({
@@ -514,6 +518,7 @@ export function enumerateMergeScan({
     db,
     forge,
     targets,
+    wrongBase,
     forceReview: false,
     listedCount: targets.length,
     now,
@@ -528,6 +533,7 @@ function assemble({
   db,
   forge,
   targets,
+  wrongBase = [],
   forceReview,
   listedCount,
 }) {
@@ -571,7 +577,14 @@ function assemble({
   }
   const plan = [];
   const planRequests = planRequestsOf(repo, mergeHits);
-  const escalate = [];
+  const escalate = wrongBase
+    .filter((pr) => pr.ticket)
+    .map((pr) => ({
+      pr: pr.number,
+      headSha: pr.headSha,
+      ticket: pr.ticket,
+      reason: `targets ${pr.baseRefName} instead of configured base ${base}`,
+    }));
   const artifact = {
     recommendation: recommendationOf({
       reviews,
@@ -593,7 +606,9 @@ function assemble({
       reviews,
       plan,
       fix,
+      base,
       listedCount,
+      wrongBase,
       forceReview,
       planRequests,
     }),
@@ -614,13 +629,22 @@ function summaryFor({
   reviews,
   plan,
   fix = [],
+  base,
   listedCount,
+  wrongBase = [],
   forceReview,
   planRequests = [],
 }) {
   const bits = [];
   if (forceReview) bits.push(`selected scan of ${listedCount} PR(s)`);
   else bits.push(`${listedCount} open base-targeting PR(s)`);
+  if (wrongBase.length > 0) {
+    bits.push(
+      `wrong-base PR(s): ${wrongBase
+        .map((pr) => `#${pr.number} (${pr.baseRefName} → ${base})`)
+        .join(", ")}`,
+    );
+  }
   bits.push(`${reviews.length} review(s) to run`);
   if (fix.length > 0) bits.push(`${fix.length} rebase fix(es)`);
   if (planRequests.length > 0) bits.push("MERGE hits queued for planning");

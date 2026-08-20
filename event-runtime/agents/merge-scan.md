@@ -22,7 +22,11 @@ queued as `planRequests[]` so `merge-plan@1` can batch them. `plan[]` on a
 scan artifact is always empty.
 
 When `prNumbers` is absent, enumerate **all** open PRs and consider every
-base-targeting, non-draft PR. When `prNumbers` is present, review exactly those
+base-targeting, non-draft PR. Emit an `escalate[]` item for every non-draft PR
+with an identifiable ticket that targets a different base, and name every
+wrong-base PR and its actual/expected bases in the summary rather than silently
+excluding it; this is a dispatch/handoff escape that needs an operator to
+retarget or close. When `prNumbers` is present, review exactly those
 PR numbers in the listed repo — do not enumerate the open-PR set and do not add
 newer, related, or otherwise open PRs to the scan. Selected scans must stay
 O(the number selected), normally O(1).

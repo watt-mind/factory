@@ -5015,6 +5015,7 @@ describe("handoff verification gate (WM-718)", () => {
           returnHandoffTicket: (p) => (calls.returned.push(p), true),
           holdPullRequest: (p) => (calls.held.push(p), true),
           commentTicket: (p) => (calls.comments.push(p), true),
+          fetchHandoffPullRequest: () => ({ baseRefName: "develop" }),
           ...hooks,
         },
       }),
@@ -5124,6 +5125,26 @@ describe("handoff verification gate (WM-718)", () => {
       "- Verification: `echo repo_verified` — exit 0 (pass)",
     );
     expect(calls.comments[0].body).toContain("repo `verify:` command stood in");
+  });
+
+  test("a PR targeting the wrong base fails handoff verification and is returned", async () => {
+    const spec = handoffSpec({ ticket: "WM-9381" });
+    const { summary, calls } = await dispatch({
+      spec,
+      description: OWNED,
+      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
+      hooks: {
+        fetchHandoffPullRequest: () => ({ baseRefName: "main" }),
+      },
+    });
+
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("handoff_verification_failed");
+    expect(summary.detail).toContain(
+      "PR #77 targets main, expected configured base develop",
+    );
+    expect(calls.held).toHaveLength(1);
+    expect(calls.returned).toHaveLength(1);
   });
 
   test("a change under event-runtime/web/src/** runs the web build and a red build refuses the handoff", async () => {
