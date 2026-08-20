@@ -1453,7 +1453,10 @@ function defaultUnclaimTicket({ repo, ticket, why, log = null, fetchTicket }) {
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
-    if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress"))
+    if (
+      !(Array.isArray(cur.labels) ? cur.labels : (cur.labels?.nodes ?? [])) // WM-978
+        .some((l) => l.name === "ai:in-progress")
+    )
       return false;
 
     runLinearCli([
@@ -1661,7 +1664,10 @@ function defaultBlockBaselineTicket({
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
-    if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress"))
+    if (
+      !(Array.isArray(cur.labels) ? cur.labels : (cur.labels?.nodes ?? [])) // WM-978
+        .some((l) => l.name === "ai:in-progress")
+    )
       return false;
 
     const signature = baselineFailureSignature({ why, log, baseline });

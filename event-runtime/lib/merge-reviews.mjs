@@ -682,7 +682,11 @@ function linearHeld(ticketState) {
   if (!ticketState || typeof ticketState !== "object") return true;
   const state = ticketState.state?.name;
   if (state === "Blocked") return true;
-  const names = (ticketState.labels?.nodes ?? [])
+  const names = (
+    Array.isArray(ticketState.labels)
+      ? ticketState.labels
+      : (ticketState.labels?.nodes ?? [])
+  ) // WM-978: both label shapes
     .map((node) => (typeof node?.name === "string" ? node.name : ""))
     .filter(Boolean);
   return names.some((name) =>

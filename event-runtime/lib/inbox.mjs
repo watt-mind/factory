@@ -1250,7 +1250,9 @@ function linearIssueResolved(row, issue, db) {
   if (row.kind === "BLOCKED") return state !== "Blocked";
   if (row.kind === "ESCALATED") {
     const delivery = parseObject(row.delivery_json);
-    const labels = (issue?.labels?.nodes ?? []).map((label) => label.name);
+    const labels = (
+      Array.isArray(issue?.labels) ? issue.labels : (issue?.labels?.nodes ?? [])
+    ).map((label) => label.name); // WM-978: both label shapes
     const hasEscalatedLabel = labels.includes("ai:escalated");
     if (hasEscalatedLabel && !delivery.seenEscalated) {
       delivery.seenEscalated = true;

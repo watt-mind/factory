@@ -738,7 +738,14 @@ function evidenceTicket(ticket, ticketId) {
     state: ticket?.state?.name ?? null,
     assigneeNull: !ticket?.assignee,
     labels: sortUnique(
-      (ticket?.labels?.nodes ?? []).map((label) => label?.name).filter(Boolean),
+      // WM-978: tolerate both label shapes — the WM-894 control-plane adapter
+      // emits a flat [{id,name}] array; older payloads used GraphQL {nodes}.
+      (Array.isArray(ticket?.labels)
+        ? ticket.labels
+        : (ticket?.labels?.nodes ?? [])
+      )
+        .map((label) => label?.name)
+        .filter(Boolean),
     ),
     ownedPaths: effectiveOwnedPaths(description),
     ownedPathsParsed: parsed.length > 0,

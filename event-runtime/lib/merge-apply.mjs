@@ -69,7 +69,11 @@ function githubHeld(labels) {
 function linearHeld(ticketJson) {
   if (!ticketJson || typeof ticketJson !== "object") return true;
   if (ticketJson.state?.name === "Blocked") return true;
-  const names = (ticketJson.labels?.nodes ?? []).map((n) => n?.name ?? "");
+  const names = (
+    Array.isArray(ticketJson.labels)
+      ? ticketJson.labels
+      : (ticketJson.labels?.nodes ?? [])
+  ).map((n) => n?.name ?? ""); // WM-978: both label shapes
   return names.some((name) =>
     /^(ai:escalated|type:security|.*security.*)$/i.test(name),
   );

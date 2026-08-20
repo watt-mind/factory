@@ -1237,6 +1237,35 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("flat labels array from the control-plane adapter still admits (WM-978)", () => {
+    withReposRoot(
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+      () => {
+        // WM-894's adapter emits labels as a flat [{id,name}] array instead of
+        // the GraphQL {nodes:[...]} shape; admission must accept both.
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "gated", ticket: "WM-978" },
+          {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-978",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: [{ id: "x", name: "ai:agent-ready" }],
+              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+            }),
+            fetchInFlight: () => [],
+          },
+        );
+        expect(result.refusal?.reason).not.toBe("ticket_not_agent_ready");
+        expect(result.evidence.ticket.labels).toContain("ai:agent-ready");
+      },
+    );
+  });
+
   test("lease-loss retry accepts only the factory viewer's surviving In Progress claim (WM-621)", () => {
     withReposRoot(
       `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
