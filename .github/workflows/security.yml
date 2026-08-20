@@ -162,7 +162,14 @@ jobs:
           "$uvx_bin" --version
 
       - name: Semgrep scan
-        run: uvx --from semgrep==1.111.0 semgrep scan --config p/security-audit --error --metrics=off .
+        # `--with 'setuptools<81'`: semgrep's opentelemetry instrumentation
+        # still imports pkg_resources, which setuptools removed starting
+        # with 81 (deprecated since 80). uv's default resolver picks the
+        # newest setuptools, which no longer ships that module — pin below
+        # the removal so the import keeps working (WM-950 moved this job off
+        # the shadow fleet, whose pre-provisioned image had an older
+        # setuptools already on PATH).
+        run: uvx --from semgrep==1.111.0 --with 'setuptools<81' semgrep scan --config p/security-audit --error --metrics=off .
 
   actionlint:
     name: Actionlint
@@ -190,6 +197,11 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v actionlint >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/actionlint" ]; then
+            # download-actionlint.bash requires DIR to already exist (it
+            # doesn't mkdir it); the shadow fleet had ~/.local/bin
+            # pre-provisioned, but a clean GitHub-hosted image doesn't
+            # (WM-950 moved this job off the shadow fleet).
+            mkdir -p "$HOME/.local/bin"
             bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7 "$HOME/.local/bin"
           fi
           # $GITHUB_PATH only takes effect starting the *next* step, not this
