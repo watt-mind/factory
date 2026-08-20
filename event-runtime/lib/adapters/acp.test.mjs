@@ -509,7 +509,9 @@ describe("mapSessionUpdate / usageFromUpdate", () => {
       contextSize: 200000,
       costUSD: 0.045,
     });
-    expect(mapSessionUpdate({ sessionUpdate: "plan", entries: [] })).toEqual([]);
+    expect(mapSessionUpdate({ sessionUpdate: "plan", entries: [] })).toEqual(
+      [],
+    );
     expect(mapSessionUpdate(null)).toEqual([]);
   });
 });
@@ -523,9 +525,9 @@ describe("permission policy", () => {
       { mutating: true },
       { workspaceDir: root },
     );
-    expect(
-      decidePermission({ toolCall: { kind: "read" } }, policy),
-    ).toBe("allow");
+    expect(decidePermission({ toolCall: { kind: "read" } }, policy)).toBe(
+      "allow",
+    );
     expect(
       decidePermission(
         { toolCall: { kind: "edit", locations: [{ path: inside }] } },
@@ -616,9 +618,9 @@ describe("execute against a fake ACP agent", () => {
     expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(record.env.CLAUDECODE).toBeUndefined();
     expect(existsSync(path.join(workspaceDir, "result.json"))).toBe(true);
-    expect(readFileSync(path.join(workspaceDir, ".transcript.json"), "utf8")).toContain(
-      "session/update",
-    );
+    expect(
+      readFileSync(path.join(workspaceDir, ".transcript.json"), "utf8"),
+    ).toContain("session/update");
     expect(traceEvents.some((e) => e.kind === "assistant_text")).toBe(true);
     expect(traceEvents.some((e) => e.kind === "tool_use")).toBe(true);
     expect(traceEvents.some((e) => e.kind === "tool_result")).toBe(true);

@@ -132,10 +132,7 @@ export function resolveAcpConfig({ spec, def, config } = {}) {
  * Resolve the agent binary. Absolute paths must exist; names go through
  * `which`. Returns null when missing so execute() can throw CliNotFoundError.
  */
-export function resolveAcpCommand(
-  config,
-  { which = Bun.which, pathEnv } = {},
-) {
+export function resolveAcpCommand(config, { which = Bun.which, pathEnv } = {}) {
   const command = config?.command;
   if (typeof command !== "string" || command === "") return null;
   const args = Array.isArray(config.args) ? config.args : [];
@@ -172,7 +169,11 @@ export function createAcpRpc({ stdin, stdout, onRequest, onNotification }) {
       return;
     }
     if (!msg || typeof msg !== "object") return;
-    if (typeof msg.method === "string" && msg.id !== undefined && msg.id !== null) {
+    if (
+      typeof msg.method === "string" &&
+      msg.id !== undefined &&
+      msg.id !== null
+    ) {
       onRequest?.(msg);
       return;
     }
@@ -276,7 +277,9 @@ export function mapSessionUpdate(update) {
   const kind = update.sessionUpdate;
   if (kind === "agent_message_chunk") {
     const text = contentText(update.content);
-    return text ? [{ kind: "assistant_text", payload: { text: clip(text) } }] : [];
+    return text
+      ? [{ kind: "assistant_text", payload: { text: clip(text) } }]
+      : [];
   }
   if (kind === "tool_call") {
     return [
@@ -479,7 +482,8 @@ export async function execute({
   const acpConfig = resolveAcpConfig({ spec, def, config });
   const childEnv = safeChildEnvironment({ ...acpConfig.env, ...env }, def);
   const resolved = resolveAcpCommand(acpConfig, {
-    which: (name) => Bun.which(name, { PATH: childEnv.PATH ?? process.env.PATH }),
+    which: (name) =>
+      Bun.which(name, { PATH: childEnv.PATH ?? process.env.PATH }),
     pathEnv: childEnv.PATH ?? process.env.PATH,
   });
   if (!resolved) {
@@ -607,7 +611,7 @@ export async function execute({
                 intent =
                   typeof answer === "string"
                     ? answer
-                    : answer?.intent ?? "reject";
+                    : (answer?.intent ?? "reject");
                 if (answer && typeof answer === "object" && answer.outcome) {
                   pendingPermissionIds.delete(msg.id);
                   rpc.respond(msg.id, { outcome: answer.outcome });
@@ -795,11 +799,7 @@ export async function execute({
         ? stopReasonExit(sessionOutcome.stopReason)
         : exitCode;
       const finalExit =
-        timedOut || aborted
-          ? null
-          : stopExit === null
-            ? exitCode
-            : stopExit;
+        timedOut || aborted ? null : stopExit === null ? exitCode : stopExit;
       const usage = lastUsage ?? undefined;
       try {
         if (usage) onUsage?.(usage);
