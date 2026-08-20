@@ -22,7 +22,9 @@ import {
   RESERVED_CONTRIBUTIONS,
   applyConfigDefaults,
   collectHarnessRoots,
+  contributionCounts,
   extensionSecretEnvVar,
+  formatContributionCounts,
   getExtensionConfig,
   harnessPluginName,
   loadExtensionRoots,
@@ -1075,6 +1077,52 @@ describe("extension hooks (contributes.hooks)", () => {
   });
 });
 
+describe("contributionCounts (WM-865)", () => {
+  test("counts hooks, panels and config on a manifest and a loaded extension", () => {
+    expect(contributionCounts(null)).toEqual({
+      packs: 0,
+      adapters: 0,
+      hooks: 0,
+      panels: 0,
+      config: 0,
+    });
+    expect(
+      contributionCounts({
+        contributes: {
+          packs: ["./pack"],
+          adapters: { echo: "./adapters/echo.mjs" },
+          hooks: { "approve.before": "./hooks/x.mjs" },
+          panels: ["./panels"],
+          config: { namespace: "sample", schema: "./config.schema.json" },
+        },
+      }),
+    ).toEqual({ packs: 1, adapters: 1, hooks: 1, panels: 1, config: 1 });
+    expect(
+      contributionCounts({
+        packs: ["sample-ext"],
+        adapters: ["echo"],
+        hooks: [
+          { point: "approve.before", id: "factory/sample:approve-before" },
+        ],
+        panels: ["/tmp/panels"],
+        config: null,
+      }),
+    ).toEqual({ packs: 1, adapters: 1, hooks: 1, panels: 1, config: 0 });
+    expect(formatContributionCounts(contributionCounts({}))).toBe(
+      "0 packs, 0 adapters, 0 hooks, 0 panels, 0 configs",
+    );
+    expect(
+      formatContributionCounts({
+        packs: 1,
+        adapters: 1,
+        hooks: 1,
+        panels: 1,
+        config: 1,
+      }),
+    ).toBe("1 pack, 1 adapter, 1 hook, 1 panel, 1 config");
+  });
+});
+
 describe("cli extensions", () => {
   const run = (...args) =>
     Bun.spawnSync({
@@ -1089,7 +1137,7 @@ describe("cli extensions", () => {
     const ok = run("validate", SAMPLE_EXTENSION);
     expect(ok.exitCode).toBe(0);
     expect(ok.stdout.toString()).toMatch(
-      /factory\/sample@1\.0\.0: valid \(1 pack, 1 adapter, config namespace sample\)/,
+      /factory\/sample@1\.0\.0: valid \(1 pack, 1 adapter, 1 hook, 1 panel, 1 config, config namespace sample\)/,
     );
 
     const noConfig = tempExtension((m) => {
@@ -1099,9 +1147,19 @@ describe("cli extensions", () => {
     const plain = run("validate", noConfig);
     expect(plain.exitCode).toBe(0);
     expect(plain.stdout.toString()).toMatch(
-      /factory\/plain@1\.0\.0: valid \(1 pack, 1 adapter\)/,
+      /factory\/plain@1\.0\.0: valid \(1 pack, 1 adapter, 1 hook, 1 panel, 0 configs\)/,
     );
     expect(plain.stdout.toString()).not.toMatch(/config namespace/);
+
+    const stripped = tempExtension((m) => {
+      m.name = "factory/bare";
+      m.contributes = {};
+    });
+    const bare = run("validate", stripped);
+    expect(bare.exitCode).toBe(0);
+    expect(bare.stdout.toString()).toMatch(
+      /factory\/bare@1\.0\.0: valid \(0 packs, 0 adapters, 0 hooks, 0 panels, 0 configs\)/,
+    );
 
     const bad = tempExtension((m) => {
       m.version = "one";
@@ -1148,11 +1206,11 @@ describe("cli extensions", () => {
     expect(out.exitCode).toBe(0);
     const text = out.stdout.toString();
     expect(text).toMatch(
-      /EXTENSION\s+VERSION\s+PACKS\s+ADAPTERS\s+NAMESPACE\s+PATH/,
+      /EXTENSION\s+VERSION\s+PACKS\s+ADAPTERS\s+HOOKS\s+PANELS\s+CONFIG\s+NAMESPACE\s+PATH/,
     );
     expect(text).toMatch(
       new RegExp(
-        `factory/sample\\s+1\\.0\\.0\\s+1\\s+1\\s+sample\\s+${SAMPLE_EXTENSION}`,
+        `factory/sample\\s+1\\.0\\.0\\s+1\\s+1\\s+1\\s+1\\s+1\\s+sample\\s+${SAMPLE_EXTENSION}`,
       ),
     );
     expect(out.stderr.toString()).toMatch(

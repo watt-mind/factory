@@ -13,6 +13,8 @@ import {
 import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
 import {
+  contributionCounts,
+  formatContributionCounts,
   loadExtensions,
   validateExtensionManifest,
 } from "./lib/extensions.mjs";
@@ -239,10 +241,11 @@ export async function adaptersCommand(args = []) {
 
 /**
  * `extensions list` — the allow-listed extensions the loader accepts (WM-838),
- * with their contribution counts and `contributes.config` namespace; faults
- * print as anomalies on stderr, exactly as /status would report them, and the
- * command still exits 0 because a broken third-party extension is a
- * configuration anomaly, not a CLI failure.
+ * with their contribution counts (packs, adapters, hooks, panels, config)
+ * and `contributes.config` namespace; faults print as anomalies on stderr,
+ * exactly as /status would report them, and the command still exits 0
+ * because a broken third-party extension is a configuration anomaly, not a
+ * CLI failure.
  * `extensions validate <path>` — validate one manifest (schema, path
  * existence, adapter names) without loading a pack or importing an adapter;
  * exit 1 when it does not validate. Both are local — no serve needed.
@@ -262,10 +265,8 @@ export async function extensionsCommand(args = []) {
       process.exit(1);
     }
     const contributes = out.manifest.contributes ?? {};
-    const packs = (contributes.packs ?? []).length;
-    const adapters = Object.keys(contributes.adapters ?? {}).length;
+    const counts = formatContributionCounts(contributionCounts(out.manifest));
     const namespace = contributes.config?.namespace;
-    const counts = `${packs} pack${packs === 1 ? "" : "s"}, ${adapters} adapter${adapters === 1 ? "" : "s"}`;
     const configBit =
       typeof namespace === "string" && namespace !== ""
         ? `, config namespace ${namespace}`
@@ -300,12 +301,13 @@ export async function extensionsCommand(args = []) {
       ),
     );
     console.log(
-      `${"EXTENSION".padEnd(width)}${"VERSION".padEnd(10)}${"PACKS".padEnd(7)}${"ADAPTERS".padEnd(10)}${"NAMESPACE".padEnd(nsWidth)}PATH`,
+      `${"EXTENSION".padEnd(width)}${"VERSION".padEnd(10)}${"PACKS".padEnd(7)}${"ADAPTERS".padEnd(10)}${"HOOKS".padEnd(7)}${"PANELS".padEnd(8)}${"CONFIG".padEnd(8)}${"NAMESPACE".padEnd(nsWidth)}PATH`,
     );
     for (const ext of loaded.extensions) {
+      const counts = contributionCounts(ext);
       const namespace = ext.config?.namespace ?? "-";
       console.log(
-        `${ext.name.padEnd(width)}${ext.version.padEnd(10)}${String(ext.packs.length).padEnd(7)}${String(ext.adapters.length).padEnd(10)}${namespace.padEnd(nsWidth)}${ext.path}`,
+        `${ext.name.padEnd(width)}${ext.version.padEnd(10)}${String(counts.packs).padEnd(7)}${String(counts.adapters).padEnd(10)}${String(counts.hooks).padEnd(7)}${String(counts.panels).padEnd(8)}${String(counts.config).padEnd(8)}${namespace.padEnd(nsWidth)}${ext.path}`,
       );
     }
     return loaded;

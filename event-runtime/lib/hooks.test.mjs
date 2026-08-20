@@ -347,6 +347,76 @@ describe("hook registry (WM-842)", () => {
     expect(escalationLabels.default({})).toEqual({ decision: "allow" });
   });
 
+  test("escalation-labels accepts a configurable label list, falling back to the original checks", () => {
+    expect(escalationLabels.DEFAULT_ESCALATION_LABELS).toEqual([
+      "ai:escalated",
+      "type:security",
+      "/security/i",
+    ]);
+    // Unconfigured / malformed options keep the original three checks.
+    for (const options of [undefined, null, {}, { labels: "ai:escalated" }]) {
+      expect(
+        escalationLabels.hasSecurityOrEscalation(["ai:escalated"], options),
+      ).toBe(true);
+      expect(
+        escalationLabels.hasSecurityOrEscalation(["type:security"], options),
+      ).toBe(true);
+      expect(
+        escalationLabels.hasSecurityOrEscalation(
+          ["area:Security-review"],
+          options,
+        ),
+      ).toBe(true);
+      expect(
+        escalationLabels.hasSecurityOrEscalation(["ai:agent-ready"], options),
+      ).toBe(false);
+    }
+    // An explicit list replaces the defaults; `/security/i` is not implied.
+    expect(
+      escalationLabels.hasSecurityOrEscalation(["ai:blocked"], {
+        labels: ["ai:blocked"],
+      }),
+    ).toBe(true);
+    expect(
+      escalationLabels.hasSecurityOrEscalation(["ai:escalated"], {
+        labels: ["ai:blocked"],
+      }),
+    ).toBe(false);
+    expect(
+      escalationLabels.hasSecurityOrEscalation(["area:Security-review"], {
+        labels: ["ai:blocked"],
+      }),
+    ).toBe(false);
+    // Empty list is an explicit "match nothing", not a fallback.
+    expect(
+      escalationLabels.hasSecurityOrEscalation(["ai:escalated"], {
+        labels: [],
+      }),
+    ).toBe(false);
+    // Regex literals and RegExp objects, plus the escalationLabels alias.
+    expect(
+      escalationLabels.hasSecurityOrEscalation(["hold:urgent"], {
+        escalationLabels: ["/hold:/i", /^nogo$/],
+      }),
+    ).toBe(true);
+    expect(escalationLabels.parseLabelMatcher("/hold:/i")("hold:urgent")).toBe(
+      true,
+    );
+    // The default export reads ctx.config the same way.
+    expect(
+      escalationLabels.default({
+        evidence: { ticket: { labels: ["ops:freeze"] } },
+        config: { labels: ["ops:freeze"] },
+      }),
+    ).toEqual({ decision: "deny", reason: "escalated_or_security" });
+    expect(
+      escalationLabels.default({
+        evidence: { ticket: { labels: ["ai:escalated"] } },
+        config: { labels: ["ops:freeze"] },
+      }),
+    ).toEqual({ decision: "allow" });
+  });
+
   test("hookDecisionCounts aggregates allow/deny per hook over the window", () => {
     const db = openDb(":memory:");
     expect(hookDecisionCounts(db, { now })).toEqual({});

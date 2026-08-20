@@ -123,6 +123,63 @@ export function extensionHookSource(name) {
   return `extension:${name}`;
 }
 
+/**
+ * Pack / adapter / hook / panel / config contribution counts for CLI
+ * `extensions list` and `extensions validate` (WM-865). Accepts either a
+ * manifest (`contributes.*`) or a loaded extension (`packs`/`adapters`/
+ * `hooks`/`panels` arrays plus `config`).
+ *
+ * `config` is 1 when the extension declares `contributes.config` (or a
+ * loaded extension carries a config object), else 0 — one contribution,
+ * not the number of schema properties.
+ *
+ * @param {object|null|undefined} source
+ * @returns {{ packs: number, adapters: number, hooks: number, panels: number, config: number }}
+ */
+export function contributionCounts(source) {
+  const empty = { packs: 0, adapters: 0, hooks: 0, panels: 0, config: 0 };
+  if (!source || typeof source !== "object") return empty;
+  const contributes = source.contributes;
+  if (contributes && typeof contributes === "object") {
+    return {
+      packs: Array.isArray(contributes.packs) ? contributes.packs.length : 0,
+      adapters: countKeysOrLength(contributes.adapters),
+      hooks: countKeysOrLength(contributes.hooks),
+      panels: Array.isArray(contributes.panels) ? contributes.panels.length : 0,
+      config: contributes.config ? 1 : 0,
+    };
+  }
+  return {
+    packs: Array.isArray(source.packs) ? source.packs.length : 0,
+    adapters: countKeysOrLength(source.adapters),
+    hooks: countKeysOrLength(source.hooks),
+    panels: Array.isArray(source.panels) ? source.panels.length : 0,
+    config: source.config ? 1 : 0,
+  };
+}
+
+function countKeysOrLength(value) {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === "object") return Object.keys(value).length;
+  return 0;
+}
+
+function countBit(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** `1 pack, 2 adapters, 0 hooks, 1 panel, 1 config` — validate summary line. */
+export function formatContributionCounts(counts) {
+  const c = counts ?? contributionCounts(null);
+  return [
+    countBit(c.packs, "pack"),
+    countBit(c.adapters, "adapter"),
+    countBit(c.hooks, "hook"),
+    countBit(c.panels, "panel"),
+    countBit(c.config, "config"),
+  ].join(", ");
+}
+
 /** Policy entry fields `extensions[]` accepts besides `path`. */
 const ENTRY_FIELDS = new Set(["path", "config"]);
 
