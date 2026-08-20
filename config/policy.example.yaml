@@ -21,3 +21,13 @@ controlPlane:
     # Projects v2 board whose Status single-select is the factory lifecycle.
     project: Factory
     statusField: Status
+
+# First-party data-only reference packs. Copy this allow-list deliberately;
+# packs are never discovered from the filesystem.
+packs:
+  - name: example-hello
+    path: packs/example-hello
+    namespace: example-hello
+  - name: ops-disk
+    path: packs/ops-disk
+    namespace: ops-disk

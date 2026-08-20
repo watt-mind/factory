@@ -1,0 +1,5 @@
+{
+  "agents/hello.md": "sha256:cec63fed3a63d19cd73b0aec47bca62ff3a772cd6fdae1bcbf61b7be32222aea",
+  "schemas/hello.input.json": "sha256:26046e580a933b6ed8065c344dc221f119ecb6668bc5478af6b376c69300d2ea",
+  "schemas/hello.output.json": "sha256:26046e580a933b6ed8065c344dc221f119ecb6668bc5478af6b376c69300d2ea"
+}

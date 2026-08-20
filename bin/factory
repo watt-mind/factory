@@ -88,6 +88,7 @@ case "$cmd" in
   tick)         run_bun orchestrator/tick.mjs "$@" ;;
   dispatch)     run_bun tools/dispatch.mjs "$@" ;;
   events)       run_bun event-runtime/cli.mjs "$@" ;;
+  pack)         run_bun event-runtime/cli.mjs pack "$@" ;;
   inbox)        run_bun event-runtime/cli.mjs inbox "$@" ;;
   approve)      run_bun event-runtime/cli.mjs approve "$@" ;;
   reject)       run_bun event-runtime/cli.mjs reject "$@" ;;
@@ -287,6 +288,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   tick          orchestrator/tick.mjs
   dispatch      tools/dispatch.mjs (swift event task runner: triage, status, janitor)
   events        event-runtime/cli.mjs (status, ps, runs, proposals, approve, reject, inject, requeue)
+  pack          scaffold or validate a data-only filesystem pack
   inbox         list open human inbox items
   approve       event-runtime/cli.mjs approve <proposal-id>
   reject        event-runtime/cli.mjs reject <proposal-id> "<reason>"

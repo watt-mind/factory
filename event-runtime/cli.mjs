@@ -3,6 +3,8 @@
 import { COMMANDS } from "./cli/commands.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
+import { initPack } from "./lib/pack-init.mjs";
+import { validatePack } from "./lib/pack-validate.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
@@ -27,7 +29,7 @@ const USAGE = BASE_USAGE.replace(
     "  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts, config namespace\n  extensions validate <path>     validate a factory-extension.json without loading it",
   )
   .concat(
-    "\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
+    "\n  pack init <name> [path]          scaffold a pinned, data-only pack (default packs/<name>)\n  pack validate <path>              validate one pack through the registry loader\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
   )
   .replace(
     "All commands except serve, work, supervise, and update-pins are clients of the control",
@@ -291,6 +293,24 @@ export async function extensionsCommand(args = []) {
   process.exit(1);
 }
 
+/** `pack init` and `pack validate` — local authoring commands, no serve needed. */
+export function packCommand(args = []) {
+  const [sub, first, second, ...rest] = args;
+  if (sub === "init" && first && rest.length === 0) {
+    const created = initPack(first, second ? { dir: second } : undefined);
+    console.log(`${created.name}: initialized ${created.root}`);
+    return created;
+  }
+  if (sub === "validate" && first && !second && rest.length === 0) {
+    const checked = validatePack(first);
+    console.log(
+      `${checked.name}: valid (${checked.agents} agent${checked.agents === 1 ? "" : "s"}, namespace ${checked.namespace})`,
+    );
+    return checked;
+  }
+  throw new Error("usage: pack init <name> [path] | pack validate <path>");
+}
+
 /** Backfill accepted typed output into the content store (WM-858). */
 export function artifactsCommand(
   args = [],
@@ -322,6 +342,7 @@ export async function dispatch(argv = process.argv.slice(2)) {
   if (command === "inbox") return inboxCommand(args);
   if (command === "memos") return memosCommand(args);
   if (command === "extensions") return extensionsCommand(args);
+  if (command === "pack") return packCommand(args);
   if (command === "artifacts") return artifactsCommand(args);
   if (!Object.hasOwn(COMMANDS, command)) {
     console.error(USAGE);

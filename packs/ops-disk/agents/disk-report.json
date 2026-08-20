@@ -1,0 +1,11 @@
+{
+  "id": "disk-report",
+  "version": 1,
+  "prompt": "agents/disk-report.md",
+  "input_schema": "schemas/disk-report.input.json",
+  "output_schema": "schemas/disk-report.output.json",
+  "workspace": { "type": "ephemeral", "retainOnFailure": false },
+  "capabilities": { "filesystem": "read-only", "services": [] },
+  "limits": { "timeout_seconds": 30, "attempts": 1 },
+  "mutating": false
+}

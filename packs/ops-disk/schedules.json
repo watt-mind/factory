@@ -1,0 +1,9 @@
+{
+  "ops-disk-observation": {
+    "every": "1h",
+    "eventType": "ops.disk.observed",
+    "catchUp": "none",
+    "approval": "watched",
+    "enabled": false
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "agents/disk-report.md": "sha256:a123e17d6c91fea92e9f33adcfeb8c8572cacdf9c984e6f7105fcba113b743ae",
+  "schemas/disk-report.input.json": "sha256:452403034c704f07d297856584b0d4f004d98c6e1251781db3c10248c235c038",
+  "schemas/disk-report.output.json": "sha256:d59313e28b05f58358228cfb746d9cf62d54062780db6875b8077c91962ee940"
+}

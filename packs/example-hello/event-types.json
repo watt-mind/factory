@@ -1,0 +1,7 @@
+{
+  "example-hello.hello.requested": {
+    "agent": "example-hello/hello@1",
+    "adapter": "fake",
+    "idempotencyScope": ["correlationId"]
+  }
+}

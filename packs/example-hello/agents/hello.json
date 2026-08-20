@@ -1,0 +1,20 @@
+{
+  "id": "hello",
+  "version": 1,
+  "prompt": "agents/hello.md",
+  "input_schema": "schemas/hello.input.json",
+  "output_schema": "schemas/hello.output.json",
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": false
+  },
+  "capabilities": {
+    "filesystem": "read-only",
+    "services": []
+  },
+  "limits": {
+    "timeout_seconds": 30,
+    "attempts": 1
+  },
+  "mutating": false
+}

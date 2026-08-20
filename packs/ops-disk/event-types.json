@@ -1,0 +1,7 @@
+{
+  "ops.disk.observed": {
+    "agent": "ops-disk/disk-report@1",
+    "adapter": "fake",
+    "idempotencyScope": ["correlationId"]
+  }
+}
