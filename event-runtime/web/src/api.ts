@@ -142,6 +142,14 @@ export type RunListFilters = {
     | "finished"
     | "usage";
   agent?: string;
+  /** Opaque cursor returned by the preceding GET /runs page. */
+  before?: string;
+};
+
+export type RunListResponse = {
+  runs: RunListItem[];
+  /** Absent for legacy fixtures/servers; null on the final summary page. */
+  nextBefore?: string | null;
 };
 
 export type ProposalListFilters = {
@@ -159,7 +167,7 @@ function withQuery(path: string, values: Record<string, string | undefined>) {
 }
 
 export function fetchRuns(filters: RunListFilters = {}) {
-  return call<{ runs: RunListItem[] }>("GET", withQuery("/runs", filters));
+  return call<RunListResponse>("GET", withQuery("/runs", filters));
 }
 
 export function fetchProposalHistory(

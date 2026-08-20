@@ -182,6 +182,8 @@ export interface RunListItem {
   eventSource: string | null;
   created_at: string;
   updated_at: string;
+  /** Idempotency subject exposed by the bounded GET /runs summary. */
+  idempotencyKey?: string;
   /**
    * Plan-time pins (WM-135), flattened out of the spec for the Model column
    * (WM-221). Optional for the same reason they are optional on `RunSpec`:

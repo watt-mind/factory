@@ -144,6 +144,39 @@ function renderRuns(props: Partial<Parameters<typeof Runs>[0]> = {}) {
   );
 }
 
+describe("Runs API pagination (WM-976)", () => {
+  test("moves through summary pages with the runs pager", async () => {
+    const first = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const second = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [second], nextBefore: null }
+        : { runs: [first], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-page-new");
+        expect(r.getByRole("button", { name: "Older" })).toBeTruthy();
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        expect(r.queryByTitle("run-page-new")).toBeNull();
+        expect(runs).toHaveBeenLastCalledWith(undefined, {
+          before: "older-page",
+        });
+      },
+    );
+  });
+});
+
 function ticketSchemaRegistry(): AgentsView {
   return createAgentsFixture({
     agents: [

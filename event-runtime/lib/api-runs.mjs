@@ -512,6 +512,9 @@ const RUN_POPULATIONS = new Set([
   "usage",
 ]);
 
+export const RUN_LIST_DEFAULT_LIMIT = 100;
+export const RUN_LIST_MAX_LIMIT = 200;
+
 class ListQueryError extends Error {
   constructor(error, details = {}) {
     super(error);
@@ -1202,7 +1205,43 @@ function listFilters(url, { proposal = false, nowMs = Date.now() } = {}) {
   return { from, to, fromMs, toMs, population, nowMs };
 }
 
-function runsView(db, filters = {}) {
+function encodeRunCursor(row) {
+  return Buffer.from(
+    JSON.stringify({ createdAt: row.created_at, rowid: row.list_rowid }),
+  ).toString("base64url");
+}
+
+function runPage(url) {
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? RUN_LIST_DEFAULT_LIMIT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > RUN_LIST_MAX_LIMIT) {
+    throw new ListQueryError("invalid_limit", {
+      message: `limit must be an integer between 1 and ${RUN_LIST_MAX_LIMIT}`,
+    });
+  }
+
+  const before = url.searchParams.get("before");
+  if (!before) return { limit, before: null };
+  try {
+    const cursor = JSON.parse(
+      Buffer.from(before, "base64url").toString("utf8"),
+    );
+    if (
+      !cursor ||
+      typeof cursor.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(cursor.createdAt)) ||
+      !Number.isSafeInteger(cursor.rowid) ||
+      cursor.rowid < 1
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return { limit, before: cursor };
+  } catch {
+    throw new ListQueryError("invalid_before");
+  }
+}
+
+function runsView(db, filters = {}, page = {}) {
   const { state, agent, from, to, population } = filters;
   const clauses = [];
   const params = [];
@@ -1268,57 +1307,49 @@ function runsView(db, filters = {}) {
     );
     params.push(from, to);
   }
+  if (page.before) {
+    clauses.push(
+      "(r.created_at < ? OR (r.created_at = ? AND r.rowid < ?))",
+    );
+    params.push(
+      page.before.createdAt,
+      page.before.createdAt,
+      page.before.rowid,
+    );
+  }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = db
     .query(
-      `SELECT r.*, a.reason_code, a.terminal_state AS attempt_terminal,
+      `SELECT r.*, r.rowid AS list_rowid, a.reason_code, a.terminal_state AS attempt_terminal,
               a.started_at, a.lease_expires_at, p.event_id, p.event_source
        FROM runs r
        LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
        LEFT JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
        ${where}
-       ORDER BY r.created_at DESC, r.rowid DESC`,
+       ORDER BY r.created_at DESC, r.rowid DESC
+       LIMIT ?`,
     )
-    .all(...params);
-  return rows.map((row) => {
+    .all(...params, page.limit + 1);
+  const hasNextPage = rows.length > page.limit;
+  const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
+  return {
+    runs: pageRows.map((row) => {
     const spec = JSON.parse(row.spec_json);
     return {
       runId: row.run_id,
-      spec,
       state: row.state,
       attempts: row.attempts,
-      maxAttempts: spec.maxAttempts,
       agent: spec.agent,
       adapter: spec.adapter,
-      reasonCode: row.reason_code ?? null,
-      eventId: row.event_id ?? null,
-      eventSource: row.event_source ?? null,
       created_at: row.created_at,
       updated_at: row.updated_at,
       modelTier: spec.modelTier ?? null,
       model: spec.model ?? null,
-      startedAt: row.started_at ?? null,
-      leaseExpiresAt: row.lease_expires_at ?? null,
-      // Two extra queries per row: only worth it while the deadline can
-      // still move (WM-692). Terminal rows on this 2s-polled list get null.
-      deadlineAt:
-        row.attempts > 0 && IN_FLIGHT_STATES.has(row.state)
-          ? (() => {
-              const deadline = attemptDeadline(
-                db,
-                row.run_id,
-                row.attempts,
-                spec,
-              );
-              return Number.isFinite(deadline)
-                ? new Date(deadline).toISOString()
-                : null;
-            })()
-          : null,
-      timeoutSeconds: spec.timeoutSeconds,
-      repos: repoNamesFromInput(spec.input),
+      idempotencyKey: row.idempotency_key,
     };
-  });
+    }),
+    nextBefore: hasNextPage ? encodeRunCursor(pageRows.at(-1)) : null,
+  };
 }
 
 function journalView(db, since, limit) {
@@ -1697,7 +1728,7 @@ export async function handleRunApiRoute({
         state: url.searchParams.get("state") ?? undefined,
         agent: url.searchParams.get("agent") ?? undefined,
       };
-      return send(200, { runs: runsView(db, filters) });
+      return send(200, runsView(db, filters, runPage(url)));
     } catch (err) {
       if (err instanceof ListQueryError) return send(422, err.body);
       throw err;

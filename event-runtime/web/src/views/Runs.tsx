@@ -567,6 +567,7 @@ export function Runs({
   const [cancelReason, setCancelReason] = useState("");
   const drilldown = runDrilldownFilters(window.location.hash);
   const drilldownKey = JSON.stringify(drilldown);
+  const [runCursor, setRunCursor] = useState<string | null>(null);
 
   const proposalsQ = useQuery({
     queryKey: ["proposals", "open"],
@@ -586,8 +587,12 @@ export function Runs({
   // status tab would make every other tab's badge a factory-wide lie.
   const fetchAll = context.kind !== "all" || drilldown !== null;
   const list = useQuery({
-    queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey],
-    queryFn: () => api.runs(undefined, drilldown ?? {}),
+    queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey, runCursor],
+    queryFn: () =>
+      api.runs(undefined, {
+        ...(drilldown ?? {}),
+        before: runCursor ?? undefined,
+      }),
     ...refetchIntervals.primary,
   });
   const statusQ = useQuery({
@@ -652,6 +657,7 @@ export function Runs({
     };
   };
   const rows = list.data?.runs ?? [];
+  const nextBefore = list.data?.nextBefore;
   const scoped = useMemo(
     () =>
       rows.filter(
@@ -1415,7 +1421,7 @@ export function Runs({
                   )}
                   {show.has("attempts") && (
                     <td className="max-w-16 whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
-                      {r.attempts}/{r.maxAttempts}
+                      {r.attempts}
                     </td>
                   )}
                   {show.has("reason") && (
@@ -1494,6 +1500,13 @@ export function Runs({
               range={[windowStart, windowEnd, tokens.length]}
               move={moveWindow}
             />
+            {nextBefore && (
+              <tr>
+                <td>
+                  <button onClick={() => setRunCursor(nextBefore)}>Older</button>
+                </td>
+              </tr>
+            )}
             {visible.length === 0 && (
               <ListEmpty
                 colSpan={listCols.length}

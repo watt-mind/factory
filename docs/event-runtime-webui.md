@@ -243,6 +243,22 @@ badge, agent, attempts, created/updated. State badges use one fixed color
 map for the closed §8 lifecycle — proposal-to-terminal — so a state is
 recognizable at a glance across every view.
 
+`GET /runs` is cursor-paginated (`limit`, default 100 and bounded to 200;
+opaque `before` from `nextBefore`) and returns a compact list summary: run id,
+state, agent, adapter, pinned model, created/updated timestamps, attempts, and
+idempotency key. In particular it never embeds `spec_json`; callers open
+`GET /runs/:id` for the full immutable spec and inspection data. A bare
+`GET /runs` remains valid JSON, now containing the newest summary page.
+The Runs view moves through pages with its **Older** control, preserving
+the existing row selection and inspect/detail links.
+
+Runtime retention is an explicit maintenance sweep, dry by default:
+`bun event-runtime/lib/janitor.mjs retention [--apply] [--trace-days N]
+[--artifact-days N]`. It reports the trace-row and artifact-file counts it
+would delete (or deleted with `--apply`). Trace rows default to 14 days;
+artifacts older than 30 days are removed only when no run created in that
+window references them.
+
 The detail panel shows the five blocks `GET /runs/:id` returns:
 
 - **run** — state, attempts, `idempotencyKey`, `specHash`, and the full spec

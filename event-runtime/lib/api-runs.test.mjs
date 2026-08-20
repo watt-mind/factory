@@ -253,7 +253,7 @@ describe("run list deadlines (WM-692)", () => {
     ).run(runId, at, new Date(start + 180_000).toISOString());
   }
 
-  test("GET /runs computes deadlineAt only for in-flight rows", async () => {
+  test("GET /runs returns a bounded summary without spec-derived bulk", async () => {
     const s = await makeServer({ now: () => start });
     try {
       for (const state of [
@@ -269,13 +269,73 @@ describe("run list deadlines (WM-692)", () => {
       }
       const { runs } = await s.client.runs();
       const byState = Object.fromEntries(runs.map((r) => [r.state, r]));
-      const deadline = new Date(start + 60_000).toISOString();
-      for (const state of ["LEASED", "RUNNING", "VERIFYING"]) {
-        expect(byState[state].deadlineAt).toBe(deadline);
+      for (const state of ["LEASED", "RUNNING", "VERIFYING", "COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"]) {
+        expect(byState[state]).toMatchObject({
+          runId: `run-list-${state}`,
+          state,
+          agent: "factory-status-report@1",
+          adapter: "fake",
+          idempotencyKey: `idem-run-list-${state}`,
+        });
+        expect(byState[state].spec).toBeUndefined();
+        expect(byState[state].deadlineAt).toBeUndefined();
       }
-      for (const state of ["COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"]) {
-        expect(byState[state].deadlineAt).toBeNull();
-        expect(byState[state].startedAt).toBe(new Date(start).toISOString());
+    } finally {
+      s.close();
+    }
+  });
+
+  test("GET /runs keyset-paginates tied timestamps and rejects bad bounds", async () => {
+    const s = await makeServer({ now: () => start });
+    try {
+      for (const runId of ["run-page-a", "run-page-b", "run-page-c"]) {
+        s.db
+          .query(
+            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+             VALUES (?, ?, ?, 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+          )
+          .run(
+            runId,
+            `idem-${runId}`,
+            JSON.stringify({ agent: "page-agent", adapter: "fake" }),
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+          );
+      }
+      const first = await fetch(s.url("/runs?limit=2"));
+      expect(first.status).toBe(200);
+      const firstPage = await first.json();
+      expect(firstPage.runs.map((run) => run.runId)).toEqual([
+        "run-page-c",
+        "run-page-b",
+      ]);
+      expect(firstPage.runs[0]).toEqual({
+        runId: "run-page-c",
+        state: "COMPLETED",
+        attempts: 1,
+        agent: "page-agent",
+        adapter: "fake",
+        created_at: new Date(start).toISOString(),
+        updated_at: new Date(start).toISOString(),
+        modelTier: null,
+        model: null,
+        idempotencyKey: "idem-run-page-c",
+      });
+      expect(typeof firstPage.nextBefore).toBe("string");
+
+      const second = await fetch(
+        s.url(`/runs?limit=2&before=${encodeURIComponent(firstPage.nextBefore)}`),
+      );
+      expect(second.status).toBe(200);
+      expect((await second.json())).toEqual({
+        runs: [
+          expect.objectContaining({ runId: "run-page-a" }),
+        ],
+        nextBefore: null,
+      });
+      for (const query of ["limit=0", "limit=201", "before=not-a-cursor"]) {
+        const response = await fetch(s.url(`/runs?${query}`));
+        expect(response.status).toBe(422);
       }
     } finally {
       s.close();
@@ -964,9 +1024,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
 
     const list = await s.client.runs();
     expect(list.runs.map((r) => r.runId)).toContain(flowRunId);
-    expect(list.runs[0].spec).toEqual(done.run.spec);
     expect(list.runs[0].agent).toBe("factory-status-report@1");
-    expect(list.runs[0].repos).toEqual(["ok"]);
+    expect(list.runs[0].idempotencyKey).toBe(done.run.idempotencyKey);
+    expect(list.runs[0].spec).toBeUndefined();
     expect((await s.client.runs("COMPLETED")).runs).toHaveLength(1);
     expect((await s.client.runs("QUEUED")).runs).toHaveLength(0);
 
@@ -1160,10 +1220,8 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
       const { runs } = await client.runs();
       expect(runs[0].state).toBe("COMPLETED");
-      expect(runs[0].reasonCode).toBe("ok");
-      expect(runs[0].eventId).toBe("link-1");
       expect(runs[0].adapter).toBe("fake");
-      expect(runs[0].maxAttempts).toBe(1);
+      expect(runs[0].idempotencyKey).toBeTruthy();
 
       const { events } = await client.events();
       expect(events[0].eventId).toBe("link-1");
