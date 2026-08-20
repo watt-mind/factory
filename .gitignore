@@ -11,6 +11,12 @@ state/
 .env.*
 !.env.example
 
+# Operator-local routing, policy, and schedules. Tracked defaults live beside
+# them as *.example.yaml; `factory init` scaffolds these without overwriting.
+config/repos.yaml
+config/policy.yaml
+config/schedule.yaml
+
 .DS_Store
 graphify-out/
 

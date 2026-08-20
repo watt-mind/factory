@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 /** Event-runtime CLI argument routing and command dispatch. */
+import path from "node:path";
 import { COMMANDS } from "./cli/commands.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
@@ -8,7 +9,9 @@ import { validatePack } from "./lib/pack-validate.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
+  FACTORY_ROOT,
   artifactsRoot,
+  initializeLocalConfig,
   runtimeHome,
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
@@ -21,9 +24,13 @@ import {
 } from "./lib/extensions.mjs";
 
 const USAGE = BASE_USAGE.replace(
-  "  inbox                          open items waiting on the human",
-  "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API\n  memos <subjectType> <id> [--kind k] [--all]\n                                 live memos for a subject, with provenance and expiry",
+  "usage: bun event-runtime/cli.mjs <command>",
+  "usage: bun event-runtime/cli.mjs <command>\n\n  init [--root DIR]             scaffold ignored local config from tracked examples",
 )
+  .replace(
+    "  inbox                          open items waiting on the human",
+    "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API\n  memos <subjectType> <id> [--kind k] [--all]\n                                 live memos for a subject, with provenance and expiry",
+  )
   .replace(
     "  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)",
     "  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)\n  extensions list [--json]       allow-listed extensions (policy.yaml extensions:): name, version, path, contribution counts, config namespace\n  extensions validate <path>     validate a factory-extension.json without loading it",
@@ -33,7 +40,7 @@ const USAGE = BASE_USAGE.replace(
   )
   .replace(
     "All commands except serve, work, supervise, and update-pins are clients of the control",
-    "All commands except serve, work, supervise, update-pins, and artifacts are clients of the control",
+    "All commands except init, serve, work, supervise, update-pins, and artifacts are clients of the control",
   );
 
 // Preserve the small programmatic surface used by runtime tests and tooling.
@@ -336,8 +343,27 @@ export function artifactsCommand(
   }
 }
 
+/** Scaffold operator-owned config without replacing any existing file. */
+export function initCommand(args = []) {
+  let root = FACTORY_ROOT;
+  if (args.length) {
+    if (args.length !== 2 || args[0] !== "--root" || !args[1]) {
+      throw new Error("usage: init [--root DIR]");
+    }
+    root = path.resolve(args[1]);
+  }
+  const results = initializeLocalConfig({ root });
+  for (const result of results) {
+    console.log(
+      `${result.created ? "created" : "exists "} ${path.relative(root, result.path)}`,
+    );
+  }
+  return results;
+}
+
 export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
+  if (command === "init") return initCommand(args);
   if (command === "decide") return decideCommand(args);
   if (command === "inbox") return inboxCommand(args);
   if (command === "memos") return memosCommand(args);

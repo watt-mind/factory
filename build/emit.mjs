@@ -50,6 +50,7 @@ import {
   CORE_HARNESS_PLUGIN,
   collectHarnessRoots,
 } from "../event-runtime/lib/extensions.mjs";
+import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED = path.join(ROOT, "shared");
@@ -408,7 +409,7 @@ const agents = corePack.agents;
 /** [{name, path, state}] — state is ok | stale | missing | no-checkout. */
 function floorStatus() {
   const cfg = Bun.YAML.parse(
-    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
+    readFileSync(resolveConfigPath("repos", { root: ROOT }), "utf8"),
   );
   return (cfg.repos ?? []).map((repo) => {
     const repoPath = String(repo.path).replace(/^~/, homedir());
@@ -553,7 +554,7 @@ for (const extra of loadedPacks.filter((p) => !p.pack.builtin)) {
 // this is the one that reliably works for `claude -p`.
 if (process.argv.includes("--link-repos")) {
   const cfg = Bun.YAML.parse(
-    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
+    readFileSync(resolveConfigPath("repos", { root: ROOT }), "utf8"),
   );
   console.log("\nlinking factory commands into each configured repo:");
   for (const repo of cfg.repos ?? []) {

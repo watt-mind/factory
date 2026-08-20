@@ -1,0 +1,43 @@
+# Tracked example only. Run `factory init`, then edit config/repos.yaml.
+# Keep machine-specific paths and private/client repository names out of git.
+repos:
+  # Factory can manage its own checkout. The home-relative paths are portable;
+  # change them in config/repos.yaml if your checkout layout differs.
+  - name: factory
+    path: ~/Develop/factory
+    github: watt-mind/factory
+    icon: ph-robot
+    color: orange
+    team: WM
+    project: Factory
+    base: develop
+    deploy_branch: main
+    worktree_up: bin/worktree-up.sh
+    worktree_down: bin/worktree-down.sh
+    worktree_root: ~/Develop/.worktrees/factory
+    max_in_flight: 20
+    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check
+    owned_paths_policy:
+      direct:
+        - source: shared/**
+          requires:
+            - dist/**
+            - plugins/core/**
+      pin_manifests:
+        - event-runtime/agents/*.json
+    merge_ci:
+      workflow: CI
+      required_checks:
+        - Shadow runner fleet available
+        - Verify
+    escalate_paths: []
+
+  # Add product repositories only to your ignored config/repos.yaml. Start in
+  # report-only mode until their isolated worktree lifecycle is proven.
+  # - name: example
+  #   path: ~/Develop/example
+  #   github: your-org/example
+  #   team: EXAMPLE
+  #   base: main
+  #   report_only: true
+  #   verify: bun test

@@ -29,6 +29,27 @@ delegates branch, ports, services, and per-ticket database setup to the repo's
 own `worktree_up`/`worktree_down` scripts. Provisioning supplies the stable
 checkout those mechanisms need; it does not replace either mechanism.
 
+## Local configuration and first-run setup
+
+Repository routing is operator-owned state. The public tree tracks
+`config/repos.example.yaml`, while `config/repos.yaml` is ignored. The same
+rule applies to `policy` and `schedule`, so machine paths, organization policy,
+and private repository names cannot leak through a commit.
+
+Run this once after cloning:
+
+```sh
+factory init
+# or: bun event-runtime/cli.mjs init
+```
+
+The command copies all three examples to their local names and never replaces
+an existing file, so it is safe to rerun after an upgrade. Existing checkouts
+that already have local YAML continue to take precedence. Read-only code that
+uses the shared resolver can fall back to an example in a clean checkout and
+prints an explicit warning; operating or dispatching from examples is not a
+substitute for reviewing the generated local files.
+
 ---
 
 ## 1. The gap, precisely

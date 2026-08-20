@@ -1,33 +1,96 @@
-# Example ControlPlane selection for a GitHub Issues factory (WM-798).
-#
-# Copy this stanza into config/policy.yaml, or run:
-#   factory init --control-plane github [--root DIR] [--repo owner/name]
-#
-# Requires `gh auth login` — the same credential the forge already uses.
-# No Linear account. Create a GitHub Project named "Factory" whose Status
-# field has options: Triage, Todo, In Progress, In Review, Done, Blocked.
-# Protocol labels keep Linear's spelling (ai:agent-ready, type:*, …).
+# Tracked example only. Run `factory init`, then edit config/policy.yaml.
+# Keep organization billing details, notification paths, and private policy out
+# of git. Defaults below are deliberately conservative.
+
+packs: []
+extensions: []
+
+chain_auto_approval:
+  # New installations may opt into this closed set after reviewing their
+  # tracker, credentials, and merge policy.
+  allowed_event_types:
+    - factory.work.requested
+    - factory.triage.requested
+    - factory.triage-apply.requested
+    - factory.dispatch.requested
+    - factory.merge.requested
+    - factory.merge-review.requested
+    - factory.merge-fix.requested
+    - factory.merge-plan.requested
+    - factory.merge-apply.requested
+    - factory.merge-landed
+    - factory.merge-verify.requested
+    - factory.merge-escalate.requested
+
+merge:
+  max_fix_rounds: 2
+  batch_size: 4
+
+forge:
+  kind: github
 
 controlPlane:
-  kind: github
-  github:
-    # Default repository when a team key is not in `teams`.
-    repo: OWNER/REPO
-    # Linear-style team key → GitHub repository. `file` and
-    # `listDispatchable` resolve `team` through this map; a key that already
-    # looks like owner/name is used as-is.
-    teams:
-      DEMO: OWNER/REPO
-    # Projects v2 board whose Status single-select is the factory lifecycle.
-    project: Factory
-    statusField: Status
+  kind: linear
 
-# First-party data-only reference packs. Copy this allow-list deliberately;
-# packs are never discovered from the filesystem.
-packs:
-  - name: example-hello
-    path: packs/example-hello
-    namespace: example-hello
-  - name: ops-disk
-    path: packs/ops-disk
-    namespace: ops-disk
+dispatch:
+  owned_paths_collision: advisory
+  owned_paths_conformance: advisory
+
+concurrency:
+  max_in_flight_per_repo: 20
+  max_concurrent_merges: 1
+
+workers:
+  min: 1
+  max: 20
+
+budget:
+  # Notional API-equivalent runaway guards; adjust for your adapter/provider.
+  per_ticket_usd: 15
+  merge_usd: 40
+  per_day_usd: 2000
+  on_exhausted: drain
+
+models:
+  # Change these provider model identifiers for your authenticated CLIs.
+  claude:
+    strong: default
+    standard: sonnet
+    light: haiku
+  pi:
+    strong: openai-codex/gpt-5.6-sol
+    standard: openai-codex/gpt-5.6-terra
+    light: openai-codex/gpt-5.6-luna
+  agy:
+    strong: gemini-3.7-flash
+    standard: gemini-3.7-flash
+    light: gemini-3.7-flash
+  cursor:
+    strong: cursor-grok-4.6-high
+    standard: cursor-grok-4.6-high
+    light: cursor-grok-4.6-low-fast
+
+limits:
+  max_run_minutes: 90
+
+circuit_breaker:
+  consecutive_env_failures: 2
+
+escalation:
+  never_auto_merge:
+    - auth / authz
+    - payments / money movement
+    - credential and secret handling
+    - destructive DB migrations
+    - production infra config
+  auto_merge_base: [develop]
+  auto_merge_owners: []
+
+notify:
+  on:
+    - ticket_blocked
+    - pr_escalated
+    - base_ci_red
+    - smoke_red
+    - circuit_breaker_tripped
+    - release_candidate_ready

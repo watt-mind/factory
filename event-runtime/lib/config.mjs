@@ -5,7 +5,12 @@
  * the existing orchestrator's state (docs/event-runtime.md §3).
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import {
+  constants as fsConstants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +22,74 @@ export const RUNTIME_ROOT = path.dirname(
 
 /** The factory checkout itself — where config/repos.yaml lives (OPS-228). */
 export const FACTORY_ROOT = path.dirname(RUNTIME_ROOT);
+
+/** Operator-owned configuration files scaffolded by `factory init`. */
+export const LOCAL_CONFIG_NAMES = Object.freeze([
+  "repos",
+  "policy",
+  "schedule",
+]);
+
+const warnedExampleConfigs = new Set();
+
+/**
+ * Resolve one operator-owned config, preferring the untracked local file.
+ *
+ * A clean checkout remains inspectable without setup by falling back to the
+ * tracked example. The warning is deliberately once per path/process: callers
+ * such as the API load repos repeatedly, and the operator needs a signal, not
+ * a line of noise on every request.
+ */
+export function resolveConfigPath(
+  name,
+  { root = FACTORY_ROOT, warn = true } = {},
+) {
+  if (!LOCAL_CONFIG_NAMES.includes(name)) {
+    throw new Error(
+      `unknown local config ${JSON.stringify(name)} (expected ${LOCAL_CONFIG_NAMES.join(", ")})`,
+    );
+  }
+  const local = path.join(root, "config", `${name}.yaml`);
+  if (existsSync(local)) return local;
+
+  const example = path.join(root, "config", `${name}.example.yaml`);
+  if (!existsSync(example)) return local;
+  if (warn && !warnedExampleConfigs.has(example)) {
+    warnedExampleConfigs.add(example);
+    console.warn(
+      `warning: ${local} is missing; using ${example}. Run \`factory init\` and edit the local config before operating the factory.`,
+    );
+  }
+  return example;
+}
+
+/**
+ * Copy every tracked example to its ignored local path without overwriting.
+ * COPYFILE_EXCL also keeps concurrent init calls idempotent.
+ */
+export function initializeLocalConfig({ root = FACTORY_ROOT } = {}) {
+  const configDir = path.join(root, "config");
+  mkdirSync(configDir, { recursive: true });
+  return LOCAL_CONFIG_NAMES.map((name) => {
+    const example = path.join(configDir, `${name}.example.yaml`);
+    const local = path.join(configDir, `${name}.yaml`);
+    if (!existsSync(example)) {
+      throw new Error(`missing configuration template: ${example}`);
+    }
+    if (existsSync(local)) {
+      return { name, path: local, template: example, created: false };
+    }
+    try {
+      copyFileSync(example, local, fsConstants.COPYFILE_EXCL);
+      return { name, path: local, template: example, created: true };
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        return { name, path: local, template: example, created: false };
+      }
+      throw error;
+    }
+  });
+}
 
 export function runtimeHome() {
   return (

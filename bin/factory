@@ -126,9 +126,12 @@ case "$cmd" in
   down)         exec bash "$ROOT/bin/live-stack.sh" down "$@" ;;
   tail)         exec bash "$ROOT/bin/live-stack.sh" tail "$@" ;;
   init)
-    # GitHub Issues control-plane defaults (WM-798). Full config scaffolding
-    # (repos/policy/schedule examples) is WM-794.
-    exec bun "$ROOT/lib/control-plane/github.mjs" "$@"
+    # Preserve the existing GitHub control-plane initializer while making the
+    # no-argument command scaffold all operator-local config from templates.
+    if [[ "${1:-}" == "--control-plane" ]]; then
+      exec bun "$ROOT/lib/control-plane/github.mjs" "$@"
+    fi
+    run_bun event-runtime/cli.mjs init "$@"
     ;;
   demo)
     # Isolated event-runtime env (OPS-217) stays available behind --here /
@@ -263,6 +266,7 @@ case "$cmd" in
     cat <<EOF
 factory — control plane (FACTORY_ROOT=$ROOT)
 
+  init          scaffold config/*.yaml from tracked examples (never overwrites)
   linear        tools/linear.mjs
   queue         orchestrator/queue.mjs
   next          orchestrator/next.mjs
@@ -298,8 +302,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   up            start live event-runtime stack (API 7381, live worker, and Web UI 7382)
   down          stop live event-runtime stack
   tail          tail live daemon logs (~/.factory/run/{serve,worker,web}.log)
-  init          scaffold GitHub Issues control-plane defaults
-                (factory init --control-plane github [--root DIR] [--repo owner/name])
+  init --control-plane github [--root DIR] [--repo owner/name]
+                scaffold GitHub Issues control-plane defaults
   demo          run the bundled starter ticket (WM-799); --dry for CI.
                 Isolated event-runtime env: demo --here / demo --down
   run           runners/run-agent.sh

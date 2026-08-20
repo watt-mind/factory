@@ -1,5 +1,5 @@
 /**
- * Repo facts, read from the factory's existing config/repos.yaml (OPS-228).
+ * Repo facts, read from the factory's local config/repos.yaml (OPS-228).
  *
  * Deliberately a reader, not an owner: repos.yaml is already the single
  * source of routing truth for the dispatcher (base branch, worktree scripts,
@@ -14,7 +14,11 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
+import {
+  DEFAULT_MAX_IN_FLIGHT,
+  FACTORY_ROOT,
+  resolveConfigPath,
+} from "./config.mjs";
 
 export class RepoError extends Error {
   constructor(message) {
@@ -34,7 +38,7 @@ export function reposRoot() {
 }
 
 export function reposConfigPath(root = reposRoot()) {
-  return path.join(root, "config", "repos.yaml");
+  return resolveConfigPath("repos", { root });
 }
 
 /** Expand a leading ~ the way the config files write paths. */

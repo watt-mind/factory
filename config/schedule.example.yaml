@@ -1,0 +1,13 @@
+# Tracked example only. Run `factory init`, then edit config/schedule.yaml.
+# No recurring automation is enabled by default in a new installation.
+
+defaults:
+  repo: factory
+  harness: claude
+  label_prefix: com.example.factory
+  log_dir: ~/.factory/logs
+  run_at_load: false
+
+# Add reviewed jobs here. Keeping the example empty ensures cloning Factory can
+# never start unattended mutation merely because a scheduler was installed.
+jobs: []
