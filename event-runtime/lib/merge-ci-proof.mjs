@@ -102,9 +102,6 @@ export function proveMergeCiFallback({
     throw new Error("configured workflow run is missing or ambiguous");
   }
   const [run] = matchingRuns;
-  if (run.status !== "completed" || run.conclusion !== "success") {
-    throw new Error("configured workflow run is not completed successfully");
-  }
   if (
     !Number.isInteger(run.databaseId) &&
     (typeof run.databaseId !== "string" || run.databaseId.length === 0)

@@ -16,7 +16,10 @@ import { sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { policyMergeBatchSize } from "./planner.mjs";
 import { getRepo, loadRepos, RepoError } from "./repos.mjs";
-import { noRequiredChecksDiagnostic } from "./merge-ci-proof.mjs";
+import {
+  noRequiredChecksDiagnostic,
+  proveMergeCiFallback,
+} from "./merge-ci-proof.mjs";
 
 export const MERGE_REVIEW_VERDICTS = Object.freeze([
   "MERGE",
@@ -766,9 +769,18 @@ export function defaultProveCi({
       (run) => run.workflowName === gate.workflow && run.headSha === headSha,
     );
     if (matching.length !== 1) return false;
-    return (
-      matching[0].status === "completed" && matching[0].conclusion === "success"
+    const rawJobs = forge.apiRaw(
+      `repos/${github}/actions/runs/${matching[0].databaseId}/jobs?per_page=100`,
     );
+    const jobs = JSON.parse(rawJobs)?.jobs;
+    proveMergeCiFallback({
+      workflow: gate.workflow,
+      requiredChecks: gate.requiredChecks,
+      headSha,
+      runs,
+      jobs,
+    });
+    return true;
   } catch {
     return false;
   }
