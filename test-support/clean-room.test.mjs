@@ -6,13 +6,7 @@
  * Factory configuration.
  */
 import { afterEach, expect, test } from "bun:test";
-import {
-  cpSync,
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

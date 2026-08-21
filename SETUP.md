@@ -8,11 +8,11 @@ Linear token, or machine-local configuration is required.
 
 Install these command-line tools before configuring a real repository:
 
-| Tool | Supported version | Check |
-| :--- | :--- | :--- |
-| Bun | Bun >= 1.3 | `bun --version` |
-| Git | Git >= 2.40 | `git --version` |
-| GitHub CLI | Current stable release (tested with 2.70+) | `gh --version` |
+| Tool                 | Supported version                                     | Check                 |
+| :------------------- | :---------------------------------------------------- | :-------------------- |
+| Bun                  | Bun >= 1.3                                            | `bun --version`       |
+| Git                  | Git >= 2.40                                           | `git --version`       |
+| GitHub CLI           | Current stable release (tested with 2.70+)            | `gh --version`        |
 | Coding-agent harness | One of Claude Code, Codex, Gemini, Cursor, Pi, or Agy | `<harness> --version` |
 
 For a real GitHub-backed run, authenticate the GitHub CLI first. The command
