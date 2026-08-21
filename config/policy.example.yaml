@@ -32,6 +32,18 @@ forge:
 controlPlane:
   kind: linear
 
+commitMsg:
+  # Ticket-reference shapes the commit-msg hook accepts, as ERE alternatives.
+  # Omit the stanza to use the built-in default, which is exactly these two:
+  # any 2-5 letter tracker prefix, plus the GitHub issue form. Listing both is
+  # deliberate during a tracker cutover — historical `(ABC-123)` refs and new
+  # `(#123)` refs stay valid at the same time, with no hook edit.
+  #
+  # Setting this REPLACES the default rather than adding to it.
+  ticketPatterns:
+    - '\([A-Z]{2,5}-[0-9]+\)'
+    - '\(#[0-9]+\)'
+
 dispatch:
   owned_paths_collision: advisory
   owned_paths_conformance: advisory

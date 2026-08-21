@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
@@ -124,8 +124,107 @@ test("every allowed type is accepted with a ticket ref", () => {
   }
 });
 
-test("unknown ticket prefix is rejected", () => {
-  const r = run("fix(scope): thing (XX-1)\n");
-  expect(r.status).toBe(1);
-  expect(r.stderr).toContain("missing a ticket reference");
+// WM-1011: the hook no longer enumerates workspace team keys, so an
+// unrecognised-but-well-formed prefix like (XX-1) is now ACCEPTED on purpose —
+// which tracker a contributor uses is not this workspace's business. What
+// still gets rejected is anything not shaped like a ticket reference at all.
+test("a malformed ticket reference is still rejected", () => {
+  for (const subject of [
+    "fix(scope): thing (lower-1)", // not uppercase
+    "fix(scope): thing (TOOLONGPREFIX-1)", // over 5 letters
+    "fix(scope): thing (WM-)", // no number
+    "fix(scope): thing (123)", // no prefix and no #
+    "fix(scope): thing WM-1", // not parenthesised
+  ]) {
+    const r = run(`${subject}\n`);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("missing a ticket reference");
+  }
+});
+
+test("the default accepts any 2-5 letter tracker prefix, naming no workspace", () => {
+  for (const ref of ["(WM-1)", "(XX-1)", "(ENG-42)", "(ABCDE-7)"]) {
+    expect(run(`fix(scope): thing ${ref}\n`).status).toBe(0);
+  }
+});
+
+test("the default accepts the GitHub issue form", () => {
+  expect(run("fix(scope): thing (#123)\n").status).toBe(0);
+});
+
+test("both forms are accepted at once, for the cutover window", () => {
+  // WM-1006 Phase 3 has a period where historical WM-* refs and new #123 refs
+  // are both live. Neither should need a hook edit.
+  expect(run("fix(scope): historical (WM-999)\n").status).toBe(0);
+  expect(run("fix(scope): new work (#12)\n").status).toBe(0);
+});
+
+test("no private team key appears in the script or tracked example config", () => {
+  const script = readFileSync(SCRIPT, "utf8");
+  expect(script).not.toContain("CLNT");
+  expect(script).not.toMatch(/\(WM\|OPS/);
+  const example = readFileSync(
+    path.resolve(import.meta.dir, "..", "config", "policy.example.yaml"),
+    "utf8",
+  );
+  expect(example).not.toContain("CLNT");
+});
+
+test("ticketPatterns in policy.yaml replaces the default", () => {
+  const cfg = path.join(WORK_DIR, "policy-override.yaml");
+  writeFileSync(
+    cfg,
+    "merge:\n  max_fix_rounds: 2\ncommitMsg:\n  ticketPatterns:\n    - '\\(GH-[0-9]+\\)'\nconcurrency:\n  max_concurrent_merges: 1\n",
+  );
+  const env = { FACTORY_COMMIT_MSG_CONFIG: cfg };
+  expect(run("fix(s): thing (GH-9)\n", env).status).toBe(0);
+  // the built-in shapes are replaced, not merged
+  expect(run("fix(s): thing (WM-123)\n", env).status).toBe(1);
+  expect(run("fix(s): thing (#123)\n", env).status).toBe(1);
+  // the error message reports what is actually enforced
+  expect(run("fix(s): thing\n", env).stderr).toContain("(GH-123)");
+});
+
+test("multiple configured patterns are all accepted", () => {
+  const cfg = path.join(WORK_DIR, "policy-multi.yaml");
+  writeFileSync(
+    cfg,
+    "commitMsg:\n  ticketPatterns:\n    - '\\(GH-[0-9]+\\)'\n    - '\\(#[0-9]+\\)'\n",
+  );
+  const env = { FACTORY_COMMIT_MSG_CONFIG: cfg };
+  expect(run("fix(s): thing (GH-9)\n", env).status).toBe(0);
+  expect(run("fix(s): thing (#9)\n", env).status).toBe(0);
+  expect(run("fix(s): thing (WM-9)\n", env).status).toBe(1);
+});
+
+test("a missing or stanza-less config falls back to the default", () => {
+  const missing = {
+    FACTORY_COMMIT_MSG_CONFIG: path.join(WORK_DIR, "nope.yaml"),
+  };
+  expect(run("fix(s): thing (WM-1)\n", missing).status).toBe(0);
+  expect(run("fix(s): thing (#1)\n", missing).status).toBe(0);
+
+  const cfg = path.join(WORK_DIR, "policy-nostanza.yaml");
+  writeFileSync(cfg, "merge:\n  max_fix_rounds: 2\n");
+  const env = { FACTORY_COMMIT_MSG_CONFIG: cfg };
+  // "no opinion" must not mean "accept nothing" — a config typo must not lock
+  // every commit out of the repo.
+  expect(run("fix(s): thing (WM-1)\n", env).status).toBe(0);
+  expect(run("fix(s): thing\n", env).status).toBe(1);
+});
+
+test("FACTORY_NO_TICKET and the exemptions survive the rewrite", () => {
+  expect(run("fix(s): thing\n", { FACTORY_NO_TICKET: "1" }).status).toBe(0);
+  for (const subject of [
+    "Merge branch develop",
+    'Revert "fix(s): thing (WM-1)"',
+    "fixup! fix(s): thing",
+    "squash! fix(s): thing",
+    "build(deps): bump thing",
+  ]) {
+    expect(run(`${subject}\n`).status).toBe(0);
+  }
+  expect(run("whatever\n", { GIT_AUTHOR_NAME: "dependabot[bot]" }).status).toBe(
+    0,
+  );
 });
