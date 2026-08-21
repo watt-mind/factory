@@ -251,6 +251,10 @@ else
   fi
 fi
 
+# Worktrees are clean checkouts, so carry over the primary instance's ignored
+# runtime config before either checkout-only callers or daemon startup use it.
+provision_instance_local_configs "$WT" "$REPO"
+
 if [[ "$CHECKOUT_ONLY" -eq 1 ]]; then
   printf '%s\n' "$WT"
   exit 0
