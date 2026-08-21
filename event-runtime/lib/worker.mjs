@@ -77,6 +77,59 @@ const HARNESS_UNKNOWN_CODES = Object.freeze({
   subagents: "harness_unknown_subagent",
 });
 
+const INSTANCE_LOCAL_CONFIG_FILES = Object.freeze([
+  "repos.yaml",
+  "policy.yaml",
+  "schedule.yaml",
+]);
+
+/**
+ * Bring the operator-owned config files into a delegated checkout. These
+ * files are intentionally untracked, so a fresh worktree otherwise falls
+ * back to examples and cannot use this factory instance's routing or policy.
+ */
+export function provisionInstanceLocalConfigs({
+  checkoutPath,
+  factoryRoot = process.env.FACTORY_ROOT || FACTORY_ROOT,
+} = {}) {
+  if (!checkoutPath) return [];
+  const sourceConfig = path.join(factoryRoot, "config");
+  const destinationConfig = path.join(checkoutPath, "config");
+  const isGitCheckout =
+    spawnSync(
+      "git",
+      ["-C", checkoutPath, "rev-parse", "--is-inside-work-tree"],
+      {
+        encoding: "utf8",
+      },
+    ).status === 0;
+  const copied = [];
+
+  for (const filename of INSTANCE_LOCAL_CONFIG_FILES) {
+    const source = path.join(sourceConfig, filename);
+    const rel = path.posix.join("config", filename);
+    if (!existsSync(source)) continue;
+    const destination = path.join(destinationConfig, filename);
+    if (path.resolve(source) === path.resolve(destination)) continue;
+
+    // Never introduce an instance config into a checkout where an agent could
+    // stage it. Non-factory repository fixtures and repositories without this
+    // local-config contract continue using their tracked examples.
+    if (
+      isGitCheckout &&
+      spawnSync("git", ["-C", checkoutPath, "check-ignore", "-q", "--", rel], {
+        encoding: "utf8",
+      }).status !== 0
+    ) {
+      continue;
+    }
+    mkdirSync(destinationConfig, { recursive: true });
+    cpSync(source, destination);
+    copied.push(rel);
+  }
+  return copied;
+}
+
 export class HarnessMaterializeError extends Error {
   /**
    * @param {string} code - typed reason: `harness_unknown_*` / `harness_unsupported` / `harness_unmaterializable`
@@ -2378,6 +2431,7 @@ export async function executeClaimed(
     workspaceDir = created.dir;
     assertSandboxWorkspaceSupported(workspaceDir, def);
     checkoutPath = created.checkout?.path ?? null;
+    provisionInstanceLocalConfigs({ checkoutPath });
     checkoutBaseline = checkoutPath ? repositoryStatus(checkoutPath) : null;
     worktreeRecord = created.worktree
       ? {

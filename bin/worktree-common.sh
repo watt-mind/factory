@@ -166,6 +166,27 @@ die() {
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 
+# Local config is intentionally gitignored, but a delegated checkout needs
+# the active instance's routing, policy, and schedule rather than examples.
+# Skip a checkout without the ignore rule so an agent can never stage it.
+provision_instance_local_configs() { # <checkout> [primary-checkout]
+  local checkout="$1" primary="${2:-${FACTORY_ROOT:-$(repo_root)}}"
+  local name source destination rel
+  for name in repos policy schedule; do
+    source="$primary/config/$name.yaml"
+    [[ -f "$source" ]] || continue
+    destination="$checkout/config/$name.yaml"
+    rel="config/$name.yaml"
+    [[ "$(realpath -m "$source")" == "$(realpath -m "$destination")" ]] && continue
+    if git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      && ! git -C "$checkout" check-ignore -q -- "$rel"; then
+      continue
+    fi
+    mkdir -p "$checkout/config"
+    cp -f "$source" "$destination"
+  done
+}
+
 [[ "$PORT_BASE" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_BASE must be numeric (got '$PORT_BASE')"
 [[ "$PORT_SPAN" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_SPAN must be numeric (got '$PORT_SPAN')"
 (( PORT_BASE % 2 == 0 )) || die "FACTORY_PORT_BASE must be even so API/web pairs stay aligned (got '$PORT_BASE')"

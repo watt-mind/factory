@@ -61,6 +61,7 @@ import {
   releaseClaimLock,
   repositoryIsClean,
   repositoryStatus,
+  provisionInstanceLocalConfigs,
   resolveLinearApiKey,
   retryRun,
   runLinearCli,
@@ -167,6 +168,87 @@ function opts(extra = {}) {
 }
 
 describe("worker", () => {
+  test("provisions present instance configs into an ignored checkout and skips absent files", () => {
+    const factoryRoot = tmpDir("evrt-instance-config-source-");
+    const checkout = tmpDir("evrt-instance-config-checkout-");
+    try {
+      mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+      mkdirSync(path.join(checkout, "config"), { recursive: true });
+      writeFileSync(
+        path.join(checkout, ".gitignore"),
+        "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
+      );
+      expect(spawnSync("git", ["init", "-q"], { cwd: checkout }).status).toBe(
+        0,
+      );
+      writeFileSync(
+        path.join(factoryRoot, "config", "repos.yaml"),
+        "repos: []\n",
+      );
+      writeFileSync(
+        path.join(factoryRoot, "config", "policy.yaml"),
+        "limits: {}\n",
+      );
+
+      expect(
+        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+      ).toEqual(["config/repos.yaml", "config/policy.yaml"]);
+      expect(
+        readFileSync(path.join(checkout, "config", "repos.yaml"), "utf8"),
+      ).toBe("repos: []\n");
+      expect(existsSync(path.join(checkout, "config", "schedule.yaml"))).toBe(
+        false,
+      );
+      for (const file of ["config/repos.yaml", "config/policy.yaml"]) {
+        expect(
+          spawnSync("git", ["check-ignore", "-q", file], { cwd: checkout })
+            .status,
+        ).toBe(0);
+      }
+    } finally {
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test("silently skips instance config provisioning when no local files exist", () => {
+    const factoryRoot = tmpDir("evrt-instance-config-empty-source-");
+    const checkout = tmpDir("evrt-instance-config-empty-checkout-");
+    try {
+      expect(
+        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+      ).toEqual([]);
+    } finally {
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test("does not provision instance config into a checkout that could stage it", () => {
+    const factoryRoot = tmpDir("evrt-instance-config-protected-source-");
+    const checkout = tmpDir("evrt-instance-config-protected-checkout-");
+    try {
+      mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+      writeFileSync(
+        path.join(factoryRoot, "config", "repos.yaml"),
+        "repos: []\n",
+      );
+      expect(spawnSync("git", ["init", "-q"], { cwd: checkout }).status).toBe(
+        0,
+      );
+
+      expect(
+        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+      ).toEqual([]);
+      expect(existsSync(path.join(checkout, "config", "repos.yaml"))).toBe(
+        false,
+      );
+    } finally {
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
   test("repository integrity gate rejects any checkout dirt before output acceptance", () => {
     const repo = tmpDir("evrt-clean-repo-");
     const git = (args) =>
