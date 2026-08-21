@@ -117,6 +117,22 @@ describe("configured merge_ci proof", () => {
     });
   });
 
+  test("a failed job outside the configured allow-list does not block proof", () => {
+    expect(
+      proveMergeCiFallback({
+        ...fallback,
+        jobs: [
+          ...fallback.jobs,
+          { name: "docs", status: "completed", conclusion: "failure" },
+        ],
+      }),
+    ).toEqual({
+      runId: 409,
+      workflow: "CI",
+      requiredChecks: ["Shadow runner fleet available", "Verify"],
+    });
+  });
+
   test("missing, duplicate, stale, or non-green fallback evidence fails closed", () => {
     expect(() =>
       proveMergeCiFallback({ ...fallback, jobs: fallback.jobs.slice(0, 1) }),
