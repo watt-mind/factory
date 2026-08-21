@@ -121,6 +121,7 @@ describe("configured merge_ci proof", () => {
     expect(
       proveMergeCiFallback({
         ...fallback,
+        runs: [{ ...fallback.runs[0], conclusion: "failure" }],
         jobs: [
           ...fallback.jobs,
           { name: "docs", status: "completed", conclusion: "failure" },

@@ -153,7 +153,7 @@ describe("configured merge_ci fallback", () => {
     ],
   ]);
 
-  function fallbackForge(jobs) {
+  function fallbackForge(jobs, { conclusion = "success" } = {}) {
     return memoryForge({
       repos: {
         [GITHUB]: {
@@ -162,7 +162,7 @@ describe("configured merge_ci fallback", () => {
             {
               databaseId: 409,
               status: "completed",
-              conclusion: "success",
+              conclusion,
               headSha: HEAD,
               workflowName: "CI",
             },
@@ -189,11 +189,14 @@ describe("configured merge_ci fallback", () => {
     });
 
   test("evaluates only configured required jobs at the selected head SHA", () => {
-    const forge = fallbackForge([
-      { name: "Lint", status: "completed", conclusion: "success" },
-      { name: "Verify", status: "completed", conclusion: "success" },
-      { name: "docs", status: "completed", conclusion: "failure" },
-    ]);
+    const forge = fallbackForge(
+      [
+        { name: "Lint", status: "completed", conclusion: "success" },
+        { name: "Verify", status: "completed", conclusion: "success" },
+        { name: "docs", status: "completed", conclusion: "failure" },
+      ],
+      { conclusion: "failure" },
+    );
 
     expect(prove(forge)).toBe(true);
     expect(forge.calls).toContainEqual({
