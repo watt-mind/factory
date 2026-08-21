@@ -13,6 +13,7 @@ import {
   formatOptions,
   formatRunLifecycleMessage,
   formatResolvedReply,
+  RUN_LIFECYCLE_VERBS,
   inboxDeepLink,
   isApprover,
   optionNeedsReason,
@@ -124,6 +125,13 @@ export function createBuzzRuntime({
   let lastErrorStatus = null;
   let droppedPosts = 0;
   let since = Math.floor(now() / 1000) - 60;
+  // Cursor into the durable lifecycle journal (client.runs.tail, WM-975):
+  // null means "not yet established" — the first poll tick sets it to the
+  // current head instead of tailing, so a restart never replays history
+  // into the feed. From then on each tick only sees new transitions,
+  // wherever they were committed (client.runs.subscribe is process-local
+  // and misses transitions the separate worker process commits).
+  let runCursor = null;
 
   const relayOpts = () => ({
     secretHex: identity.secretHex,
@@ -295,6 +303,11 @@ export function createBuzzRuntime({
     // Lifecycle telemetry has no pager fallback: an unconfigured feed must be
     // silent so #ops-factory stays for high-priority inbox alerts only.
     if (!feedChannel || !identity.secretHex) return;
+    // Every queue/verification hop the tail delivers is a no-op message
+    // (formatRunLifecycleMessage returns null for it); skip the runs.get
+    // round-trip for those entirely rather than fetching a run we are about
+    // to discard (WM-975 review).
+    if (!RUN_LIFECYCLE_VERBS[event?.to]) return;
     let run = null;
     try {
       run = await client?.runs?.get?.(event?.runId);
@@ -546,10 +559,51 @@ export function createBuzzRuntime({
     }
   }
 
+  /**
+   * Tail the durable lifecycle journal on the connector's own poll cadence
+   * (WM-975). This is the only reliable way to observe a transition: the
+   * worker that executes RUNNING/COMPLETED/etc runs in a separate process
+   * (OPS-233) from this connector, so client.runs.subscribe — a
+   * process-local bus — never fires for it.
+   */
+  async function pollRuns() {
+    if (!feedChannel) return;
+    const tail = client?.runs?.tail;
+    if (typeof tail !== "function") return;
+    if (runCursor === null) {
+      const cursorFn = client?.runs?.cursor;
+      try {
+        runCursor =
+          typeof cursorFn === "function" ? ((await cursorFn()) ?? 0) : 0;
+      } catch (err) {
+        log(`runs.cursor failed: ${err.message}`);
+        runCursor = 0;
+      }
+      return;
+    }
+    let tailed;
+    try {
+      tailed = await tail(runCursor);
+    } catch (err) {
+      log(`runs.tail failed: ${err.message}`);
+      return;
+    }
+    const events = Array.isArray(tailed?.events) ? tailed.events : [];
+    if (typeof tailed?.cursor === "number") runCursor = tailed.cursor;
+    for (const event of events) {
+      try {
+        await onRunEvent(event);
+      } catch (err) {
+        log(`run lifecycle event failed: ${err.message}`);
+      }
+    }
+  }
+
   async function poll() {
     if (!identity.secretHex) return;
     lastPollAt = new Date(now()).toISOString();
     try {
+      await pollRuns();
       await flushQueue();
       try {
         const open = client.inbox.list({ status: "open" }) ?? [];
@@ -604,6 +658,7 @@ export function createBuzzRuntime({
     identity,
     health,
     poll,
+    pollRuns,
     onInboxEvent,
     onRunEvent,
     pollSeconds,

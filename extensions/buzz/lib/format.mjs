@@ -25,7 +25,7 @@ export const DEFAULT_POST_KINDS = Object.freeze([
 
 export const DM_KINDS = new Set(["BLOCKED", "CIRCUIT BREAKER", "SMOKE RED"]);
 
-const RUN_LIFECYCLE_VERBS = Object.freeze({
+export const RUN_LIFECYCLE_VERBS = Object.freeze({
   LEASED: "claimed",
   RUNNING: "started",
   COMPLETED: "completed",
@@ -44,7 +44,10 @@ export function formatRunLifecycleMessage(event, run = null) {
   const verb = RUN_LIFECYCLE_VERBS[event?.to];
   if (!runId || !verb) return null;
 
-  const artifact = run?.result?.artifact ?? {};
+  // getRun (event-runtime/lib/connectors.mjs) hands a connector the
+  // artifact only — `run.result` IS the artifact, never the whole
+  // result_json (WM-975 review).
+  const artifact = run?.result ?? {};
   const ticket = artifact.ticket ?? run?.spec?.input?.ticket ?? null;
   const agent = run?.spec?.agent ?? null;
   const prUrl =
@@ -53,8 +56,8 @@ export function formatRunLifecycleMessage(event, run = null) {
       : null;
   const lines = [
     `run ${runId} ${verb}${prUrl ? " — PR opened" : ""}`,
-    ...(ticket ? [`ticket: ${ticket}`] : []),
-    ...(agent ? [`agent: ${agent}`] : []),
+    ...(ticket ? [`ticket: ${truncateBody(String(ticket), 300)}`] : []),
+    ...(agent ? [`agent: ${truncateBody(String(agent), 300)}`] : []),
     ...(prUrl ? [prUrl] : []),
   ];
   return lines.join("\n");

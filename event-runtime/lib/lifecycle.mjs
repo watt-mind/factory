@@ -232,6 +232,55 @@ export function lifecycleOf(db, runId) {
     .all(runId);
 }
 
+function toLifecycleEvent(row) {
+  return {
+    runId: row.run_id,
+    from: row.from_state,
+    to: row.to_state,
+    actor: row.actor,
+    reason: row.reason ?? null,
+    attempt: row.attempt ?? null,
+    correlationId: row.correlation_id ?? null,
+    causationId: row.causation_id ?? null,
+    policyVersion: row.policy_version ?? null,
+    at: row.at,
+    seq: row.seq,
+  };
+}
+
+/**
+ * The highest committed journal seq, for a poller establishing its starting
+ * cursor (mirrors serve.mjs's `lastSeq` at `serve` start-up): a connector
+ * calls this once so its first tail() does not replay history.
+ */
+export function currentLifecycleSeq(db) {
+  return db.query(`SELECT MAX(seq) AS m FROM lifecycle_events`).get().m ?? 0;
+}
+
+/**
+ * Durable, cross-process tail of committed lifecycle transitions (WM-975):
+ * `subscribeRunLifecycle` above is a process-local bus, so it never sees a
+ * transition committed by another process (the worker, OPS-233, is one) —
+ * only a caller in the *same* process as the writer ever gets called back.
+ * This reads the journal itself, mirroring serve.mjs's `announceTransitions`
+ * query, so any poller — regardless of which process wrote the row — can
+ * observe every transition by re-polling with the returned cursor.
+ *
+ * @param {object} db
+ * @param {number} [sinceSeq] - exclusive lower bound; 0 (default) tails from
+ *   the beginning of the journal.
+ * @returns {{ events: Array<object>, cursor: number }}
+ */
+export function tailLifecycleEvents(db, sinceSeq = 0) {
+  const rows = db
+    .query(`SELECT * FROM lifecycle_events WHERE seq > ? ORDER BY seq`)
+    .all(sinceSeq);
+  return {
+    events: rows.map(toLifecycleEvent),
+    cursor: rows.length > 0 ? rows[rows.length - 1].seq : sinceSeq,
+  };
+}
+
 const IDEMPOTENCY_TRIGGER_MARKER = ":trigger:";
 
 function idempotencyFamily(db, idempotencyKey) {
