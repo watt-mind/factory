@@ -11,6 +11,7 @@ import {
   fieldsForOption,
   formatInboxMessage,
   formatOptions,
+  formatRunLifecycleMessage,
   formatResolvedReply,
   inboxDeepLink,
   isApprover,
@@ -99,6 +100,10 @@ export function createBuzzRuntime({
 } = {}) {
   const relayUrl = config.relayUrl ?? "https://watt-mind.communities.buzz.xyz";
   const channel = config.channel ?? "91572011-2505-5288-b6f5-4a7d74abf106";
+  const feedChannel =
+    typeof config.feedChannel === "string" && config.feedChannel.trim() !== ""
+      ? config.feedChannel.trim()
+      : null;
   const postKinds = new Set(asList(config.postKinds, DEFAULT_POST_KINDS));
   const pollSeconds = clampInt(config.pollSeconds, 5, 120, 15);
   const dmBlockedTo =
@@ -283,6 +288,34 @@ export function createBuzzRuntime({
       await run();
     } catch {
       enqueue(run);
+    }
+  }
+
+  async function onRunEvent(event) {
+    // Lifecycle telemetry has no pager fallback: an unconfigured feed must be
+    // silent so #ops-factory stays for high-priority inbox alerts only.
+    if (!feedChannel || !identity.secretHex) return;
+    let run = null;
+    try {
+      run = await client?.runs?.get?.(event?.runId);
+    } catch (err) {
+      log(`runs.get ${event?.runId ?? "unknown"}: ${err.message}`);
+    }
+    const content = formatRunLifecycleMessage(event, run);
+    if (!content) return;
+    const post = () =>
+      publish(
+        channelMessage({
+          secretHex: identity.secretHex,
+          auth: identity.auth,
+          channel: feedChannel,
+          content,
+        }),
+      );
+    try {
+      await post();
+    } catch {
+      enqueue(post);
     }
   }
 
@@ -572,6 +605,7 @@ export function createBuzzRuntime({
     health,
     poll,
     onInboxEvent,
+    onRunEvent,
     pollSeconds,
     posted,
     queue,

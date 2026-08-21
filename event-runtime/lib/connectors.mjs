@@ -39,6 +39,7 @@ import {
 } from "./inbox.mjs";
 import { admitExternalEvent } from "./intake.mjs";
 import { getProposal } from "./proposals.mjs";
+import { subscribeRunLifecycle } from "./lifecycle.mjs";
 
 /** Connector names match adapter names: lower-case identifiers. */
 export const CONNECTOR_NAME_PATTERN = ADAPTER_NAME_PATTERN;
@@ -185,6 +186,11 @@ function cloneJson(value) {
 function getRun(db, id) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(id);
   if (!row) return null;
+  const result = db
+    .query(
+      `SELECT result_json FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`,
+    )
+    .get(id);
   return {
     runId: row.run_id,
     state: row.state,
@@ -192,6 +198,7 @@ function getRun(db, id) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     spec: row.spec_json ? JSON.parse(row.spec_json) : null,
+    result: result?.result_json ? JSON.parse(result.result_json) : null,
   };
 }
 
@@ -251,6 +258,9 @@ export function createConnectorClient({ db, registry, extension, name }) {
     runs: Object.freeze({
       get(id) {
         return getRun(db, id);
+      },
+      subscribe(cb) {
+        return subscribeRunLifecycle(cb);
       },
     }),
   });

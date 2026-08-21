@@ -22,6 +22,7 @@ import { decisionRequestHash } from "./decision.mjs";
 import { EXTENSION_MANIFEST, loadExtensions } from "./extensions.mjs";
 import { createHookRegistry } from "./hooks.mjs";
 import { createInboxItem, getInboxItem } from "./inbox.mjs";
+import { createRun, transition } from "./lifecycle.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const SAMPLE_EXTENSION = path.join(
@@ -418,5 +419,52 @@ describe("narrow loopback client", () => {
       "connector:factory/sample/echo:unknown",
     );
     expect(decided.item.delivery.buzz.eventId).toBe("nevent1xyz");
+  });
+
+  test("runs.subscribe receives lifecycle transitions and can unsubscribe", () => {
+    const db = openDb(":memory:");
+    const client = createConnectorClient({
+      db,
+      registry: loadRegistry(),
+      extension: "factory/sample",
+      name: "echo",
+    });
+    const events = [];
+    const unsubscribe = client.runs.subscribe((event) => events.push(event));
+    createRun(db, {
+      runId: "run_connector_subscribe",
+      idempotencyKey: "connector-subscribe",
+      spec: {},
+      specJson: "{}",
+      specHash: "spec-hash",
+      actor: "planner",
+      now: 0,
+    });
+    transition(db, {
+      runId: "run_connector_subscribe",
+      to: "APPROVED",
+      actor: "operator",
+      now: 1,
+    });
+    unsubscribe();
+    transition(db, {
+      runId: "run_connector_subscribe",
+      to: "QUEUED",
+      actor: "operator",
+      now: 2,
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        runId: "run_connector_subscribe",
+        from: null,
+        to: "PROPOSED",
+      }),
+      expect.objectContaining({
+        runId: "run_connector_subscribe",
+        from: "PROPOSED",
+        to: "APPROVED",
+      }),
+    ]);
   });
 });

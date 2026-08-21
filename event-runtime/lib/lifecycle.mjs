@@ -44,6 +44,34 @@ const LEGAL = {
   CANCELLED: [],
 };
 
+const lifecycleListeners = new Set();
+
+/**
+ * Subscribe to committed run lifecycle records. Connectors use this narrow
+ * process-local bus rather than receiving the runtime database handle.
+ *
+ * @param {(event: { runId: string, from: string|null, to: string, actor: string, reason?: string|null, attempt?: number|null, at: string }) => void} cb
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeRunLifecycle(cb) {
+  if (typeof cb !== "function") {
+    throw new TypeError("runs.subscribe callback must be a function");
+  }
+  lifecycleListeners.add(cb);
+  return () => lifecycleListeners.delete(cb);
+}
+
+/** Fan out a committed lifecycle event while isolating connector failures. */
+function emitRunLifecycle(event) {
+  for (const cb of lifecycleListeners) {
+    try {
+      cb(event);
+    } catch {
+      // A connector that throws from subscribe must not disrupt run execution.
+    }
+  }
+}
+
 export class IllegalTransition extends Error {
   constructor(runId, from, to) {
     super(`illegal transition ${from ?? "(none)"} → ${to} for ${runId}`);
@@ -100,7 +128,7 @@ export function createRun(
   },
 ) {
   const at = new Date(resolveNow(now)).toISOString();
-  return txImmediate(db, () => {
+  const result = txImmediate(db, () => {
     db.query(
       `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'PROPOSED', 0, ?, ?)`,
@@ -118,6 +146,17 @@ export function createRun(
     });
     return { runId, state: "PROPOSED" };
   });
+  emitRunLifecycle({
+    runId,
+    from: null,
+    to: "PROPOSED",
+    actor,
+    correlationId: correlationId ?? null,
+    causationId: causationId ?? null,
+    policyVersion: policyVersion ?? null,
+    at,
+  });
+  return result;
 }
 
 /**
@@ -141,7 +180,7 @@ export function transition(
   },
 ) {
   const at = new Date(resolveNow(now)).toISOString();
-  return txImmediate(db, () => {
+  const result = txImmediate(db, () => {
     const run = db.query(`SELECT state FROM runs WHERE run_id = ?`).get(runId);
     if (!run) throw new IllegalTransition(runId, undefined, to);
     const from = run.state;
@@ -168,6 +207,19 @@ export function transition(
     });
     return { runId, from, to };
   });
+  emitRunLifecycle({
+    runId,
+    from: result.from,
+    to: result.to,
+    actor,
+    reason: reason ?? null,
+    attempt: attempt ?? null,
+    correlationId: correlationId ?? null,
+    causationId: causationId ?? null,
+    policyVersion: policyVersion ?? null,
+    at,
+  });
+  return result;
 }
 
 export function runState(db, runId) {

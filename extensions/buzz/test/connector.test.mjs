@@ -144,6 +144,74 @@ function startRelay({ failEvents = 0, extraEvents = [] } = {}) {
 const secrets = { agentNsec: AGENT_SECRET, authTag: AUTH_TAG };
 
 describe("egress", () => {
+  test("lifecycle events post to feedChannel, never the pager channel", async () => {
+    const relay = startRelay();
+    const feedChannel = "8469ab53-6292-4436-938f-edf77ad2a652";
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL, feedChannel },
+      secrets,
+      client: {
+        ...fakeClient(),
+        runs: {
+          get: () => ({
+            runId: "run_1",
+            spec: { agent: "factory-ticket" },
+            result: {
+              artifact: {
+                outcome: "PR_OPEN",
+                ticket: "WM-975",
+                prUrl: "https://github.com/watt-mind/factory/pull/975",
+              },
+            },
+          }),
+        },
+      },
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await runtime.onRunEvent({
+      runId: "run_1",
+      from: "VERIFYING",
+      to: "COMPLETED",
+      at: "2026-08-21T00:00:00.000Z",
+    });
+
+    expect(relay.posted).toHaveLength(1);
+    expect(relay.posted[0].tags).toContainEqual(["h", feedChannel]);
+    expect(relay.posted[0].tags).not.toContainEqual(["h", CHANNEL]);
+    expect(relay.posted[0].content).toContain("PR opened");
+    expect(relay.posted[0].content).toContain("WM-975");
+  });
+
+  test("lifecycle events are omitted when feedChannel is unset", async () => {
+    const relay = startRelay();
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client: fakeClient(),
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await runtime.onRunEvent({ runId: "run_1", to: "RUNNING" });
+
+    expect(relay.posted).toHaveLength(0);
+  });
+
+  test("failed lifecycle egress is queued without rejecting the event", async () => {
+    const relay = startRelay({ failEvents: 1 });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, feedChannel: "feed-channel" },
+      secrets,
+      client: fakeClient(),
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await expect(
+      runtime.onRunEvent({ runId: "run_1", to: "RUNNING" }),
+    ).resolves.toBeUndefined();
+    expect(runtime.queue).toHaveLength(1);
+  });
+
   test("new inbox item becomes one kind-9 with h=channel and delivery recorded", async () => {
     const relay = startRelay();
     const marked = [];
