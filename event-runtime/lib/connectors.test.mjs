@@ -22,6 +22,7 @@ import { decisionRequestHash } from "./decision.mjs";
 import { EXTENSION_MANIFEST, loadExtensions } from "./extensions.mjs";
 import { createHookRegistry } from "./hooks.mjs";
 import { createInboxItem, getInboxItem } from "./inbox.mjs";
+import { createRun, transition } from "./lifecycle.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const SAMPLE_EXTENSION = path.join(
@@ -363,6 +364,43 @@ describe("narrow loopback client", () => {
     expect(client.runs.get("missing")).toBeNull();
   });
 
+  test("runs.get hands back only the artifact, never the whole result_json (WM-975)", () => {
+    const db = openDb(":memory:");
+    const client = createConnectorClient({
+      db,
+      registry: loadRegistry(),
+      extension: "factory/sample",
+      name: "echo",
+    });
+    createRun(db, {
+      runId: "run_connector_artifact",
+      idempotencyKey: "connector-artifact",
+      spec: { agent: "factory-ticket" },
+      specJson: JSON.stringify({ agent: "factory-ticket" }),
+      specHash: "spec-hash",
+      actor: "planner",
+      now: 0,
+    });
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:x', '{}', '{}', ?)`,
+    ).run(
+      "run_connector_artifact",
+      JSON.stringify({
+        artifact: { outcome: "PR_OPEN", ticket: "WM-975" },
+        // Deliberately not exposed to a connector: prompts, receipts, and
+        // other agent-internal detail that rides in result_json alongside
+        // the artifact.
+        promptTranscript: "should never leave this process",
+      }),
+      "2026-08-20T00:00:00.000Z",
+    );
+
+    const run = client.runs.get("run_connector_artifact");
+    expect(run.result).toEqual({ outcome: "PR_OPEN", ticket: "WM-975" });
+    expect(run.result.promptTranscript).toBeUndefined();
+  });
+
   test("inbox.markDelivered merges delivery, rejects missing id, leaves decide independent", () => {
     const db = openDb(":memory:");
     const client = createConnectorClient({
@@ -418,5 +456,121 @@ describe("narrow loopback client", () => {
       "connector:factory/sample/echo:unknown",
     );
     expect(decided.item.delivery.buzz.eventId).toBe("nevent1xyz");
+  });
+
+  test("runs.subscribe receives lifecycle transitions and can unsubscribe", () => {
+    const db = openDb(":memory:");
+    const client = createConnectorClient({
+      db,
+      registry: loadRegistry(),
+      extension: "factory/sample",
+      name: "echo",
+    });
+    const events = [];
+    const unsubscribe = client.runs.subscribe((event) => events.push(event));
+    createRun(db, {
+      runId: "run_connector_subscribe",
+      idempotencyKey: "connector-subscribe",
+      spec: {},
+      specJson: "{}",
+      specHash: "spec-hash",
+      actor: "planner",
+      now: 0,
+    });
+    transition(db, {
+      runId: "run_connector_subscribe",
+      to: "APPROVED",
+      actor: "operator",
+      now: 1,
+    });
+    unsubscribe();
+    transition(db, {
+      runId: "run_connector_subscribe",
+      to: "QUEUED",
+      actor: "operator",
+      now: 2,
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        runId: "run_connector_subscribe",
+        from: null,
+        to: "PROPOSED",
+      }),
+      expect.objectContaining({
+        runId: "run_connector_subscribe",
+        from: "PROPOSED",
+        to: "APPROVED",
+      }),
+    ]);
+  });
+
+  test("runs.tail observes a transition committed by a separate DB connection (WM-975)", () => {
+    // `writer` and `reader` are separate connections to the same on-disk
+    // database — the same shape as the OPS-233 split, where the worker (its
+    // own process, its own connection) executes the interesting
+    // transitions and the API process (a different connection) hosts the
+    // connectors. subscribeRunLifecycle's in-memory bus cannot bridge that
+    // gap by construction; the durable-journal tail reads the row itself,
+    // so it observes the transition regardless of which connection wrote it.
+    const file = path.join(tmpDir("event-connector-tail-"), "runtime.db");
+    const writer = openDb(file);
+    const reader = openDb(file);
+    const client = createConnectorClient({
+      db: reader,
+      registry: loadRegistry(),
+      extension: "factory/sample",
+      name: "echo",
+    });
+
+    const cursor = client.runs.cursor();
+    createRun(writer, {
+      runId: "run_connector_tail",
+      idempotencyKey: "connector-tail",
+      spec: {},
+      specJson: "{}",
+      specHash: "spec-hash",
+      actor: "planner",
+      now: 0,
+    });
+    transition(writer, {
+      runId: "run_connector_tail",
+      to: "APPROVED",
+      actor: "operator",
+      now: 1,
+    });
+
+    const tailed = client.runs.tail(cursor);
+    expect(tailed.events).toEqual([
+      expect.objectContaining({
+        runId: "run_connector_tail",
+        from: null,
+        to: "PROPOSED",
+      }),
+      expect.objectContaining({
+        runId: "run_connector_tail",
+        from: "PROPOSED",
+        to: "APPROVED",
+      }),
+    ]);
+    expect(tailed.cursor).toBeGreaterThan(cursor);
+
+    // Re-polling with the returned cursor yields nothing new until another
+    // transition lands.
+    expect(client.runs.tail(tailed.cursor).events).toEqual([]);
+    transition(writer, {
+      runId: "run_connector_tail",
+      to: "QUEUED",
+      actor: "operator",
+      now: 2,
+    });
+    const next = client.runs.tail(tailed.cursor);
+    expect(next.events).toEqual([
+      expect.objectContaining({
+        runId: "run_connector_tail",
+        from: "APPROVED",
+        to: "QUEUED",
+      }),
+    ]);
   });
 });

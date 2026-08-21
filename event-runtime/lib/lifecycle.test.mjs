@@ -1,12 +1,16 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-lifecycle-test-mjs";
 import { describe, expect, test } from "bun:test";
+import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
   IllegalTransition,
   TERMINAL_STATES,
   createRun,
+  currentLifecycleSeq,
   lifecycleOf,
   resolveIdempotency,
   runState,
+  tailLifecycleEvents,
   transition,
 } from "./lifecycle.mjs";
 
@@ -176,5 +180,51 @@ describe("lifecycle", () => {
     for (let i = 1; i < timestamps.length; i += 1) {
       expect(timestamps[i]).toBeGreaterThan(timestamps[i - 1]);
     }
+  });
+
+  test("tailLifecycleEvents observes a transition committed through a separate DB connection (WM-975)", () => {
+    // subscribeRunLifecycle is a process-local bus: a callback registered
+    // against `reader` never fires for a transition written through
+    // `writer`, a *different* connection to the same on-disk database —
+    // the same split as the OPS-233 worker (its own process and connection)
+    // versus the API process a connector runs in. tailLifecycleEvents reads
+    // the journal row itself, so it is not fooled the same way.
+    const file = path.join(tmpDir("event-lifecycle-tail-"), "runtime.db");
+    const writer = openDb(file);
+    const reader = openDb(file);
+
+    const cursor = currentLifecycleSeq(reader);
+
+    createRun(writer, {
+      runId: "run_lifecycle_tail",
+      idempotencyKey: "lifecycle-tail",
+      spec: {},
+      specJson: "{}",
+      specHash: "sha256:0",
+      actor: "planner",
+      now: 0,
+    });
+    transition(writer, {
+      runId: "run_lifecycle_tail",
+      to: "APPROVED",
+      actor: "operator",
+      now: 1,
+    });
+
+    const tailed = tailLifecycleEvents(reader, cursor);
+    expect(tailed.events).toEqual([
+      expect.objectContaining({
+        runId: "run_lifecycle_tail",
+        from: null,
+        to: "PROPOSED",
+      }),
+      expect.objectContaining({
+        runId: "run_lifecycle_tail",
+        from: "PROPOSED",
+        to: "APPROVED",
+      }),
+    ]);
+    expect(tailed.cursor).toBeGreaterThan(cursor);
+    expect(tailLifecycleEvents(reader, tailed.cursor).events).toEqual([]);
   });
 });

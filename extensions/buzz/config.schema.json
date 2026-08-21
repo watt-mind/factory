@@ -17,6 +17,12 @@
       "title": "Inbox channel",
       "description": "NIP-29 channel uuid for kind-9 posts (`h` tag). Default is #general on the watt-mind relay."
     },
+    "feedChannel": {
+      "type": "string",
+      "format": "channel-id",
+      "title": "Factory feed channel",
+      "description": "NIP-29 channel uuid for run lifecycle telemetry. When unset, lifecycle events are omitted and never fall back to the inbox/pager channel. #feed-factory is 8469ab53-6292-4436-938f-edf77ad2a652 on the Watt Mind relay."
+    },
     "dmBlockedTo": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",

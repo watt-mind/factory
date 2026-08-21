@@ -44,6 +44,34 @@ const LEGAL = {
   CANCELLED: [],
 };
 
+const lifecycleListeners = new Set();
+
+/**
+ * Subscribe to committed run lifecycle records. Connectors use this narrow
+ * process-local bus rather than receiving the runtime database handle.
+ *
+ * @param {(event: { runId: string, from: string|null, to: string, actor: string, reason?: string|null, attempt?: number|null, at: string }) => void} cb
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeRunLifecycle(cb) {
+  if (typeof cb !== "function") {
+    throw new TypeError("runs.subscribe callback must be a function");
+  }
+  lifecycleListeners.add(cb);
+  return () => lifecycleListeners.delete(cb);
+}
+
+/** Fan out a committed lifecycle event while isolating connector failures. */
+function emitRunLifecycle(event) {
+  for (const cb of lifecycleListeners) {
+    try {
+      cb(event);
+    } catch {
+      // A connector that throws from subscribe must not disrupt run execution.
+    }
+  }
+}
+
 export class IllegalTransition extends Error {
   constructor(runId, from, to) {
     super(`illegal transition ${from ?? "(none)"} → ${to} for ${runId}`);
@@ -100,7 +128,7 @@ export function createRun(
   },
 ) {
   const at = new Date(resolveNow(now)).toISOString();
-  return txImmediate(db, () => {
+  const result = txImmediate(db, () => {
     db.query(
       `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'PROPOSED', 0, ?, ?)`,
@@ -118,6 +146,17 @@ export function createRun(
     });
     return { runId, state: "PROPOSED" };
   });
+  emitRunLifecycle({
+    runId,
+    from: null,
+    to: "PROPOSED",
+    actor,
+    correlationId: correlationId ?? null,
+    causationId: causationId ?? null,
+    policyVersion: policyVersion ?? null,
+    at,
+  });
+  return result;
 }
 
 /**
@@ -141,7 +180,7 @@ export function transition(
   },
 ) {
   const at = new Date(resolveNow(now)).toISOString();
-  return txImmediate(db, () => {
+  const result = txImmediate(db, () => {
     const run = db.query(`SELECT state FROM runs WHERE run_id = ?`).get(runId);
     if (!run) throw new IllegalTransition(runId, undefined, to);
     const from = run.state;
@@ -168,6 +207,19 @@ export function transition(
     });
     return { runId, from, to };
   });
+  emitRunLifecycle({
+    runId,
+    from: result.from,
+    to: result.to,
+    actor,
+    reason: reason ?? null,
+    attempt: attempt ?? null,
+    correlationId: correlationId ?? null,
+    causationId: causationId ?? null,
+    policyVersion: policyVersion ?? null,
+    at,
+  });
+  return result;
 }
 
 export function runState(db, runId) {
@@ -178,6 +230,55 @@ export function lifecycleOf(db, runId) {
   return db
     .query(`SELECT * FROM lifecycle_events WHERE run_id = ? ORDER BY seq`)
     .all(runId);
+}
+
+function toLifecycleEvent(row) {
+  return {
+    runId: row.run_id,
+    from: row.from_state,
+    to: row.to_state,
+    actor: row.actor,
+    reason: row.reason ?? null,
+    attempt: row.attempt ?? null,
+    correlationId: row.correlation_id ?? null,
+    causationId: row.causation_id ?? null,
+    policyVersion: row.policy_version ?? null,
+    at: row.at,
+    seq: row.seq,
+  };
+}
+
+/**
+ * The highest committed journal seq, for a poller establishing its starting
+ * cursor (mirrors serve.mjs's `lastSeq` at `serve` start-up): a connector
+ * calls this once so its first tail() does not replay history.
+ */
+export function currentLifecycleSeq(db) {
+  return db.query(`SELECT MAX(seq) AS m FROM lifecycle_events`).get().m ?? 0;
+}
+
+/**
+ * Durable, cross-process tail of committed lifecycle transitions (WM-975):
+ * `subscribeRunLifecycle` above is a process-local bus, so it never sees a
+ * transition committed by another process (the worker, OPS-233, is one) —
+ * only a caller in the *same* process as the writer ever gets called back.
+ * This reads the journal itself, mirroring serve.mjs's `announceTransitions`
+ * query, so any poller — regardless of which process wrote the row — can
+ * observe every transition by re-polling with the returned cursor.
+ *
+ * @param {object} db
+ * @param {number} [sinceSeq] - exclusive lower bound; 0 (default) tails from
+ *   the beginning of the journal.
+ * @returns {{ events: Array<object>, cursor: number }}
+ */
+export function tailLifecycleEvents(db, sinceSeq = 0) {
+  const rows = db
+    .query(`SELECT * FROM lifecycle_events WHERE seq > ? ORDER BY seq`)
+    .all(sinceSeq);
+  return {
+    events: rows.map(toLifecycleEvent),
+    cursor: rows.length > 0 ? rows[rows.length - 1].seq : sinceSeq,
+  };
 }
 
 const IDEMPOTENCY_TRIGGER_MARKER = ":trigger:";
