@@ -164,6 +164,53 @@ test("write_ports / read_ports round-trip", () => {
   }
 });
 
+test("provision_instance_local_configs copies ignored local config and skips absent files", () => {
+  const source = mkdtempSync(path.join(tmpdir(), "wm-1005-config-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "wm-1005-config-checkout-"));
+  try {
+    mkdirSync(path.join(source, "config"), { recursive: true });
+    mkdirSync(path.join(checkout, "config"), { recursive: true });
+    writeFileSync(
+      path.join(checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
+    );
+    writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
+    writeFileSync(
+      path.join(source, "config", "schedule.yaml"),
+      "schedules: []\n",
+    );
+    const r = sh(
+      [
+        `git -C "${checkout}" init -q`,
+        `provision_instance_local_configs "${checkout}" "${source}"`,
+        `test "$(cat "${checkout}/config/repos.yaml")" = "repos: []"`,
+        `test "$(cat "${checkout}/config/schedule.yaml")" = "schedules: []"`,
+        `test ! -e "${checkout}/config/policy.yaml"`,
+        `git -C "${checkout}" check-ignore -q config/repos.yaml`,
+        `git -C "${checkout}" check-ignore -q config/schedule.yaml`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("provision_instance_local_configs silently skips a source without local files", () => {
+  const source = mkdtempSync(path.join(tmpdir(), "wm-1005-empty-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "wm-1005-empty-checkout-"));
+  try {
+    const r = sh(
+      `provision_instance_local_configs "${checkout}" "${source}"\ntest ! -e "${checkout}/config/repos.yaml"`,
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
 test("listen_tcp_port rejects a dead pid even if lsof returns a listener", () => {
   const dir = mockLsofDir();
   const pidfile = path.join(dir, "dead.pid");

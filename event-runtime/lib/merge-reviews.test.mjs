@@ -7,6 +7,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-merge-rev
 import { sha256Hex } from "./canonical.mjs";
 import { MIGRATIONS, migrateDb, openDb } from "./db.mjs";
 import {
+  defaultProveCi,
   enumerateMergePlan,
   enumerateMergeScan,
   lookupMergeReview,
@@ -140,6 +141,82 @@ function planItem(prNumber = 12) {
     ambiguous: false,
   };
 }
+
+describe("configured merge_ci fallback", () => {
+  const mergeCiRepos = new Map([
+    [
+      "factory",
+      {
+        ...repos.get("factory"),
+        mergeCi: { workflow: "CI", requiredChecks: ["Lint", "Verify"] },
+      },
+    ],
+  ]);
+
+  function fallbackForge(jobs, { conclusion = "success" } = {}) {
+    return memoryForge({
+      repos: {
+        [GITHUB]: {
+          prs: [pr({ number: 42, checks: [] })],
+          runs: [
+            {
+              databaseId: 409,
+              status: "completed",
+              conclusion,
+              headSha: HEAD,
+              workflowName: "CI",
+            },
+          ],
+        },
+      },
+      api: {
+        [`repos/${GITHUB}/actions/runs/409/jobs?per_page=100`]: JSON.stringify({
+          jobs,
+        }),
+      },
+    });
+  }
+
+  const prove = (forge) =>
+    defaultProveCi({
+      forge,
+      github: GITHUB,
+      pr: 42,
+      headRef: "feat/WM-984",
+      headSha: HEAD,
+      repo: "factory",
+      repos: mergeCiRepos,
+    });
+
+  test("evaluates only configured required jobs at the selected head SHA", () => {
+    const forge = fallbackForge(
+      [
+        { name: "Lint", status: "completed", conclusion: "success" },
+        { name: "Verify", status: "completed", conclusion: "success" },
+        { name: "docs", status: "completed", conclusion: "failure" },
+      ],
+      { conclusion: "failure" },
+    );
+
+    expect(prove(forge)).toBe(true);
+    expect(forge.calls).toContainEqual({
+      op: "apiRaw",
+      path: `repos/${GITHUB}/actions/runs/409/jobs?per_page=100`,
+      jq: undefined,
+    });
+  });
+
+  test("fails closed when a configured required job fails", () => {
+    expect(
+      prove(
+        fallbackForge([
+          { name: "Lint", status: "completed", conclusion: "failure" },
+          { name: "Verify", status: "completed", conclusion: "success" },
+        ]),
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("merge_reviews ledger keying (WM-907 / WM-936)", () => {
   test("a fresh database has the merge_reviews table", () => {
