@@ -255,6 +255,7 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
     const reaper = schedules.find((sc) => sc.loop === "reaper");
     expect(reaper).toBeDefined();
     expect(reaper.repo).toBeNull();
+    expect(reaper.source).toBe("kernel");
     expect(schedules.find((sc) => sc.loop === "merge-factory").repo).toBe(
       "factory",
     );

@@ -161,7 +161,8 @@ the registry rather than hidden in a plist.
 ## 8. Where schedules are declared
 
 `event-runtime/schedules.json`, beside `event-types.json` and `edges.json`,
-pinned and validated at load like every other registry file:
+holds the tracked, pinned **kernel defaults** and is validated at load like
+every other registry file:
 
 ```json
 {
@@ -188,6 +189,39 @@ a later addition with its timezone declared explicitly — not a default.
 Validation fails closed: an unregistered `eventType`, an unparseable
 `every`, or `approval: auto` on a loop with no `enabled: true` is a load
 error, not a surprise at 03:00.
+
+### Instance schedule overlay
+
+`config/schedule.yaml` is ignored local configuration. Its optional
+`schedules:` mapping is merged over the kernel defaults when the registry is
+loaded. An existing kernel loop may override `enabled`, `every`, and keys in
+its `payload`; its event type, approval policy, and other safety semantics
+remain pinned in `schedules.json`. The mapping may also define a wholly new,
+complete schedule entry for this instance. The resulting effective entries are
+validated with the same fail-closed rules as kernel entries.
+
+For example, an operator can keep a local four-hour merge cadence and enable
+local client work/merge loops without exposing those preferences or client
+names in the public registry:
+
+```yaml
+schedules:
+  merge-factory:
+    enabled: true
+    every: 4h
+  work-client-repo:
+    enabled: true
+  merge-client-repo:
+    enabled: true
+```
+
+`GET /schedules` and the corresponding CLI listing return each effective
+entry's `source` (`kernel` or `overlay`). Registry digests cover only the
+tracked kernel defaults, so adding or changing this local overlay never
+changes the pinned digest. The migration target is to put the current
+instance preferences (including the four-hour Factory merge cadence and the
+desired LegalEase work/merge state) in this overlay, then return tracked
+defaults to neutral values in a follow-up.
 
 ## 9. Visibility and doctor checks
 

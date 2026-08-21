@@ -80,7 +80,9 @@ function registryDigest(registry) {
       agents,
       eventTypes: registry.eventTypes,
       edges: registry.edges,
-      schedules: registry.schedules,
+      // Local config/schedule.yaml is instance state, not a registry input:
+      // its overlay must never change the digest of pinned kernel defaults.
+      schedules: registry.kernelSchedules ?? registry.schedules,
       modelTiers: registry.modelTiers,
     }),
   );
@@ -167,6 +169,75 @@ describe("registry", () => {
     const expected =
       "sha256:a4ef0ee4d19d5519e291bdbd43594c490862facf4ce247ca5f03830a2a5ac355";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
+  });
+
+  test("local schedule overlay changes enabled, cadence, payload, and source without changing the kernel digest", () => {
+    const config = path.join(
+      tmpDir("event-schedule-overlay-"),
+      "schedule.yaml",
+    );
+    writeFileSync(
+      config,
+      `schedules:\n  work-bj29:\n    every: 9h\n    enabled: true\n    payload:\n      instance: local\n  merge-factory:\n    enabled: false\n`,
+    );
+    const overlaid = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    const withoutOverlay = loadRegistry({ packRoots: [] });
+
+    expect(overlaid.schedules["work-bj29"]).toMatchObject({
+      every: "9h",
+      enabled: true,
+      payload: { repo: "bj29", instance: "local" },
+    });
+    expect(overlaid.schedules["merge-factory"].enabled).toBe(false);
+    expect(overlaid.scheduleSources["work-bj29"]).toBe("overlay");
+    expect(overlaid.scheduleSources.reaper).toBe("kernel");
+    expect(registryDigest(overlaid)).toBe(registryDigest(withoutOverlay));
+  });
+
+  test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
+    const config = path.join(tmpDir("event-schedule-new-"), "schedule.yaml");
+    writeFileSync(
+      config,
+      `schedules:\n  instance-reconcile:\n    every: 10m\n    eventType: factory.reconcile.requested\n    payload:\n      repo: instance\n    enabled: false\n`,
+    );
+    const registry = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    expect(registry.schedules["instance-reconcile"]).toMatchObject({
+      every: "10m",
+      eventType: "factory.reconcile.requested",
+      payload: { repo: "instance" },
+    });
+    expect(registry.scheduleSources["instance-reconcile"]).toBe("overlay");
+
+    writeFileSync(
+      config,
+      `schedules:\n  reaper:\n    eventType: factory.reconcile.requested\n`,
+    );
+    expect(() =>
+      loadRegistry({ packRoots: [], scheduleConfigPath: config }),
+    ).toThrow(/cannot override a kernel schedule/);
+  });
+
+  test("an absent schedules section leaves the effective schedules byte-identical", () => {
+    const config = path.join(
+      tmpDir("event-schedule-identity-"),
+      "schedule.yaml",
+    );
+    writeFileSync(config, "defaults:\n  repo: instance\njobs: []\n");
+    const withEmptyOverlay = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    const defaults = loadRegistry({ packRoots: [] });
+    expect(JSON.stringify(withEmptyOverlay.schedules)).toBe(
+      JSON.stringify(defaults.schedules),
+    );
+    expect(withEmptyOverlay.scheduleSources).toEqual(defaults.scheduleSources);
   });
 
   test("pack provenance never enters the receipt defHash (WM-470)", () => {

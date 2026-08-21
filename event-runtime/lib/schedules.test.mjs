@@ -708,6 +708,17 @@ describe("registry validation of schedules.json", () => {
     });
     // Enabling it must stay a deliberate act, not a default someone inherits.
     expect(base.schedules.reaper.enabled).toBe(false);
+    expect(base.scheduleSources.reaper).toBe("kernel");
+  });
+
+  test("schedule view identifies the source of each effective schedule", () => {
+    const d = db();
+    const registry = {
+      ...withLoop(),
+      scheduleSources: { reaper: "overlay" },
+    };
+    expect(scheduleView(d, registry)[0].source).toBe("overlay");
+    d.close();
   });
 
   test("the reaper agent is a closed command template, not a model", () => {

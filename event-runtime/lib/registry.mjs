@@ -50,6 +50,100 @@ function nullDict() {
   return Object.create(null);
 }
 
+const SCHEDULE_OVERLAY_FIELDS = new Set(["enabled", "every", "payload"]);
+
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Instance schedule settings intentionally sit outside the pinned registry.
+ * They may turn a kernel loop on, change its cadence, or add static payload
+ * keys, but cannot change its event routing or approval policy.
+ */
+function loadScheduleOverlay(file) {
+  if (!existsSync(file)) return nullDict();
+  let parsed;
+  try {
+    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new RegistryError(
+      `${file}: unparseable schedule.yaml — ${err.message}`,
+    );
+  }
+  if (parsed !== null && parsed !== undefined && !isPlainObject(parsed)) {
+    throw new RegistryError(`${file}: schedule.yaml must be an object`);
+  }
+  if (parsed?.schedules === undefined || parsed.schedules === null)
+    return nullDict();
+  if (!isPlainObject(parsed.schedules)) {
+    throw new RegistryError(`${file}: "schedules" must be an object`);
+  }
+  return parsed.schedules;
+}
+
+function cloneSchedules(schedules) {
+  const clone = nullDict();
+  for (const [loop, schedule] of Object.entries(schedules)) {
+    clone[loop] = isPlainObject(schedule)
+      ? {
+          ...schedule,
+          ...(isPlainObject(schedule.payload)
+            ? { payload: { ...schedule.payload } }
+            : {}),
+        }
+      : schedule;
+  }
+  return clone;
+}
+
+function applyScheduleOverlay(kernelSchedules, overlay, file) {
+  const schedules = cloneSchedules(kernelSchedules);
+  const sources = nullDict();
+  for (const loop of Object.keys(schedules)) sources[loop] = "kernel";
+
+  for (const [loop, override] of Object.entries(overlay)) {
+    if (!isPlainObject(override)) {
+      throw new RegistryError(`${file}: schedules.${loop} must be an object`);
+    }
+    if (Object.hasOwn(schedules, loop)) {
+      for (const field of Object.keys(override)) {
+        if (!SCHEDULE_OVERLAY_FIELDS.has(field)) {
+          throw new RegistryError(
+            `${file}: schedules.${loop}.${field} cannot override a kernel schedule (allowed: enabled, every, payload)`,
+          );
+        }
+      }
+      if (override.payload !== undefined && !isPlainObject(override.payload)) {
+        throw new RegistryError(
+          `${file}: schedules.${loop}.payload must be a plain object`,
+        );
+      }
+      schedules[loop] = {
+        ...schedules[loop],
+        ...override,
+        ...(override.payload !== undefined
+          ? {
+              payload: {
+                ...(schedules[loop].payload ?? {}),
+                ...override.payload,
+              },
+            }
+          : {}),
+      };
+    } else {
+      schedules[loop] = {
+        ...override,
+        ...(isPlainObject(override.payload)
+          ? { payload: { ...override.payload } }
+          : {}),
+      };
+    }
+    sources[loop] = "overlay";
+  }
+  return { schedules, sources };
+}
+
 function policyFile(root) {
   return resolveConfigPath("policy", { root });
 }
@@ -765,6 +859,10 @@ export function loadRegistry({
   harnessRoots = [],
   modelTiers = loadModelTierMap(),
   loaderFor = defaultLoaderFor,
+  scheduleConfigPath = resolveConfigPath("schedule", {
+    root: path.dirname(root),
+    warn: false,
+  }),
 } = {}) {
   const configured =
     packRoots ??
@@ -863,6 +961,18 @@ export function loadRegistry({
       "schedule loop",
     );
   }
+
+  // Keep kernel schedules separate from the effective runtime view: the
+  // former is the pinned registry input, while the ignored local config is
+  // deliberately instance state just like policy.yaml.
+  const kernelSchedules = cloneSchedules(schedules);
+  const overlaidSchedules = applyScheduleOverlay(
+    kernelSchedules,
+    loadScheduleOverlay(scheduleConfigPath),
+    scheduleConfigPath,
+  );
+  const effectiveSchedules = overlaidSchedules.schedules;
+  const effectiveScheduleSources = overlaidSchedules.sources;
 
   // Extension-contributed panel directories (`contributes.panels`,
   // lib/extensions.mjs) load after every pack, so a pack panel outranks an
@@ -1047,46 +1157,56 @@ export function loadRegistry({
   // Schedules (OPS-381): validated fail-closed at load — an unparseable
   // cadence or an unregistered event type must be a startup error, not a
   // surprise at 03:00 when nothing fires.
-  for (const [loop, schedule] of Object.entries(schedules)) {
+  for (const [loop, schedule] of Object.entries(effectiveSchedules)) {
+    const scheduleFile =
+      effectiveScheduleSources[loop] === "overlay"
+        ? scheduleConfigPath
+        : "schedules.json";
     if (!/^[a-z][a-z0-9-]*$/.test(loop))
-      throw new RegistryError(`schedules.json: bad loop name "${loop}"`);
+      throw new RegistryError(`${scheduleFile}: bad loop name "${loop}"`);
     if (
       typeof schedule !== "object" ||
       schedule === null ||
       Array.isArray(schedule)
     ) {
-      throw new RegistryError(`schedules.json: ${loop} must map to an object`);
+      throw new RegistryError(`${scheduleFile}: ${loop} must map to an object`);
     }
     try {
       parseCadence(schedule.every);
     } catch (err) {
-      throw new RegistryError(`schedules.json: ${loop}: ${err.message}`);
+      throw new RegistryError(`${scheduleFile}: ${loop}: ${err.message}`);
     }
     const scheduleEventType = Object.hasOwn(schedule, "eventType")
       ? schedule.eventType
       : undefined;
     if (!scheduleEventType || !Object.hasOwn(eventTypes, scheduleEventType)) {
       throw new RegistryError(
-        `schedules.json: ${loop} fires unregistered event type ${scheduleEventType}`,
+        `${scheduleFile}: ${loop} fires unregistered event type ${scheduleEventType}`,
       );
     }
     const catchUp = schedule.catchUp ?? "none";
     if (!CATCH_UP_MODES.includes(catchUp)) {
       throw new RegistryError(
-        `schedules.json: ${loop} has unknown catchUp "${catchUp}" (${CATCH_UP_MODES.join(", ")})`,
+        `${scheduleFile}: ${loop} has unknown catchUp "${catchUp}" (${CATCH_UP_MODES.join(", ")})`,
       );
     }
     const approval = schedule.approval ?? "watched";
     if (!APPROVAL_MODES.includes(approval)) {
       throw new RegistryError(
-        `schedules.json: ${loop} has unknown approval "${approval}" (${APPROVAL_MODES.join(", ")})`,
+        `${scheduleFile}: ${loop} has unknown approval "${approval}" (${APPROVAL_MODES.join(", ")})`,
       );
     }
-    // Unattended approval on a loop that is not even switched on is almost
-    // certainly a half-finished edit; refuse it rather than let it lurk.
-    if (approval === "auto" && !schedule.enabled) {
+    // Unattended approval on a kernel loop that is not even switched on is
+    // almost certainly a half-finished edit; refuse it rather than let it
+    // lurk. A local overlay may deliberately switch an auto kernel loop off:
+    // it cannot make that loop run, and is the safe emergency-stop case.
+    if (
+      approval === "auto" &&
+      !schedule.enabled &&
+      effectiveScheduleSources[loop] !== "overlay"
+    ) {
       throw new RegistryError(
-        `schedules.json: ${loop} declares approval "auto" but is not enabled — decide one`,
+        `${scheduleFile}: ${loop} declares approval "auto" but is not enabled — decide one`,
       );
     }
     // The ship chain's deploy-branch merge is PERMANENTLY watched: that
@@ -1100,7 +1220,7 @@ export function loadRegistry({
       scheduledMapping.humanApprovalOnly === true
     ) {
       throw new RegistryError(
-        `schedules.json: ${loop} declares approval "auto" but ${scheduleEventType} is humanApprovalOnly — the deploy-branch decision is permanently the human's watched approval (docs/event-runtime-dispatch.md §7, WM-111)`,
+        `${scheduleFile}: ${loop} declares approval "auto" but ${scheduleEventType} is humanApprovalOnly — the deploy-branch decision is permanently the human's watched approval (docs/event-runtime-dispatch.md §7, WM-111)`,
       );
     }
     // A static payload rides along on every tick (repo-scoped loops need
@@ -1113,7 +1233,7 @@ export function loadRegistry({
         Array.isArray(schedule.payload)
       ) {
         throw new RegistryError(
-          `schedules.json: ${loop} payload must be a plain object`,
+          `${scheduleFile}: ${loop} payload must be a plain object`,
         );
       }
       for (const reserved of [
@@ -1124,7 +1244,7 @@ export function loadRegistry({
       ]) {
         if (reserved in schedule.payload) {
           throw new RegistryError(
-            `schedules.json: ${loop} payload must not set reserved tick field "${reserved}"`,
+            `${scheduleFile}: ${loop} payload must not set reserved tick field "${reserved}"`,
           );
         }
       }
@@ -1145,7 +1265,9 @@ export function loadRegistry({
     eventTypes,
     schemas,
     edges,
-    schedules,
+    schedules: effectiveSchedules,
+    kernelSchedules,
+    scheduleSources: effectiveScheduleSources,
     modelTiers,
     harnessRoots,
   };

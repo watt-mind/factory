@@ -259,6 +259,7 @@ export function scheduleView(db, registry, { now = Date.now() } = {}) {
     return {
       loop,
       every: schedule.every,
+      source: registry.scheduleSources?.[loop] ?? "kernel",
       cadenceSeconds,
       eventType: schedule.eventType,
       approval: schedule.approval ?? "watched",
