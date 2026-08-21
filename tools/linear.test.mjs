@@ -410,7 +410,10 @@ test("resolveRepoName matches the checkout, the worktree root, and --repo", () =
       "alpha",
     );
     expect(
-      resolveRepoName({ cwd: path.join(alphaPath, "lib"), repoFlag: undefined }),
+      resolveRepoName({
+        cwd: path.join(alphaPath, "lib"),
+        repoFlag: undefined,
+      }),
     ).toBe("alpha");
     // cwd inside a WORKTREE — resolves via worktree_root, not path
     expect(
@@ -420,7 +423,9 @@ test("resolveRepoName matches the checkout, the worktree root, and --repo", () =
       }),
     ).toBe("alpha");
     // a different repo
-    expect(resolveRepoName({ cwd: betaPath, repoFlag: undefined })).toBe("beta");
+    expect(resolveRepoName({ cwd: betaPath, repoFlag: undefined })).toBe(
+      "beta",
+    );
     // nothing matches -> null, so the caller falls back to policy
     expect(
       resolveRepoName({ cwd: os.tmpdir(), repoFlag: undefined }),

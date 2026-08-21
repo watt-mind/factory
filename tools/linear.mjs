@@ -282,12 +282,14 @@ export function resolveRepoName({
   }
   const here = path.resolve(cwd);
   const under = (dir) =>
-    dir && (here === dir || here.startsWith(dir.endsWith("/") ? dir : `${dir}/`));
+    dir &&
+    (here === dir || here.startsWith(dir.endsWith("/") ? dir : `${dir}/`));
   let best = null;
   for (const repo of registry.values()) {
     for (const dir of [repo.path, repo.worktreeRoot]) {
       if (!under(dir)) continue;
-      if (!best || dir.length > best.length) best = { name: repo.name, length: dir.length };
+      if (!best || dir.length > best.length)
+        best = { name: repo.name, length: dir.length };
     }
   }
   return best?.name ?? null;
