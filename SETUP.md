@@ -1,6 +1,38 @@
 # Setup
 
-## 1. Authenticate the CLI
+## 1. Supported clean-room environments
+
+Factory is supported on macOS 13 or later (Apple Silicon and Intel) and
+Linux on x64 or arm64. Start from a new clone; no existing Factory directory,
+Linear token, or machine-local configuration is required.
+
+Install these command-line tools before configuring a real repository:
+
+| Tool | Supported version | Check |
+| :--- | :--- | :--- |
+| Bun | Bun >= 1.3 | `bun --version` |
+| Git | Git >= 2.40 | `git --version` |
+| GitHub CLI | Current stable release (tested with 2.70+) | `gh --version` |
+| Coding-agent harness | One of Claude Code, Codex, Gemini, Cursor, Pi, or Agy | `<harness> --version` |
+
+For a real GitHub-backed run, authenticate the GitHub CLI first. The command
+uses its own credential store; do not create or paste a token into Factory
+configuration.
+
+```bash
+gh auth login -h github.com
+gh auth status
+```
+
+`factory doctor` reports missing Bun, Git, GitHub CLI, GitHub authentication,
+and harnesses with the command or URL that fixes each prerequisite. Run it
+before creating your first real ticket:
+
+```bash
+factory doctor
+```
+
+## 2. Install and select a coding-agent harness
 
 ```bash
 claude setup-token
@@ -8,7 +40,33 @@ claude setup-token
 
 Do this **before** loading any launchd job. A launchd process inherits no interactive session, so without a long-lived token the job fails on auth in a way that looks like a hang rather than an error.
 
-## 2. Distribute to the other harnesses
+If you use another supported harness, complete that harness's own login flow
+instead. The GitHub CLI authentication above is still required for GitHub
+Issues and PRs.
+
+## 3. Initialize a clean clone
+
+From the root of a freshly cloned Factory checkout:
+
+```bash
+bun install --frozen-lockfile
+bun build/emit.mjs --link-bin
+export PATH="$HOME/.local/bin:$PATH"
+
+# Copy local-only configuration templates without overwriting existing files.
+factory init --root "$PWD"
+
+# Use GitHub Issues rather than Linear for this installation.
+factory init --control-plane github --root "$PWD" --repo OWNER/REPO --team TEAM
+```
+
+The second command writes a GitHub control-plane stanza to the local,
+gitignored `config/policy.yaml`; it does not contact GitHub or require a
+Linear token. It prints the Project status values and labels to create before
+dispatching. Replace `OWNER/REPO` and `TEAM` with the repository and issue
+prefix you will use. Keep local configuration and credentials out of commits.
+
+## 4. Distribute to the other harnesses
 
 ```bash
 bun build/emit.mjs           # regenerate plugins/ and dist/
