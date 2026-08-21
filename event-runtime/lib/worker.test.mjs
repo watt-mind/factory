@@ -193,12 +193,12 @@ describe("worker", () => {
       expect(
         provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
       ).toEqual(["config/repos.yaml", "config/policy.yaml"]);
-      expect(readFileSync(path.join(checkout, "config", "repos.yaml"), "utf8")).toBe(
-        "repos: []\n",
-      );
       expect(
-        existsSync(path.join(checkout, "config", "schedule.yaml")),
-      ).toBe(false);
+        readFileSync(path.join(checkout, "config", "repos.yaml"), "utf8"),
+      ).toBe("repos: []\n");
+      expect(existsSync(path.join(checkout, "config", "schedule.yaml"))).toBe(
+        false,
+      );
       for (const file of ["config/repos.yaml", "config/policy.yaml"]) {
         expect(
           spawnSync("git", ["check-ignore", "-q", file], { cwd: checkout })

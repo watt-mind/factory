@@ -96,9 +96,13 @@ export function provisionInstanceLocalConfigs({
   const sourceConfig = path.join(factoryRoot, "config");
   const destinationConfig = path.join(checkoutPath, "config");
   const isGitCheckout =
-    spawnSync("git", ["-C", checkoutPath, "rev-parse", "--is-inside-work-tree"], {
-      encoding: "utf8",
-    }).status === 0;
+    spawnSync(
+      "git",
+      ["-C", checkoutPath, "rev-parse", "--is-inside-work-tree"],
+      {
+        encoding: "utf8",
+      },
+    ).status === 0;
   const copied = [];
 
   for (const filename of INSTANCE_LOCAL_CONFIG_FILES) {

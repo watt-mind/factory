@@ -175,7 +175,10 @@ test("provision_instance_local_configs copies ignored local config and skips abs
       "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
     );
     writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
-    writeFileSync(path.join(source, "config", "schedule.yaml"), "schedules: []\n");
+    writeFileSync(
+      path.join(source, "config", "schedule.yaml"),
+      "schedules: []\n",
+    );
     const r = sh(
       [
         `git -C "${checkout}" init -q`,
