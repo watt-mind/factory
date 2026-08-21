@@ -23,6 +23,7 @@ import {
   formatComments,
   parsePositionalArgs,
   closureCheckMessages,
+  resolveRepoName,
   __resetLinearReposCache,
 } from "./linear.mjs";
 
@@ -382,4 +383,62 @@ test("no new call site imports gql outside lib/control-plane and the reaper tran
       return !GQL_IMPORT_ALLOWED.has(file) && !file.endsWith(".test.mjs");
     });
   expect(hits).toEqual([]);
+});
+
+// ------------------------------------------------ repo resolution (WM-1007) ---
+// The CLI must know which repos.yaml entry an invocation is about, because
+// that entry decides which control plane the verb talks to. The worktree case
+// is the one that matters: every dispatched agent runs from
+// <worktree_root>/<TICKET>, never from `path`.
+test("resolveRepoName matches the checkout, the worktree root, and --repo", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "linear-reporesolve-"));
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    const alphaPath = path.join(root, "alpha");
+    const alphaWt = path.join(root, "wt", "alpha");
+    const betaPath = path.join(root, "beta");
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: alpha\n    path: ${alphaPath}\n    worktree_root: ${alphaWt}\n  - name: beta\n    path: ${betaPath}\n`,
+    );
+    process.env.FACTORY_REPOS_ROOT = root;
+    __resetLinearReposCache();
+
+    // cwd inside the checkout
+    expect(resolveRepoName({ cwd: alphaPath, repoFlag: undefined })).toBe(
+      "alpha",
+    );
+    expect(
+      resolveRepoName({ cwd: path.join(alphaPath, "lib"), repoFlag: undefined }),
+    ).toBe("alpha");
+    // cwd inside a WORKTREE — resolves via worktree_root, not path
+    expect(
+      resolveRepoName({
+        cwd: path.join(alphaWt, "WM-1007"),
+        repoFlag: undefined,
+      }),
+    ).toBe("alpha");
+    // a different repo
+    expect(resolveRepoName({ cwd: betaPath, repoFlag: undefined })).toBe("beta");
+    // nothing matches -> null, so the caller falls back to policy
+    expect(
+      resolveRepoName({ cwd: os.tmpdir(), repoFlag: undefined }),
+    ).toBeNull();
+    // an explicit flag wins over cwd
+    expect(resolveRepoName({ cwd: alphaPath, repoFlag: "beta" })).toBe("beta");
+    // a bad flag is the operator's mistake, not a silent fallback
+    expect(() => resolveRepoName({ cwd: alphaPath, repoFlag: "nope" })).toThrow(
+      /unknown --repo "nope"/,
+    );
+    // a prefix that is not a path boundary must not match
+    expect(
+      resolveRepoName({ cwd: `${alphaPath}-other`, repoFlag: undefined }),
+    ).toBeNull();
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+    __resetLinearReposCache();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

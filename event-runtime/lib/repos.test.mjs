@@ -90,6 +90,7 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       github: "watt-mind/full",
       team: "CLNT",
       project: "Full Project",
+      controlPlane: null,
       base: "develop",
       deployBranch: "master",
       reportOnly: false,
@@ -473,5 +474,43 @@ describe("reposView is what the control API serves", () => {
       ["full", false],
       ["bare", true],
     ]);
+  });
+});
+
+// WM-1007: which tracker holds a repo's tickets. null means "inherit
+// config/policy.yaml" — a default of "linear" here would state a choice the
+// file never made, and would outrank policy for every repo that omitted it.
+describe("control_plane on a repo entry", () => {
+  test("absent reads as null, not a default", () => {
+    const root = factoryRoot("repos:\n  - name: a\n    path: /tmp/a\n");
+    expect(loadRepos({ root }).get("a").controlPlane).toBeNull();
+  });
+
+  test("each valid kind is carried through", () => {
+    for (const kind of ["linear", "github", "memory"]) {
+      const root = factoryRoot(
+        `repos:\n  - name: a\n    path: /tmp/a\n    control_plane: ${kind}\n`,
+      );
+      expect(loadRepos({ root }).get("a").controlPlane).toBe(kind);
+    }
+  });
+
+  test("an unknown kind is a load error naming the repo and the options", () => {
+    const root = factoryRoot(
+      "repos:\n  - name: a\n    path: /tmp/a\n    control_plane: jira\n",
+    );
+    expect(() => loadRepos({ root })).toThrow(RepoError);
+    expect(() => loadRepos({ root })).toThrow(
+      /repo a control_plane must be one of linear, memory, github/,
+    );
+  });
+
+  test("reposView does not publish it yet (see follow-up)", () => {
+    const root = factoryRoot(
+      "repos:\n  - name: a\n    path: /tmp/a\n    control_plane: github\n",
+    );
+    expect(reposView(loadRepos({ root }))[0]).not.toHaveProperty(
+      "controlPlane",
+    );
   });
 });

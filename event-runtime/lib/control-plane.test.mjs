@@ -526,6 +526,100 @@ describe("loadControlPlane selection", () => {
     expect(loadControlPlane().kind).toBe("linear");
   });
 
+  // ------------------------------------------------ per-repo selection ---
+  // WM-1007. The point of these is the precedence chain: a repo may pick its
+  // own tracker, and a repo that says nothing must INHERIT rather than
+  // default, so adding the key to one repo never moves another.
+  describe("per-repo control_plane", () => {
+    const withRepos = (policyYaml, reposYaml) => {
+      const root = tmpDir("control-plane-repos-");
+      mkdirSync(path.join(root, "config"), { recursive: true });
+      if (policyYaml !== null)
+        writeFileSync(path.join(root, "config", "policy.yaml"), policyYaml);
+      writeFileSync(path.join(root, "config", "repos.yaml"), reposYaml);
+      return root;
+    };
+    const REPOS = [
+      "repos:",
+      "  - name: onGithub",
+      "    path: /tmp/on-github",
+      "    control_plane: github",
+      "  - name: onMemory",
+      "    path: /tmp/on-memory",
+      "    control_plane: memory",
+      "  - name: inherits",
+      "    path: /tmp/inherits",
+      "",
+    ].join("\n");
+
+    test("a repo's control_plane outranks policy", () => {
+      const root = withRepos("controlPlane:\n  kind: linear\n", REPOS);
+      expect(loadControlPlane({ root, repoName: "onMemory" }).kind).toBe(
+        "memory",
+      );
+    });
+
+    test("a repo without the key inherits policy, not the default", () => {
+      const root = withRepos("controlPlane:\n  kind: memory\n", REPOS);
+      expect(loadControlPlane({ root, repoName: "inherits" }).kind).toBe(
+        "memory",
+      );
+    });
+
+    test("with neither repo key nor policy stanza it is linear", () => {
+      const root = withRepos(null, REPOS);
+      expect(loadControlPlane({ root, repoName: "inherits" }).kind).toBe(
+        "linear",
+      );
+    });
+
+    test("an explicit kind outranks the repo entry", () => {
+      const root = withRepos("controlPlane:\n  kind: linear\n", REPOS);
+      expect(
+        loadControlPlane({ root, repoName: "onMemory", kind: "linear" }).kind,
+      ).toBe("linear");
+    });
+
+    test("one repo choosing github does not move a repo that inherits", () => {
+      const root = withRepos("controlPlane:\n  kind: linear\n", REPOS);
+      expect(loadControlPlane({ root, repoName: "onGithub" }).kind).toBe(
+        "github",
+      );
+      expect(loadControlPlane({ root, repoName: "inherits" }).kind).toBe(
+        "linear",
+      );
+    });
+
+    test("an unknown repo throws rather than falling back to policy", () => {
+      const root = withRepos("controlPlane:\n  kind: linear\n", REPOS);
+      expect(() => loadControlPlane({ root, repoName: "typo" })).toThrow(
+        /unknown repo "typo"/,
+      );
+    });
+
+    test("an invalid control_plane value is a load error naming the repo", () => {
+      const root = withRepos(
+        null,
+        "repos:\n  - name: bad\n    path: /tmp/bad\n    control_plane: jira\n",
+      );
+      expect(() => loadControlPlane({ root, repoName: "bad" })).toThrow(
+        /repo bad control_plane must be one of/,
+      );
+    });
+
+    test("no repoName never reads the repo registry", () => {
+      // repos.yaml is deliberately absent: the global path must not depend on
+      // it, or every existing call site breaks in a checkout without one.
+      const root = tmpDir("control-plane-no-repos-");
+      mkdirSync(path.join(root, "config"), { recursive: true });
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "controlPlane:\n  kind: memory\n",
+      );
+      expect(loadControlPlane({ root }).kind).toBe("memory");
+    });
+  });
+
   test("re-exports githubControlPlane from the adapter", () => {
     expect(controlPlaneIndex.githubControlPlane).toBe(
       githubControlPlaneFromAdapter,

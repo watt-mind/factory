@@ -19,6 +19,10 @@ import {
   FACTORY_ROOT,
   resolveConfigPath,
 } from "./config.mjs";
+// types.mjs only, never index.mjs: index.mjs reads this registry to resolve a
+// repo's control plane (WM-1007), so importing it back here would cycle.
+// types.mjs imports nothing.
+import { CONTROL_PLANE_KINDS } from "../../lib/control-plane/types.mjs";
 
 export class RepoError extends Error {
   constructor(message) {
@@ -128,6 +132,7 @@ function normalizeOwnedPathsPolicy(raw = {}, repoName, file) {
 /**
  * @returns {Map<string, {name: string, path: string, github: string|null, base: string,
  *                        deployBranch: string|null, team: string|null, project: string|null,
+ *                        controlPlane: "linear"|"memory"|"github"|null,
  *                        reportOnly: boolean, maxInFlight: number|null, smokeDeadlineSeconds: number|null,
  *                        mergeCi: {workflow: string, requiredChecks: string[]}|null,
  *                        escalatePaths: string[]|null, smokeWorkflow: string|null, smokeUrl: string|null,
@@ -241,6 +246,19 @@ export function loadRepos({ root = reposRoot() } = {}) {
       // Deliberate allow-list: never pass through credential-shaped additions.
       security = { pythonVersion: entry.security.python_version ?? null };
     }
+    // WM-1007: which tracker holds this repo's tickets. Absent means "inherit
+    // config/policy.yaml", which is why the default is null and not "linear" —
+    // a value here would state a choice this file never made, and would
+    // silently outrank the policy for every repo that omitted the key.
+    let controlPlane = null;
+    if (entry.control_plane !== undefined && entry.control_plane !== null) {
+      if (!CONTROL_PLANE_KINDS.includes(entry.control_plane)) {
+        throw new RepoError(
+          `${file}: repo ${entry.name} control_plane must be one of ${CONTROL_PLANE_KINDS.join(", ")}, got ${JSON.stringify(entry.control_plane)}`,
+        );
+      }
+      controlPlane = entry.control_plane;
+    }
     repos.set(entry.name, {
       name: entry.name,
       path: expandHome(entry.path),
@@ -249,6 +267,7 @@ export function loadRepos({ root = reposRoot() } = {}) {
       deployBranch: entry.deploy_branch ?? null,
       team: entry.team ?? null,
       project: entry.project ?? null,
+      controlPlane,
       // Absent means dispatchable: report_only is the guard a repo opts into,
       // so anything but an explicit `true` must read as false rather than
       // "maybe" — an operator reading "dispatch" off a null would be wrong.
@@ -301,6 +320,10 @@ export function reposView(repos) {
     github: repo.github,
     team: repo.team,
     project: repo.project,
+    // controlPlane is deliberately NOT published here yet: the view is an
+    // allow-list with an exact-shape contract test in api-registry.test.mjs,
+    // which is outside WM-1007's Owned Paths. Surfacing it to operators is
+    // filed separately.
     base: repo.base,
     deployBranch: repo.deployBranch,
     reportOnly: repo.reportOnly,

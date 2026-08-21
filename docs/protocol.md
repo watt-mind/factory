@@ -60,13 +60,34 @@ repos:
   - name: example
     team: ENG # tracker team key (Linear team key today)
     project: Example app # optional; omit when the team has one project
+    control_plane: github # optional; inherits policy.yaml when omitted
 ```
 
-Resolve the team from the repo you are in: match `path` (with `~` expanded)
-against cwd, or take `--repo` / `$ARGUMENTS` when a command names one.
-`factory linear queue --repo <name>` already does this. Do not invent a team
-key, and do not copy another workspace's vocabulary (`WM` / `OPS` / `CLNT`,
-or anyone else's) into a repo that does not use it.
+Resolve the team from the repo you are in: match `path` **or `worktree_root`**
+(with `~` expanded) against cwd, or take `--repo` / `$ARGUMENTS` when a command
+names one. `worktree_root` matters because every dispatched agent runs from
+`<worktree_root>/<TICKET>`, not from `path`. Longest matching prefix wins. Do
+not invent a team key, and do not copy another workspace's vocabulary (`WM` /
+`OPS` / `CLNT`, or anyone else's) into a repo that does not use it.
+
+### Which control plane a repo uses
+
+`control_plane` on a repo entry selects that repo's tracker: `linear`,
+`github`, or `memory`. Resolution is most-specific-first (WM-1007):
+
+1. an explicit `kind` passed to `loadControlPlane()` — tests, and callers that already know
+2. `control_plane:` on the `config/repos.yaml` entry
+3. `controlPlane.kind` in `config/policy.yaml`
+4. `linear`
+
+A repo that omits the key **inherits** the workspace default rather than
+defaulting on its own, so adding the key to one repo never changes another.
+An unknown repo name throws instead of falling back — a stale name would
+otherwise run that repo's tickets against the wrong tracker and report the
+result as an empty queue.
+
+This is what lets one factory instance keep its own repo on GitHub Issues
+while every other repo it manages stays on Linear.
 
 A workspace may add a repo-local issue-management guide. Follow that guide
 inside that repo; do not import another team's labels or projects into it.

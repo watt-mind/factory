@@ -252,8 +252,58 @@ export function installLinearBudgetCapture() {
   };
 }
 
+/**
+ * Which `config/repos.yaml` entry this invocation is about (WM-1007), or null
+ * when nothing identifies one.
+ *
+ * `--repo` wins. Otherwise match cwd, which must consider **both** the repo's
+ * checkout and its `worktree_root`: every dispatched agent runs from
+ * `<worktree_root>/<TICKET>`, not from `path`, so matching `path` alone would
+ * resolve to null in the one case that matters most and silently fall back to
+ * the workspace-wide control plane.
+ *
+ * Longest prefix wins, so a repo checked out inside another repo's tree
+ * resolves to the inner one.
+ */
+export function resolveRepoName({
+  cwd = process.cwd(),
+  repos,
+  repoFlag = flag("repo"),
+} = {}) {
+  const registry = repos ?? getRepos();
+  const explicit = repoFlag;
+  if (explicit) {
+    if (!registry.has(explicit)) {
+      throw new Error(
+        `unknown --repo ${JSON.stringify(explicit)} — known: ${[...registry.keys()].join(", ") || "(none)"}`,
+      );
+    }
+    return explicit;
+  }
+  const here = path.resolve(cwd);
+  const under = (dir) =>
+    dir && (here === dir || here.startsWith(dir.endsWith("/") ? dir : `${dir}/`));
+  let best = null;
+  for (const repo of registry.values()) {
+    for (const dir of [repo.path, repo.worktreeRoot]) {
+      if (!under(dir)) continue;
+      if (!best || dir.length > best.length) best = { name: repo.name, length: dir.length };
+    }
+  }
+  return best?.name ?? null;
+}
+
 function controlPlane() {
-  return loadControlPlane();
+  // Absent a resolvable repo, fall back to the workspace default exactly as
+  // before — a CLI run from /tmp must still work.
+  let repoName = null;
+  try {
+    repoName = resolveRepoName();
+  } catch (err) {
+    // An explicit bad --repo is the operator's mistake; surface it.
+    if (flag("repo")) throw err;
+  }
+  return loadControlPlane(repoName ? { repoName } : {});
 }
 
 /** Compact ticket rendering — the fields the protocol actually acts on. */
@@ -345,6 +395,7 @@ const VALUE_FLAGS = new Set([
   "label",
   "project",
   "remove",
+  "repo",
   "source",
   "team",
   "title",
