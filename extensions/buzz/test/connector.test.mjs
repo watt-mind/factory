@@ -144,6 +144,176 @@ function startRelay({ failEvents = 0, extraEvents = [] } = {}) {
 const secrets = { agentNsec: AGENT_SECRET, authTag: AUTH_TAG };
 
 describe("egress", () => {
+  test("lifecycle events post to feedChannel, never the pager channel", async () => {
+    const relay = startRelay();
+    const feedChannel = "8469ab53-6292-4436-938f-edf77ad2a652";
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL, feedChannel },
+      secrets,
+      client: {
+        ...fakeClient(),
+        runs: {
+          // getRun (event-runtime/lib/connectors.mjs) hands the connector
+          // only the artifact — run.result IS the artifact, not the whole
+          // result_json (WM-975).
+          get: () => ({
+            runId: "run_1",
+            spec: { agent: "factory-ticket" },
+            result: {
+              outcome: "PR_OPEN",
+              ticket: "WM-975",
+              prUrl: "https://github.com/watt-mind/factory/pull/975",
+            },
+          }),
+        },
+      },
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await runtime.onRunEvent({
+      runId: "run_1",
+      from: "VERIFYING",
+      to: "COMPLETED",
+      at: "2026-08-21T00:00:00.000Z",
+    });
+
+    expect(relay.posted).toHaveLength(1);
+    expect(relay.posted[0].tags).toContainEqual(["h", feedChannel]);
+    expect(relay.posted[0].tags).not.toContainEqual(["h", CHANNEL]);
+    expect(relay.posted[0].content).toContain("PR opened");
+    expect(relay.posted[0].content).toContain("WM-975");
+  });
+
+  test("lifecycle events are omitted when feedChannel is unset", async () => {
+    const relay = startRelay();
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, channel: CHANNEL },
+      secrets,
+      client: fakeClient(),
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await runtime.onRunEvent({ runId: "run_1", to: "RUNNING" });
+
+    expect(relay.posted).toHaveLength(0);
+  });
+
+  test("failed lifecycle egress is queued without rejecting the event", async () => {
+    const relay = startRelay({ failEvents: 1 });
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, feedChannel: "feed-channel" },
+      secrets,
+      client: fakeClient(),
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await expect(
+      runtime.onRunEvent({ runId: "run_1", to: "RUNNING" }),
+    ).resolves.toBeUndefined();
+    expect(runtime.queue).toHaveLength(1);
+  });
+
+  test("onRunEvent skips the runs.get round-trip for a non-milestone hop", async () => {
+    const relay = startRelay();
+    let getCalls = 0;
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, feedChannel: "feed-channel" },
+      secrets,
+      client: {
+        ...fakeClient(),
+        runs: {
+          get: () => {
+            getCalls += 1;
+            return null;
+          },
+        },
+      },
+      fetchImpl: relay.fetchImpl,
+    });
+
+    // QUEUED is a journal hop with no RUN_LIFECYCLE_VERBS entry — checking
+    // the verb table before calling runs.get avoids fetching a run whose
+    // message we are about to discard anyway.
+    await runtime.onRunEvent({ runId: "run_1", to: "QUEUED" });
+    expect(getCalls).toBe(0);
+    expect(relay.posted).toHaveLength(0);
+
+    await runtime.onRunEvent({ runId: "run_1", to: "RUNNING" });
+    expect(getCalls).toBe(1);
+  });
+
+  test("lifecycle message coerces non-string ticket/agent and truncates long values", async () => {
+    const relay = startRelay();
+    const longTicket = "T".repeat(400);
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, feedChannel: "feed-channel" },
+      secrets,
+      client: {
+        ...fakeClient(),
+        runs: {
+          get: () => ({
+            runId: "run_1",
+            spec: { agent: { name: "factory-ticket" } },
+            result: { ticket: longTicket },
+          }),
+        },
+      },
+      fetchImpl: relay.fetchImpl,
+    });
+
+    await runtime.onRunEvent({ runId: "run_1", to: "RUNNING" });
+
+    expect(relay.posted).toHaveLength(1);
+    const content = relay.posted[0].content;
+    expect(content).toContain("ticket: " + "T".repeat(300));
+    expect(content).not.toContain("T".repeat(301));
+    expect(content).toContain("agent: [object Object]");
+  });
+
+  test("poll() tails run lifecycle transitions on the connector's own cadence (WM-975)", async () => {
+    const relay = startRelay();
+    let cursor = 5;
+    let delivered = false;
+    const tailCalls = [];
+    const runtime = createBuzzRuntime({
+      config: { relayUrl: relay.url, feedChannel: "feed-channel" },
+      secrets,
+      client: {
+        ...fakeClient(),
+        runs: {
+          cursor: () => cursor,
+          tail: (since) => {
+            tailCalls.push(since);
+            if (!delivered) {
+              delivered = true;
+              cursor = 6;
+              return {
+                events: [{ runId: "run_tailed", to: "RUNNING" }],
+                cursor,
+              };
+            }
+            return { events: [], cursor: since };
+          },
+          get: () => null,
+        },
+      },
+      fetchImpl: relay.fetchImpl,
+    });
+
+    // First tick only establishes the starting cursor (skips history), per
+    // OPS-233: a restart must not replay the whole journal into the feed.
+    await runtime.poll();
+    expect(relay.posted).toHaveLength(0);
+
+    await runtime.poll();
+    expect(tailCalls).toEqual([5]);
+    expect(relay.posted).toHaveLength(1);
+    expect(relay.posted[0].content).toContain("run_tailed");
+
+    await runtime.poll();
+    expect(relay.posted).toHaveLength(1);
+  });
+
   test("new inbox item becomes one kind-9 with h=channel and delivery recorded", async () => {
     const relay = startRelay();
     const marked = [];

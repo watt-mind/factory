@@ -21,6 +21,10 @@ export default async function start(ctx) {
       ctx.log?.(`inbox event failed: ${err.message}`);
     });
   });
+  // Run lifecycle transitions are NOT wired through client.runs.subscribe:
+  // that bus is process-local and the worker that executes RUNNING /
+  // COMPLETED / etc runs in a separate process (OPS-233), so it would never
+  // fire here. runtime.poll() tails the durable journal instead (WM-975).
   const timer = setInterval(() => {
     runtime.poll().catch((err) => ctx.log?.(`poll failed: ${err.message}`));
   }, runtime.pollSeconds * 1000);

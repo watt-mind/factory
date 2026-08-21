@@ -80,7 +80,9 @@ function registryDigest(registry) {
       agents,
       eventTypes: registry.eventTypes,
       edges: registry.edges,
-      schedules: registry.schedules,
+      // Local config/schedule.yaml is instance state, not a registry input:
+      // its overlay must never change the digest of pinned kernel defaults.
+      schedules: registry.kernelSchedules ?? registry.schedules,
       modelTiers: registry.modelTiers,
     }),
   );
@@ -167,6 +169,155 @@ describe("registry", () => {
     const expected =
       "sha256:a4ef0ee4d19d5519e291bdbd43594c490862facf4ce247ca5f03830a2a5ac355";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
+  });
+
+  test("local schedule overlay changes enabled, cadence, payload, and source without changing the kernel digest", () => {
+    const config = path.join(
+      tmpDir("event-schedule-overlay-"),
+      "schedule.yaml",
+    );
+    writeFileSync(
+      config,
+      `schedules:\n  work-bj29:\n    every: 9h\n    enabled: true\n    payload:\n      instance: local\n  merge-factory:\n    enabled: false\n`,
+    );
+    const overlaid = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    const withoutOverlay = loadRegistry({ packRoots: [] });
+
+    expect(overlaid.schedules["work-bj29"]).toMatchObject({
+      every: "9h",
+      enabled: true,
+      payload: { repo: "bj29", instance: "local" },
+    });
+    expect(overlaid.schedules["merge-factory"].enabled).toBe(false);
+    expect(overlaid.scheduleSources["work-bj29"]).toBe("overlay");
+    expect(overlaid.scheduleSources.reaper).toBe("kernel");
+    expect(registryDigest(overlaid)).toBe(registryDigest(withoutOverlay));
+  });
+
+  test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
+    const config = path.join(tmpDir("event-schedule-new-"), "schedule.yaml");
+    writeFileSync(
+      config,
+      `schedules:\n  instance-reconcile:\n    every: 10m\n    eventType: factory.reconcile.requested\n    payload:\n      repo: instance\n    enabled: false\n`,
+    );
+    const registry = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    expect(registry.schedules["instance-reconcile"]).toMatchObject({
+      every: "10m",
+      eventType: "factory.reconcile.requested",
+      payload: { repo: "instance" },
+    });
+    expect(registry.scheduleSources["instance-reconcile"]).toBe("overlay");
+
+    writeFileSync(
+      config,
+      `schedules:\n  reaper:\n    eventType: factory.reconcile.requested\n`,
+    );
+    expect(() =>
+      loadRegistry({ packRoots: [], scheduleConfigPath: config }),
+    ).toThrow(/cannot override a kernel schedule/);
+  });
+
+  test("a new overlay loop declaring approval:auto is coerced to watched (WM-998)", () => {
+    const config = path.join(
+      tmpDir("event-schedule-new-auto-"),
+      "schedule.yaml",
+    );
+    writeFileSync(
+      config,
+      `schedules:\n  instance-auto:\n    every: 10m\n    eventType: factory.reconcile.requested\n    approval: auto\n    enabled: true\n`,
+    );
+    const registry = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    // An overlay cannot grant a brand-new loop unattended approval: nobody
+    // upstream ever reviewed it, so it always queues for a human — the
+    // overlay's own "auto" is silently overridden, not honored.
+    expect(registry.schedules["instance-auto"].approval).toBe("watched");
+    expect(registry.scheduleSources["instance-auto"]).toBe("overlay");
+  });
+
+  test("a payload-only overlay override does not disarm the auto/enabled guard (WM-998)", () => {
+    // Fixture pack ships a loop that is already invalid on its own terms:
+    // approval "auto" on a loop that is not enabled. Loading it with no
+    // overlay involved must fail closed.
+    const pack = tempPack();
+    writeFileSync(
+      path.join(pack.path, "schedules.json"),
+      JSON.stringify({
+        "temp-auto-guard": {
+          every: "60m",
+          eventType: "sample.echo.requested",
+          catchUp: "none",
+          approval: "auto",
+          enabled: false,
+        },
+      }),
+    );
+    expect(() => loadRegistry({ packRoots: [pack] })).toThrow(
+      /declares approval "auto" but is not enabled/,
+    );
+
+    // An overlay that touches this loop but never sets `enabled` (a
+    // payload- or cadence-only override) must not relax the guard just
+    // because the loop's source flips to "overlay" — only an overlay that
+    // itself sets enabled:false is the deliberate emergency-stop case.
+    const config = path.join(
+      tmpDir("event-schedule-auto-guard-"),
+      "schedule.yaml",
+    );
+    writeFileSync(config, `schedules:\n  temp-auto-guard:\n    every: 90m\n`);
+    expect(() =>
+      loadRegistry({ packRoots: [pack], scheduleConfigPath: config }),
+    ).toThrow(/declares approval "auto" but is not enabled/);
+
+    // The overlay explicitly setting enabled:false, by contrast, is the
+    // deliberate emergency-stop case and stays exempt.
+    writeFileSync(
+      config,
+      `schedules:\n  temp-auto-guard:\n    enabled: false\n`,
+    );
+    const registry = loadRegistry({
+      packRoots: [pack],
+      scheduleConfigPath: config,
+    });
+    expect(registry.schedules["temp-auto-guard"].enabled).toBe(false);
+    expect(registry.scheduleSources["temp-auto-guard"]).toBe("overlay");
+  });
+
+  test("an absent schedules section leaves the effective schedules byte-identical", () => {
+    const config = path.join(
+      tmpDir("event-schedule-identity-"),
+      "schedule.yaml",
+    );
+    writeFileSync(config, "defaults:\n  repo: instance\njobs: []\n");
+    const withEmptyOverlay = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    // The baseline must be pinned to an explicit, provably overlay-free
+    // config path rather than the default resolution (which would pick up
+    // an ambient repo-root schedule.yaml, if one happens to exist locally)
+    // — this test asserts identity against "no overlay", not against
+    // whatever the developer's working tree currently contains.
+    const absentConfig = path.join(
+      tmpDir("event-schedule-identity-absent-"),
+      "schedule.yaml",
+    );
+    const defaults = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: absentConfig,
+    });
+    expect(JSON.stringify(withEmptyOverlay.schedules)).toBe(
+      JSON.stringify(defaults.schedules),
+    );
+    expect(withEmptyOverlay.scheduleSources).toEqual(defaults.scheduleSources);
   });
 
   test("pack provenance never enters the receipt defHash (WM-470)", () => {
