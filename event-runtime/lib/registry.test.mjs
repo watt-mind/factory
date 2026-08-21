@@ -272,10 +272,7 @@ describe("registry", () => {
       tmpDir("event-schedule-auto-guard-"),
       "schedule.yaml",
     );
-    writeFileSync(
-      config,
-      `schedules:\n  temp-auto-guard:\n    every: 90m\n`,
-    );
+    writeFileSync(config, `schedules:\n  temp-auto-guard:\n    every: 90m\n`);
     expect(() =>
       loadRegistry({ packRoots: [pack], scheduleConfigPath: config }),
     ).toThrow(/declares approval "auto" but is not enabled/);
