@@ -101,6 +101,12 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
   const schedules = cloneSchedules(kernelSchedules);
   const sources = nullDict();
   for (const loop of Object.keys(schedules)) sources[loop] = "kernel";
+  // Which fields the overlay itself set for a loop (existing-loop overrides
+  // only, from SCHEDULE_OVERLAY_FIELDS). Used downstream to tell "the
+  // overlay deliberately disabled this loop" apart from "the overlay only
+  // touched payload/cadence and enabled happens to already be false" — only
+  // the former is the safe emergency-stop case (WM-998 review).
+  const overlayFields = nullDict();
 
   for (const [loop, override] of Object.entries(overlay)) {
     if (!isPlainObject(override)) {
@@ -131,17 +137,32 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
             }
           : {}),
       };
+      overlayFields[loop] = new Set(Object.keys(override));
     } else {
+      // A brand-new loop the overlay is introducing has no kernel-reviewed
+      // approval policy behind it. It always queues for human approval: an
+      // overlay cannot grant itself "auto" on a loop nobody upstream ever
+      // signed off on (WM-998 review — closes the self-approval hole).
+      if (
+        Object.hasOwn(override, "approval") &&
+        override.approval !== "watched"
+      ) {
+        console.warn(
+          `${file}: schedules.${loop}.approval "${override.approval}" ignored for a new overlay loop — new instance loops are always "watched"`,
+        );
+      }
       schedules[loop] = {
         ...override,
         ...(isPlainObject(override.payload)
           ? { payload: { ...override.payload } }
           : {}),
+        approval: "watched",
       };
+      overlayFields[loop] = new Set(Object.keys(override));
     }
     sources[loop] = "overlay";
   }
-  return { schedules, sources };
+  return { schedules, sources, overlayFields };
 }
 
 function policyFile(root) {
@@ -973,6 +994,7 @@ export function loadRegistry({
   );
   const effectiveSchedules = overlaidSchedules.schedules;
   const effectiveScheduleSources = overlaidSchedules.sources;
+  const effectiveScheduleOverlayFields = overlaidSchedules.overlayFields;
 
   // Extension-contributed panel directories (`contributes.panels`,
   // lib/extensions.mjs) load after every pack, so a pack panel outranks an
@@ -1199,12 +1221,15 @@ export function loadRegistry({
     // Unattended approval on a kernel loop that is not even switched on is
     // almost certainly a half-finished edit; refuse it rather than let it
     // lurk. A local overlay may deliberately switch an auto kernel loop off:
-    // it cannot make that loop run, and is the safe emergency-stop case.
-    if (
-      approval === "auto" &&
-      !schedule.enabled &&
-      effectiveScheduleSources[loop] !== "overlay"
-    ) {
+    // it cannot make that loop run, and is the safe emergency-stop case. That
+    // exemption only holds when the overlay's own override is what set
+    // `enabled: false` — a payload- or cadence-only override riding on top
+    // of an already-disabled kernel loop does not touch the approval
+    // boundary and must still fail closed (WM-998 review).
+    const overlayDisabledThisLoop =
+      effectiveScheduleSources[loop] === "overlay" &&
+      Boolean(effectiveScheduleOverlayFields[loop]?.has("enabled"));
+    if (approval === "auto" && !schedule.enabled && !overlayDisabledThisLoop) {
       throw new RegistryError(
         `${scheduleFile}: ${loop} declares approval "auto" but is not enabled — decide one`,
       );
