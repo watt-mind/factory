@@ -20,6 +20,10 @@ function cleanRoot() {
   cleanRoots.push(root);
   cpSync(path.join(ROOT, "config"), path.join(root, "config"), {
     recursive: true,
+    filter: (src) =>
+      !src.endsWith(".yaml") ||
+      src.endsWith(".example.yaml") ||
+      path.basename(src) === "nodes.yaml",
   });
   return root;
 }
