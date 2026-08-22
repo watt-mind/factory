@@ -29,6 +29,7 @@ import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
+import { isTrustedAssociation } from "./triage.mjs";
 import { listMemos } from "./memos.mjs";
 import {
   artifactsRoot,
@@ -753,6 +754,13 @@ function evidenceTicket(ticket, ticketId) {
     ownedPaths: effectiveOwnedPaths(description),
     ownedPathsParsed: parsed.length > 0,
     descriptionHash: hashJson(description),
+    // WM-879: github-plane trust facts. `controlPlaneKind` is undefined for
+    // every other plane (Linear, memory), which is what keeps the gates
+    // below github-only without a separate repo-config lookup.
+    controlPlaneKind: ticket?.controlPlaneKind ?? undefined,
+    authorAssociation: ticket?.authorAssociation ?? null,
+    lastEditorAssociation: ticket?.lastEditorAssociation ?? null,
+    readyPinHash: ticket?.readyPinHash ?? null,
   };
 }
 
@@ -949,6 +957,32 @@ export function worktreeDispatchAutoEligibility(
   }
   if (evidence.ticket.labels.includes("ai:escalated")) {
     return refusal("ticket_escalated", evidence);
+  }
+
+  // WM-879: the github control plane is a public repo — the label gate above
+  // keeps stranger-created issues out only until someone with triage
+  // permission labels one, and covers nothing after that label is applied.
+  // These two checks close that window; every dispatch path (auto and
+  // operator-injected) funnels through this one function, so there is no
+  // bypass. Linear/memory tickets carry no `controlPlaneKind`, so they skip
+  // both checks entirely — unaffected by construction.
+  if (evidence.ticket.controlPlaneKind === "github") {
+    const trustedAuthor =
+      isTrustedAssociation(evidence.ticket.authorAssociation) &&
+      isTrustedAssociation(evidence.ticket.lastEditorAssociation);
+    evidence.checks.ticket_trusted_author = trustedAuthor;
+    if (!trustedAuthor) return refusal("ticket_untrusted_author", evidence);
+
+    // Absent pin (never labeled through a pin-aware path) is not itself a
+    // refusal — only a MISMATCHED pin proves the body changed since it was
+    // marked ready. Refusing on absence would strand every ticket labeled
+    // before this gate shipped.
+    const pinMatches =
+      !evidence.ticket.readyPinHash ||
+      evidence.ticket.readyPinHash === evidence.ticket.descriptionHash;
+    evidence.checks.ticket_body_pin_matches = pinMatches;
+    if (!pinMatches)
+      return refusal("ticket_body_changed_since_ready", evidence);
   }
 
   const blockers = openBlockers(ticket);
