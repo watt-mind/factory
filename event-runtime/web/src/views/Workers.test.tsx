@@ -20,7 +20,12 @@ import {
 } from "./Workers";
 import { api } from "../api";
 import { changeInput } from "../test-render";
-import type { RunListItem, Worker, WorkerCapacity, WorkerState } from "../types";
+import type {
+  RunListItem,
+  Worker,
+  WorkerCapacity,
+  WorkerState,
+} from "../types";
 
 afterEach(() => {
   cleanup();

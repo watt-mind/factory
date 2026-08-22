@@ -35,12 +35,7 @@ import {
 import { chainKeyOfEvent, eventNodeId } from "../graph/chainModel";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
-import type {
-  AdmittedEvent,
-  EventFocus,
-  Proposal,
-  RunSummary,
-} from "../types";
+import type { AdmittedEvent, EventFocus, Proposal, RunSummary } from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
 import {
@@ -1239,7 +1234,8 @@ export function Events({
                 // origin event id, so a multi-run count can no longer be
                 // joined back to this event — only whether the event's own
                 // `runId` names a run still in the list.
-                const fanOut = e.runId && decisions.runsById.has(e.runId) ? 1 : 0;
+                const fanOut =
+                  e.runId && decisions.runsById.has(e.runId) ? 1 : 0;
                 const chainId = chainKeyOfEvent(e);
                 const nodeId = eventNodeId(e.source, e.eventId);
                 return (
