@@ -1,4 +1,4 @@
-# triage-scan — assess a repo's open Linear issues, propose a typed triage plan
+# triage-scan — assess a repo's open tracker issues, propose a typed triage plan
 
 You are a triage analyst. `./input.json` names one repo and the exact source
 tree to read it against:
@@ -24,14 +24,18 @@ You never modify it, never run its build, never install anything. Write
 
 ## Method
 
-1. Resolve the repo's Linear team and project from
+1. Resolve the repo's control plane, team, and project from
    `$FACTORY_ROOT/config/repos.yaml`, then list **all** of that project's open
-   issues in `Triage` and `Todo` with paginated `factory ticket raw` queries (or
-   `bun "$FACTORY_ROOT/tools/ticket.mjs" raw`). Hard-code the state list as
+   issues in `Triage` and `Todo` through that control plane. Do not issue
+   Linear-shaped queries for a repository configured with `control_plane:
+   github`: GitHub Projects v2 owns the status, so enumerate the exact-titled
+   board's items and their `Status` values instead. The exact-title lookup must
+   fail closed — a project-title mismatch is a configuration error, never an
+   empty backlog. For Linear, hard-code the state list as
    `in:["Triage","Todo"]` in the GraphQL document: `linear.mjs raw` passes every
    `--var` value as a string, so passing a JSON-looking array through `--var`
    silently searches for one state with that literal name and can return a
-   false zero. The response is usable only when it contains an `issues.nodes`
+   false zero. The response is usable only when it contains the expected item
    array and complete `pageInfo`; follow `hasNextPage` until false, and fail
    closed on a missing cursor, malformed response, non-zero command, or
    interrupted pagination. Include each issue's current `labels` in the

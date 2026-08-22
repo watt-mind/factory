@@ -180,8 +180,10 @@ describe("registry", () => {
     // Regenerated (#941): disk-diagnose/disk-remediate host allowlists moved
     // to instance-local config; tracked definitions ship empty (both are
     // registry inputs).
+    // Regenerated (#924): triage-scan selects its configured control plane and
+    // fails closed when a GitHub Project title does not match.
     const expected =
-      "sha256:afb4cc92abd9a45299ceb2f28ec7b76d026e4922ef217fdcc6ec0e085994e850";
+      "sha256:2b94b0d9df14f622af0f875a4425c3583674afd0b875a0d470eec03ba2f5ac10";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
