@@ -166,8 +166,11 @@ describe("registry", () => {
     // Regenerated (merge-factory clock scan 15m -> 4h in schedules.json).
     // Regenerated (WM-938): dispatch pins explicit PR bases and merge-scan
     // surfaces wrong-base PRs; both agent definitions are registry inputs.
+    // Regenerated (WM-1039): dispatch runs only ticket + configured repo
+    // verification in worktrees; full suites remain CI-only.
+    // Regenerated (WM-1039 rebase over tracker-neutral sweep)
     const expected =
-      "sha256:5a8aeabaab1f3f111286106bb15ec76977c88340cb7578045e6cf74a1dd346fc";
+      "sha256:a4d70bef9089d1513b6697ca4f026563b86d8d4785bee68738a2359fbdd573a5";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -338,8 +341,11 @@ describe("registry", () => {
     // for WM-610. Still not a provenance break: `pack` stays non-enumerable.
     // WM-812 adds decision-memo declarations and re-pins the dispatch brief.
     // WM-938 adds the explicit-base PR command and re-pins dispatch.
+    // WM-1039 keeps dispatched worktree verification to the ticket and repo
+    // commands, leaving full suites to CI, and re-pins dispatch.
+    // Regenerated (WM-1039 rebase over tracker-neutral sweep)
     expect(computeDefHash(def)).toBe(
-      "sha256:d004d6500d8ba0cac57573f8d0836a1ec2f18e083dd414d0348adb230387f893",
+      "sha256:b82767b2413db396af047029261323df01a8255315135e91694fad4b960b851d",
     );
   });
 
