@@ -11,7 +11,7 @@
     "release-hold": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "state",
         "{issueId}",
         "Todo",
@@ -24,7 +24,7 @@
     "release-to-triage": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "state",
         "{issueId}",
         "Triage",
@@ -35,7 +35,7 @@
     "comment-evidence": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "comment",
         "{issueId}",
         "unblock: {reason}"
@@ -48,7 +48,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write"]
+    "services": ["tracker:write"]
   },
   "limits": {
     "timeout_seconds": 600,

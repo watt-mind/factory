@@ -17,7 +17,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["gh:read", "linear:read"]
+    "services": ["gh:read", "tracker:read"]
   },
   "limits": {
     "timeout_seconds": 120,

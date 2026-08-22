@@ -14,7 +14,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["gh:write", "linear:read", "event-runtime:write"]
+    "services": ["gh:write", "tracker:read", "event-runtime:write"]
   },
   "limits": {
     "timeout_seconds": 600,

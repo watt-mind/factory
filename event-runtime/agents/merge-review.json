@@ -13,7 +13,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["gh:read", "linear:read", "repo:read"]
+    "services": ["gh:read", "tracker:read", "repo:read"]
   },
   "limits": {
     "timeout_seconds": 300,

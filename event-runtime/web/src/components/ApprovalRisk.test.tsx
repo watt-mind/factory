@@ -97,7 +97,7 @@ describe("computeApprovalRisk (WM-505)", () => {
       proposal(
         {},
         {
-          capabilities: ["linear:read"],
+          capabilities: ["tracker:read"],
           timeoutSeconds: 120,
           input: { branch: "feat/x" },
         },
@@ -153,7 +153,7 @@ describe("ApprovalSafetyCard (WM-505)", () => {
         proposal={proposal(
           {},
           {
-            capabilities: ["gh:write", "linear:read"],
+            capabilities: ["gh:write", "tracker:read"],
             timeoutSeconds: 900,
             maxAttempts: 2,
           },
@@ -168,7 +168,7 @@ describe("ApprovalSafetyCard (WM-505)", () => {
     expect(text).toContain("Mutating");
     expect(text).toContain("Risk");
     expect(text).toContain("gh:write");
-    expect(text).toContain("linear:read");
+    expect(text).toContain("tracker:read");
     expect(text).toContain("15m");
     expect(text).toContain("max 2 att");
     expect(text).toContain("github");
