@@ -1,6 +1,8 @@
 ---
 title: Overview
 description: The factory that builds software — and itself
+sidebar:
+  order: 1
 ---
 
 **factory** is a runtime for self-improving agentic loops. Code is the first product line.
@@ -30,6 +32,7 @@ That is factory.
 
 ## Next Steps
 
-- [Quickstart Demo](/factory/getting-started/quickstart/) — Run the 2-minute offline demo with zero accounts or tokens.
-- [First Real PR](/factory/getting-started/first-pr/) — Connect a GitHub repository and dispatch an agent-ready issue.
-- [Factory Doctor](/factory/getting-started/doctor/) — Verify your local environment and toolchains.
+- [Connect Your Repo](/factory/getting-started/quickstart/) — Point factory at a repository you already have. The fast path is a prompt you hand to the coding agent you already use.
+- [Your First Dispatch](/factory/getting-started/first-pr/) — What happens when factory picks up a ticket, and how to read the result.
+- [Configuration Reference](/factory/getting-started/configuration/) — Repositories, policies, and schedules.
+- [Factory Doctor](/factory/getting-started/doctor/) — Verify your local environment and toolchains, or check a fresh clone offline.

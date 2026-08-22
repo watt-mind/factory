@@ -14,7 +14,8 @@ factory <command> [options]
 | Command             | Description                                                                            |
 | :------------------ | :------------------------------------------------------------------------------------- |
 | `factory status`    | Displays repository freshness, deployment state, and queue health.                     |
-| `factory demo`      | Runs the self-contained offline seven-step demo.                                       |
+| `factory onboard`   | Prints the prompt that connects a repository; paste it into your coding agent.         |
+| `factory demo`      | Runs the self-contained offline seven-step demo to verify an install.                  |
 | `factory doctor`    | Diagnoses toolchains, authentication, configuration, and harnesses.                    |
 | `factory ticket`    | Reads, files, claims, comments on, and transitions tracker tickets.                    |
 | `factory queue`     | Shows dispatchable work, blockers, and available concurrency.                          |

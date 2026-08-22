@@ -38,27 +38,38 @@ software, used in earnest every day — expect sharp edges, and please
 
 ## Try it
 
-Bun 1.3+ and Git 2.40+, on macOS 13+ or Linux (x64 / arm64).
+Bun 1.3+, Git 2.40+ and the GitHub CLI, on macOS 13+ or Linux (x64 / arm64),
+plus a coding agent you already use.
+
+Point it at a repository you already have. Connecting one needs answers only
+that repo has — which branch is the integration branch, what the verification
+command really is, which files an honest first ticket should own — so the fast
+path is a prompt handed to your own coding agent rather than an installer:
 
 ```bash
 git clone https://github.com/watt-mind/factory.git
 cd factory
 bun install
-bin/factory demo --dry   # print the plan — offline, and what CI runs
-bin/factory demo         # claim → implement → verify → PR → merge
+bin/factory onboard --repo ~/Develop/yourapp | pbcopy
 ```
 
-![A recorded `factory demo` run: a ticket is claimed, implemented, verified, and merged.](docs/media/demo.gif)
+Paste it into Claude Code, Codex, Gemini, Cursor, or Pi with your repository
+open. It surveys the repo, wires up the control plane, files the first
+agent-ready ticket, and stops at a gate it cannot talk its way past:
+`factory doctor` and `factory queue` green.
 
-The demo needs no accounts: no tracker token, no GitHub token, no model API
-key. It copies a bundled repository into a temporary checkout, implements the
-starter ticket, runs that repository's own tests, opens and merges a pull
-request on an in-memory forge, and leaves your clone untouched.
+The prompt is [docs/onboarding/connect-repo.md](docs/onboarding/connect-repo.md)
+— a runbook, not an incantation, so following it by hand is a supported path.
+It stops rather than guessing: if your test command is already red, or the
+Projects board has to be created under an owner it cannot infer, it says so and
+hands the question back.
 
-To point the factory at a real repository,
-[docs/quickstart.md](docs/quickstart.md) has the path that needs only
-`gh auth login` and one coding-agent harness. [SETUP.md](SETUP.md) covers
-operator installation, harness links, and the event-runtime daemon.
+`bin/factory demo` is a separate, narrower thing — it runs the whole loop
+offline against a bundled repository, with no accounts, tokens, or model, to
+prove a fresh clone works. It says nothing about your code.
+[docs/quickstart.md](docs/quickstart.md) has both paths in full, and
+[SETUP.md](SETUP.md) covers operator installation, harness links, and the
+event-runtime daemon.
 
 ## Why
 
@@ -108,11 +119,11 @@ rather than inventing ports for tooling that does not exist.
 Where work is admitted, claimed, and reviewed. It sits behind a `ControlPlane`
 adapter, so the loops never hard-wire one tracker.
 
-| Adapter       | Status       | Notes                                                                                                                                                                              |
-| :------------ | :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linear        | v1           | Claim, labels, states, comments. One authority, so two agents cannot both own a ticket                                                                                             |
-| GitHub Issues | shipping     | Issues, labels, and a Projects `Status` field. No third-party account; today you create the Project and the labels by hand, from what `factory init --control-plane github` prints |
-| Memory        | demo / tests | In-process, for `factory demo` and offline runs                                                                                                                                    |
+| Adapter       | Status       | Notes                                                                                                                                                                                   |
+| :------------ | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linear        | v1           | Claim, labels, states, comments. One authority, so two agents cannot both own a ticket                                                                                                  |
+| GitHub Issues | shipping     | Issues, labels, and a Projects `Status` field. No third-party account; `factory init --control-plane github` creates the labels, and prints what the Projects board still needs by hand |
+| Memory        | demo / tests | In-process, for `factory demo` and offline runs                                                                                                                                         |
 
 GitHub is the forge either way: the pull request is the artifact, the branch
 is the work, CI is the gate.
@@ -263,7 +274,7 @@ is added there in the future, it must carry explicit terms; placement under
 
 | Doc                                                | What it is                                                     |
 | :------------------------------------------------- | :------------------------------------------------------------- |
-| [docs/quickstart.md](docs/quickstart.md)           | The offline demo, then the first real pull request             |
+| [docs/quickstart.md](docs/quickstart.md)           | Connecting a repository, then verifying a clone offline        |
 | [docs/thesis.md](docs/thesis.md)                   | Positioning: an unattended software factory first              |
 | [docs/model.md](docs/model.md)                     | Public primitives in this repository's vocabulary              |
 | [docs/architecture.md](docs/architecture.md)       | Why the factory is shaped this way                             |
