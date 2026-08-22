@@ -2188,8 +2188,10 @@ describe("planAdmittedEvents", () => {
       expect(hashJson(replannedSpec)).toBe(outcome.proposal.spec_hash);
       expect(replannedSpec.idempotencyKey).toBe(originalSpec.idempotencyKey);
     } finally {
-      process.env.FACTORY_REPOS_ROOT = oldReposRoot;
-      process.env.FACTORY_EVENT_HOME = oldHome;
+      if (oldReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = oldReposRoot;
+      if (oldHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = oldHome;
     }
   });
 
