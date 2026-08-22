@@ -5,12 +5,18 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as actions from "./adapters/actions.mjs";
 import * as fake from "./adapters/fake.mjs";
+import { hashJson } from "./canonical.mjs";
 import { resolveChains } from "./chain.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planAdmittedEvents } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
+import {
+  isTrustedAssociation,
+  parseReadyPin,
+  readyPinMarker,
+} from "./triage.mjs";
 import { runOnce } from "./worker.mjs";
 
 const registry = loadRegistry();
@@ -464,5 +470,43 @@ describe("triage-apply is closed by construction (OPS-229)", () => {
     expect(registry.agents.get("triage-scan@1").workspace.type).toBe(
       "repository",
     );
+  });
+});
+
+describe("trusted-author + body-hash-pin primitives (GH-879)", () => {
+  test("only OWNER/MEMBER/COLLABORATOR are trusted; everything else, including null, is not", () => {
+    expect(isTrustedAssociation("OWNER")).toBe(true);
+    expect(isTrustedAssociation("MEMBER")).toBe(true);
+    expect(isTrustedAssociation("COLLABORATOR")).toBe(true);
+    for (const bad of [
+      "CONTRIBUTOR",
+      "FIRST_TIME_CONTRIBUTOR",
+      "NONE",
+      null,
+      undefined,
+      "",
+    ]) {
+      expect(isTrustedAssociation(bad)).toBe(false);
+    }
+  });
+
+  test("readyPinMarker pins hashJson(description) in a parseable comment marker", () => {
+    const description = "## Owned Paths\n* README.md\n";
+    const marker = readyPinMarker(description);
+    expect(marker).toContain(hashJson(description));
+    expect(parseReadyPin(marker)).toBe(hashJson(description));
+  });
+
+  test("parseReadyPin ignores unrelated comment text and a malformed marker", () => {
+    expect(parseReadyPin("just a regular comment")).toBeNull();
+    expect(parseReadyPin("<!-- factory:ready-pin not-a-hash -->")).toBeNull();
+    expect(parseReadyPin("")).toBeNull();
+    expect(parseReadyPin(undefined)).toBeNull();
+  });
+
+  test("a re-label produces a different marker for a different description", () => {
+    const before = readyPinMarker("first body");
+    const after = readyPinMarker("edited body");
+    expect(parseReadyPin(before)).not.toBe(parseReadyPin(after));
   });
 });
