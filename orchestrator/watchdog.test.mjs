@@ -57,9 +57,21 @@ test("formatWatchdogReport formats critical issues", () => {
 });
 
 test("runWatchdogCheck detects unreachable API as critical", async () => {
+  // A hardcoded port assumes nothing else is listening on it, which a
+  // stranger process (or a concurrent worktree) can invalidate (#876).
+  // Bind loopback:0 to get OS-assigned ports, then release them
+  // immediately so they are unreachable when runWatchdogCheck fetches them.
+  const apiProbe = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const port = apiProbe.port;
+  apiProbe.stop(true);
+
+  const webProbe = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const webPort = webProbe.port;
+  webProbe.stop(true);
+
   const result = await runWatchdogCheck({
-    port: 59998, // unreachable
-    webPort: 59997,
+    port,
+    webPort,
     checkShadowFleet: false,
   });
 
