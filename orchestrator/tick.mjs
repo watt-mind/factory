@@ -33,6 +33,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
+import { ticketSlug } from "../lib/ticket-slug.mjs";
 import {
   parseOwnedPaths,
   effectiveOwnedPaths,
@@ -645,7 +646,13 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   async function runTicket(t) {
-    const wt = path.join(expand(repo.worktree_root), t.identifier);
+    // Slug, not the raw identifier: worktree-up.sh creates `gh-863` for
+    // `watt-mind/factory#863` (#881/#884). Computing the raw path here made
+    // tick report "worktree ready" for a directory that does not exist and
+    // then spawn the agent with that cwd — which surfaces as ENOENT on the
+    // EXECUTABLE, so it read as a missing /usr/bin/timeout rather than a path
+    // bug, and tripped the circuit breaker as an environment failure (#887).
+    const wt = path.join(expand(repo.worktree_root), ticketSlug(t.identifier));
     const up = spawnSync("/bin/bash", [repo.worktree_up, t.identifier], {
       cwd: repoPath,
       encoding: "utf8",
@@ -1072,7 +1079,10 @@ export async function main(argv = process.argv.slice(2)) {
         ticket: t.identifier,
         owner: leaseOwner,
       });
-      const wt = path.join(expand(repo.worktree_root), t.identifier);
+      const wt = path.join(
+        expand(repo.worktree_root),
+        ticketSlug(t.identifier),
+      );
       preserveWip(wt, t.identifier);
       await unclaim(
         t,
