@@ -1546,9 +1546,7 @@ describe("contributes.harness (WM-849)", () => {
 
     const out = validateExtensionManifest(linked);
     expect(out.valid).toBe(false);
-    expect(out.errors.join("\n")).toMatch(
-      /adapters\.echo .* is not a file/,
-    );
+    expect(out.errors.join("\n")).toMatch(/adapters\.echo .* is not a file/);
     expect(out.errors.join("\n")).toMatch(/harness\.floor .* is not a file/);
     expect(out.errors.join("\n")).toMatch(
       /hooks\["approve\.before"\] .* escapes the extension directory/,
