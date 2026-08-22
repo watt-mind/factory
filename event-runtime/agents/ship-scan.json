@@ -22,6 +22,6 @@
   "pins": {
     "agents/ship-scan.md": "sha256:26280ed658ee4759db15f3f2c250d57ec7145f787cec2474a53fcf9b9edf6564",
     "schemas/ship-scan.input.json": "sha256:78ca9a5df1148baf509348b7a492f7d299c2d519df2c9adc0c875e969db067da",
-    "schemas/ship-scan.output.json": "sha256:168b0a95ae41730123c2e9f76b7502199d401022731788c44602ca1c02285f8c"
+    "schemas/ship-scan.output.json": "sha256:7c3090b9ee758e639a4311efb571e0130e171190c89ae65ce09f68bbbe5ac2ae"
   }
 }

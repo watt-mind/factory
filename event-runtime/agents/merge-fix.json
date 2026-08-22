@@ -25,7 +25,7 @@
   "mutating": true,
   "pins": {
     "agents/merge-fix.md": "sha256:c06dba00c6fa4d34fcb97a0adc0fedf3d7f87c94e4535c4acd7afab2427e7b9b",
-    "schemas/merge-fix.input.json": "sha256:71a8c16d52dfc908972bf3f9ca6d942c93ab6b0213588298a1cd2715e265aa6c",
-    "schemas/merge-fix.output.json": "sha256:0aa6ba59514abbb6609ef53c124f627c7e5ab09eca655696c99aa4e38e34ce46"
+    "schemas/merge-fix.input.json": "sha256:332e1c82296541678b8f95b49f65fba63a87219315dbfc6b9556cd4d3df9ecbd",
+    "schemas/merge-fix.output.json": "sha256:636ab0de7337d7358e47fd95c52abc80eedbebb618a968f9546b67da07150ff3"
   }
 }

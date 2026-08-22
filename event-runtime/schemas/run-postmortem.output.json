@@ -33,7 +33,7 @@
               "type": { "const": "ticket" },
               "id": {
                 "type": "string",
-                "pattern": "^[A-Z]+-[0-9]+$",
+                "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
                 "description": "Linear issue id of the failed run, derived from its spec/transcript — never another ticket"
               }
             }

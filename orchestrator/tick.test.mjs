@@ -110,3 +110,48 @@ describe("acquireClaimLock", () => {
     });
   });
 });
+
+// ------------------------------------------- control-plane selection (#880) ---
+// The dispatcher read its queue from the repo's control plane and then claimed
+// on the WORKSPACE DEFAULT, because the --apply block created a second, bare
+// `loadControlPlane()`. After the WM-1006 cutover that meant reading GitHub and
+// claiming against Linear with a GitHub identifier:
+//   Entity not found: Issue — Could not find referenced Issue.
+// It failed safe, but no ticket on a non-default plane could ever dispatch.
+describe("tick resolves its control plane from the repo (#880)", () => {
+  const SRC = readFileSync(new URL("./tick.mjs", import.meta.url), "utf8");
+
+  test("there is no bare loadControlPlane() call", () => {
+    // A bare call silently resolves to the workspace default. Two handles in
+    // one file is the defect; one handle, built from the repo, is the fix.
+    const calls = SRC.split("\n").filter(
+      (l) =>
+        /loadControlPlane\(\s*\)/.test(l) &&
+        !l.trim().startsWith("*") &&
+        !l.trim().startsWith("//"),
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("every loadControlPlane call passes repoName", () => {
+    const calls = [...SRC.matchAll(/loadControlPlane\(\{([^}]*)\}/g)].map(
+      (m) => m[1],
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    for (const args of calls) expect(args).toContain("repoName");
+  });
+
+  test("the apply path issues no tracker-native GraphQL", () => {
+    // viewer / team.states / issueLabels / issueUpdate are Linear-shaped and
+    // unanswerable by any other adapter. unclaim() is the rollback that stops a
+    // dead run holding a cap slot, so it has to work on every plane.
+    for (const shape of [
+      "issueLabels(",
+      "issueUpdate(",
+      "team(id:",
+      "query{ viewer{",
+    ]) {
+      expect(SRC).not.toContain(shape);
+    }
+  });
+});

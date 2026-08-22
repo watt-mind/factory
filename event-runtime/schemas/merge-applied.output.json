@@ -20,7 +20,7 @@
         "properties": {
           "issueId": {
             "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
             "description": "The item's Linear ticket — the item-list adapter records the item key under the fixed name issueId (lib/adapters/actions.mjs), and merge-apply's itemKey is the ticket"
           },
           "action": {
@@ -40,7 +40,10 @@
         "additionalProperties": false,
         "properties": {
           "pr": { "type": "integer", "minimum": 1 },
-          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "ticket": {
+            "type": "string",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+          },
           "reason": { "type": "string", "minLength": 1 }
         }
       }

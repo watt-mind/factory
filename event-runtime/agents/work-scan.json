@@ -23,6 +23,6 @@
   "pins": {
     "agents/work-scan.md": "sha256:aabcaed7a814e14b4aa291eacd1e63825fa9424a71991377006a780decaecbd1",
     "schemas/work-scan.input.json": "sha256:34f273b7a3183c61ef94d6474a74d579826a3f4306a1f0aec54ccfdb84870bf1",
-    "schemas/work-scan.output.json": "sha256:98a2cb891198b79d8d8d9924a3db1fe2bd11e2983c71ae4a3499bc54a5d43f5f"
+    "schemas/work-scan.output.json": "sha256:7250a4c26073e443552b2d0bfdec53b2d4348940a92f250013ad31efdd637055"
   }
 }

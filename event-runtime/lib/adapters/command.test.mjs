@@ -252,6 +252,12 @@ function sampleFromSchema(schema) {
       if (schema.pattern === "^[0-9a-f]{40}$") return "b".repeat(40);
       if (schema.pattern === "^/[A-Za-z0-9/._-]*$") return "/var";
       if (schema.pattern === "^[A-Z]+-[0-9]+$") return "OPS-1";
+      // WM-1006: tracker-neutral ticket ids (Linear TEAM-N or GitHub #N forms)
+      if (
+        schema.pattern ===
+        "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+      )
+        return "OPS-1";
       return "x".repeat(schema.minLength ?? 1);
     }
     case "integer":

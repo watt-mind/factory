@@ -42,7 +42,7 @@
   ],
   "pins": {
     "agents/dispatch.md": "sha256:ae36ff073880ff1ae89e6c21ed6660ee6f8294681b0d937da1efbef15373de6c",
-    "schemas/dispatch.input.json": "sha256:7949221631e30ad9c6f8fa8a92d071f6ee88ea03e7fbafcbf3af1dffa432cdee",
-    "schemas/dispatch.output.json": "sha256:bc25aee1baa16aa21f50e9a3f8c320e57cec11cbdf31c822baee838d49ddb672"
+    "schemas/dispatch.input.json": "sha256:2909f2898723c796669716a0f9c185ec262bdbea20a948754c6228384f88e6e6",
+    "schemas/dispatch.output.json": "sha256:a8d8cd5816eb8d7da832da59120bc1f028623edf1a9a9e180348d897621dfff1"
   }
 }
