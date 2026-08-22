@@ -66,12 +66,34 @@ factory init --control-plane github --root "$PWD" --repo OWNER/SAMPLE --team SAM
 factory doctor
 ```
 
-Create a GitHub Project named `Factory` in `OWNER/SAMPLE` with the statuses
-printed by `factory init`, then create the protocol labels it prints. Add the
-external sample repository to the local `config/repos.yaml` with its explicit
-base branch, verification command, and its own `worktree_up`/`worktree_down`
-scripts. That isolation is what lets a claimed ticket receive a verified PR
-without sharing ports or a database with another run.
+`factory init --control-plane github` **creates the protocol labels for you**
+(WM-1009). Run it after `gh auth login` — with a real `--repo`, it writes the
+policy file and then creates every `ai:*`, `type:*`, `source:*`, `agent:*` and
+`priority:*` label the protocol names, roughly twenty-five of them. Labels that
+already exist are left untouched, including their colour and description, so
+re-running is safe and reports what it created versus what was already there.
+Add `--dry-run` to see the plan without writing anything.
+
+Provisioning is not fatal: if `gh` is unauthenticated or offline, the policy
+file is still written, the command still exits 0, and it prints the exact
+command to re-run once you have credentials. Scaffolding config before
+authenticating is a normal order to work in.
+
+The **Projects v2 board** is still manual. `factory init` checks for a board
+named `Factory` with a `Status` single-select and reports precisely what to
+create; it does not create the board itself, because doing that blind against
+the wrong owner (user vs. organisation) produces a board in the wrong place
+that then has to be found and deleted. If the board exists but its `Status`
+options do not exactly match `Triage, Todo, In Progress, In Review, Done,
+Blocked`, init fails and names the missing ones — a half-configured board
+would otherwise surface much later as a transition error inside an unattended
+loop, reading as a tracker outage rather than a setup mistake.
+
+Then add the external sample repository to the local `config/repos.yaml` with
+its explicit base branch, verification command, `control_plane: github`, and
+its own `worktree_up`/`worktree_down` scripts. That isolation is what lets a
+claimed ticket receive a verified PR without sharing ports or a database with
+another run.
 
 Create one GitHub Issue in the `Todo` project state with `ai:agent-ready`, an
 unassigned owner, a verification command, and a narrow `Owned Paths` section.

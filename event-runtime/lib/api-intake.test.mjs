@@ -5,6 +5,7 @@ import {
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { spawnTracked } from "./test-helpers-process.mjs";
+import { freePort, loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 import {
   GH_SECRET,
   PV,
@@ -527,7 +528,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
 
   test("serve startup banner warns when FACTORY_EVENT_SECRET is unset", async () => {
     const home = tmpDir("evrt-banner-");
-    const port = String(59600 + (process.pid % 200));
+    const port = freePort();
     const CLI = path.resolve(import.meta.dir, "../cli.mjs");
 
     const env = { ...process.env, FACTORY_EVENT_HOME: home };
@@ -546,7 +547,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
       out += b;
     });
 
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + loadAdjustedTimeout(8000);
     while (Date.now() < deadline && !out.includes("control API on")) {
       await Bun.sleep(100);
     }
