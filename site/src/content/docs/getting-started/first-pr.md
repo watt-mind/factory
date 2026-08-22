@@ -1,9 +1,18 @@
 ---
-title: First Real PR
-description: Connecting Factory to GitHub Issues and dispatching real tasks
+title: Your First Dispatch
+description: What happens when factory picks up a ticket, and how to read the result
+sidebar:
+  order: 3
 ---
 
-Once you have verified the offline demo, you can connect Factory to an external GitHub repository.
+Once your repository is [connected](/factory/getting-started/quickstart/) and one agent-ready ticket is sitting in `Todo`, dispatch is two commands: ask what factory would do, then let it.
+
+```bash
+factory next --repo <name>                              # read-only recommendation
+factory next --repo <name> --apply --harness claude     # or codex, gemini, cursor, pi, agy
+```
+
+`--repo` takes the `name` from your `config/repos.yaml` stanza, not the `OWNER/REPO` slug.
 
 <iframe
   class="diagram-embed"
@@ -12,106 +21,45 @@ Once you have verified the offline demo, you can connect Factory to an external 
   loading="lazy"
 ></iframe>
 
-## Prerequisites
+## What `--apply` does
 
-1. Authenticate the GitHub CLI:
-   ```bash
-   gh auth login -h github.com
-   ```
-2. Ensure you have at least one coding agent harness installed (e.g. Claude Code, Gemini CLI, Cursor, or Codex).
+1. **Claims the ticket** — assigns it, moves it to `In Progress`, adds `ai:in-progress`, then re-reads it. That read-back is the entire concurrency control: if the assignee came back as someone else, another agent won the race and this one takes the next ticket instead.
+2. **Provisions an isolated worktree** — via your `worktree_up` script if the repo declares one, so ports, databases, and scratch state are isolated too, not just the branch.
+3. **Runs your coding agent inside the ticket's `Owned Paths`** — the harness you named, with the repo's `AGENTS.md` floor in context.
+4. **Re-runs the verification command independently** — outside the agent's process, on the resulting tree.
+5. **Pushes and opens a PR** against the `base` you configured.
+6. **Posts a handoff** on the ticket and moves it to `In Review` with `ai:needs-review`.
 
-## 1. Initialize Configuration
+Step 4 is the one that matters. The agent's own report that the tests pass is commentary; factory runs the command itself and reads the exit code. See [Verification as a Gate](/factory/concepts/verification/).
 
-From your Factory clone:
+## Reading the result
 
-```bash
-bun install --frozen-lockfile
-bun build/emit.mjs --link-bin
-export PATH="$HOME/.local/bin:$PATH"
+Check these three things on the first PR, in this order:
 
-factory init --root "$PWD"
-factory init --control-plane github --root "$PWD" --repo OWNER/REPO --team REPO
-factory doctor
-```
+- **The base branch.** `gh pr view <n> --json baseRefName`. It must match the `base` in your repo stanza. GitHub's default branch is not used as a fallback, so a mismatch means the stanza is wrong.
+- **The diff stays inside `Owned Paths`.** Files outside that glob set are the signal that the ticket was under-specified, not that the agent misbehaved.
+- **The verification output** in the ticket's handoff comment, against the command you declared.
 
-:::note[Automated label provisioning]
-`factory init --control-plane github` creates the required protocol labels (such as `ai:agent-ready`, `ai:in-progress`, `type:*`, `priority:*`, and `source:*`). Existing labels are left untouched. The command checks the Projects v2 board but leaves board creation to you so it cannot create one under the wrong owner.
-:::
+## When it refuses
 
-## 2. Configure Projects Board
+`factory next` refuses by naming the gate that failed rather than guessing, so the reason is the fix. The ones you are most likely to meet on a fresh connection:
 
-In GitHub, ensure your repository has a Projects v2 board named **Factory** with a single-select `Status` field containing these exact options:
+| Reason                                 | What it means                                                                                                                                                        |
+| :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repo_report_only`                     | The stanza still has `report_only: true`. Remove it when you are ready to act.                                                                                       |
+| `owned_paths_unknown`                  | The ticket's `Owned Paths` section did not parse. It must be one path or glob per bullet, with no spaces — a comma-separated list on one bullet is dropped silently. |
+| `owned_paths_overlap`                  | Another in-flight ticket already owns some of these paths. This is the concurrency guarantee working, not a bug.                                                     |
+| `no_worktree_scripts`                  | Event-runtime dispatch needs `worktree_up`, `worktree_down`, and `worktree_root`. See step 10 of the connect prompt.                                                 |
+| `ticket_not_agent_ready`               | Missing the `ai:agent-ready` label.                                                                                                                                  |
+| `ticket_not_todo`                      | Not in `Todo`. `Triage` and `Backlog` are deliberately not queues to pull from.                                                                                      |
+| `ticket_assigned`                      | Someone — or some agent — already holds the claim.                                                                                                                   |
+| `capacity_full`                        | `max_in_flight` for this repo is reached. Working as configured.                                                                                                     |
+| `ticket_escalated` / `ticket_security` | The diff or ticket touches auth, payments, secrets, migrations, or production infra. These come back to a human by design.                                           |
 
-```text
-Triage, Todo, In Progress, In Review, Done, Blocked
-```
+## After the PR
 
-## 3. Register Repository in `config/repos.yaml`
+Nothing merges because an agent said it was done. The merge stage reviews the diff against the ticket, waits for the checks named in `merge_ci.required_checks` to actually report success, and holds anything security-relevant for a human.
 
-Add the repository configuration:
-
-```yaml
-repos:
-  - name: sample
-    path: ~/Develop/sample
-    github: OWNER/REPO
-    team: SAMPLE
-    project: Factory
-    control_plane: github
-    base: develop
-    worktree_up: bin/worktree-up.sh
-    worktree_down: bin/worktree-down.sh
-    worktree_root: ~/Develop/.worktrees/sample
-    max_in_flight: 2
-    verify: bun test && bun run lint
-```
-
-## 4. File an Agent-Ready Issue
-
-Create a GitHub Issue in the `Todo` state with the label `ai:agent-ready` and an unassigned owner:
-
-````markdown
-### Problem & Context
-
-Add a health-check endpoint to the API server.
-
-### Acceptance Criteria
-
-- [ ] `GET /health` returns `200 OK` with `{"status":"ok"}`.
-- [ ] A regression test covers the endpoint.
-
-### Source File Pointers
-
-- `src/server.ts`
-- `test/server.test.ts`
-
-### Owned Paths
-
-- src/server.ts
-- test/server.test.ts
-
-### Verification Command
-
-```bash
-bun test test/server.test.ts && bun run lint
-```
-````
-
-## 5. Dispatch the Ticket
-
-Ask Factory which stage is ready, then apply it using a harness installed on your machine:
-
-```bash
-factory next --repo sample
-factory next --repo sample --apply --harness claude
-```
-
-`--repo` uses the repository's `name` from `config/repos.yaml`, not its `OWNER/REPO` slug.
-
-Factory will:
-
-1. Claim the issue and transition it to `In Progress` with `ai:in-progress`.
-2. Provision an isolated worktree via `bin/worktree-up.sh`.
-3. Invoke the coding agent inside its declared `Owned Paths`.
-4. Re-run the verification command independently.
-5. Push the branch and open a PR targeting your configured `base` branch.
+- [Verification as a Gate](/factory/concepts/verification/) — why the exit code is the evidence.
+- [Owned Paths](/factory/concepts/owned-paths/) — how disjoint globs make parallel dispatch safe.
+- [Configuration](/factory/getting-started/configuration/) — `max_in_flight`, `merge_ci`, escalation paths.

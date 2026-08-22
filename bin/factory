@@ -45,7 +45,7 @@ show_banner() {
   _pad "${_d}A runtime for self-improving agentic loops${_r}"
   echo '  ║                                                               ║'
   _pad "${_m}▸ Apache-2.0 · github.com/watt-mind/factory${_r}"
-  _pad "${_d}New here? Run: factory demo${_r}"
+  _pad "${_d}New here? Run: factory onboard${_r}"
   echo '  ║                                                               ║'
   echo '  ╚═══════════════════════════════════════════════════════════════╝'
   printf '%s\n' "$_r"
@@ -140,6 +140,7 @@ case "$cmd" in
     fi
     run_bun event-runtime/cli.mjs init "$@"
     ;;
+  onboard)      run_bun tools/onboard.mjs "$@" ;;
   demo)
     # Isolated event-runtime env (OPS-217) stays available behind --here /
     # --down so existing worktree-up sessions keep working. Bare `factory demo`
@@ -312,8 +313,10 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   tail          tail live daemon logs (~/.factory/run/{serve,worker,web}.log)
   init --control-plane github [--root DIR] [--repo owner/name]
                 scaffold GitHub Issues control-plane defaults
-  demo          run the bundled starter ticket (WM-799); --dry for CI.
-                Isolated event-runtime env: demo --here / demo --down
+  onboard       print the prompt that connects a repo to factory (#938);
+                paste it into your coding agent. --repo <path> fills it in
+  demo          verify a fresh clone offline — no accounts, no keys, no model.
+                --dry for CI. Isolated event-runtime env: demo --here / --down
   run           runners/run-agent.sh
   notify        durable human inbox + notify.py projection (direct fallback when serve is offline or its push fails)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)

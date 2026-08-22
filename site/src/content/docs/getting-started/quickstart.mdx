@@ -1,0 +1,104 @@
+---
+title: Connect Your Repo
+description: Point factory at a repository you already have, and get the first independently verified PR out of it
+sidebar:
+  order: 2
+---
+
+import { Code, Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+import connectRepoPrompt from "../../../../../docs/onboarding/connect-repo.md?raw";
+import { selectControlPlane } from "../../../../../tools/onboard.mjs";
+
+export const githubPrompt = selectControlPlane(connectRepoPrompt, "github");
+export const linearPrompt = selectControlPlane(connectRepoPrompt, "linear");
+
+factory connects to a repository you already have. There is nothing to migrate to and no scaffold to adopt: it reads your tracker, runs your test command, and opens pull requests against your branch.
+
+Connecting one takes a handful of decisions that are specific to _that_ repo — which branch is the integration branch, what the verification command really is, whether concurrent agents need more isolation than `git worktree` gives, which files an honest first ticket should own. An install script can only ask you or guess. Your coding agent can open the repo and look.
+
+So the fast path is a prompt.
+
+## Before you start
+
+| Requirement            | Check                                                                    |
+| :--------------------- | :----------------------------------------------------------------------- |
+| Bun >= 1.3             | `bun --version`                                                          |
+| Git >= 2.40            | `git --version`                                                          |
+| GitHub CLI             | `gh --version`, then `gh auth login -h github.com`                       |
+| A coding-agent harness | Claude Code, Codex, Gemini, Cursor, Pi, or Agy — installed and logged in |
+
+A tracker to use as the control plane. GitHub Issues is the default and needs no account beyond the one you have.
+
+## Hand it to your agent
+
+If you already have a factory checkout, the CLI prints the prompt with your repo filled in:
+
+```bash
+factory onboard --repo ~/Develop/yourapp | pbcopy
+factory onboard --repo ~/Develop/yourapp --control-plane linear   # Linear instead of GitHub Issues
+```
+
+If you do not have a checkout yet, copy the prompt below — its first steps clone factory for you.
+
+Then open your coding agent **in your repository** and paste.
+
+<Tabs syncKey="control-plane">
+  <TabItem label="GitHub Issues">
+    <Code
+      code={githubPrompt}
+      lang="markdown"
+      title="factory onboard --repo ~/Develop/yourapp"
+    />
+  </TabItem>
+  <TabItem label="Linear">
+    <Code
+      code={linearPrompt}
+      lang="markdown"
+      title="factory onboard --repo ~/Develop/yourapp --control-plane linear"
+    />
+  </TabItem>
+</Tabs>
+
+<Aside type="note" title="One copy of this prompt">
+  Both tabs are `docs/onboarding/connect-repo.md` from the repository, put
+  through the same tracker selection `factory onboard` applies. The page, the
+  CLI, and the repo cannot drift apart, because there is only one copy.
+</Aside>
+
+## Or do it by hand
+
+The prompt is a runbook, not an incantation — every step is a command you can run and a decision you can make yourself. Read it top to bottom and follow it. Nothing in it requires an agent; the agent is just faster at the survey in step 3 and more patient about the ticket template in step 8.
+
+## What "connected" actually means
+
+Five things exist afterwards. If you are debugging a connection, check them in this order.
+
+| Piece                                               | Where it lives                                           | What breaks without it                                        |
+| :-------------------------------------------------- | :------------------------------------------------------- | :------------------------------------------------------------ |
+| A control plane with the protocol labels and states | Your tracker                                             | Nothing is ever "ready"; the queue is always empty            |
+| A repo stanza                                       | `config/repos.yaml` in the factory checkout (gitignored) | factory does not know the repo exists                         |
+| The agent operating floor                           | `AGENTS.md` in **your** repo                             | Agents work without the rules that make parallel work safe    |
+| One agent-ready ticket                              | Your tracker: `Todo` + `ai:agent-ready` + unassigned     | Nothing to dispatch                                           |
+| A verification command that passes today            | The repo stanza and the ticket                           | The first dispatch fails for reasons that are not the agent's |
+
+## The exit gate
+
+<Aside type="caution" title="The connection is not done because the agent says so">
+  It is done when `factory doctor` is clean and `factory queue --repo <name>`
+  lists your ticket as dispatchable. That is the same principle the rest of
+  factory runs on: an agent's report is commentary, an exit code is evidence.
+</Aside>
+
+```bash
+factory doctor
+factory queue --repo <name>
+factory next  --repo <name>            # read-only: what would it do?
+```
+
+When `factory next` refuses, it names the gate that failed rather than guessing — see [Your First Dispatch](/factory/getting-started/first-pr/) for how to read the common refusals.
+
+## Next
+
+- [Your First Dispatch](/factory/getting-started/first-pr/) — what happens when you add `--apply`, and how to read the result.
+- [Configuration](/factory/getting-started/configuration/) — the rest of `config/repos.yaml`.
+- [Factory Doctor](/factory/getting-started/doctor/) — environment diagnostics, and how to verify a fresh clone offline.
