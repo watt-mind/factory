@@ -1,0 +1,106 @@
+name: Agent-ready task
+description: A fully specified task an agent can pick up and implement unattended
+title: "type(scope): "
+labels:
+  - source:human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form produces a ticket the factory can dispatch **without a human in the loop**.
+        Every field maps to a required section of the protocol (`docs/protocol.md` §5).
+
+        A task missing `Owned Paths` or `Verification Command` is demoted to Triage automatically —
+        those two are what make unattended work safe, not paperwork.
+
+        Filing this does **not** queue the task. A maintainer adds `ai:agent-ready` once the spec
+        holds up. Anyone can file; only maintainers can dispatch.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and pull requests for this work.
+          required: true
+        - label: This does not contain credentials, personal data, or client data.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem & Context
+      description: What is wrong or missing, and why it matters. Link related issues.
+      placeholder: |
+        `factory doctor` reports a missing GitHub CLI as "unknown error", so a
+        first-run user cannot tell a setup problem from a bug.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: >-
+        Observable, falsifiable checks. An agent will treat these as the definition of done,
+        so "works correctly" is not usable — say what output proves it.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: pointers
+    attributes:
+      label: Source File Pointers
+      description: Where to start reading. Every path must already exist on the base branch.
+      placeholder: |
+        * `orchestrator/doctor.mjs` — the check that reports the error
+        * `docs/quickstart.md` — the remediation text it should point at
+    validations:
+      required: true
+  - type: textarea
+    id: owned_paths
+    attributes:
+      label: Owned Paths
+      description: >-
+        The files an agent may modify. This is the concurrency key — the dispatcher refuses to
+        run two tasks whose sets intersect, so tight globs beat convenient ones.
+        ONE PATH PER BULLET, keeping the leading "- ". No prose, no commas, and no
+        spaces inside a path — the parser keeps only bullet lines that look like a
+        path, so a comma-separated list or a stray space is silently dropped and the
+        task then dispatches with a narrower scope than you wrote.
+        Generated output must be listed with its source.
+      value: |
+        - 
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification Command
+      description: >-
+        A command that actually runs in this repo and fails when the work is wrong.
+        The agent runs exactly this and will not open a PR on failing output.
+        Include the formatting and lint checks CI runs, or a task can pass here and still land red.
+      value: |
+        ```
+        bun test --timeout 20000 --max-concurrency=4 event-runtime/lib && bun run format:check && bun run lint
+        ```
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      description: Sets the `type:*` label. Exactly one.
+      options:
+        - feature
+        - bug
+        - maintenance
+        - docs
+        - performance
+        - security
+        - ui-ux
+        - a11y
+    validations:
+      required: true

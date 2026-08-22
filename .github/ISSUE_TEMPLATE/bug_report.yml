@@ -2,7 +2,8 @@ name: Bug report
 description: Report a reproducible problem in Factory
 title: "bug: "
 labels:
-  - bug
+  - type:bug
+  - source:human
 body:
   - type: markdown
     attributes:
