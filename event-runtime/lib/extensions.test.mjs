@@ -1534,6 +1534,26 @@ describe("contributes.harness (WM-849)", () => {
     expect(out.errors.join("\n")).toMatch(/harness\.floor .* is not a file/);
     expect(out.errors.join("\n")).toMatch(/harness\.commands .* escapes/);
   });
+
+  test("missing in-tree paths stay in-tree through a symlinked extension root", () => {
+    const dir = tempExtension((m) => {
+      m.contributes.adapters = { echo: "./adapters/nope.mjs" };
+      m.contributes.hooks = { "approve.before": "../escape.mjs" };
+      m.contributes.harness = { floor: "./missing.md" };
+    });
+    const linked = path.join(tmpDir("event-extension-link-"), "extension");
+    symlinkSync(dir, linked, "dir");
+
+    const out = validateExtensionManifest(linked);
+    expect(out.valid).toBe(false);
+    expect(out.errors.join("\n")).toMatch(
+      /adapters\.echo .* is not a file/,
+    );
+    expect(out.errors.join("\n")).toMatch(/harness\.floor .* is not a file/);
+    expect(out.errors.join("\n")).toMatch(
+      /hooks\["approve\.before"\] .* escapes the extension directory/,
+    );
+  });
 });
 
 describe("extension packages (WM-922)", () => {

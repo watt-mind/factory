@@ -243,11 +243,15 @@ export function looksLikePackageName(value) {
 }
 
 function existingRealpath(p) {
-  try {
-    return realpathSync(p);
-  } catch {
-    return path.resolve(p);
+  const missing = [];
+  let current = path.resolve(p);
+  while (!existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(p);
+    missing.unshift(path.basename(current));
+    current = parent;
   }
+  return path.join(realpathSync(current), ...missing);
 }
 
 /**
