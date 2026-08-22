@@ -41,7 +41,12 @@ import { emitDueTicks } from "./schedules.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
 import { hashJson } from "./canonical.mjs";
-import { spawnTracked } from "./test-helpers-process.mjs";
+import {
+  registerTestProcessCleanup,
+  spawnTracked,
+} from "./test-helpers-process.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);

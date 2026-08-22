@@ -29,9 +29,11 @@ import {
   spawnWorker,
   waitFor,
   registerCliTmpCleanup,
+  registerTestProcessCleanup,
 } from "./test-helpers.mjs";
 
 registerCliTmpCleanup();
+registerTestProcessCleanup(import.meta.url);
 
 const WORKER_POLICY_VERSION = policyVersion();
 

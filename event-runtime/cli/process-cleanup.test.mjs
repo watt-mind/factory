@@ -7,10 +7,13 @@ import { fileURLToPath } from "node:url";
 import {
   cleanupTrackedProcesses,
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   spawnTracked,
   trackProcessGroupForPid,
 } from "../lib/test-helpers-process.mjs";
 import { loadAdjustedTimeout } from "../lib/test-helpers-timing.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 const EVENT_RUNTIME = fileURLToPath(new URL("..", import.meta.url));
 const LIVE_STACK = fileURLToPath(

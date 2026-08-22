@@ -33,8 +33,11 @@ import { createAdapterRegistry, validateAdapterContract } from "./index.mjs";
 import { SandboxUnsupportedError } from "./sandboxed.mjs";
 import {
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 const tmpBase = tmpDir("evrt-acp-");
 const stubPath = path.join(tmpBase, "fake-acp.mjs");

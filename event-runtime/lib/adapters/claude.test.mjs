@@ -30,8 +30,11 @@ import {
 import { SandboxUnsupportedError } from "./sandboxed.mjs";
 import {
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 describe("sandbox decision (WM-313): deferred, so refused — never ignored", () => {
   const sandboxedDef = (promptPath) => ({
