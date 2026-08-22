@@ -26,7 +26,7 @@ import {
 import { handleRunArtifactClick, toggleRunPin } from "./Runs";
 import { AgentHoverCard } from "../components/AgentHoverCard";
 import { TicketText } from "../components/TicketHoverCard";
-import type { RunListItem } from "../types";
+import type { RunSummary } from "../types";
 
 /**
  * Full-page run view (`#/run/:id`, webui doc §10.11) — the trace at a
@@ -85,7 +85,7 @@ export function RunFull({
     queryFn: () => api.events(),
     ...refetchIntervals.secondary,
   });
-  const listRow = useMemo(
+  const listRow: RunSummary | null = useMemo(
     () => (listQ.data?.runs ?? []).find((r) => r.runId === runId) ?? null,
     [listQ.data, runId],
   );
@@ -96,23 +96,19 @@ export function RunFull({
         e.causationId === runId || (e.envelope as any)?.causationId === runId,
     );
   }, [eventsQ.data, runId]);
-  // The chain this run belongs to: its origin event's correlation id (falling
-  // back to the event id, as the chain emitter does), or — for a run whose
-  // origin is not in the list — any event it emitted names the same chain.
+  // The chain this run belongs to: any event it emitted names the same chain.
+  // This used to also try the list row's origin event (source/eventId), but
+  // the bounded GET /runs summary (WM-976) dropped both fields off the run
+  // row, so that join can never match — the origin-event sidebar row
+  // (RunDetailBlocks) is in the same position, and gracefully renders nothing
+  // once `listRow` no longer carries `eventId`/`eventSource`.
   const chainKey = useMemo(() => {
     const events = eventsQ.data?.events ?? [];
-    const origin = listRow
-      ? events.find(
-          (e) =>
-            e.source === listRow.eventSource && e.eventId === listRow.eventId,
-        )
-      : null;
-    if (origin) return origin.correlationId ?? origin.eventId;
     const emitted = events.find((e) => e.causationId === runId);
     return emitted ? (emitted.correlationId ?? emitted.eventId) : null;
-  }, [eventsQ.data, listRow, runId]);
+  }, [eventsQ.data, runId]);
   const runsById = useMemo(() => {
-    const map = new Map<string, RunListItem>();
+    const map = new Map<string, RunSummary>();
     for (const r of listQ.data?.runs ?? []) {
       map.set(r.runId, r);
     }
@@ -643,7 +639,10 @@ export function RunFull({
                 d={d}
                 now={now}
                 connected={connected}
-                origin={listRow}
+                // The bounded GET /runs summary (WM-976) dropped eventId/
+                // eventSource off the list row, so there is no origin event
+                // left to join here.
+                origin={null}
                 onJumpAgent={onJumpAgent}
                 onJumpEvent={onJumpEvent}
                 onCancel={() => setConfirm("cancel")}
