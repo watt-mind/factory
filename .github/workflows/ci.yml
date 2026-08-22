@@ -198,6 +198,20 @@ jobs:
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
+      - name: Initialize local config (factory init)
+        # WM-866: config/*.yaml went untracked in WM-794, so this fresh
+        # checkout has only the example fallbacks. Individual readers already
+        # fall back to config/*.example.yaml on their own, but scaffolding the
+        # local files here makes every job behave like a real operator
+        # checkout instead of depending on that fallback being wired into
+        # every current and future config consumer. `factory init` only
+        # writes gitignored config/*.yaml paths and never overwrites, so
+        # `git diff --exit-code` proves it stays a no-op against tracked
+        # files (and is safe to re-run every job, every time).
+        run: |
+          bin/factory init
+          git diff --exit-code
+
       - name: Test event-runtime library
         # Spawn-heavy suites can exceed Bun's 5s default on the shared host.
         # Explicit liveness bounds declared by individual tests still win.
@@ -304,6 +318,13 @@ jobs:
       # without it the job dies on `Cannot find module '@testing-library/react'`.
       - name: Install event-runtime/web deps
         run: cd event-runtime/web && bun install --frozen-lockfile
+
+      - name: Initialize local config (factory init)
+        # WM-866: see the same step in "Fast unit tests" — each job gets its
+        # own fresh checkout, so each needs its own scaffold.
+        run: |
+          bin/factory init
+          git diff --exit-code
 
       - name: Run timing-group tests
         shell: bash
@@ -414,6 +435,17 @@ jobs:
       # is why local `bun test event-runtime` was a false green.
       - name: Install event-runtime/web deps
         run: cd event-runtime/web && bun install --frozen-lockfile
+
+      - name: Initialize local config (factory init)
+        # WM-866: see the same step in "Fast unit tests" — each job gets its
+        # own fresh checkout, so each needs its own scaffold. Full
+        # verification also runs orchestrator/deploy commands (Supervisor
+        # lists jobs, Schedule renders match deploy/launchd) that read
+        # config/*.yaml, so this job needs the scaffold in place before those
+        # steps too.
+        run: |
+          bin/factory init
+          git diff --exit-code
 
       # WM-607: root JS + event-runtime/web TSX now lint via eslint.config.mjs.
       # --max-warnings pins the current warning count so it can only shrink;

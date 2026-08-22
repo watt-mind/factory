@@ -96,6 +96,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         github: "watt-mind/dispatchable",
         team: "CLNT",
         project: null,
+        controlPlane: null,
         base: "develop",
         deployBranch: "master",
         reportOnly: false,

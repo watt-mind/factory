@@ -74,6 +74,15 @@ already exist are left untouched, including their colour and description, so
 re-running is safe and reports what it created versus what was already there.
 Add `--dry-run` to see the plan without writing anything.
 
+On a **multi-repo `config/repos.yaml`** (more than one entry), this command
+only binds the `--repo` you named: it sets `control_plane: github` on that
+one repos.yaml entry and writes `controlPlane.github` in `policy.yaml`, but
+leaves `controlPlane.kind` — the workspace-wide default every repo without
+its own `control_plane:` inherits — untouched (WM-1046). A root with 0-1
+repo entries has nothing else to move, so it still sets `kind: github` there,
+same as before. To move the workspace default deliberately, pass `--global`;
+it prints which repos that would move, by name, before writing.
+
 Provisioning is not fatal: if `gh` is unauthenticated or offline, the policy
 file is still written, the command still exits 0, and it prints the exact
 command to re-run once you have credentials. Scaffolding config before
