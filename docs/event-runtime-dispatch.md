@@ -95,6 +95,64 @@ asymmetry collapses when per-agent Linear identities land (OPS-40); until
 then it is stated here so nobody "fixes" either side to match the other. See
 §9.
 
+### Trusted-author and body-hash-pin gates (github plane, GH-879)
+
+**Decision.** On the github control plane the factory's control plane is a
+public repository: `Todo` + `ai:agent-ready` + unassigned keeps stranger-filed
+issues out only until someone with triage permission labels one, and it
+covers nothing after that label is applied. An issue body is executable
+instructions to the factory — the Verification Command runs on the runner,
+Owned Paths scopes which files get touched — so a plausible outside issue
+labeled by a hurried maintainer, or an author editing the body **after**
+labeling, is command injection into a dispatch worktree. Dispatch admission
+(`worktreeDispatchAutoEligibility` in `event-runtime/lib/planner.mjs`) closes
+both windows with two checks, applied only when the ticket carries
+`controlPlaneKind: "github"` — Linear and memory tickets never set that field
+and skip both checks entirely, unaffected.
+
+1. **Trusted-author gate.** Refuses `ticket_untrusted_author` unless BOTH the
+   issue's original `authorAssociation` and the association of whoever made
+   the most recent body edit are `OWNER`, `MEMBER`, or `COLLABORATOR`
+   (`event-runtime/lib/triage.mjs`'s `isTrustedAssociation`). An issue never
+   edited since creation has the author as its own last editor — no extra
+   request. An edit by someone else is resolved via the repo's collaborator
+   permission (`admin`/`maintain`/`write` reads as trusted-equivalent
+   `COLLABORATOR`; anything weaker, or unfetchable — including a ghost/deleted
+   editor account — resolves to `null` and **fails closed**, never open).
+   Reading a repo's edit history needs the same write-level `gh` token the
+   dispatcher already needs to label/comment/transition that issue, so an
+   admission run that can act on a ticket can also see whether its body was
+   edited.
+
+2. **Body-hash pin.** When triage-apply's `label-agent-ready` action (or any
+   other `transition`/`setLabels` call) adds `ai:agent-ready`, the github
+   control plane stamps an issue comment with the current body's content hash
+   — reusing the same `hashJson` convention as every other `descriptionHash`
+   in this runtime — as a marker: `<!-- factory:ready-pin sha256:... -->`.
+   Admission recomputes the hash from the live body and refuses
+   `ticket_body_changed_since_ready` on a mismatch. **Re-labeling is the
+   documented refresh path**: applying `ai:agent-ready` again (even if it was
+   already present) stamps a fresh pin against whatever the body reads at
+   that moment, which is how a legitimate maintainer edit after triage gets
+   re-admitted. A ticket with **no** pin at all (labeled before this gate
+   shipped, or through a path that predates it) is not itself a refusal —
+   only a _mismatched_ pin proves tampering — so rollout does not strand
+   every already-ready ticket.
+
+Both checks live inside the one shared admission function every dispatch path
+funnels through (automatic chain approval and operator-injected dispatch
+alike), so there is no operator bypass — the point is stopping bad-actor
+_content_, not bad-actor _operators_.
+
+**Rejected: a verification-command allowlist.** Explicitly deferred
+(operator decision 2026-08-22, "operator-approved 1+2" only). Vetting a
+proposed Verification Command against a safe-command grammar is a much larger
+surface — arbitrary shell quoting, path traversal inside otherwise-innocuous
+test invocations — and these two gates already remove the two paths a
+stranger has to get _content_ into a ticket in the first place: they can't
+author a trusted-looking issue, and they can't edit one after it is trusted
+and pinned.
+
 ### Per-ticket model tier
 
 A `factory.dispatch.requested` run may override the dispatch agent's default
