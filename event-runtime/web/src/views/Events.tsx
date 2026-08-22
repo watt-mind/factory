@@ -39,7 +39,7 @@ import type {
   AdmittedEvent,
   EventFocus,
   Proposal,
-  RunListItem,
+  RunSummary,
 } from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
@@ -258,18 +258,18 @@ export function decisionOf(
   e: AdmittedEvent,
   proposalsById: ReadonlyMap<string, Proposal>,
   proposalsByEvent: ReadonlyMap<string, Proposal>,
-  runsById: ReadonlyMap<string, RunListItem>,
+  runsById: ReadonlyMap<string, RunSummary>,
 ): EventDecision | null {
   // A noop proposal can point at the *blocking* run (`duplicate_run`,
   // `ticket_dispatch_already_live`); only a run planned from this very event
-  // makes the event's decision `refused`.
+  // makes the event's decision `refused`. `e.runId` already names the run
+  // this event planned, so that lookup alone establishes the link — the
+  // bounded GET /runs summary (WM-976) dropped eventSource/eventId/reasonCode
+  // off the run row, so the reason text is not available here; open the run
+  // for that.
   const run = e.runId ? runsById.get(e.runId) : undefined;
-  if (
-    run?.state === "REFUSED" &&
-    run.eventSource === e.source &&
-    run.eventId === e.eventId
-  )
-    return { outcome: "refused", status: null, reason: run.reasonCode };
+  if (run?.state === "REFUSED")
+    return { outcome: "refused", status: null, reason: null };
   const proposal =
     (e.proposalId ? proposalsById.get(e.proposalId) : undefined) ??
     proposalsByEvent.get(keyOf(e));
@@ -495,17 +495,9 @@ export function Events({
       const prev = byEvent.get(k);
       if (!prev || prev.created_at < p.created_at) byEvent.set(k, p);
     }
-    const runsById = new Map<string, RunListItem>();
-    // Causation fan-out (WM-702): the runs an event went on to plan are the
-    // event's children in the chain DAG, one hop down.
-    const runsByEvent = new Map<string, number>();
-    for (const r of runsQ.data?.runs ?? []) {
-      runsById.set(r.runId, r);
-      if (!r.eventSource || !r.eventId) continue;
-      const k = `${r.eventSource}:${r.eventId}`;
-      runsByEvent.set(k, (runsByEvent.get(k) ?? 0) + 1);
-    }
-    return { byId, byEvent, runsById, runsByEvent };
+    const runsById = new Map<string, RunSummary>();
+    for (const r of runsQ.data?.runs ?? []) runsById.set(r.runId, r);
+    return { byId, byEvent, runsById };
   }, [proposalsQ.data, runsQ.data]);
   const decisionFor = (e: AdmittedEvent) =>
     decisionOf(e, decisions.byId, decisions.byEvent, decisions.runsById);
@@ -1243,7 +1235,11 @@ export function Events({
                 const decisionTitle = decisionText(decision);
                 const isSelected = keyOf(e) === selectedKey;
                 const causedBy = e.causationId ?? null;
-                const fanOut = decisions.runsByEvent.get(keyOf(e)) ?? 0;
+                // The bounded GET /runs summary (WM-976) dropped the run's
+                // origin event id, so a multi-run count can no longer be
+                // joined back to this event — only whether the event's own
+                // `runId` names a run still in the list.
+                const fanOut = e.runId && decisions.runsById.has(e.runId) ? 1 : 0;
                 const chainId = chainKeyOfEvent(e);
                 const nodeId = eventNodeId(e.source, e.eventId);
                 return (

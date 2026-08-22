@@ -1124,7 +1124,7 @@ describe("Planner decisions explain themselves (WM-594)", () => {
     });
   });
 
-  test("a planned event whose run was refused reads `refused · Needs human`", async () => {
+  test("a planned event whose run was refused reads `refused`, without a reason the bounded GET /runs summary no longer carries (WM-982)", async () => {
     await withApi(apiWith(), async () => {
       const r = renderEvents({
         focusEvent: { source: "linear", eventId: "evt_planned_1" },
@@ -1135,14 +1135,14 @@ describe("Planner decisions explain themselves (WM-594)", () => {
         return el as HTMLElement;
       });
       expect(row.textContent).toContain("refused");
-      expect(row.textContent).toContain("Needs human");
+      expect(row.textContent).not.toContain("Needs human");
       // The list badge for that row carries the same answer as its tooltip.
       const cell = r.container
         .querySelector('td[title="evt_planned_1"]')!
         .closest("tr")!;
       expect(
         cell.querySelector('[data-decision="refused"]')?.getAttribute("title"),
-      ).toBe("refused · Needs human\nneeds_human");
+      ).toBe("refused");
     });
   });
 
@@ -1177,15 +1177,16 @@ describe("Planner decisions explain themselves (WM-594)", () => {
           r.container.querySelector('td[title="evt_admitted_1"]'),
         ).toBeNull();
       });
-      // The refused run's reason code is a reason too.
+      // A refused run's reason code used to be searchable the same way, but
+      // the bounded GET /runs summary (WM-976/WM-982) dropped reasonCode off
+      // the run row, so that join can no longer surface it as a reason.
       act(() => {
         changeInput(filterInput, "reason:needs_human");
       });
       await waitFor(() => {
         expect(
           r.container.querySelector('td[title="evt_planned_1"]'),
-        ).toBeTruthy();
-        expect(r.container.querySelector('td[title="evt_noop_1"]')).toBeNull();
+        ).toBeNull();
       });
     });
   });
@@ -1226,23 +1227,21 @@ describe("Events long-list window (WM-563)", () => {
 // One-hop causation, read off the row itself (WM-702): `↳` for the run that
 // emitted this event, `→ N` for the runs it went on to plan, both landing on
 // the chain trace with this event already selected.
+//
+// The bounded GET /runs summary (WM-976 / WM-982) dropped the run's origin
+// event id, so fan-out can no longer be a count of every run whose
+// eventSource/eventId matched this event — it can only reflect whether this
+// event's own `runId` still resolves in the run list (0 or 1).
 describe("Events causation glyphs and hover card (WM-702)", () => {
   const derived = stubEvent("evt_derived", "planned", {
     correlationId: "corr_1001",
     causationId: "run_parent",
+    runId: "run_child_a",
   });
 
   const plannedRuns = [
-    createRunListItemFixture({
-      runId: "run_child_a",
-      eventSource: "github",
-      eventId: "evt_derived",
-    }),
-    createRunListItemFixture({
-      runId: "run_child_b",
-      eventSource: "github",
-      eventId: "evt_derived",
-    }),
+    createRunListItemFixture({ runId: "run_child_a" }),
+    createRunListItemFixture({ runId: "run_child_b" }),
   ];
 
   function eventCell(container: HTMLElement, eventId: string): HTMLElement {
@@ -1272,8 +1271,8 @@ describe("Events causation glyphs and hover card (WM-702)", () => {
           "#/chain/corr_1001/event%3Agithub%3Aevt_derived",
         );
         expect(link.textContent).toContain("↳");
-        // Two runs were planned from this event — the fan-out the chain shows.
-        await waitFor(() => expect(link.textContent).toContain("→ 2"));
+        // This event's own runId resolves in the run list — fan-out is 1.
+        await waitFor(() => expect(link.textContent).toContain("→ 1"));
 
         // Following the chain must not also select the row underneath it.
         fireEvent.click(link);

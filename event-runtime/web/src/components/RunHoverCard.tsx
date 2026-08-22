@@ -232,7 +232,9 @@ export function RunHoverCard({
             </HoverCardRow>
 
             <HoverCardRow label="Attempts">
-              {run.attempts}/{run.maxAttempts}
+              {run.maxAttempts != null
+                ? `${run.attempts}/${run.maxAttempts}`
+                : run.attempts}
             </HoverCardRow>
 
             <HoverCardRow label="Output">
