@@ -3137,7 +3137,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       expect(claimCalls).toBe(0);
     } finally {
       releaseClaimLock(supervisorLock);
-      if (previousEventHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      if (previousEventHome === undefined)
+        delete process.env.FACTORY_EVENT_HOME;
       else process.env.FACTORY_EVENT_HOME = previousEventHome;
       if (previousLocksDir === undefined) delete process.env.FACTORY_LOCKS_DIR;
       else process.env.FACTORY_LOCKS_DIR = previousLocksDir;
