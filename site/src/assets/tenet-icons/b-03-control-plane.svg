@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="b03-title b03-desc"
+>
+  <title id="b03-title">Pluggable control plane rail</title>
+  <desc id="b03-desc">
+    A horizontal main rail with two vertical ports docking from above and below
+    onto a teal control span.
+  </desc>
+  <path
+    d="M 24 80 H 136"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 64 40 V 80"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 96 120 V 80"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 64 80 H 96"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+</svg>

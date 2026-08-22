@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="a04-title a04-desc"
+>
+  <title id="a04-title">Multi-harness fan-out</title>
+  <desc id="a04-desc">
+    A teal input feeds a junction from which three chamfered lanes run out to
+    the right.
+  </desc>
+  <path
+    d="M 28 80 H 64"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 64 80 V 60 L 80 44 H 128"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 64 80 H 128"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 64 80 V 100 L 80 116 H 128"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

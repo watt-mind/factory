@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The Factory loop lifecycle</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Plus+Jakarta+Sans:wght@500;600;700;800&amp;display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      :root {
+        color-scheme: light dark;
+        --paper: oklch(98% 0.004 178);
+        --ink: oklch(18.77% 0.01139 175.67);
+        --muted: oklch(39.325% 0.01702 185.19);
+        --soft: oklch(55% 0.018 178);
+        --accent: oklch(57% 0.11 182.52);
+        --accent-tint: oklch(92% 0.04 182.52);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.2);
+        --display: "Plus Jakarta Sans", system-ui, sans-serif;
+        --sans: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --paper: oklch(18.77% 0.01139 175.67);
+          --ink: oklch(91.268% 0.00852 168.74);
+          --muted: oklch(82.637% 0.01726 178.17);
+          --soft: oklch(65.329% 0.01821 177.96);
+          --accent: oklch(81.137% 0.12259 182.52);
+          --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+          --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+        }
+      }
+
+      :root[data-theme="dark"] {
+        --paper: oklch(18.77% 0.01139 175.67);
+        --ink: oklch(91.268% 0.00852 168.74);
+        --muted: oklch(82.637% 0.01726 178.17);
+        --soft: oklch(65.329% 0.01821 177.96);
+        --accent: oklch(81.137% 0.12259 182.52);
+        --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        padding: 32px 40px;
+        background-color: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+      }
+
+      .frame {
+        width: 100%;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font: 500 8px var(--mono);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        color: var(--ink);
+        font: 700 28px/1.12 var(--display);
+        letter-spacing: -0.035em;
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: calc(100vh - 112px);
+      }
+
+      .route,
+      .recovery-route {
+        fill: none;
+        stroke: var(--muted);
+        stroke-width: 1.4;
+      }
+
+      .recovery-route {
+        stroke: var(--soft);
+        stroke-dasharray: 6 5;
+      }
+
+      .state {
+        fill: var(--paper);
+        stroke: var(--ink);
+        stroke-width: 1.2;
+      }
+
+      .state.focal {
+        fill: var(--accent-tint);
+        stroke: var(--accent);
+        stroke-width: 1.5;
+      }
+
+      .recovery {
+        fill: var(--paper);
+        stroke: var(--soft);
+        stroke-width: 1.2;
+        stroke-dasharray: 6 4;
+      }
+
+      .state-name {
+        fill: var(--ink);
+        font: 600 18px var(--sans);
+        text-anchor: middle;
+      }
+
+      .state-name.focal {
+        fill: var(--accent);
+      }
+
+      .state-detail {
+        fill: var(--soft);
+        font: 400 11px var(--mono);
+        text-anchor: middle;
+      }
+
+      .transition {
+        fill: var(--muted);
+        font: 500 11px var(--mono);
+        text-anchor: middle;
+      }
+
+      .transition.focal {
+        fill: var(--accent);
+      }
+
+      .start-dot {
+        fill: var(--ink);
+      }
+
+      .end-ring {
+        fill: var(--paper);
+        stroke: var(--accent);
+        stroke-width: 2;
+      }
+
+      .end-dot {
+        fill: var(--accent);
+      }
+
+      @media (max-width: 700px) {
+        body {
+          padding: 24px;
+        }
+
+        h1 {
+          font-size: 22px;
+        }
+
+        svg {
+          height: calc(100vh - 96px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="frame">
+      <p class="eyebrow">State machine · Factory</p>
+      <h1>Four gates move a ticket from intake to durable completion</h1>
+      <svg
+        viewBox="0 0 1120 620"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-labelledby="loop-lifecycle-title loop-lifecycle-desc"
+      >
+        <title id="loop-lifecycle-title">The Factory loop lifecycle</title>
+        <desc id="loop-lifecycle-desc">
+          A ticket moves from triage to agent-ready, then to an isolated
+          worktree, a verified pull request, and Done. The reaper returns failed
+          or stale work to the ready state while preserving useful evidence.
+        </desc>
+        <defs>
+          <marker
+            id="loop-arrow"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+        </defs>
+
+        <!-- Connectors are drawn before states so every route stays behind nodes. -->
+        <path class="route" d="M72 230 H112" marker-end="url(#loop-arrow)" />
+        <path class="route" d="M288 230 H328" marker-end="url(#loop-arrow)" />
+        <path class="route" d="M504 230 H544" marker-end="url(#loop-arrow)" />
+        <path class="route" d="M720 230 H760" marker-end="url(#loop-arrow)" />
+        <path class="route" d="M936 230 H1024" marker-end="url(#loop-arrow)" />
+
+        <path
+          class="recovery-route"
+          d="M632 278 V376 H520 V412"
+          marker-end="url(#loop-arrow)"
+        />
+        <path
+          class="recovery-route"
+          d="M848 278 V376 H696"
+          marker-end="url(#loop-arrow)"
+        />
+        <path
+          class="recovery-route"
+          d="M432 412 V344 H416 V278"
+          marker-end="url(#loop-arrow)"
+        />
+
+        <text x="92" y="164" class="transition">intake</text>
+        <text x="308" y="164" class="transition">① specify</text>
+        <text x="524" y="164" class="transition">② dispatch</text>
+        <text x="740" y="164" class="transition focal">③ verify</text>
+        <text x="980" y="164" class="transition">④ review + merge</text>
+        <text x="632" y="326" class="transition">failed run</text>
+        <text x="848" y="326" class="transition">stale claim</text>
+        <text x="416" y="326" class="transition">requeue</text>
+
+        <circle class="start-dot" cx="64" cy="230" r="6" />
+
+        <rect class="state" x="112" y="182" width="176" height="96" rx="8" />
+        <text x="200" y="222" class="state-name">Triage</text>
+        <text x="200" y="246" class="state-detail">scope · paths · proof</text>
+
+        <rect class="state" x="328" y="182" width="176" height="96" rx="8" />
+        <text x="416" y="222" class="state-name">Agent-ready</text>
+        <text x="416" y="246" class="state-detail">Todo + ai:agent-ready</text>
+
+        <rect class="state" x="544" y="182" width="176" height="96" rx="8" />
+        <text x="632" y="222" class="state-name">Worktree</text>
+        <text x="632" y="246" class="state-detail">claimed + isolated</text>
+
+        <rect
+          class="state focal"
+          x="760"
+          y="182"
+          width="176"
+          height="96"
+          rx="8"
+        />
+        <text x="848" y="222" class="state-name focal">Verified PR</text>
+        <text x="848" y="246" class="state-detail">tests + CI + diff</text>
+
+        <circle class="end-ring" cx="1032" cy="230" r="9" />
+        <circle class="end-dot" cx="1032" cy="230" r="5" />
+        <text x="1070" y="226" class="state-name">Done</text>
+        <text x="1070" y="246" class="state-detail">merged + running</text>
+
+        <rect class="recovery" x="432" y="412" width="264" height="88" rx="8" />
+        <text x="564" y="450" class="state-name">Reaper recovery</text>
+        <text x="564" y="474" class="state-detail">
+          reclaim · record · preserve evidence
+        </text>
+      </svg>
+    </main>
+  </body>
+</html>

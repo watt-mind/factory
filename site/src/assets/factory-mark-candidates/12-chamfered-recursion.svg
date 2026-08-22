@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="chamfered-recursion-title chamfered-recursion-desc"
+>
+  <title id="chamfered-recursion-title">Factory chamfered recursion mark</title>
+  <desc id="chamfered-recursion-desc">
+    An open square envelope with a chamfered lower-left corner contains a
+    half-scale copy of itself; the inner envelope's exit run meets a short teal
+    gate in the outer boundary, below which the outer run leaves the figure.
+  </desc>
+  <path
+    d="M 384 242 V 90 H 160 V 258 L 232 330 H 480"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 328 242 V 166 H 216 V 250 L 252 286 H 376"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 384 242 V 322"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="butt"
+  />
+</svg>

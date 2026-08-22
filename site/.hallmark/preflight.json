@@ -1,0 +1,10 @@
+{
+  "scanned_at": "2026-08-22",
+  "project_root": "site",
+  "design_system": "design.md",
+  "framework": "Astro 7 with Starlight",
+  "fonts": ["Plus Jakarta Sans", "Inter", "JetBrains Mono"],
+  "palette": "Watt Mind OKLCH tokens",
+  "spacing": "4px named scale",
+  "motion": "restrained transform and opacity"
+}

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Factory architecture</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Plus+Jakarta+Sans:wght@500;600;700;800&amp;display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* Hallmark · genre: modern-minimal · macrostructure: Layer Stack · design-system: Watt Mind · designed-as-app */
+      /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      :root {
+        color-scheme: light dark;
+        --paper: oklch(98% 0.004 178);
+        --paper-2: oklch(95% 0.008 178);
+        --ink: oklch(18.77% 0.01139 175.67);
+        --muted: oklch(39.325% 0.01702 185.19);
+        --soft: oklch(55% 0.018 178);
+        --accent: oklch(57% 0.11 182.52);
+        --accent-tint: oklch(92% 0.04 182.52);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.2);
+        --display: "Plus Jakarta Sans", system-ui, sans-serif;
+        --sans: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --paper: oklch(18.77% 0.01139 175.67);
+          --paper-2: oklch(22.29% 0.01102 176.05);
+          --ink: oklch(91.268% 0.00852 168.74);
+          --muted: oklch(82.637% 0.01726 178.17);
+          --soft: oklch(65.329% 0.01821 177.96);
+          --accent: oklch(81.137% 0.12259 182.52);
+          --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+          --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+        }
+      }
+
+      :root[data-theme="dark"] {
+        --paper: oklch(18.77% 0.01139 175.67);
+        --paper-2: oklch(22.29% 0.01102 176.05);
+        --ink: oklch(91.268% 0.00852 168.74);
+        --muted: oklch(82.637% 0.01726 178.17);
+        --soft: oklch(65.329% 0.01821 177.96);
+        --accent: oklch(81.137% 0.12259 182.52);
+        --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        padding: 32px 40px;
+        background-color: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+      }
+
+      .frame {
+        width: 100%;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font: 500 8px var(--mono);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        color: var(--ink);
+        font: 700 28px/1.12 var(--display);
+        letter-spacing: -0.035em;
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .layer-name {
+        fill: var(--ink);
+        font: 600 18px var(--sans);
+      }
+
+      .layer-note {
+        fill: var(--muted);
+        font: 400 11px var(--mono);
+        text-anchor: end;
+      }
+
+      .layer-tag {
+        fill: var(--muted);
+        font: 500 9px var(--mono);
+        letter-spacing: 0.12em;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="frame">
+      <p class="eyebrow">Layer stack · Factory</p>
+      <h1>One control plane, many bounded execution paths</h1>
+      <svg
+        viewBox="0 0 1280 720"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-labelledby="factory-architecture-title factory-architecture-desc"
+      >
+        <title id="factory-architecture-title">Factory architecture</title>
+        <desc id="factory-architecture-desc">
+          Five stacked layers show trackers and events feeding deterministic
+          orchestration, isolated agent execution, independent verification, and
+          durable git, CI, and receipt evidence.
+        </desc>
+        <defs>
+          <marker
+            id="arrow"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+          <marker
+            id="arrow-accent"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+          <marker
+            id="arrow-link"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+        </defs>
+        <rect width="1280" height="720" fill="transparent" />
+
+        <line
+          x1="136"
+          y1="548"
+          x2="136"
+          y2="156"
+          stroke="var(--muted)"
+          stroke-width="1"
+          marker-end="url(#arrow)"
+        />
+        <text
+          x="112"
+          y="352"
+          fill="var(--muted)"
+          font-size="8"
+          font-family="var(--mono)"
+          text-anchor="middle"
+          letter-spacing="0.12em"
+          transform="rotate(-90 112 352)"
+        >
+          INTENT → EVIDENCE
+        </text>
+
+        <rect
+          x="184"
+          y="120"
+          width="912"
+          height="80"
+          rx="8"
+          fill="var(--paper-2)"
+          stroke="var(--rule)"
+          stroke-width="1"
+        />
+        <text x="208" y="152" class="layer-tag">L1 · INTAKE</text>
+        <text x="208" y="180" class="layer-name">
+          Control plane &amp; events
+        </text>
+        <text x="1064" y="168" class="layer-note">
+          GitHub Issues · Linear · schedules · webhooks
+        </text>
+
+        <rect
+          x="184"
+          y="208"
+          width="912"
+          height="80"
+          rx="8"
+          fill="var(--accent-tint)"
+          stroke="var(--accent)"
+          stroke-width="1.2"
+        />
+        <text x="208" y="240" class="layer-tag" fill="var(--accent)">
+          L2 · COORDINATION
+        </text>
+        <text x="208" y="268" class="layer-name">
+          Deterministic orchestrator
+        </text>
+        <text x="1064" y="256" class="layer-note">
+          claim · capacity · Owned Paths · approval
+        </text>
+
+        <rect
+          x="184"
+          y="296"
+          width="912"
+          height="80"
+          rx="8"
+          fill="var(--paper-2)"
+          stroke="var(--rule)"
+          stroke-width="1"
+        />
+        <text x="208" y="328" class="layer-tag">L3 · EXECUTION</text>
+        <text x="208" y="356" class="layer-name">Isolated harness workers</text>
+        <text x="1064" y="344" class="layer-note">
+          worktree · agent process · optional Gondolin VM
+        </text>
+
+        <rect
+          x="184"
+          y="384"
+          width="912"
+          height="80"
+          rx="8"
+          fill="var(--paper)"
+          stroke="var(--rule)"
+          stroke-width="1"
+        />
+        <text x="208" y="416" class="layer-tag">L4 · GATE</text>
+        <text x="208" y="444" class="layer-name">Independent verification</text>
+        <text x="1064" y="432" class="layer-note">
+          exact command · schema · CI · reviewer
+        </text>
+
+        <rect
+          x="184"
+          y="472"
+          width="912"
+          height="80"
+          rx="8"
+          fill="var(--paper-2)"
+          stroke="var(--rule)"
+          stroke-width="1"
+        />
+        <text x="208" y="504" class="layer-tag">L5 · DURABLE TRUTH</text>
+        <text x="208" y="532" class="layer-name">Git, CI &amp; receipts</text>
+        <text x="1064" y="520" class="layer-note">
+          branch · PR · checks · accepted result
+        </text>
+
+        <line x1="184" y1="584" x2="1096" y2="584" stroke="var(--rule)" />
+        <text
+          x="184"
+          y="612"
+          fill="var(--muted)"
+          font-size="8"
+          font-family="var(--mono)"
+          letter-spacing="0.16em"
+        >
+          DESIGN INVARIANT
+        </text>
+        <text
+          x="184"
+          y="640"
+          fill="var(--ink)"
+          font-size="16"
+          font-family="var(--display)"
+          font-style="italic"
+        >
+          The model proposes work; deterministic systems decide what is
+          accepted.
+        </text>
+      </svg>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="engineering-loop-title engineering-loop-desc"
+>
+  <title id="engineering-loop-title">
+    Factory engineering loop exploration
+  </title>
+  <desc id="engineering-loop-desc">
+    An infinity-shaped engineering loop with directional signals and five
+    verification nodes.
+  </desc>
+  <style>
+    .track {
+      fill: none;
+      stroke: #dde4e1;
+      stroke-width: 14;
+      stroke-linecap: square;
+      stroke-linejoin: bevel;
+    }
+    .rail {
+      fill: none;
+      stroke: #dde4e1;
+      stroke-width: 6;
+      stroke-linecap: square;
+      stroke-linejoin: bevel;
+      opacity: 0.86;
+    }
+    .cut {
+      fill: none;
+      stroke: #0e1513;
+      stroke-width: 30;
+      stroke-linecap: square;
+    }
+    .ring {
+      fill: #4fdbc8;
+      stroke: #0e1513;
+      stroke-width: 7;
+    }
+    .core {
+      fill: #003731;
+    }
+    .signal {
+      fill: #4fdbc8;
+    }
+  </style>
+  <path
+    class="track"
+    d="M76 210C76 111 185 77 254 148L390 286C449 346 564 305 564 210S449 74 390 134L250 276C181 346 76 308 76 210Z"
+  />
+  <path
+    class="rail"
+    d="M116 210C116 153 178 128 220 170L264 214M376 206L420 162C463 119 524 151 524 210S463 301 420 258L376 214"
+  />
+  <path class="cut" d="M228 288 410 106" />
+  <path class="track" d="M228 288 410 106" />
+  <path class="rail" d="m252 306 176-176" />
+  <g class="signal">
+    <path d="m151 139 20 10-18 13Z" />
+    <path d="m485 137 18 13-20 10Z" />
+    <path d="m516 263-20 9 3-22Z" />
+    <path d="m164 273-18-12 20-10Z" />
+    <path d="m300 248 16-16 7 7-16 16Z" />
+  </g>
+  <g transform="translate(104 210)">
+    <circle class="ring" r="20" />
+    <circle class="core" r="6" />
+  </g>
+  <g transform="translate(205 127)">
+    <circle class="ring" r="15" />
+    <circle class="core" r="5" />
+  </g>
+  <g transform="translate(432 126)">
+    <circle class="ring" r="20" />
+    <circle class="core" r="6" />
+  </g>
+  <g transform="translate(536 210)">
+    <circle class="ring" r="20" />
+    <circle class="core" r="6" />
+  </g>
+  <g transform="translate(431 294)">
+    <circle class="ring" r="18" />
+    <circle class="core" r="6" />
+  </g>
+</svg>

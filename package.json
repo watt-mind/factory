@@ -27,6 +27,8 @@
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "test": "bun test",
+    "docs:dev": "cd site && bun run dev",
+    "docs:build": "cd site && bun run build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },

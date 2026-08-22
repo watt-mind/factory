@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="b01-title b01-desc"
+>
+  <title id="b01-title">Isolated worktree siding</title>
+  <desc id="b01-desc">
+    A rail branching off a main line onto its own track that ends at a teal
+    stop.
+  </desc>
+  <path
+    d="M 24 104 H 136"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 44 104 L 84 64 H 112"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 120 52 V 76"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+</svg>

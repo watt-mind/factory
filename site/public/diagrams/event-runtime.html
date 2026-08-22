@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event runtime process</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Plus+Jakarta+Sans:wght@500;600;700;800&amp;display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* Hallmark · genre: modern-minimal · macrostructure: Process Flow · design-system: Watt Mind · designed-as-app */
+      /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      :root {
+        color-scheme: light dark;
+        --paper: oklch(98% 0.004 178);
+        --paper-2: oklch(95% 0.008 178);
+        --ink: oklch(18.77% 0.01139 175.67);
+        --muted: oklch(39.325% 0.01702 185.19);
+        --soft: oklch(55% 0.018 178);
+        --accent: oklch(57% 0.11 182.52);
+        --accent-tint: oklch(92% 0.04 182.52);
+        --link: oklch(57% 0.11 182.52);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.18);
+        --display: "Plus Jakarta Sans", system-ui, sans-serif;
+        --sans: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --paper: oklch(18.77% 0.01139 175.67);
+          --paper-2: oklch(22.29% 0.01102 176.05);
+          --ink: oklch(91.268% 0.00852 168.74);
+          --muted: oklch(82.637% 0.01726 178.17);
+          --soft: oklch(65.329% 0.01821 177.96);
+          --accent: oklch(81.137% 0.12259 182.52);
+          --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+          --link: oklch(80.626% 0.19482 149.26);
+          --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+        }
+      }
+
+      :root[data-theme="dark"] {
+        --paper: oklch(18.77% 0.01139 175.67);
+        --paper-2: oklch(22.29% 0.01102 176.05);
+        --ink: oklch(91.268% 0.00852 168.74);
+        --muted: oklch(82.637% 0.01726 178.17);
+        --soft: oklch(65.329% 0.01821 177.96);
+        --accent: oklch(81.137% 0.12259 182.52);
+        --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+        --link: oklch(80.626% 0.19482 149.26);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        padding: 32px 40px;
+        background-color: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+      }
+
+      .frame {
+        width: 100%;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font: 500 8px var(--mono);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        color: var(--ink);
+        font: 700 28px/1.12 var(--display);
+        letter-spacing: -0.035em;
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .node {
+        fill: var(--paper);
+        stroke: var(--ink);
+        stroke-width: 1;
+      }
+
+      .store {
+        fill: var(--paper-2);
+        stroke: var(--muted);
+      }
+
+      .focal {
+        fill: var(--accent-tint);
+        stroke: var(--accent);
+        stroke-width: 1.2;
+      }
+
+      .node-name {
+        fill: var(--ink);
+        font: 600 15px var(--sans);
+        text-anchor: middle;
+      }
+
+      .node-sub {
+        fill: var(--muted);
+        font: 400 9px var(--mono);
+        text-anchor: middle;
+      }
+
+      .tag {
+        fill: var(--soft);
+        font: 500 9px var(--mono);
+        letter-spacing: 0.1em;
+        text-anchor: middle;
+      }
+
+      .edge-label {
+        fill: var(--muted);
+        font: 400 9px var(--mono);
+        letter-spacing: 0.06em;
+        text-anchor: middle;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="frame">
+      <p class="eyebrow">Process · Event runtime</p>
+      <h1>Facts enter once; accepted results leave with evidence</h1>
+      <svg
+        viewBox="0 0 1280 720"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-labelledby="event-runtime-title event-runtime-desc"
+      >
+        <title id="event-runtime-title">Event runtime process</title>
+        <desc id="event-runtime-desc">
+          Events move from authenticated intake through deterministic planning,
+          watched approval, a leased worker, agent execution, independent
+          verification, and a transactional result outbox.
+        </desc>
+        <defs>
+          <marker
+            id="arrow"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+          <marker
+            id="arrow-accent"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+          <marker
+            id="arrow-link"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+        </defs>
+        <rect width="1280" height="720" fill="transparent" />
+
+        <rect
+          x="40"
+          y="128"
+          width="1200"
+          height="160"
+          rx="8"
+          fill="var(--paper-2)"
+          stroke="var(--rule)"
+        />
+        <rect
+          x="56"
+          y="136"
+          width="104"
+          height="20"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="108" y="151" class="tag">DECIDE</text>
+
+        <rect
+          x="40"
+          y="328"
+          width="1200"
+          height="160"
+          rx="8"
+          fill="var(--paper-2)"
+          stroke="var(--rule)"
+        />
+        <rect
+          x="56"
+          y="336"
+          width="104"
+          height="20"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="108" y="351" class="tag">EXECUTE</text>
+
+        <rect
+          x="40"
+          y="528"
+          width="1200"
+          height="104"
+          rx="8"
+          fill="var(--paper-2)"
+          stroke="var(--rule)"
+        />
+        <rect
+          x="56"
+          y="536"
+          width="104"
+          height="20"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="108" y="551" class="tag">PUBLISH</text>
+
+        <line
+          x1="320"
+          y1="208"
+          x2="400"
+          y2="208"
+          stroke="var(--muted)"
+          marker-end="url(#arrow)"
+        />
+        <line
+          x1="584"
+          y1="208"
+          x2="664"
+          y2="208"
+          stroke="var(--accent)"
+          stroke-width="1.2"
+          marker-end="url(#arrow-accent)"
+        />
+        <line
+          x1="848"
+          y1="208"
+          x2="928"
+          y2="208"
+          stroke="var(--muted)"
+          marker-end="url(#arrow)"
+        />
+        <path
+          d="M1016 248 V320 Q1016 328 1008 328 H848"
+          fill="none"
+          stroke="var(--muted)"
+          marker-end="url(#arrow)"
+        />
+        <line
+          x1="672"
+          y1="408"
+          x2="592"
+          y2="408"
+          stroke="var(--accent)"
+          stroke-width="1.2"
+          marker-end="url(#arrow-accent)"
+        />
+        <line
+          x1="416"
+          y1="408"
+          x2="336"
+          y2="408"
+          stroke="var(--muted)"
+          marker-end="url(#arrow)"
+        />
+        <path
+          d="M248 448 V520 Q248 528 256 528 H400"
+          fill="none"
+          stroke="var(--muted)"
+          marker-end="url(#arrow)"
+        />
+        <line
+          x1="584"
+          y1="580"
+          x2="664"
+          y2="580"
+          stroke="var(--link)"
+          stroke-width="1.2"
+          marker-end="url(#arrow-link)"
+        />
+
+        <rect
+          x="332"
+          y="184"
+          width="56"
+          height="16"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="360" y="196" class="edge-label">DEDUPE</text>
+        <rect
+          x="596"
+          y="184"
+          width="56"
+          height="16"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="624" y="196" class="edge-label">PLAN</text>
+        <rect
+          x="860"
+          y="184"
+          width="56"
+          height="16"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="888" y="196" class="edge-label">APPROVE</text>
+        <rect
+          x="604"
+          y="384"
+          width="56"
+          height="16"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="632" y="396" class="edge-label">RUN</text>
+        <rect
+          x="348"
+          y="384"
+          width="56"
+          height="16"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="376" y="396" class="edge-label">CHECK</text>
+        <rect
+          x="596"
+          y="556"
+          width="56"
+          height="16"
+          rx="4"
+          fill="var(--paper)"
+        />
+        <text x="624" y="568" class="edge-label">EMIT</text>
+
+        <rect class="node" x="144" y="168" width="176" height="80" rx="8" />
+        <text x="232" y="204" class="node-name">Authenticated inbox</text>
+        <text x="232" y="224" class="node-sub">persist · dedupe · ack</text>
+
+        <rect class="node" x="408" y="168" width="176" height="80" rx="8" />
+        <text x="496" y="204" class="node-name">Planner &amp; gate</text>
+        <text x="496" y="224" class="node-sub">pure policy decision</text>
+
+        <rect class="focal" x="672" y="168" width="176" height="80" rx="8" />
+        <text x="760" y="204" class="node-name">Watched proposal</text>
+        <text x="760" y="224" class="node-sub">operator or earned auto</text>
+
+        <rect class="store" x="936" y="168" width="176" height="80" rx="8" />
+        <text x="1024" y="204" class="node-name">Run queue</text>
+        <text x="1024" y="224" class="node-sub">RunSpec · policy pin</text>
+
+        <rect class="store" x="672" y="368" width="176" height="80" rx="8" />
+        <text x="760" y="404" class="node-name">Leased worker</text>
+        <text x="760" y="424" class="node-sub">attempt · fencing token</text>
+
+        <rect class="node" x="416" y="368" width="176" height="80" rx="8" />
+        <text x="504" y="404" class="node-name">Agent adapter</text>
+        <text x="504" y="424" class="node-sub">bounded workspace</text>
+
+        <rect class="node" x="160" y="368" width="176" height="80" rx="8" />
+        <text x="248" y="404" class="node-name">Verifier</text>
+        <text x="248" y="424" class="node-sub">schema · hash · evidence</text>
+
+        <rect class="store" x="408" y="548" width="176" height="64" rx="8" />
+        <text x="496" y="576" class="node-name">Accepted result</text>
+        <text x="496" y="596" class="node-sub">receipt-bound artifact</text>
+
+        <rect class="node" x="672" y="548" width="176" height="64" rx="8" />
+        <text x="760" y="576" class="node-name">Transactional outbox</text>
+        <text x="760" y="596" class="node-sub">result event · next chain</text>
+      </svg>
+    </main>
+  </body>
+</html>

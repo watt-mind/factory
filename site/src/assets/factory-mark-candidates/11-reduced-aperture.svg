@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="reduced-aperture-title reduced-aperture-desc"
+>
+  <title id="reduced-aperture-title">Factory reduced aperture mark</title>
+  <desc id="reduced-aperture-desc">
+    An open square envelope whose bottom run continues out as a teal line;
+    inside it sits a half-scale copy of the same envelope with its own exit.
+  </desc>
+  <path
+    d="M 384 266 V 98 H 160 V 322 H 384"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 384 322 H 480"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 332 226 V 150 H 212 V 270 H 348"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

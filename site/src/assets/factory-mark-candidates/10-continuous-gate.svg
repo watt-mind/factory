@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="continuous-gate-title continuous-gate-desc"
+>
+  <title id="continuous-gate-title">Factory continuous gate mark</title>
+  <desc id="continuous-gate-desc">
+    A single folded path spirals outward from a round terminus; at the point
+    where its final run crosses the outer boundary the line turns teal and
+    continues out of the figure.
+  </desc>
+  <circle cx="256" cy="210" r="16" fill="#dde4e1" />
+  <path
+    d="M 256 210 H 312 V 154 H 200 V 266 H 368 V 98 H 144 V 322 H 368"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 368 322 H 496"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+</svg>

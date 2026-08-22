@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="recursive-gate-final-title recursive-gate-final-desc"
+>
+  <title id="recursive-gate-final-title">Factory recursive gate mark</title>
+  <desc id="recursive-gate-final-desc">
+    Two nested execution envelopes closed on the right by a single teal
+    verification gate; a bounded work block emits a stem that meets the gate,
+    and one light line exits on the far side.
+  </desc>
+  <g
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path
+      d="M 416 62 H 160 A 40 40 0 0 0 120 102 V 318 A 40 40 0 0 0 160 358 H 416"
+    />
+    <path
+      d="M 368 238 V 282 A 28 28 0 0 1 340 310 H 196 A 28 28 0 0 1 168 282 V 138 A 28 28 0 0 1 196 110 H 340 A 28 28 0 0 1 368 138 V 182"
+    />
+    <path d="M 416 210 H 520" />
+  </g>
+  <rect x="232" y="178" width="64" height="64" rx="12" fill="#14b8a6" />
+  <path
+    d="M 296 210 H 416"
+    fill="none"
+    stroke="#14b8a6"
+    stroke-width="16"
+    stroke-linecap="butt"
+  />
+  <path
+    d="M 416 54 V 366"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+</svg>

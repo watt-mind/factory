@@ -2,8 +2,11 @@
 node_modules/
 dist/
 event-runtime/web/dist/
+site/dist/
+site/.astro/
 graphify-out/
 bun.lock
 event-runtime/web/bun.lock
+site/bun.lock
 deploy/launchd/
 .factory/
