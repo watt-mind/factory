@@ -18,6 +18,7 @@ import {
   updatePins,
 } from "./registry.mjs";
 import { computeDefHash } from "./receipts.mjs";
+import { updateHarnessPins } from "./pins.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry() {
@@ -1146,5 +1147,82 @@ describe("registry", () => {
     expect(registry.anomalies.join("\n")).toMatch(
       /placeholder "\{\/missing\}"/,
     );
+  });
+});
+
+describe("loadRegistry harnessRoots pin validation (WM-855)", () => {
+  function harnessRoot(root) {
+    const dir = path.join(root, "harness");
+    mkdirSync(path.join(dir, "commands"), { recursive: true });
+    writeFileSync(path.join(dir, "floor.md"), "floor v1\n");
+    writeFileSync(path.join(dir, "commands", "hello.md"), "# hello\n");
+    return {
+      dir,
+      name: "factory/core",
+      version: "0.1.0",
+      builtin: true,
+      origin: "builtin",
+      plugin: "core",
+      prefix: null,
+      floor: path.join(dir, "floor.md"),
+      commands: path.join(dir, "commands"),
+      skills: null,
+      subagents: null,
+    };
+  }
+
+  test("passes through unvalidated with no harnessRoots (default)", () => {
+    expect(() => loadRegistry({ packRoots: [] })).not.toThrow();
+  });
+
+  test("loads when harness content matches its pin", () => {
+    const root = tempRegistry();
+    const harness = harnessRoot(root);
+    updateHarnessPins({
+      roots: [harness],
+      file: path.join(root, "pins.json"),
+    });
+    expect(() =>
+      loadRegistry({
+        root,
+        packRoots: [],
+        modelTiers: PI_TIERS,
+        harnessRoots: [harness],
+      }),
+    ).not.toThrow();
+  });
+
+  test("throws RegistryError when a harness root has no pin", () => {
+    const root = tempRegistry();
+    const harness = harnessRoot(root);
+    const load = () =>
+      loadRegistry({
+        root,
+        packRoots: [],
+        modelTiers: PI_TIERS,
+        harnessRoots: [harness],
+      });
+    expect(load).toThrow(RegistryError);
+    expect(load).toThrow(
+      /has no pin — run: bun event-runtime\/cli\.mjs update-pins/,
+    );
+  });
+
+  test("throws RegistryError when harness content drifts from its pin", () => {
+    const root = tempRegistry();
+    const harness = harnessRoot(root);
+    updateHarnessPins({
+      roots: [harness],
+      file: path.join(root, "pins.json"),
+    });
+    writeFileSync(path.join(harness.commands, "hello.md"), "# hello v2\n");
+    expect(() =>
+      loadRegistry({
+        root,
+        packRoots: [],
+        modelTiers: PI_TIERS,
+        harnessRoots: [harness],
+      }),
+    ).toThrow(/does not match pin/);
   });
 });
