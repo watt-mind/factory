@@ -105,6 +105,9 @@ function triagePlanScan({ action, detail }) {
         action,
         reason: `fake: chain outcome ${action}`,
         ...(detail ? { detail } : {}),
+        ...(action === "label-agent-ready"
+          ? { tier: "standard", tierReason: "fake: default sizing" }
+          : {}),
       };
       writeFileSync(
         path.join(workspaceDir, "result.json"),
@@ -225,6 +228,8 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
           issueId: "CLNT-999",
           action: "label-agent-ready",
           reason: "fake: fully specified",
+          tier: "standard",
+          tierReason: "fake: default sizing",
         },
       ],
     });
@@ -538,6 +543,27 @@ describe("model-tier sizing on promotion (WM-696)", () => {
         .argv;
     expect(argv).toContain("ai:agent-ready");
     expect(argv).toContain("tier:{tier}");
+  });
+
+  test("the real triage-apply@1 definition removes all three tier:* values before adding one — a ticket can never end up with two", () => {
+    const argv =
+      registry.agents.get("triage-apply@1").actionRegistry["label-agent-ready"]
+        .argv;
+    const removeIndices = argv
+      .map((v, i) => (v === "--remove" ? i : -1))
+      .filter((i) => i >= 0);
+    const removedValues = removeIndices.map((i) => argv[i + 1]);
+    expect(removedValues.sort()).toEqual([
+      "tier:light",
+      "tier:standard",
+      "tier:strong",
+    ]);
+    // The --add tier:{tier} must come after every --remove of a tier value,
+    // so resolveLabelIds' drop-then-add order (labels.mjs) always leaves
+    // exactly the proposed tier present, including when it re-adds the same
+    // value it just removed.
+    const addTierIndex = argv.indexOf("tier:{tier}");
+    expect(addTierIndex).toBeGreaterThan(Math.max(...removeIndices));
   });
 
   test("label-agent-ready substitutes the approved tier into the applied label", async () => {

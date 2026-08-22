@@ -172,8 +172,12 @@ describe("registry", () => {
     // Regenerated (WM-1006 cutover: ticket patterns accept GitHub owner/repo#N ids; schemas re-pinned)
     // Regenerated (#846/WM-696): triage-scan/triage-apply admit tier/tierReason
     // for model-tier sizing on promotion; both agent definitions are registry inputs.
+    // Regenerated (#846 fix round): label-agent-ready removes all three
+    // tier:* values before adding the proposed one (triage-apply.json is a
+    // registry input); the schema's tier/tierReason requirement was
+    // reverted (the runtime's closed validator has no allOf/if/then).
     const expected =
-      "sha256:c70872ae6a991e32f2e5e388cb6dd685767a7e2869fd0faa23c300dc242709e7";
+      "sha256:150c9a7ad59111642fe3b8fa443a45412969377247309d048e825f78ba88332f";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
