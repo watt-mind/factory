@@ -25,6 +25,8 @@
         "tier:strong",
         "--add",
         "tier:{tier}",
+        "--comment",
+        "{tierReason}",
         "--repo",
         "{repo}"
       ]
@@ -112,8 +114,8 @@
   },
   "mutating": true,
   "pins": {
-    "agents/triage-apply.md": "sha256:1546e127ffd3749640599354e4fe60972c01497a7a51458724667ad7b1021f48",
-    "schemas/triage-apply.input.json": "sha256:e765ea02f17264c3c2ac0b938557a1bdf438f510d07511c1f883348c2a434133",
+    "agents/triage-apply.md": "sha256:379b340925c5e917d59c8c13cfff1fac05e4cf6c6260885b7c067d44eb359315",
+    "schemas/triage-apply.input.json": "sha256:85934114723ea03556ce593ec023bbdf4fee72794a4177e9b2c2b215db2127d9",
     "schemas/triage-applied.output.json": "sha256:ee71d56edb6f4ae96375a37e4d80e2512dd2702fac935268c0439627f561b94b"
   }
 }

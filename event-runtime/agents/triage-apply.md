@@ -8,7 +8,7 @@ Registered actions — each resolves to one fixed, non-shell-interpolated argv:
 
 | action id           | effect                                                                                                                                                                                                                                                                                                                                                                                  |
 | :------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `label-agent-ready` | `state {issueId} "Todo" --add ai:agent-ready --add tier:{tier}` — the full make-dispatchable transition (the protocol's `Todo` + `ai:agent-ready`), plus the model-tier sizing label. `tier` is required on every `label-agent-ready` item; a missing value fails the whole plan closed (item resolution happens before any item executes) rather than promoting a ticket with no tier. |
+| `label-agent-ready` | `state {issueId} "Todo" --add ai:agent-ready --add tier:{tier} --comment {tierReason}` — the full make-dispatchable transition (the protocol's `Todo` + `ai:agent-ready`), plus the model-tier sizing label and its rationale as the promotion comment. `tier` is required on every `label-agent-ready` item; a missing value fails the whole plan closed (item resolution happens before any item executes) rather than promoting a ticket with no tier. |
 | `move-to-todo`      | `state {issueId} "Todo"`                                                                                                                                                                                                                                                                                                                                                                |
 | `write-detail`      | `detail {issueId} "<detail>"` — idempotently append approved missing sections; no state or label change                                                                                                                                                                                                                                                                                 |
 | `needs-detail`      | `comment {issueId} "<reason>"` — tells the human exactly what is missing                                                                                                                                                                                                                                                                                                                |
@@ -30,9 +30,7 @@ Every action is additive or a forward state move; nothing here closes,
 deletes, or reassigns an issue. An action ID outside this table refuses
 before applying anything — including the legitimate items alongside it.
 
-`tierReason` is not posted as a ticket comment: this executor is one fixed,
-non-shell argv per action, and there is no verb that safely transitions state
-_and_ posts arbitrary free text in a single call (free text can't be
-shell-interpolated into a compound command without reopening injection risk).
-The tier rationale is instead folded into the item's `reason`, which is kept
-for the audit trail alongside every other action here.
+`tierReason` is passed as its own argv element to `state --comment`, which
+posts it only after the transition succeeds. The actions adapter substitutes
+argv elements directly, so the rationale is never shell-interpolated; it also
+remains in the item for the audit trail.

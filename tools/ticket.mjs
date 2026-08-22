@@ -648,13 +648,14 @@ const VERBS = {
     const wanted = positional[1];
     const add = flagAll("add"),
       remove = flagAll("remove");
+    const comment = flag("comment");
     if (!key)
       throw new Error(
-        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label]`,
+        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
       );
     if (!wanted && !add.length && !remove.length && !has("unassign")) {
       throw new Error(
-        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label]`,
+        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
       );
     }
     const cp = controlPlane();
@@ -674,6 +675,7 @@ const VERBS = {
       remove,
       unassign: has("unassign"),
     });
+    if (comment?.trim()) await cp.comment(key, comment);
     const msg = wanted ? `${key} -> ${wanted}` : `${key} labels updated`;
     out(
       { ok: true, identifier: key, ...(wanted ? { state: wanted } : {}) },

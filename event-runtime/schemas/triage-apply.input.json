@@ -45,7 +45,7 @@
           "tierReason": {
             "type": "string",
             "minLength": 1,
-            "description": "For label-agent-ready only: one-line justification for the tier, kept for the audit trail"
+            "description": "For label-agent-ready only: one-line justification for the tier, posted as the promotion comment after the state transition succeeds and retained for the audit trail"
           },
           "detail": {
             "type": "string",
