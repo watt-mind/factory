@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Factory control-plane CLI — cwd-independent dispatch to orchestrator/tools scripts.
 #
-#   factory linear get CLNT-616
+#   factory ticket get CLNT-616
 #   factory queue --repo bj29
 #   factory next --repo bj29 --apply
 #   factory run --repo bj29 --command factory-triage --read-only
@@ -63,7 +63,14 @@ run_sh() {
 }
 
 case "$cmd" in
-  linear)       run_bun tools/linear.mjs "$@" ;;
+  ticket)       run_bun tools/ticket.mjs "$@" ;;
+  # Deprecated alias (WM-1026). Kept because agent prompts, shared commands and
+  # every emitted harness bundle still say `factory linear`; those are swept
+  # separately, and breaking them here would stop dispatch for one commit.
+  linear)
+    echo "factory linear is deprecated — use 'factory ticket'" >&2
+    run_bun tools/ticket.mjs "$@"
+    ;;
   queue)        run_bun orchestrator/queue.mjs "$@" ;;
   next)         run_bun orchestrator/next.mjs "$@" ;;
   state)        run_bun orchestrator/state.mjs "$@" ;;
@@ -267,7 +274,8 @@ case "$cmd" in
 factory — control plane (FACTORY_ROOT=$ROOT)
 
   init          scaffold config/*.yaml from tracked examples (never overwrites)
-  linear        tools/linear.mjs
+  ticket        tools/ticket.mjs
+  linear        tools/ticket.mjs (deprecated alias for 'ticket')
   queue         orchestrator/queue.mjs
   next          orchestrator/next.mjs
   state         orchestrator/state.mjs
