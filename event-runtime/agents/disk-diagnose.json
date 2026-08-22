@@ -20,7 +20,7 @@
   },
   "mutating": false,
   "pins": {
-    "agents/disk-diagnose.md": "sha256:8454c1519b8992f2b6e948b3f6ba147807d2ac49c7e192c431647e5e9ca37c43",
+    "agents/disk-diagnose.md": "sha256:2ad9598e1a2e7dad9a508942e65902e141bdd04842df0d95a3801ddcbcfd3007",
     "schemas/disk-diagnose.input.json": "sha256:b14b2a1cb4ffbc5f5666a1c56ef155fb048a421a47050a5623c11ab09b204e90",
     "schemas/disk-diagnose.output.json": "sha256:c5f6d4a93935d0f0a1ba7e3bc50d97a3f688afd78d0a4f373345a053780ac7b2"
   }

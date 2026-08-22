@@ -9,10 +9,10 @@ directory.
 
 ## Host access (allowlist — nothing else)
 
-| host | ssh target              |
-| :--- | :---------------------- |
-| lab  | `root@100.110.36.96`    |
-| web  | `hdkiller@100.93.81.56` |
+The host allowlist is instance-local and intentionally not tracked in this
+repository. The operator configures `hosts` on the `disk-remediate` definition
+via an instance-local override (see `config/policy.example.yaml`); until
+configured, runs refuse with `host not in allowlist`.
 
 ## Method — read-only commands only
 

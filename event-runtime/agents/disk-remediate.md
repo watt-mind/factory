@@ -11,7 +11,9 @@ Registered actions (the closed registry — nothing else can execute):
 | `docker-system-prune`  | `sudo docker system prune -af`     |
 | `journal-vacuum-3d`    | `sudo journalctl --vacuum-time=3d` |
 
-Host allowlist: `lab` (`root@100.110.36.96`), `web` (`hdkiller@100.93.81.56`).
+Host allowlist: instance-local, intentionally empty in the tracked definition —
+the operator supplies `hosts` via an instance-local override (see
+`config/policy.example.yaml`). An unconfigured instance refuses before executing.
 
 The adapter probes `df --output=used -B1 <mount>` before and after, records
 raw probe output as evidence, and the verifier **recomputes** reclaimed bytes
