@@ -682,6 +682,53 @@ describe("RunFull causal follow-up events and chained runs (WM-420)", () => {
   });
 });
 
+describe("RunFull run-list join against the bounded GET /runs summary (WM-982)", () => {
+  test("still resolves the chain via an emitted event's causationId when the list row carries no eventId/eventSource", async () => {
+    const runId = "run_bounded_chain_test";
+    const detail = createRunDetailFixture({
+      run: { runId, state: "COMPLETED" } as RunDetail["run"],
+    });
+    const emitted = createEventFixture({
+      source: "factory",
+      eventId: "evt_bounded_1",
+      correlationId: "chain_corr_bounded",
+      causationId: runId,
+    });
+    let jumpedChain = "";
+
+    await withApi(
+      {
+        run: async () => detail,
+        // The bounded GET /runs summary (WM-976) never sends eventId/eventSource.
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "COMPLETED" })],
+        }),
+        events: async () => ({ events: [emitted] }),
+      },
+      async () => {
+        const { getByRole } = renderWithClient(
+          <RunFull
+            runId={runId}
+            connected={true}
+            onBack={noop}
+            onJumpAgent={noop}
+            onJumpEvent={noop}
+            onJumpChain={(corr) => {
+              jumpedChain = corr;
+            }}
+          />,
+        );
+
+        const viewChainBtn = await waitFor(() =>
+          getByRole("button", { name: /View chain/ }),
+        );
+        fireEvent.click(viewChainBtn);
+        expect(jumpedChain).toBe("chain_corr_bounded");
+      },
+    );
+  });
+});
+
 describe("RunFull navigation shortcuts (WM-875)", () => {
   test("c and l trigger onJumpChain and render c badge hint", async () => {
     const runId = "run_chain_jump_test";

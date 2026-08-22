@@ -35,12 +35,7 @@ import {
 import { chainKeyOfEvent, eventNodeId } from "../graph/chainModel";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
-import type {
-  AdmittedEvent,
-  EventFocus,
-  Proposal,
-  RunListItem,
-} from "../types";
+import type { AdmittedEvent, EventFocus, Proposal, RunSummary } from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
 import {
@@ -258,21 +253,25 @@ export function decisionOf(
   e: AdmittedEvent,
   proposalsById: ReadonlyMap<string, Proposal>,
   proposalsByEvent: ReadonlyMap<string, Proposal>,
-  runsById: ReadonlyMap<string, RunListItem>,
+  runsById: ReadonlyMap<string, RunSummary>,
 ): EventDecision | null {
   // A noop proposal can point at the *blocking* run (`duplicate_run`,
-  // `ticket_dispatch_already_live`); only a run planned from this very event
-  // makes the event's decision `refused`.
-  const run = e.runId ? runsById.get(e.runId) : undefined;
-  if (
-    run?.state === "REFUSED" &&
-    run.eventSource === e.source &&
-    run.eventId === e.eventId
-  )
-    return { outcome: "refused", status: null, reason: run.reasonCode };
+  // `ticket_dispatch_already_live`); only a run this event's own proposal
+  // actually planned (`decision === "run"`) makes the event's decision
+  // `refused` — `e.runId` alone is not enough, it is set from the event's
+  // latest proposal even when that proposal is `noop` and merely points at
+  // the run it deduplicated onto. The bounded GET /runs summary (WM-976)
+  // dropped eventSource/eventId/reasonCode off the run row, so the reason
+  // text is not available here; open the run for that.
   const proposal =
     (e.proposalId ? proposalsById.get(e.proposalId) : undefined) ??
     proposalsByEvent.get(keyOf(e));
+  const plannedRun =
+    e.runId && (!proposal || proposal.decision === "run")
+      ? runsById.get(e.runId)
+      : undefined;
+  if (plannedRun?.state === "REFUSED")
+    return { outcome: "refused", status: null, reason: null };
   if (proposal) {
     return {
       outcome: proposal.decision === "run" ? "planned" : proposal.decision,
@@ -283,6 +282,25 @@ export function decisionOf(
   if (e.lastPlanError)
     return { outcome: e.status, status: null, reason: e.lastPlanError };
   return null;
+}
+
+/**
+ * Whether `e.runId` names a run this event's own proposal actually planned
+ * (`decision === "run"`) rather than one it merely points at as the run it
+ * deduplicated onto (`noop`/`duplicate_run`, `ticket_dispatch_already_live`).
+ * Shared by `decisionOf`'s REFUSED check and the fan-out count below so both
+ * agree on what "this event planned that run" means.
+ */
+function runPlannedBy(
+  e: AdmittedEvent,
+  proposalsById: ReadonlyMap<string, Proposal>,
+  proposalsByEvent: ReadonlyMap<string, Proposal>,
+): boolean {
+  if (!e.runId) return false;
+  const proposal =
+    (e.proposalId ? proposalsById.get(e.proposalId) : undefined) ??
+    proposalsByEvent.get(keyOf(e));
+  return !proposal || proposal.decision === "run";
 }
 
 /** `noop · Owned paths overlap` — badge tooltip and the decision row's text. */
@@ -495,17 +513,9 @@ export function Events({
       const prev = byEvent.get(k);
       if (!prev || prev.created_at < p.created_at) byEvent.set(k, p);
     }
-    const runsById = new Map<string, RunListItem>();
-    // Causation fan-out (WM-702): the runs an event went on to plan are the
-    // event's children in the chain DAG, one hop down.
-    const runsByEvent = new Map<string, number>();
-    for (const r of runsQ.data?.runs ?? []) {
-      runsById.set(r.runId, r);
-      if (!r.eventSource || !r.eventId) continue;
-      const k = `${r.eventSource}:${r.eventId}`;
-      runsByEvent.set(k, (runsByEvent.get(k) ?? 0) + 1);
-    }
-    return { byId, byEvent, runsById, runsByEvent };
+    const runsById = new Map<string, RunSummary>();
+    for (const r of runsQ.data?.runs ?? []) runsById.set(r.runId, r);
+    return { byId, byEvent, runsById };
   }, [proposalsQ.data, runsQ.data]);
   const decisionFor = (e: AdmittedEvent) =>
     decisionOf(e, decisions.byId, decisions.byEvent, decisions.runsById);
@@ -1243,7 +1253,17 @@ export function Events({
                 const decisionTitle = decisionText(decision);
                 const isSelected = keyOf(e) === selectedKey;
                 const causedBy = e.causationId ?? null;
-                const fanOut = decisions.runsByEvent.get(keyOf(e)) ?? 0;
+                // The bounded GET /runs summary (WM-976) dropped the run's
+                // origin event id, so a multi-run count can no longer be
+                // joined back to this event — only whether the event's own
+                // proposal actually planned `runId` (not merely pointed at
+                // it as a `noop`/`duplicate_run` dedup target) and that run
+                // is still in the list.
+                const fanOut =
+                  runPlannedBy(e, decisions.byId, decisions.byEvent) &&
+                  decisions.runsById.has(e.runId!)
+                    ? 1
+                    : 0;
                 const chainId = chainKeyOfEvent(e);
                 const nodeId = eventNodeId(e.source, e.eventId);
                 return (

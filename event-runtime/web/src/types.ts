@@ -168,6 +168,17 @@ export interface ChainListItem {
   single: boolean;
 }
 
+/**
+ * The broad run-row shape some call sites still assume: a `RunListItem` plus
+ * fields (`spec`, `reasonCode`, `eventId`/`eventSource`, `repos`, lease/deadline
+ * timing) that predate the WM-976 bounded-summary cutover. `GET /runs` itself
+ * no longer returns any of them — see `RunSummary` below for what it actually
+ * sends. Kept broad (rather than narrowed to match) because several call sites
+ * outside this ticket's owned paths still declare and rely on these fields;
+ * narrowing here would silently start returning `undefined` for properties
+ * they treat as always-present. New code reading a `GET /runs` response should
+ * type it as `RunSummary`, not this.
+ */
 export interface RunListItem {
   runId: string;
   /** Full run specification for custom columns and field discovery. */
@@ -199,6 +210,28 @@ export interface RunListItem {
   timeoutSeconds?: number;
   /** Repos the spec input names. Empty if unscoped. */
   repos: string[];
+}
+
+/**
+ * What `GET /runs` actually returns per row since the WM-976 bounded-summary
+ * cutover (`runsView()` in `event-runtime/lib/api-runs.mjs`): no `spec`, no
+ * `reasonCode`/`eventId`/`eventSource`/`repos`, no lease or deadline timing.
+ * Consumers of the run list that need those fields must fetch the per-run
+ * detail (`GET /runs/:id`, see `RunDetail`) instead of assuming the list row
+ * carries them — a summary row that used to satisfy `RunListItem` no longer
+ * does, which is exactly the bug this type exists to catch at compile time.
+ */
+export interface RunSummary {
+  runId: string;
+  state: RunState;
+  attempts: number;
+  agent: string;
+  adapter: string;
+  created_at: string;
+  updated_at: string;
+  idempotencyKey?: string;
+  modelTier?: string | null;
+  model?: string | null;
 }
 
 export type MetricsWindow = "1h" | "24h" | "7d" | "30d";

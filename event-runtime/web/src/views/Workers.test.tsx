@@ -20,7 +20,12 @@ import {
 } from "./Workers";
 import { api } from "../api";
 import { changeInput } from "../test-render";
-import type { Worker, WorkerCapacity, WorkerState } from "../types";
+import type {
+  RunListItem,
+  Worker,
+  WorkerCapacity,
+  WorkerState,
+} from "../types";
 
 afterEach(() => {
   cleanup();
@@ -632,7 +637,7 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
 
   function withRunsAndWorkers(
     workers: Worker[],
-    runs: (typeof stubRun)[],
+    runs: RunListItem[],
     fn: () => Promise<void>,
   ) {
     const origWorkers = api.workers;
@@ -677,6 +682,42 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
 
       // Verify idle worker displays dashes for active columns
       expect(getByText("w_idle_free")).toBeTruthy();
+    });
+  });
+
+  test("renders a dash target instead of throwing when the run is the bounded GET /runs summary (WM-982)", async () => {
+    // The bounded summary (WM-976) carries none of `repos`, `eventId`,
+    // `eventSource`, `reasonCode`, `maxAttempts`, or `spec` — only what
+    // `runsView()` actually returns. Cast through `unknown` because the
+    // client-side `RunListItem` type still (wrongly) claims those fields are
+    // required — this reproduces what the server genuinely sends today.
+    const boundedRun = {
+      runId: "run_active_463",
+      state: "RUNNING" as const,
+      attempts: 1,
+      agent: "dispatch@1",
+      adapter: "pi",
+      created_at: NOW,
+      updated_at: NOW,
+      modelTier: "strong",
+      model: "openai-codex/gpt-5.6-sol",
+    } as unknown as RunListItem;
+    const workerBusy: Worker = {
+      ...stubWorker("w_busy_active", "busy"),
+      currentRun: "run_active_463",
+    };
+
+    await withRunsAndWorkers([workerBusy], [boundedRun], async () => {
+      const { getByText, container } = renderWorkers();
+
+      await waitFor(() => {
+        expect(getByText("w_busy_active")).toBeTruthy();
+      });
+
+      expect(getByText("dispatch@1")).toBeTruthy();
+      expect(getByText("openai-codex/gpt-5.6-sol")).toBeTruthy();
+      expect(container.textContent).not.toContain("factory · WM-253");
+      expect(container.textContent).not.toContain("undefined");
     });
   });
 

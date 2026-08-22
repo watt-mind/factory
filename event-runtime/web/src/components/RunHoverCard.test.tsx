@@ -296,6 +296,23 @@ describe("RunHoverCard", () => {
     });
   });
 
+  test("renders attempts alone, without a stray slash, when the bounded GET /runs summary omits maxAttempts (WM-982)", async () => {
+    await withApi({ run: async () => stubDetail() }, async () => {
+      const r = renderWithClient(
+        <RunHoverCard run={stubRun({ maxAttempts: undefined })}>
+          <span>run_test_1001</span>
+        </RunHoverCard>,
+      );
+      fireEvent.mouseEnter(triggerOf(r.container));
+
+      await waitFor(() => expect(r.getByRole("dialog")).toBeTruthy());
+      const card = r.getByRole("dialog");
+      expect(card.textContent).toContain("2");
+      expect(card.textContent).not.toContain("2/undefined");
+      expect(card.textContent).not.toContain("undefined");
+    });
+  });
+
   test("opens on keyboard focus so the card is not mouse-only", async () => {
     await withApi({ run: async () => stubDetail() }, async () => {
       const r = renderWithClient(
