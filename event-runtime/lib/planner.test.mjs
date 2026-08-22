@@ -1,9 +1,9 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { canonicalJson, hashJson } from "./canonical.mjs";
+import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -1895,6 +1895,38 @@ describe("buildRunSpec", () => {
     });
     expect(overridden.adapter).toBe("pi");
     expect(overridden.idempotencyKey).toBe(a.idempotencyKey);
+  });
+
+  test("pins only the declared harness source files in the approved spec", () => {
+    const def = registry.agents.get("factory-status-report@1");
+    const synthetic = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    synthetic.agents.set("factory-status-report@1", {
+      ...def,
+      harness: { commands: ["factory-ticket"] },
+    });
+    const mapping = synthetic.eventTypes["factory.status-report.requested"];
+    const spec = buildRunSpec(synthetic, envelope(), mapping, {
+      runId: "run_harness_pins",
+      policyVersion: "git:test",
+      now: NOW,
+    });
+
+    expect(spec.harness).toEqual({ commands: ["factory-ticket"] });
+    expect(spec.harnessPins).toEqual({
+      core: {
+        origin: "builtin",
+        name: "factory/core",
+        version: "0.1.0",
+        files: {
+          "commands/factory-ticket.md": hashBytes(
+            readFileSync("shared/commands/factory-ticket.md"),
+          ),
+        },
+      },
+    });
   });
 });
 

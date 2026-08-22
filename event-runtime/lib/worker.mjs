@@ -35,7 +35,7 @@ import {
 import { loadForge } from "../../lib/forge/index.mjs";
 import { releaseLabels } from "../../lib/control-plane/labels.mjs";
 import { storeCollected, storeResultArtifact } from "./artifacts.mjs";
-import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
+import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
@@ -184,6 +184,32 @@ function harnessRelDest(layout, name) {
   return parts.join("/");
 }
 
+/** Hash every regular file copied for one declared harness component. */
+function harnessFilePins(dest, workspaceDir) {
+  const files = [];
+  const visit = (file) => {
+    const st = statSync(file);
+    if (st.isFile()) {
+      files.push(file);
+      return;
+    }
+    for (const entry of readdirSync(file, { withFileTypes: true }).sort(
+      (a, b) => a.name.localeCompare(b.name),
+    )) {
+      visit(path.join(file, entry.name));
+    }
+  };
+  visit(dest);
+  return Object.fromEntries(
+    files
+      .sort()
+      .map((file) => [
+        path.relative(workspaceDir, file),
+        hashBytes(readFileSync(file)),
+      ]),
+  );
+}
+
 /**
  * Copy declared RunSpec.harness content into the attempt workspace using the
  * target adapter's `HARNESS_LAYOUT`. No-op when the spec omits harness or
@@ -278,6 +304,7 @@ export function materializeRunHarness({
         kind,
         name,
         dest: path.relative(workspaceDir, dest),
+        pins: harnessFilePins(dest, workspaceDir),
       });
     }
   }
@@ -1898,6 +1925,7 @@ export async function executeClaimed(
   const mayMutateClaimedTicket = () =>
     ticketClaimed && assertCurrentToken(db, runId, fencingToken);
   let attemptUsage = { adapter: adapterOverride ?? spec.adapter };
+  let materializedHarnessPins = null;
 
   let dispatchOpts = dispatch;
   const explicitDispatchStub =
@@ -2105,6 +2133,7 @@ export async function executeClaimed(
         evidenceSetHash: null,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
+        harnessPins: materializedHarnessPins,
       });
       const result = {
         schemaVersion: "factory.run-result/v1",
@@ -2496,13 +2525,18 @@ export async function executeClaimed(
     }
 
     try {
-      materializeRunHarness({
+      const writtenHarness = materializeRunHarness({
         spec,
         adapter,
         adapterKey,
         workspaceDir,
         registry,
       });
+      const pins = Object.assign(
+        {},
+        ...writtenHarness.map((entry) => entry.pins),
+      );
+      materializedHarnessPins = Object.keys(pins).length > 0 ? pins : null;
     } catch (err) {
       if (err instanceof HarnessMaterializeError) {
         const refusedRes = refuseTerminal(err.code, ["harness_materialize"], {
@@ -3035,6 +3069,7 @@ export async function executeClaimed(
           evidenceSetHash: null,
           journalHead: latestJournalHash(db, runId),
           verificationStatus: "passed",
+          harnessPins: materializedHarnessPins,
         });
         db.query(
           `INSERT INTO results (run_id, attempt, result_json, artifact_hash, evidence_set_hash, verification_json, receipt_json, accepted_at)
@@ -3134,6 +3169,7 @@ export async function executeClaimed(
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
         extraReceipt: verified.receipt,
+        harnessPins: materializedHarnessPins,
       });
       const { result } = verified;
       db.query(

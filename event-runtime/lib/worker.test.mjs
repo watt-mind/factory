@@ -40,7 +40,7 @@ import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
-import { canonicalJson, hashJson } from "./canonical.mjs";
+import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { artifactsRoot, resolveConfigPath } from "./config.mjs";
 import { openDb, runUsage } from "./db.mjs";
 import {
@@ -74,6 +74,7 @@ import {
   extendRunDeadline,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
+  materializeRunHarness,
   reapExpiredLeases,
   releaseClaimLock,
   repositoryIsClean,
@@ -185,6 +186,82 @@ function opts(extra = {}) {
 }
 
 describe("worker", () => {
+  test("materialized harness entries record hashes for every copied file", () => {
+    const factoryRoot = tmpDir("evrt-harness-source-");
+    const workspaceDir = tmpDir("evrt-harness-workspace-");
+    const catalog = path.join(factoryRoot, "catalog");
+    const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
+    mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(catalog, "skills", "demo", "SKILL.md"),
+      "catalog\n",
+    );
+    writeFileSync(path.join(source, "SKILL.md"), "first\n");
+    writeFileSync(path.join(source, "notes.md"), "second\n");
+
+    const written = materializeRunHarness({
+      spec: { harness: { skills: ["demo"] } },
+      adapterKey: "fake",
+      adapter: {
+        HARNESS_LAYOUT: {
+          skills: {
+            source: (name) => ["dist", "fake", "skills", name],
+            dest: (name) => [".fake", "skills", name],
+            type: "dir",
+          },
+        },
+      },
+      workspaceDir,
+      registry: { harnessRoots: [{ skills: path.join(catalog, "skills") }] },
+      factoryRoot,
+    });
+
+    expect(written).toEqual([
+      {
+        kind: "skills",
+        name: "demo",
+        dest: ".fake/skills/demo",
+        pins: {
+          ".fake/skills/demo/SKILL.md": hashBytes("first\n"),
+          ".fake/skills/demo/notes.md": hashBytes("second\n"),
+        },
+      },
+    ]);
+  });
+
+  test("completed receipts attest emitted harness files", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({ harness: { commands: ["factory-ticket"] } }),
+    );
+    const materializingFake = {
+      ...fake,
+      HARNESS_LAYOUT: {
+        commands: {
+          source: (name) => ["plugins", "core", "commands", `${name}.md`],
+          dest: (name) => [".fake", "commands", `${name}.md`],
+          type: "file",
+        },
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake: materializingFake },
+      opts(),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(summary.receipt.harnessPins).toEqual({
+      ".fake/commands/factory-ticket.md": hashBytes(
+        readFileSync("plugins/core/commands/factory-ticket.md"),
+      ),
+    });
+  });
+
   test("provisions present instance configs into an ignored checkout and skips absent files", () => {
     const factoryRoot = tmpDir("evrt-instance-config-source-");
     const checkout = tmpDir("evrt-instance-config-checkout-");
