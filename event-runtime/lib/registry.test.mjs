@@ -177,8 +177,11 @@ describe("registry", () => {
     // tier:* values before adding the proposed one (triage-apply.json is a
     // registry input); the schema's tier/tierReason requirement was
     // reverted (the runtime's closed validator has no allOf/if/then).
+    // Regenerated (#941): disk-diagnose/disk-remediate host allowlists moved
+    // to instance-local config; tracked definitions ship empty (both are
+    // registry inputs).
     const expected =
-      "sha256:150c9a7ad59111642fe3b8fa443a45412969377247309d048e825f78ba88332f";
+      "sha256:afb4cc92abd9a45299ceb2f28ec7b76d026e4922ef217fdcc6ec0e085994e850";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

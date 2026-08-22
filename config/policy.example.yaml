@@ -114,3 +114,13 @@ notify:
     - smoke_red
     - circuit_breaker_tripped
     - release_candidate_ready
+
+# Instance-local host allowlist for the disk maintenance agents
+# (disk-diagnose / disk-remediate). The tracked agent definitions ship with an
+# empty allowlist on purpose — set your own targets here (or leave unset to
+# keep the disk agents refusing).
+# agents:
+#   disk:
+#     hosts:
+#       lab: root@203.0.113.10
+#       web: ops@203.0.113.20

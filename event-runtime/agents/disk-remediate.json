@@ -14,10 +14,7 @@
     "{target}",
     "{remote}"
   ],
-  "hosts": {
-    "lab": "root@100.110.36.96",
-    "web": "hdkiller@100.93.81.56"
-  },
+  "hosts": {},
   "probeRemote": "df --output=used -B1 {mount} | tail -1",
   "actionRegistry": {
     "docker-builder-prune": {
@@ -44,7 +41,7 @@
   },
   "mutating": true,
   "pins": {
-    "agents/disk-remediate.md": "sha256:1d8c7afa476ae5b41c62e92bc6b036993d129869fe3fbda2d5fa7ef04cebdffa",
+    "agents/disk-remediate.md": "sha256:17449eb77f7fb7595470fa8b36317ce5e8da45edb65b4bd7775a23786f99f127",
     "schemas/disk-remediate.input.json": "sha256:7edfcd06c8d3508355c02a92810ebd9dd621509d18cd6f871f107f38fea7265e",
     "schemas/disk-remediation.output.json": "sha256:1339cd92145c5f30637ba92449e4b1fe1a3bb146af7fb81b45ff0f55da909610"
   }

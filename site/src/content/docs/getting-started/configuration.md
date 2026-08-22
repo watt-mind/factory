@@ -1,6 +1,8 @@
 ---
 title: Configuration Reference
 description: Configuring repositories, policies, and schedules
+sidebar:
+  order: 4
 ---
 
 Factory configuration lives in the `config/` directory.

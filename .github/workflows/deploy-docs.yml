@@ -63,7 +63,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     needs: build
-    runs-on: [self-hosted, smoke-test]
+    # deploy-pages is a tiny OIDC handshake; no self-hosted runner carries a
+    # smoke-test label, so this job could never schedule there (first main
+    # deploy failed with an unschedulable job). GitHub-hosted is correct here.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Deploy to GitHub Pages
