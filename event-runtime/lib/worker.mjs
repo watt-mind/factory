@@ -33,6 +33,7 @@ import {
   writeWorkerLease,
 } from "../../lib/worker-leases.mjs";
 import { loadForge } from "../../lib/forge/index.mjs";
+import { releaseLabels } from "../../lib/control-plane/labels.mjs";
 import { storeCollected, storeResultArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
@@ -1496,13 +1497,23 @@ function defaultClaimTicket({ repo, ticket, harness = "claude" }) {
   }
 }
 
-function defaultUnclaimTicket({ repo, ticket, why, log = null, fetchTicket }) {
+// `runCli` is the test seam, mirroring the `fetchTicket` injection already
+// here: the interesting behaviour is the exact argv this builds (WM-1024),
+// and asserting "some mutation ran" was already true of the broken version.
+export function defaultUnclaimTicket({
+  repo,
+  ticket,
+  why,
+  log = null,
+  fetchTicket,
+  runCli = runLinearCli,
+}) {
   try {
     let cur = null;
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = runLinearCli(["get", ticket, "--json"]);
+      const out = runCli(["get", ticket, "--json"]);
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
@@ -1512,16 +1523,26 @@ function defaultUnclaimTicket({ repo, ticket, why, log = null, fetchTicket }) {
     )
       return false;
 
-    runLinearCli([
+    // WM-1024: `Todo` + unassigned is NOT dispatchable — the predicate in
+    // docs/protocol.md §4 also requires `ai:agent-ready`. This path used to
+    // drop `ai:in-progress` and stop there, which did not re-queue the ticket
+    // but hid it: the board still read `Todo`, and no dispatcher ever picked
+    // it up again. Also strips the stale `agent:*` label, which otherwise
+    // claims a harness still holds work it has given up.
+    const currentNames = (
+      Array.isArray(cur.labels) ? cur.labels : (cur.labels?.nodes ?? [])
+    ).map((l) => l.name);
+    const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
+    runCli([
       "state",
       ticket,
       "Todo",
       "--unassign",
-      "--remove",
-      "ai:in-progress",
+      ...add.flatMap((n) => ["--add", n]),
+      ...remove.flatMap((n) => ["--remove", n]),
     ]);
-    const body = `Dispatch run failed, claim released back to Todo.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
-    runLinearCli(["comment", ticket, body]);
+    const body = `Dispatch run failed, claim released back to Todo + ai:agent-ready.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
+    runCli(["comment", ticket, body]);
     return true;
   } catch {
     return false;
