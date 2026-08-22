@@ -105,6 +105,9 @@ function triagePlanScan({ action, detail }) {
         action,
         reason: `fake: chain outcome ${action}`,
         ...(detail ? { detail } : {}),
+        ...(action === "label-agent-ready"
+          ? { tier: "standard", tierReason: "fake: default sizing" }
+          : {}),
       };
       writeFileSync(
         path.join(workspaceDir, "result.json"),
@@ -225,6 +228,8 @@ describe("triage chain: scan → approved apply (OPS-229)", () => {
           issueId: "CLNT-999",
           action: "label-agent-ready",
           reason: "fake: fully specified",
+          tier: "standard",
+          tierReason: "fake: default sizing",
         },
       ],
     });
@@ -508,5 +513,107 @@ describe("trusted-author + body-hash-pin primitives (GH-879)", () => {
     const before = readyPinMarker("first body");
     const after = readyPinMarker("edited body");
     expect(parseReadyPin(before)).not.toBe(parseReadyPin(after));
+  });
+});
+
+describe("model-tier sizing on promotion (WM-696)", () => {
+  // Mirrors the real triage-apply@1 label-agent-ready argv shape (state
+  // transition + two --add labels), substituted against a harmless local
+  // echo so the test stays hermetic (no real tracker CLI is invoked).
+  function tierDef(dir) {
+    return {
+      ref: "test-triage-tier@1",
+      itemsField: "plan",
+      itemKey: "issueId",
+      actionRegistry: {
+        "label-agent-ready": {
+          argv: [
+            "sh",
+            "-c",
+            `echo {issueId} ai:agent-ready tier:{tier} >> ${dir}/applied.txt`,
+          ],
+        },
+      },
+    };
+  }
+
+  test("the real triage-apply@1 definition adds tier:{tier} alongside ai:agent-ready", () => {
+    const argv =
+      registry.agents.get("triage-apply@1").actionRegistry["label-agent-ready"]
+        .argv;
+    expect(argv).toContain("ai:agent-ready");
+    expect(argv).toContain("tier:{tier}");
+  });
+
+  test("the real triage-apply@1 definition removes all three tier:* values before adding one — a ticket can never end up with two", () => {
+    const argv =
+      registry.agents.get("triage-apply@1").actionRegistry["label-agent-ready"]
+        .argv;
+    const removeIndices = argv
+      .map((v, i) => (v === "--remove" ? i : -1))
+      .filter((i) => i >= 0);
+    const removedValues = removeIndices.map((i) => argv[i + 1]);
+    expect(removedValues.sort()).toEqual([
+      "tier:light",
+      "tier:standard",
+      "tier:strong",
+    ]);
+    // The --add tier:{tier} must come after every --remove of a tier value,
+    // so resolveLabelIds' drop-then-add order (labels.mjs) always leaves
+    // exactly the proposed tier present, including when it re-adds the same
+    // value it just removed.
+    const addTierIndex = argv.indexOf("tier:{tier}");
+    expect(addTierIndex).toBeGreaterThan(Math.max(...removeIndices));
+  });
+
+  test("label-agent-ready substitutes the approved tier into the applied label", async () => {
+    const dir = tmpDir("evrt-apply-");
+    const workspaceDir = tmpDir("evrt-apply-ws-");
+    const outcome = await actions.execute({
+      spec: {
+        input: {
+          repo: "bj29",
+          plan: [
+            {
+              issueId: "CLNT-1",
+              action: "label-agent-ready",
+              tier: "light",
+              tierReason: "single-file config change",
+            },
+          ],
+        },
+      },
+      def: tierDef(dir),
+      workspaceDir,
+      timeoutMs: 10_000,
+    });
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    expect(readFileSync(path.join(dir, "applied.txt"), "utf8").trim()).toBe(
+      "CLNT-1 ai:agent-ready tier:light",
+    );
+  });
+
+  test("a label-agent-ready item with no tier fails the whole plan closed", async () => {
+    const dir = tmpDir("evrt-apply-");
+    const workspaceDir = tmpDir("evrt-apply-ws-");
+    const outcome = await actions.execute({
+      spec: {
+        input: {
+          repo: "bj29",
+          plan: [
+            { issueId: "CLNT-1", action: "label-agent-ready", tier: "light" },
+            { issueId: "CLNT-2", action: "label-agent-ready" }, // no tier
+          ],
+        },
+      },
+      def: tierDef(dir),
+      workspaceDir,
+      timeoutMs: 10_000,
+    });
+    expect(outcome.exitCode).toBe(1);
+    expect(() => readFileSync(path.join(dir, "applied.txt"))).toThrow(); // CLNT-1 never ran either
+    expect(
+      readFileSync(path.join(workspaceDir, ".actions.log"), "utf8"),
+    ).toContain('missing/non-primitive field "tier"');
   });
 });
