@@ -27,6 +27,8 @@ Decide **Triage vs. `Todo` + `ai:agent-ready`**:
 - Write the full §5 template (Problem & Context, Acceptance Criteria, Source File Pointers, Owned Paths, Verification Command) only if the conversation actually gave enough to fill all five sections for real. A plausible-sounding guess at `Owned Paths` or a Verification Command that hasn't actually been confirmed to run is worse than leaving the ticket in `Triage` — it will pass a template check and still fail at execution time.
 - Otherwise file to **`Triage`** with whatever context exists (Problem & Context at minimum), and say explicitly what's missing before it can be promoted.
 
+When promoting to `Todo` + `ai:agent-ready`, also set a `tier:*` label (closed vocabulary: `tier:light`, `tier:standard`, `tier:strong`) per the sizing rule — `light` for a one-or-two-file change outside `escalate_paths` (`config/repos.yaml`), `type:docs`/copy/config-value, or a reproduced bug with a one-line fix; `strong` for any `escalate_paths` path, `type:security`, cross-package/architecture work, or acceptance criteria that say "design"/"decide"; `standard` otherwise — and note the tier and why in the same comment where you report the promotion.
+
 Never move an issue to `Todo` without `ai:agent-ready` fully satisfied, and never claim it — filing and working are different steps, and this command only does the first.
 
 ## 4. File and report

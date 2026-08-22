@@ -34,7 +34,9 @@ You never modify it, never run its build, never install anything. Write
    false zero. The response is usable only when it contains an `issues.nodes`
    array and complete `pageInfo`; follow `hasNextPage` until false, and fail
    closed on a missing cursor, malformed response, non-zero command, or
-   interrupted pagination.
+   interrupted pagination. Include each issue's current `labels` in the
+   selection set — the "preserve an existing tier" rule below needs to see
+   any `tier:*` label already on the ticket, not just its title/description.
 2. Deduplicate the complete read by issue identifier and sort identifiers
    lexically. Do not sample, truncate, or make a discretionary subset. For
    every returned issue, judge whether an agent could pick it up
@@ -77,6 +79,36 @@ was right.
 | `needs-human`       | a decision only the operator can make                                                                         |
 
 Never invent an action id. Never propose changes to issues outside this repo.
+
+### Model-tier sizing (`label-agent-ready` only)
+
+Every `label-agent-ready` item requires `tier` and `tierReason`. Assign per
+this closed sizing rule:
+
+- `tier:light` — one or two files in `Owned Paths`, no path under
+  `escalate_paths` (`config/repos.yaml`), `type:docs` / copy / config-value
+  changes, or a `type:bug` with a repro and a one-line expected fix.
+- `tier:strong` — any path under `escalate_paths` (auth, payments,
+  migrations, prod infra), `type:security`, cross-package or architecture
+  work (`area:architecture`), anything whose acceptance criteria say
+  "design"/"decide" or list open questions, or a ticket that previously
+  failed verification.
+- `tier:standard` — everything else (the default).
+
+**Preserve an existing tier, never recompute it.** If the ticket already
+carries a `tier:*` label, set `tier` to that exact value and `tierReason` to
+say it is preserved — do not re-derive a different tier from the current
+content. `triage-apply`'s `label-agent-ready` action removes every `tier:*`
+value before adding the proposed one, so a ticket ends up with exactly one
+`tier:*` label by construction even if this rule is not followed — but a
+proposed value that silently overwrites the operator's own prior tier
+decision is still wrong, which is why the rule stands regardless of that
+backstop (`docs/event-runtime-dispatch.md`).
+
+Fold `tierReason` into `reason` (e.g. `"fully specified; tier:light — single
+config-value change"`) so the sizing decision is visible wherever `reason` is
+surfaced, since `tierReason` itself is carried for the audit trail only and is
+not posted as a ticket comment.
 
 ### Owned Paths are the dispatch concurrency lock
 
@@ -175,6 +207,13 @@ than emitting a best-effort malformed item.
         "detail": "## Owned Paths\n\n- `src/client.ts`\n\n## Verification\n\n```\nbun test src/client.test.ts\n```",
         "ownedPaths": ["src/client.ts"],
         "verificationCommand": "bun test src/client.test.ts"
+      },
+      {
+        "issueId": "CLNT-124",
+        "action": "label-agent-ready",
+        "reason": "fully specified; tier:light — single config-value change",
+        "tier": "light",
+        "tierReason": "one file, no escalate_paths, config-value change"
       }
     ],
     "summary": "one line an operator can act on"

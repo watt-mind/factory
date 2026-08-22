@@ -28,6 +28,15 @@
             ]
           },
           "reason": { "type": "string", "minLength": 1 },
+          "tier": {
+            "enum": ["light", "standard", "strong"],
+            "description": "For label-agent-ready only: the model-tier sizing decision (docs/protocol.md Sizing Rule); required whenever action is label-agent-ready"
+          },
+          "tierReason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "For label-agent-ready only: one-line justification for the tier, folded into `reason` so it is visible in the audit trail"
+          },
           "detail": {
             "type": "string",
             "minLength": 1,
