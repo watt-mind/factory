@@ -1,1 +1,13 @@
 Copyright 2026 Watt Mind Kft.
+
+This product includes vendored third-party source under `extensions/buzz/vendor/`,
+each carrying its own upstream license file at the corresponding path:
+
+  @noble/curves, @noble/hashes, @noble/ciphers, @scure/base
+  Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+  Copyright (c) 2016 Thomas Pornin <pornin@bolet.org> (extensions/buzz/vendor/ciphers)
+  Licensed under the MIT License.
+  See extensions/buzz/vendor/{base,ciphers,curves,hashes}/LICENSE.
+
+See docs/audit-licenses.md for the full dependency license inventory and
+compatibility review.
