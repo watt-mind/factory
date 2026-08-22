@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { loadControlPlane } from "../../lib/control-plane/index.mjs";
 import { hashJson } from "./canonical.mjs";
 import {
   decisionRequestHash,
@@ -1198,61 +1199,24 @@ function laterCiSuccess(db, row, refs) {
   });
 }
 
-const LINEAR_API_URL = "https://api.linear.app/graphql";
-
-function resolveLinearApiKey({
-  env = process.env,
-  envFile = path.join(homedir(), "Develop", "hdkiller", ".env"),
-} = {}) {
-  if (env.LINEAR_API_KEY) return env.LINEAR_API_KEY;
-  if (!existsSync(envFile)) return null;
-
-  try {
-    for (const line of readFileSync(envFile, "utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("="))
-        continue;
-      const idx = trimmed.indexOf("=");
-      if (trimmed.slice(0, idx).trim() !== "LINEAR_API_KEY") continue;
-      const value = trimmed
-        .slice(idx + 1)
-        .trim()
-        .replace(/^['"]|['"]$/g, "");
-      if (!value) return null;
-      env.LINEAR_API_KEY = value;
-      return value;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
+/**
+ * Tracker request, through the control-plane adapter (WM-962).
+ *
+ * This used to be a second, complete Linear HTTP client living here: its own
+ * `fetch` to api.linear.app, its own key resolution, and no retries or
+ * rate-limit backoff. Two transports to the same API drift — this one also
+ * hardcoded a personal path (`~/Develop/hdkiller/.env`) that has no business
+ * in a public repo, and it bypassed the per-repo control-plane selection
+ * WM-1007 added, so it would still have talked to Linear for a repo
+ * configured for GitHub.
+ *
+ * `raw()` rather than a typed verb: the inbox asks for a batched
+ * `issue(id:)` projection that the neutral contract does not model. Keeping
+ * it on the adapter still puts it behind one transport with one credential
+ * path, which is the point of the invariant in tools/ticket.test.mjs.
+ */
 export async function linearGql(query, variables = {}) {
-  const apiKey = resolveLinearApiKey();
-  if (!apiKey) {
-    throw new Error(
-      "Linear API error: LINEAR_API_KEY not found in env or ~/Develop/hdkiller/.env",
-    );
-  }
-  const res = await fetch(LINEAR_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: apiKey,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) {
-    throw new Error(`Linear API HTTP ${res.status}: ${res.statusText}`);
-  }
-  const body = await res.json();
-  if (body.errors?.length) {
-    throw new Error(
-      `Linear GraphQL error: ${body.errors.map((e) => e.message).join("; ")}`,
-    );
-  }
-  return body.data;
+  return loadControlPlane().raw(query, variables);
 }
 
 /** One bounded GraphQL request for the distinct Linear referents in this poll. */

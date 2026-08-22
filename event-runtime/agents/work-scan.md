@@ -27,7 +27,7 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
 ## Method
 
 1. **Enumerate and filter candidates** with a complete repo queue read
-   (`bun "$FACTORY_ROOT/tools/linear.mjs"`; all pages, no sampling). Build the
+   (`bun "$FACTORY_ROOT/tools/ticket.mjs"`; all pages, no sampling). Build the
    candidate set yourself from the returned fields. A ticket is a candidate
    only when **all three** predicates hold:
 

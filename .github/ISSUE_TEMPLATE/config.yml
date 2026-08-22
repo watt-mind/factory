@@ -3,3 +3,6 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/watt-mind/factory/security/policy
     about: Report vulnerabilities privately by following the security policy.
+  - name: Questions and open-ended ideas
+    url: https://github.com/watt-mind/factory/discussions
+    about: For anything not yet shaped like a task. Issues here are work items, not a forum.

@@ -1,6 +1,6 @@
 Find tickets in this project's backlog that no longer need to exist, and retire them — never delete them. "Retire" means moving to Linear's `Canceled` or `Duplicate` state with a comment citing the evidence. Those states already exist for exactly this (`docs/protocol.md` §4) and keep the ticket recoverable; an actual delete does not, so **never call a delete/archive mutation, only a state transition.**
 
-Resolve the team/project from the repo via `config/repos.yaml` (`docs/protocol.md` §1–2), or from `$ARGUMENTS` if a project name is given. Use `factory linear`; on failure retry once then fall back to `factory linear raw` per the floor.
+Resolve the team/project from the repo via `config/repos.yaml` (`docs/protocol.md` §1–2), or from `$ARGUMENTS` if a project name is given. Use `factory ticket`; on failure retry once then fall back to `factory ticket raw` per the floor.
 
 **First, before judging anything: `git fetch --quiet` and check `git rev-list --count HEAD..origin/<base>`** (never `@{upstream}` — it depends on tracking config the checkout may not have). This stage's entire job is deciding what is already true of the code, so it is the stage a stale checkout hurts most — a feature merged last week reads as unshipped and its ticket keeps a dispatch slot it no longer deserves. Follow the floor's **Checkout freshness** rule: fast-forward a clean tree, and read `origin/<base>` rather than the working tree when it's dirty, ahead, or the fetch/rev-list itself fails. State the ref you swept against at the top of the report.
 

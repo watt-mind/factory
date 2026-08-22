@@ -421,7 +421,7 @@ describe("work-scan registration (WM-110)", () => {
       retainOnFailure: true,
     });
     expect(def.output_contract).toBe("factory.work-plan/v1");
-    expect(def.capabilities.services).toEqual(["linear:read", "repo:read"]);
+    expect(def.capabilities.services).toEqual(["tracker:read", "repo:read"]);
   });
 
   test("factory.work.requested maps to work-scan@1 on the pi adapter, deduped by inputHash", () => {

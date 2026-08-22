@@ -9,7 +9,7 @@ The user's accompanying request is this workflow's argument string. Wherever the
 
 Triage the open Linear issues for the repository I'm currently in: turn raw `Triage` tickets into fully specified, agent-dispatchable ones where possible.
 
-Resolve the team from the repo via `config/repos.yaml` (`docs/protocol.md` §1). Use `factory linear`; on failure retry once then fall back to `factory linear raw` per the floor. Interpret $ARGUMENTS as specific issue IDs, a max count, or "all" (workspace-wide); default is this repo's team, up to 10 issues.
+Resolve the team from the repo via `config/repos.yaml` (`docs/protocol.md` §1). Use `factory ticket`; on failure retry once then fall back to `factory ticket raw` per the floor. Interpret $ARGUMENTS as specific issue IDs, a max count, or "all" (workspace-wide); default is this repo's team, up to 10 issues.
 
 ## Claim what you are triaging
 

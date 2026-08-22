@@ -14,7 +14,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write"]
+    "services": ["tracker:write"]
   },
   "limits": {
     "timeout_seconds": 600,

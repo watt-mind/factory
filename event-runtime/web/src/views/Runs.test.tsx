@@ -1232,7 +1232,7 @@ describe("Runs copy chords and hints (WM-233)", () => {
       repos: ["watt-mind/factory"],
       spec: createRunSpecFixture(runId, {
         agent: "shipper",
-        capabilities: ["gh:write", "linear:read"],
+        capabilities: ["gh:write", "tracker:read"],
         timeoutSeconds: 900,
         maxAttempts: 2,
         input: { branch: "main" },
@@ -1298,7 +1298,7 @@ describe("Runs copy chords and hints (WM-233)", () => {
 
         // Capabilities the agent runs with — the signal the old dialog dropped.
         expect(text).toContain("gh:write");
-        expect(text).toContain("linear:read");
+        expect(text).toContain("tracker:read");
         // Mutating / blast-radius verdict.
         expect(text).toContain("Mutating");
         expect(text).toContain("Risk");

@@ -2,7 +2,8 @@ name: Feature request
 description: Propose a focused improvement to Factory
 title: "feat: "
 labels:
-  - enhancement
+  - type:feature
+  - source:human
 body:
   - type: checkboxes
     id: preflight

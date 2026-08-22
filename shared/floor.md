@@ -12,7 +12,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Event-runtime code follows the documented house conventions.** For module shape, dependency injection, adapter contracts, fail-closed boundaries, and tests, read [`docs/event-runtime-conventions.md`](https://github.com/watt-mind/factory/blob/develop/docs/event-runtime-conventions.md) before changing `event-runtime/`.
 
-**Work comes from Linear, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
+**Work comes from the control plane, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
 
@@ -42,7 +42,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Negative testing and falsifiability.** New regression tests must be observed failing before applying the fix to prove they test the actual failure mode and are not vacuous. Verify that tests distinguish correct implementations from plausible incorrect ones (without using `git stash`; use safe per-file reverts such as `git show <ref>:<path> > <path>`). A test that passes before the fix is applied tests nothing.
 
-**Mandatory `## Handoff` comment.** Before moving a ticket to `In Review`, post a structured `## Handoff` comment on the Linear ticket with these exact fields:
+**Mandatory `## Handoff` comment.** Before moving a ticket to `In Review`, post a structured `## Handoff` comment on the ticket with these exact fields:
 
 ```
 ## Handoff
@@ -59,7 +59,7 @@ Posting this structured comment is a mandatory prerequisite before advancing a t
 
 ### Never auto-merge
 
-Regardless of CI or review outcome, these come back to a human with findings: **auth/authz, payments or money movement, credential and secret handling, destructive DB migrations, production infra config, and `CLNT` security behavior.** When escalating, add `ai:escalated` to the Linear ticket — that's what surfaces it in the human's "My Decisions Needed" view — and notify (see below).
+Regardless of CI or review outcome, these come back to a human with findings: **auth/authz, payments or money movement, credential and secret handling, destructive DB migrations, production infra config, and `CLNT` security behavior.** When escalating, add `ai:escalated` to the ticket — that's what surfaces it in the human's "My Decisions Needed" view — and notify (see below).
 
 The test is whether the diff **changes security-relevant behavior**, not whether a file sits near security code — read as file-adjacency this list swallows every PR in an app where auth is everywhere, and that trains everyone to rubber-stamp it. When it's genuinely ambiguous, escalate: a false escalation costs one message, a wrong merge costs a client incident.
 
@@ -89,15 +89,15 @@ Same care for force-pushes: never `--force` onto a `base` or `deploy_branch`, an
 
 Move the ticket to `Blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
 
-**"Notify" means exactly this command** — a Linear comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
+**"Notify" means exactly this command** — a ticket comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
 
 ```bash
 factory notify "<EVENT> <TICKET/PR>: <one answerable sentence>"
 ```
 
-Event prefix is one of `BLOCKED`, `ESCALATED`, `CI RED`, `SMOKE RED`, `CIRCUIT BREAKER`, `RC READY`. It pushes a Telegram message to the human and exits non-zero on failure — if it fails, post the same text as a Linear comment and flag the failed push in your report. Notify only for those six events; routine progress (claims, PRs opened, clean merges) goes to Linear and the run report, never here.
+Event prefix is one of `BLOCKED`, `ESCALATED`, `CI RED`, `SMOKE RED`, `CIRCUIT BREAKER`, `RC READY`. It pushes a Telegram message to the human and exits non-zero on failure — if it fails, post the same text as a ticket comment and flag the failed push in your report. Notify only for those six events; routine progress (claims, PRs opened, clean merges) goes to the ticket and the run report, never here.
 
-Before blocking on product intent, check whether it's already written down — the repo's `docs/product-decisions.md`, `docs/`, or the Linear project Overview. If you resolve a decision that wasn't recorded, record it.
+Before blocking on product intent, check whether it's already written down — the repo's `docs/product-decisions.md`, `docs/`, or the tracker project overview. If you resolve a decision that wasn't recorded, record it.
 
 ### Waiting
 
@@ -149,7 +149,7 @@ Ahead-only (clean, not behind, but carrying unpushed commits) still routes to `o
 
 Never pull over uncommitted work to get a fresher read — those files are a human's in-flight change, and losing them costs far more than a slightly stale spec. Reading `origin/<base>` gets the same correctness without touching the tree.
 
-Then **name the ref your evidence came from** in the report or the Linear comment. `origin/develop@a1b2c3d` is checkable by the next reader; "I read the file" is not.
+Then **name the ref your evidence came from** in the report or the ticket comment. `origin/develop@a1b2c3d` is checkable by the next reader; "I read the file" is not.
 
 Dispatch is exempt — the worktree script branches from `origin/<base>`, so ticket work always starts current. The exposure is the read-only stages (sweep, triage, audit), which read the main checkout: against a stale one, a shipped feature reads as unshipped and an overtaken ticket keeps its place in the queue.
 
@@ -201,7 +201,7 @@ Quote glob arguments: `grep -rn "..." src --include='*.ts'`, never `--include=*.
 Mechanical factory tools run from **any cwd** via the `factory` CLI on PATH — product checkouts and worktrees do not contain `orchestrator/` or `tools/`.
 
 ```bash
-factory linear get CLNT-616
+factory ticket get CLNT-616
 factory queue --repo bj29
 factory next --repo bj29
 factory label-guard --repo bj29 --apply
@@ -209,30 +209,30 @@ factory label-guard --repo bj29 --apply
 
 Install once: `bun build/emit.mjs --link-bin` (symlinks `~/Develop/factory/bin/factory` → `~/.local/bin/factory`). `factory notify` is the cwd-independent wrapper around the human interrupt channel. Never `bun orchestrator/...` from a worktree — that path is not there.
 
-### Linear
+### Tickets
 
-**Use `factory linear` — not the Linear MCP, and not the standalone `linear` CLI.** The MCP fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback; the schpet `linear` CLI fails differently (`linear issue comment CLNT-526 --body` is wrong syntax — it needs `comment add`; `linear issue query` with hand-rolled filters errors on type coercion). Both waste turns. The factory tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
+**Use `factory ticket` — not the Linear MCP, and not the standalone `linear` CLI.** The MCP fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback; the schpet `linear` CLI fails differently (`linear issue comment CLNT-526 --body` is wrong syntax — it needs `comment add`; `linear issue query` with hand-rolled filters errors on type coercion). Both waste turns. The factory tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
 
-You work in a worktree, not in the factory checkout. **`factory linear` resolves the checkout itself**; headless runs also set `$FACTORY_ROOT`. Fallback when the CLI is missing: `bun "$FACTORY_ROOT/tools/linear.mjs"`.
+You work in a worktree, not in the factory checkout. **`factory ticket` resolves the checkout itself**; headless runs also set `$FACTORY_ROOT`. Fallback when the CLI is missing: `bun "$FACTORY_ROOT/tools/ticket.mjs"`.
 
 ```bash
-factory linear get CLNT-616                              # ticket, state, labels, criteria
-factory linear claim CLNT-616 --agent claude             # assign + In Progress + labels + read-back
-factory linear comment CLNT-616 "..."                    # the heartbeat
-factory linear state CLNT-616 "In Review" --add ai:needs-review
-factory linear file --team CLNT --title "..." --body "..." --type bug
-factory linear queue --team CLNT                         # what is dispatchable
+factory ticket get CLNT-616                              # ticket, state, labels, criteria
+factory ticket claim CLNT-616 --agent claude             # assign + In Progress + labels + read-back
+factory ticket comment CLNT-616 "..."                    # the heartbeat
+factory ticket state CLNT-616 "In Review" --add ai:needs-review
+factory ticket file --team CLNT --title "..." --body "..." --type bug
+factory ticket queue --team CLNT                         # what is dispatchable
 ```
 
 `claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.
 
-**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Linear comments and issues filed through `tools/linear.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
+**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Comments and issues filed through `tools/ticket.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
 
-**Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory linear state` or `factory linear claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
+**Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory ticket state` or `factory ticket claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
 
-**Strict order of operations for discovered work.** Discovered work filed during a merge review or ticket session cannot have its ticket ID known prior to creation. Pre-writing cross-references in summary or handoff comments before filing causes fake or broken identifiers. Follow this strict order: file follow-ups first via `factory linear file`, collect the returned issue identifiers, and then author summary and handoff comments referencing those real IDs.
+**Strict order of operations for discovered work.** Discovered work filed during a merge review or ticket session cannot have its ticket ID known prior to creation. Pre-writing cross-references in summary or handoff comments before filing causes fake or broken identifiers. Follow this strict order: file follow-ups first via `factory ticket file`, collect the returned issue identifiers, and then author summary and handoff comments referencing those real IDs.
 
 ### Secrets
 
-Never print, echo, commit, or paste an API key, token, or `.env` file — not into a transcript, a PR, a Linear comment, or a log. Scripts read credentials themselves. If a secret appears in a diff, that's an escalation, not a cleanup.
+Never print, echo, commit, or paste an API key, token, or `.env` file — not into a transcript, a PR, a ticket comment, or a log. Scripts read credentials themselves. If a secret appears in a diff, that's an escalation, not a cleanup.
 <!-- FACTORY:FLOOR:END -->
