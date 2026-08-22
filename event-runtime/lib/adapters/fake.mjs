@@ -293,6 +293,8 @@ export async function execute({
                 issueId: "CLNT-999",
                 action: "label-agent-ready",
                 reason: "fake: fully specified",
+                tier: "standard",
+                tierReason: "fake: default sizing",
               },
             ],
             summary: `fake triage of ${repo}`,

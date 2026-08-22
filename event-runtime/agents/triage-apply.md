@@ -6,14 +6,14 @@ via the deterministic actions adapter in item-list mode
 
 Registered actions — each resolves to one fixed, non-shell-interpolated argv:
 
-| action id           | effect                                                                                                                           |
-| :------------------ | :------------------------------------------------------------------------------------------------------------------------------- |
-| `label-agent-ready` | `state {issueId} "Todo" --add ai:agent-ready` — the full make-dispatchable transition (the protocol's `Todo` + `ai:agent-ready`) |
-| `move-to-todo`      | `state {issueId} "Todo"`                                                                                                         |
-| `write-detail`      | `detail {issueId} "<detail>"` — idempotently append approved missing sections; no state or label change                          |
-| `needs-detail`      | `comment {issueId} "<reason>"` — tells the human exactly what is missing                                                         |
-| `mark-duplicate`    | `comment {issueId} "<reason>"` — names the covering issue; the relation stays a human call                                       |
-| `needs-human`       | `comment {issueId} "<reason>"`                                                                                                   |
+| action id           | effect                                                                                                                                                                                                                                                                                                                                                                                  |
+| :------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `label-agent-ready` | `state {issueId} "Todo" --add ai:agent-ready --add tier:{tier}` — the full make-dispatchable transition (the protocol's `Todo` + `ai:agent-ready`), plus the model-tier sizing label. `tier` is required on every `label-agent-ready` item; a missing value fails the whole plan closed (item resolution happens before any item executes) rather than promoting a ticket with no tier. |
+| `move-to-todo`      | `state {issueId} "Todo"`                                                                                                                                                                                                                                                                                                                                                                |
+| `write-detail`      | `detail {issueId} "<detail>"` — idempotently append approved missing sections; no state or label change                                                                                                                                                                                                                                                                                 |
+| `needs-detail`      | `comment {issueId} "<reason>"` — tells the human exactly what is missing                                                                                                                                                                                                                                                                                                                |
+| `mark-duplicate`    | `comment {issueId} "<reason>"` — names the covering issue; the relation stays a human call                                                                                                                                                                                                                                                                                              |
+| `needs-human`       | `comment {issueId} "<reason>"`                                                                                                                                                                                                                                                                                                                                                          |
 
 `write-detail` is intentionally separate from `label-agent-ready`. It calls
 `tools/ticket.mjs detail`, which preserves the description read immediately
@@ -29,3 +29,10 @@ changes state or labels.
 Every action is additive or a forward state move; nothing here closes,
 deletes, or reassigns an issue. An action ID outside this table refuses
 before applying anything — including the legitimate items alongside it.
+
+`tierReason` is not posted as a ticket comment: this executor is one fixed,
+non-shell argv per action, and there is no verb that safely transitions state
+_and_ posts arbitrary free text in a single call (free text can't be
+shell-interpolated into a compound command without reopening injection risk).
+The tier rationale is instead folded into the item's `reason`, which is kept
+for the audit trail alongside every other action here.
