@@ -8,7 +8,13 @@
  * label when it re-holds, which is what keeps this from firing forever on an
  * unanswered sharper question).
  */
-import { gql } from "./reaper.mjs";
+// WM-962: through the adapter, not a direct `gql` import. HELD_QUERY needs
+// Linear's label history (`addedLabelIds`) to know when ai:blocked was
+// applied, which the neutral contract does not model — so this stays `raw()`
+// rather than becoming a typed verb. What matters is that there is one
+// transport with one credential path, which is what the grep invariant in
+// tools/ticket.test.mjs enforces.
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
 
 export const AI_BLOCKED = "ai:blocked";
 
@@ -121,7 +127,9 @@ export function holdInfo(node, labelIds, graceMs = REPLY_GRACE_MS) {
 let _blockedLabelIds = null;
 export async function blockedLabelIds() {
   if (!_blockedLabelIds) {
-    const r = await gql(LABEL_IDS_QUERY, { name: AI_BLOCKED });
+    const r = await loadControlPlane().raw(LABEL_IDS_QUERY, {
+      name: AI_BLOCKED,
+    });
     _blockedLabelIds = new Set((r?.issueLabels?.nodes ?? []).map((n) => n.id));
   }
   return _blockedLabelIds;
@@ -133,7 +141,7 @@ export async function answeredHeldTickets(repo) {
   if (!ids.size) return new Set();
   const held =
     (
-      await gql(HELD_QUERY, {
+      await loadControlPlane({ repoName: repo.name }).raw(HELD_QUERY, {
         team: repo.team,
         project: repo.project,
         label: AI_BLOCKED,

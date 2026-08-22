@@ -355,12 +355,15 @@ test("closure check blocks ai:agent-ready when Owned Paths closure policy is inc
 // ---------------------------------------------------------- grep invariant ---
 // Same shape as lib/forge's "nothing outside lib/forge/ spawns gh" check:
 // new Linear GraphQL call sites must go through the adapter, not gql().
+// WM-962 shrank this to the transport itself plus the adapter. Everything
+// else reaches the tracker through `loadControlPlane()` — a typed verb where
+// the contract models the question, `raw()` where it does not. Adding a name
+// back here means a second transport with its own credential path and no
+// shared retry/backoff, which is exactly what this invariant exists to stop.
 const GQL_IMPORT_ALLOWED = new Set([
   "event-runtime/lib/linear.mjs",
   "lib/control-plane/linear.mjs",
   "orchestrator/reaper.mjs",
-  // Remaining call sites sit outside this ticket's Owned Paths (WM-962).
-  "orchestrator/reply-detection.mjs",
 ]);
 
 test("no new call site imports gql outside lib/control-plane and the reaper transport", () => {
@@ -370,7 +373,11 @@ test("no new call site imports gql outside lib/control-plane and the reaper tran
       "git",
       "grep",
       "-nE",
-      String.raw`import \{[^}]*\bgql\b`,
+      // POSIX ERE, NOT PCRE: `git grep -E` does not support `\b`, so the
+      // original pattern here matched nothing and this invariant passed
+      // vacuously from the day it was written (found while shrinking the
+      // allowlist in WM-962). Spell the word boundary explicitly.
+      String.raw`import \{[^}]*(^|[^a-zA-Z])gql([^a-zA-Z]|$)`,
       "--",
       "orchestrator",
       "lib",
@@ -389,6 +396,34 @@ test("no new call site imports gql outside lib/control-plane and the reaper tran
       return !GQL_IMPORT_ALLOWED.has(file) && !file.endsWith(".test.mjs");
     });
   expect(hits).toEqual([]);
+});
+
+test("the gql grep invariant can actually match (it once could not)", () => {
+  // The check above is only worth having if its pattern works. It shipped
+  // with `\b`, which `git grep -E` (POSIX ERE) does not implement, so it
+  // silently matched nothing. Assert the pattern still finds the known
+  // allowlisted importers — if this returns nothing, the invariant above is
+  // vacuous again regardless of what it reports.
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const proc = Bun.spawnSync({
+    cmd: [
+      "git",
+      "grep",
+      "-lE",
+      String.raw`import \{[^}]*(^|[^a-zA-Z])gql([^a-zA-Z]|$)`,
+      "--",
+      "orchestrator",
+      "lib",
+      "event-runtime",
+      "tools",
+    ],
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const files = (proc.stdout?.toString() || "").split("\n").filter(Boolean);
+  expect(files).toContain("lib/control-plane/linear.mjs");
+  expect(files.length).toBeGreaterThan(0);
 });
 
 // ------------------------------------------------ repo resolution (WM-1007) ---
