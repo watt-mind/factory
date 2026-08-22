@@ -106,10 +106,16 @@ export function shieldsBadgeUrl(count) {
   return `https://img.shields.io/static/v1?${params.toString()}`;
 }
 
+/**
+ * The blank lines around the badge are the Prettier contract, not decoration
+ * (WM-1031). CI runs `prettier --check .` over README.md, and the weekly job
+ * commits its rewrite straight to `develop`; a block Prettier would reformat
+ * turns the base branch red every week from a commit nobody is watching.
+ */
 export function renderBadgeBlock(count, { repo = DEFAULT_REPO } = {}) {
   const img = shieldsBadgeUrl(count);
   const href = `https://github.com/${repo}/pulls?q=is%3Apr+is%3Amerged`;
-  return `${BADGE_START}\n[![${BADGE_LABEL}](${img})](${href})\n${BADGE_END}`;
+  return `${BADGE_START}\n\n[![${BADGE_LABEL}](${img})](${href})\n\n${BADGE_END}`;
 }
 
 function escapeRegExp(s) {

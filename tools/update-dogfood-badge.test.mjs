@@ -115,6 +115,18 @@ test("applyBadgeToReadme is idempotent for the same count", () => {
   expect(applyBadgeToReadme(once, 4)).toBe(once);
 });
 
+test("the rewritten README survives prettier untouched (WM-1031)", async () => {
+  const prettier = (await import("prettier")).default;
+  const readme = applyBadgeToReadme(
+    "# factory\n\n**A tagline.**\n\nBody paragraph.\n",
+    742,
+  );
+  const options = { ...(await prettier.resolveConfig(import.meta.dir)) };
+  expect(
+    await prettier.format(readme, { ...options, parser: "markdown" }),
+  ).toBe(readme);
+});
+
 test("shields payload matches the endpoint schema", () => {
   const payload = shieldsEndpointPayload(12);
   expect(payload).toEqual({
