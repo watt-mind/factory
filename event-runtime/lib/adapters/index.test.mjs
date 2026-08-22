@@ -25,6 +25,7 @@ const BUILTIN_NAMES = [
   "command",
   "cursor",
   "fake",
+  "hermes",
   "pi",
 ];
 
@@ -44,7 +45,7 @@ function fixtureAdapter({ sandboxSupport = "unsupported" } = {}) {
 }
 
 describe("builtinAdapters", () => {
-  test("returns exactly the seven shipped adapters, keyed by name", () => {
+  test("returns exactly the eight shipped adapters, keyed by name", () => {
     expect(Object.keys(builtinAdapters()).sort()).toEqual(BUILTIN_NAMES);
   });
 

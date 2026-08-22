@@ -153,6 +153,8 @@ Triage is the live judgement call: a bad spec burns a full dispatch run, which a
 
 `shared/` is the only place to edit. `build/emit.mjs` produces the Claude plugin, harness-native skills/prompts, custom-agent definitions for Claude Code, Codex, Gemini, Cursor, and Pi, and the `AGENTS.md` floor block.
 
+This is packaging, not the execution-side adapter registry — the event runtime's harness adapters (`claude`, `pi`, `agy`, `cursor`, `hermes`, …) are a separate, smaller set gated behind a conformance test and the sandbox seam; see [`event-runtime.md`](event-runtime.md#6-agent-definitions) §6 for that registry and its per-adapter transport notes.
+
 `--check` is the half that matters: it fails CI when a generated file drifts from `shared/`. The failure this prevents is real — coach-wattz carries "NEVER `prisma db push`" only in `GEMINI.md`, invisible to Claude Code. Four generated copies beat four hand-written ones **only** if CI proves they still match their source.
 
 The plugin is a convenience layer, not the safety floor. It reaches Claude Code only, and a cloud sandbox without GitHub auth for this private repo gets nothing — failing closed without knowing it. So the non-negotiables live in `shared/floor.md` and are committed into each repo's `AGENTS.md`, the one channel every harness reads.

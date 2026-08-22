@@ -435,7 +435,8 @@ behavior, and workspace confinement. The registry has entries for `pi`
 (OPS-296, the default LLM harness on the Codex subscription window, WM-215),
 `claude` (Claude Code, still fully supported), `agy` (Antigravity/Gemini,
 WM-424), `cursor` (Cursor Agent CLI, WM-440 — smoke-only; no production
-route), `command` (a closed argv template), `actions` (an approved action
+route), `hermes` (Hermes Agent via ACP, GH-867 — no production route yet),
+`command` (a closed argv template), `actions` (an approved action
 list resolved against a closed registry, remote-SSH or local-argv), and
 `fake` (tests and demo environments). It does not inherit the current
 runner's entire adapter surface.
@@ -477,6 +478,27 @@ started/completed → `tool_use`/`tool_result`, terminal `result` → `usage`
 `cli_not_found` preflight. The only committed route is
 `factory.cursor-smoke.requested` → `cursor-smoke@1`; no production event
 type is remapped.
+
+**The `hermes` adapter (`lib/adapters/hermes.mjs`, GH-867, migrated from
+WM-995) configures `acp.mjs`'s generic ACP v1 engine for Hermes Agent rather
+than reimplementing a bespoke CLI adapter.** Investigation ruled out a
+`-p <prompt>` one-shot CLI shape: the deployed Hermes runtime
+(`docs/editorial-agent-runtime.md` §4) is a long-lived `hermes-gateway`
+service with its own session/kanban/cron state, the wrong shape for a
+bounded, single-task factory run. Hermes's task entry point instead speaks
+ACP — newline-delimited JSON-RPC 2.0 over stdio
+(https://agentclientprotocol.com/protocol/v1) — the same transport
+`lib/adapters/acp.mjs` (WM-937) already implements: session lifecycle,
+`session/update` folding into `factory.trace/v1`, closed permission
+auto-allow with fail-closed escalate, and TERM→KILL(`killGraceMs`). `hermes.mjs`
+only supplies Hermes-specific configuration over that engine: default binary
+`hermes-agent-acp` (resolved via `config`, then `spec.hermes`, then
+`def.hermes`, same precedence as `resolveAcpConfig`), and harness packaging
+under `.hermes/commands` / `.hermes/agents` (WM-851) instead of `.claude/`.
+Sandbox is refused (`SANDBOX_SUPPORT = "unsupported"`): no Gondolin guest
+translation exists for Hermes's host binary/auth yet, the same WM-313
+deferral as `acp.mjs` itself. No production event type is routed to `hermes`
+yet — it is registered and conformance-tested, awaiting a smoke route.
 
 **The `pi` adapter (`lib/adapters/pi.mjs`, OPS-296) mirrors `claude.mjs`,
 adapted to a different CLI shape.** `pi -p --mode json` (prompt piped to
