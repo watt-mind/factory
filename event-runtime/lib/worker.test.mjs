@@ -1,5 +1,22 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
+
+/**
+ * Ceiling for the execute-side adapter spawn tests (WM-1025).
+ *
+ * These spawn a real CLI subprocess. 5s is comfortable on a quiet machine and
+ * demonstrably not comfortable on a contended one: on 2026-08-22 four of these
+ * timed out under concurrent runners and took WM-1008, WM-1015 and WM-534 out
+ * of the queue with them — WM-1015 was a documentation-only diff that could
+ * not merge because of it.
+ *
+ * `loadAdjustedTimeout` is the repo's existing answer (CI sets CI_LOAD_FACTOR,
+ * capped at 4x). This file was simply not wired into it. Scaling a liveness
+ * ceiling changes no assertion: every check below still waits on observable
+ * state, so a real hang still fails, just not a slow host.
+ */
+const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -1468,7 +1485,7 @@ describe("worker", () => {
       spec,
       def,
       workspaceDir: claudeWorkspace,
-      timeoutMs: 5_000,
+      timeoutMs: EXECUTE_SPAWN_TIMEOUT_MS,
       env: {
         PATH: `${bin}${path.delimiter}${process.env.PATH}`,
         FACTORY_TEST_ARGV: claudeArgv,
@@ -1491,7 +1508,7 @@ describe("worker", () => {
       spec,
       def,
       workspaceDir: piWorkspace,
-      timeoutMs: 5_000,
+      timeoutMs: EXECUTE_SPAWN_TIMEOUT_MS,
       env: {
         PATH: `${bin}${path.delimiter}${process.env.PATH}`,
         FACTORY_TEST_ARGV: piArgv,
@@ -5537,5 +5554,48 @@ describe("defaultReturnHandoffTicket (WM-718 F2)", () => {
     });
     expect(result).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ------------------------------------------ liveness-ceiling invariant ---
+// WM-1025. Same shape as the GQL_IMPORT_ALLOWED grep invariant in
+// tools/linear.test.mjs: the bug was not that 5s is the wrong number, it was
+// that these call sites bypassed the load-adjustment mechanism the repo
+// already had. A number typed inline cannot scale, and the next one typed
+// inline will not either — so guard the pattern, not the value.
+describe("subprocess liveness ceilings scale with host load (WM-1025)", () => {
+  const SOURCES = [
+    "event-runtime/lib/worker.test.mjs",
+    "event-runtime/work.test.mjs",
+  ];
+
+  test("no raw sub-30s timeoutMs literal bypasses loadAdjustedTimeout", () => {
+    const root = path.resolve(import.meta.dir, "..", "..");
+    const offenders = [];
+    for (const rel of SOURCES) {
+      const file = path.join(root, rel);
+      if (!existsSync(file)) continue;
+      readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, i) => {
+          // `timeoutMs: 25` style intentional-hang probes are far below the
+          // range that host contention affects; only flag plausible liveness
+          // ceilings (1s..30s) written as bare literals.
+          const m = line.match(/timeoutMs:\s*([0-9][0-9_]*)\s*,/);
+          if (!m) return;
+          const ms = Number(m[1].replace(/_/g, ""));
+          if (ms < 1_000 || ms > 30_000) return;
+          if (line.includes("loadAdjustedTimeout")) return;
+          offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the execute-side ceiling actually scales", () => {
+    // Guards the wiring itself: a constant that ignores CI_LOAD_FACTOR would
+    // satisfy the grep above while still pinning the timeout at 5s.
+    expect(EXECUTE_SPAWN_TIMEOUT_MS).toBe(loadAdjustedTimeout(5_000));
+    expect(EXECUTE_SPAWN_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
   });
 });
