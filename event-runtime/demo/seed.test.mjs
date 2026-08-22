@@ -1,11 +1,10 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-demo-seed-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadAdjustedTimeout } from "../cli/test-helpers.mjs";
 import { validate } from "../lib/schema.mjs";
-import { spawnTracked } from "../lib/test-helpers-process.mjs";
 
 const CLI = fileURLToPath(new URL("../cli.mjs", import.meta.url));
 const SEED = fileURLToPath(new URL("./seed.mjs", import.meta.url));
@@ -41,9 +40,63 @@ const redact = (text) =>
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
     .replace(/(authorization\s*[:=]\s*)\S+/gi, "$1[REDACTED]");
 
-function expectSuccess(label, result) {
+/**
+ * Long-lived suite fixtures (serve/work) are spawned directly with node's
+ * child_process rather than the shared lib/test-helpers-process.mjs
+ * spawnTracked() helper (OPS-464 regression, root-caused for gh-875).
+ *
+ * That helper's afterEach/afterAll hooks are registered once, at ES module
+ * load time, against whichever test FILE happens to import it first in the
+ * process — bun's module cache means every other importing file's hooks
+ * never fire per-file. Several unrelated files in the timing-bound-tests
+ * group (cli/work.test.mjs, cli/supervise.test.mjs, lib/adapters/*.test.mjs)
+ * import the same module, so its process-wide `afterAll` fires when the
+ * FIRST of those files finishes — often seconds in, while this file's
+ * ~20-30s seed/verify run is still mid-flight — and SIGKILLs every tracked
+ * process globally, including this suite's serve/work children. That is the
+ * "Unable to connect" failure: the runtime under test was killed out from
+ * under it by an unrelated file's cleanup, not a real readiness or network
+ * problem. Spawning here keeps this suite's process lifecycle local to this
+ * file, immune to that cross-file collision.
+ */
+function spawnSuiteProcess(command, args, options) {
+  return spawn(command, args, {
+    ...options,
+    detached: process.platform !== "win32",
+  });
+}
+
+function killSuiteProcess(child) {
+  if (!child?.pid) return;
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-child.pid, "SIGKILL");
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    /* intentionally ignored: already exited */
+  }
+}
+
+/** Distinguish "runtime unreachable" from "runtime rejected the request" on failure. */
+async function probeHealth(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    return res.ok ? "reachable" : `reachable, HTTP ${res.status}`;
+  } catch (err) {
+    return `unreachable (${err.message})`;
+  }
+}
+
+async function expectSuccess(label, result, port) {
+  if (result.status === 0) return;
+  const health = await probeHealth(port);
   const diagnostic = [
     `${label} exited ${result.status ?? "null"}${result.signal ? ` (signal ${result.signal})` : ""}`,
+    `runtime on port ${port} at failure time: ${health}`,
     `stdout:\n${redact(result.stdout)}`,
     `stderr:\n${redact(result.stderr)}`,
   ].join("\n");
@@ -150,14 +203,13 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     port = String(probe.port);
     probe.stop(true);
 
-    serveChild = spawnTracked(
+    serveChild = spawnSuiteProcess(
       "bun",
       [CLI, "serve", "--adapter-override", "fake", "--port", port],
       {
         env: { ...process.env, FACTORY_EVENT_HOME: home },
         stdio: ["ignore", "pipe", "pipe"],
       },
-      { scope: "suite" },
     );
 
     // Wait for health
@@ -177,7 +229,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     }
     expect(up).toBe(true);
 
-    workerChild = spawnTracked(
+    workerChild = spawnSuiteProcess(
       "bun",
       [
         CLI,
@@ -193,7 +245,6 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         env: { ...process.env, FACTORY_EVENT_HOME: home },
         stdio: ["ignore", "pipe", "pipe"],
       },
-      { scope: "suite" },
     );
 
     // Health only proves the control API is listening. Seed drives approvals
@@ -217,20 +268,8 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
   });
 
   afterAll(async () => {
-    if (serveChild) {
-      try {
-        serveChild.kill("SIGKILL");
-      } catch {
-        /* intentionally ignored */
-      }
-    }
-    if (workerChild) {
-      try {
-        workerChild.kill("SIGKILL");
-      } catch {
-        /* intentionally ignored */
-      }
-    }
+    killSuiteProcess(serveChild);
+    killSuiteProcess(workerChild);
   });
 
   test(
@@ -245,7 +284,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
           env: { ...process.env, FACTORY_EVENT_HOME: home },
         },
       );
-      expectSuccess("initial seed", seedRes);
+      await expectSuccess("initial seed", seedRes, port);
       expect(seedRes.stdout).toContain("merge-apply@2 watched");
       expect(seedRes.stdout).not.toContain(
         "merge-verify@1 exact landed lifecycle",
@@ -262,7 +301,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         encoding: "utf8",
         env: { ...process.env, FACTORY_EVENT_HOME: home },
       });
-      expectSuccess("initial verify", verifyRes);
+      await expectSuccess("initial verify", verifyRes, port);
     },
     loadAdjustedTimeout(30_000),
   );
@@ -296,7 +335,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
           env: { ...process.env, FACTORY_EVENT_HOME: home },
         },
       );
-      expectSuccess("re-seed", seedRes);
+      await expectSuccess("re-seed", seedRes, port);
       expect(seedRes.stdout).toContain("merge-apply@2 watched");
       expect(seedRes.stdout).not.toContain(
         "merge-verify@1 exact landed lifecycle",
@@ -315,7 +354,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         encoding: "utf8",
         env: { ...process.env, FACTORY_EVENT_HOME: home },
       });
-      expectSuccess("re-seed verify", verifyRes);
+      await expectSuccess("re-seed verify", verifyRes, port);
     },
     loadAdjustedTimeout(30_000),
   );
