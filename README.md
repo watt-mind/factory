@@ -24,7 +24,12 @@ source of truth, and CI is the reward signal. Nothing merges because an agent
 said it was done; it merges because the tests passed and a reviewer (agent or
 human) approved.
 
-![A recorded `factory demo` run: a ticket is claimed, implemented, verified, and merged.](docs/media/demo.gif)
+[![The factory's Graph view: every registered event route and recommendation edge in a running instance, laid out as a directed graph.](docs/screenshots/15-graph.jpg)](docs/screenshots/15-graph.jpg)
+
+<sub>The Graph view of a live instance — every event type, every agent it
+routes to, and the recommendation edges between them. This is the whole
+control loop as the runtime actually has it registered, not a diagram someone
+drew. <a href="docs/screenshots/">More screenshots</a>.</sub>
 
 **Status:** the first commit landed on 2026-08-03. The badge above counts the
 pull requests the factory has since merged through its own loop. Young
@@ -42,6 +47,8 @@ bun install
 bin/factory demo --dry   # print the plan — offline, and what CI runs
 bin/factory demo         # claim → implement → verify → PR → merge
 ```
+
+![A recorded `factory demo` run: a ticket is claimed, implemented, verified, and merged.](docs/media/demo.gif)
 
 The demo needs no accounts: no tracker token, no GitHub token, no model API
 key. It copies a bundled repository into a temporary checkout, implements the
