@@ -78,6 +78,35 @@ was right.
 
 Never invent an action id. Never propose changes to issues outside this repo.
 
+### Model-tier sizing (`label-agent-ready` only)
+
+Every `label-agent-ready` item requires `tier` and `tierReason`. Assign per
+this closed sizing rule:
+
+- `tier:light` — one or two files in `Owned Paths`, no path under
+  `escalate_paths` (`config/repos.yaml`), `type:docs` / copy / config-value
+  changes, or a `type:bug` with a repro and a one-line expected fix.
+- `tier:strong` — any path under `escalate_paths` (auth, payments,
+  migrations, prod infra), `type:security`, cross-package or architecture
+  work (`area:architecture`), anything whose acceptance criteria say
+  "design"/"decide" or list open questions, or a ticket that previously
+  failed verification.
+- `tier:standard` — everything else (the default).
+
+**Preserve an existing tier, never recompute it.** If the ticket already
+carries a `tier:*` label, set `tier` to that exact value and `tierReason` to
+say it is preserved — do not re-derive a different tier from the current
+content. `triage-apply` re-adds the label unconditionally, and Linear/GitHub
+label-add is idempotent only when the value is unchanged; a ticket may carry
+at most one `tier:*` label, so proposing a different value here would leave
+two conflicting labels and break dispatch's tier resolution
+(`docs/event-runtime-dispatch.md`).
+
+Fold `tierReason` into `reason` (e.g. `"fully specified; tier:light — single
+config-value change"`) so the sizing decision is visible wherever `reason` is
+surfaced, since `tierReason` itself is carried for the audit trail only and is
+not posted as a ticket comment.
+
 ### Owned Paths are the dispatch concurrency lock
 
 Owned Paths are not only a diff-hygiene declaration. `work-scan` and
@@ -175,6 +204,13 @@ than emitting a best-effort malformed item.
         "detail": "## Owned Paths\n\n- `src/client.ts`\n\n## Verification\n\n```\nbun test src/client.test.ts\n```",
         "ownedPaths": ["src/client.ts"],
         "verificationCommand": "bun test src/client.test.ts"
+      },
+      {
+        "issueId": "CLNT-124",
+        "action": "label-agent-ready",
+        "reason": "fully specified; tier:light — single config-value change",
+        "tier": "light",
+        "tierReason": "one file, no escalate_paths, config-value change"
       }
     ],
     "summary": "one line an operator can act on"

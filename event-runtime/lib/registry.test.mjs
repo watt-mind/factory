@@ -170,8 +170,10 @@ describe("registry", () => {
     // verification in worktrees; full suites remain CI-only.
     // Regenerated (WM-1039 rebase over tracker-neutral sweep)
     // Regenerated (WM-1006 cutover: ticket patterns accept GitHub owner/repo#N ids; schemas re-pinned)
+    // Regenerated (#846/WM-696): triage-scan/triage-apply admit tier/tierReason
+    // for model-tier sizing on promotion; both agent definitions are registry inputs.
     const expected =
-      "sha256:61ff5eda45e22a00505176a96c77c04abc777030447def09cbf3d785a64d309f";
+      "sha256:c70872ae6a991e32f2e5e388cb6dd685767a7e2869fd0faa23c300dc242709e7";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

@@ -16,7 +16,9 @@
         "{issueId}",
         "Todo",
         "--add",
-        "ai:agent-ready"
+        "ai:agent-ready",
+        "--add",
+        "tier:{tier}"
       ]
     },
     "move-to-todo": {
@@ -84,7 +86,9 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["tracker:write"]
+    "services": [
+      "tracker:write"
+    ]
   },
   "limits": {
     "timeout_seconds": 600,
@@ -92,8 +96,8 @@
   },
   "mutating": true,
   "pins": {
-    "agents/triage-apply.md": "sha256:4be185dce1dd5c5b5ae6a5fa1ec92dc263d0321d6e9ea75f244c2d308d917e75",
-    "schemas/triage-apply.input.json": "sha256:7b87a7cc16db5222e476f2d436d08b0a5c589586c1cb7deb0fec79787df07e83",
+    "agents/triage-apply.md": "sha256:92ac3d3400d8bbb4b05e414668f38c4906dd3047e0582cec66d5ae277e429cf1",
+    "schemas/triage-apply.input.json": "sha256:e765ea02f17264c3c2ac0b938557a1bdf438f510d07511c1f883348c2a434133",
     "schemas/triage-applied.output.json": "sha256:ee71d56edb6f4ae96375a37e4d80e2512dd2702fac935268c0439627f561b94b"
   }
 }

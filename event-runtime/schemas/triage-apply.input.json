@@ -38,6 +38,15 @@
             "type": "string",
             "description": "One-line justification for the action, kept for the audit trail"
           },
+          "tier": {
+            "enum": ["light", "standard", "strong"],
+            "description": "For label-agent-ready only: the approved model-tier sizing decision; applied as a `tier:<value>` label alongside `ai:agent-ready`"
+          },
+          "tierReason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "For label-agent-ready only: one-line justification for the tier, kept for the audit trail"
+          },
           "detail": {
             "type": "string",
             "minLength": 1,

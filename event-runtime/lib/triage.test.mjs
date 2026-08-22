@@ -510,3 +510,84 @@ describe("trusted-author + body-hash-pin primitives (GH-879)", () => {
     expect(parseReadyPin(before)).not.toBe(parseReadyPin(after));
   });
 });
+
+describe("model-tier sizing on promotion (WM-696)", () => {
+  // Mirrors the real triage-apply@1 label-agent-ready argv shape (state
+  // transition + two --add labels), substituted against a harmless local
+  // echo so the test stays hermetic (no real tracker CLI is invoked).
+  function tierDef(dir) {
+    return {
+      ref: "test-triage-tier@1",
+      itemsField: "plan",
+      itemKey: "issueId",
+      actionRegistry: {
+        "label-agent-ready": {
+          argv: [
+            "sh",
+            "-c",
+            `echo {issueId} ai:agent-ready tier:{tier} >> ${dir}/applied.txt`,
+          ],
+        },
+      },
+    };
+  }
+
+  test("the real triage-apply@1 definition adds tier:{tier} alongside ai:agent-ready", () => {
+    const argv =
+      registry.agents.get("triage-apply@1").actionRegistry["label-agent-ready"]
+        .argv;
+    expect(argv).toContain("ai:agent-ready");
+    expect(argv).toContain("tier:{tier}");
+  });
+
+  test("label-agent-ready substitutes the approved tier into the applied label", async () => {
+    const dir = tmpDir("evrt-apply-");
+    const workspaceDir = tmpDir("evrt-apply-ws-");
+    const outcome = await actions.execute({
+      spec: {
+        input: {
+          repo: "bj29",
+          plan: [
+            {
+              issueId: "CLNT-1",
+              action: "label-agent-ready",
+              tier: "light",
+              tierReason: "single-file config change",
+            },
+          ],
+        },
+      },
+      def: tierDef(dir),
+      workspaceDir,
+      timeoutMs: 10_000,
+    });
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    expect(readFileSync(path.join(dir, "applied.txt"), "utf8").trim()).toBe(
+      "CLNT-1 ai:agent-ready tier:light",
+    );
+  });
+
+  test("a label-agent-ready item with no tier fails the whole plan closed", async () => {
+    const dir = tmpDir("evrt-apply-");
+    const workspaceDir = tmpDir("evrt-apply-ws-");
+    const outcome = await actions.execute({
+      spec: {
+        input: {
+          repo: "bj29",
+          plan: [
+            { issueId: "CLNT-1", action: "label-agent-ready", tier: "light" },
+            { issueId: "CLNT-2", action: "label-agent-ready" }, // no tier
+          ],
+        },
+      },
+      def: tierDef(dir),
+      workspaceDir,
+      timeoutMs: 10_000,
+    });
+    expect(outcome.exitCode).toBe(1);
+    expect(() => readFileSync(path.join(dir, "applied.txt"))).toThrow(); // CLNT-1 never ran either
+    expect(
+      readFileSync(path.join(workspaceDir, ".actions.log"), "utf8"),
+    ).toContain('missing/non-primitive field "tier"');
+  });
+});
