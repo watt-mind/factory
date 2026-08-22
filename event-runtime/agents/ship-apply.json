@@ -66,7 +66,7 @@
   "mutating": true,
   "pins": {
     "agents/ship-apply.md": "sha256:a33250cf1c1b42252193be5e97c38fb022d83267e664c5e5e3862be2341e6516",
-    "schemas/ship-apply.input.json": "sha256:67474d001e310e576f8a57c77f63c9cb5958dc963f031fd45cf087e6bd956f2f",
+    "schemas/ship-apply.input.json": "sha256:3be41273b50d505eae8ffde87b205738ff4fd1b6c9e8ed9f9aa1809965763686",
     "schemas/ship-applied.output.json": "sha256:e73f513f50197b344ff320f2f881464028991c6dfb7689790fe3039456ce821b"
   }
 }

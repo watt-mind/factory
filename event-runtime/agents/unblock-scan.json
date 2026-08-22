@@ -23,6 +23,6 @@
   "pins": {
     "agents/unblock-scan.md": "sha256:694369735661dfaab12070e949c96e5f00d9c38570b7ceecf452e88977b242ae",
     "schemas/unblock-scan.input.json": "sha256:edb9af116d7a35b155d2472232f3c9625381996876e6aac18dacff28a215ac89",
-    "schemas/unblock-scan.output.json": "sha256:1ccccd541b192dc4a300a1a5ebfe36485fb2ed97effc4f0d6bfcc1ab7e757c65"
+    "schemas/unblock-scan.output.json": "sha256:a2ab04e3fc9a6b4d277a4ea1d0431ee673eb765167d6c884849e4f2adf624b34"
   }
 }

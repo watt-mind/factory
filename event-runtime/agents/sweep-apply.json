@@ -51,7 +51,7 @@
   "mutating": true,
   "pins": {
     "agents/sweep-apply.md": "sha256:373e0bd369792c9fee300a90b1ef833499fb9cdc53c5993e9598c882dd56aa8d",
-    "schemas/sweep-apply.input.json": "sha256:5af257704ff1a7a6753e27bbe6916cc0b0946c8b4a23250bf592dd139273ec44",
-    "schemas/sweep-applied.output.json": "sha256:75524150caebdaeffeb1dee800169a0ac423d3d6549d5491185eefe5351dacfd"
+    "schemas/sweep-apply.input.json": "sha256:b2f1f912fdd045ef9cf692eb6437c319cd90984396aebb9e7a975ea9fd81d56e",
+    "schemas/sweep-applied.output.json": "sha256:ec663e8d5a03dc19e5aa64de7806aad39dc2781e815a299ab54ada17fd0d7134"
   }
 }

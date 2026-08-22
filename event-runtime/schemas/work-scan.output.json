@@ -24,7 +24,7 @@
     },
     "ticket": {
       "type": ["string", "null"],
-      "pattern": "^[A-Z]+-[0-9]+$",
+      "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
       "description": "The plan's first ticket; must equal plan[0].ticket for DISPATCH and be null otherwise"
     },
     "plan": {
@@ -37,7 +37,7 @@
         "properties": {
           "ticket": {
             "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
             "description": "Linear issue identifier, dispatchable at scan time: state exactly Todo, label ai:agent-ready present, and assignee field null"
           },
           "ownedPaths": {
@@ -68,7 +68,7 @@
         "properties": {
           "ticket": {
             "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
             "description": "Linear issue identifier of the ready candidate that was not selected"
           },
           "reason": {

@@ -29,7 +29,7 @@
   "mutating": true,
   "pins": {
     "agents/merge-verify.md": "sha256:639cabb93ba9884c2250071147e21294396fddee125fd313ebe0318956ab7d8b",
-    "schemas/merge-verify.input.json": "sha256:9cba46817545d7fe02e96b83e050b4af6d3fba254d15d3ef1366088dbfd35fdb",
+    "schemas/merge-verify.input.json": "sha256:7b1a0ec51bff5ed2ec99ed9ab0656f62481a038f7ab1bc8be7ce5c73b9aedd62",
     "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
   }
 }

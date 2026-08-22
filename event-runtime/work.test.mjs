@@ -521,7 +521,7 @@ describe("work-scan registration (WM-110)", () => {
       "reason",
     ]);
     expect(schema.properties.plan.items.properties.ticket.pattern).toBe(
-      "^[A-Z]+-[0-9]+$",
+      "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
     );
     expect(schema.properties.deferred.items.required).toEqual([
       "ticket",

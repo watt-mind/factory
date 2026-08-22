@@ -609,7 +609,10 @@ function checkWorkPlan(candidate) {
         !Array.isArray(entry) &&
         Object.keys(entry).length === 2 &&
         typeof entry.ticket === "string" &&
-        /^[A-Z]+-[0-9]+$/.test(entry.ticket) &&
+        // WM-1006: Linear TEAM-N or GitHub owner/repo#N / #N / N identifiers.
+        /^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#?[0-9]+)$/.test(
+          entry.ticket,
+        ) &&
         dispositions.has(entry.disposition);
       if (!valid) {
         violations.push(`evidence_candidate_invalid_at_index_${index}`);
