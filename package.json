@@ -42,7 +42,6 @@
     "dist/",
     "demo/",
     "config/*.example.yaml",
-    "config/nodes.yaml",
     "config/mcp/",
     ".claude-plugin/",
     "AGENTS.md",
@@ -59,6 +58,7 @@
     "!event-runtime/web/node_modules/**"
   ],
   "scripts": {
+    "prepublishOnly": "bun tools/publish.mjs --dry-run",
     "supervise": "bun orchestrator/run.mjs",
     "watch": "bun orchestrator/watch.jsx --repo",
     "linear-reaper": "bun orchestrator/run.mjs --only linear-reaper --once --apply --repo",

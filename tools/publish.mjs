@@ -27,15 +27,14 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const SEMVER_RE =
-  /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
 // Paths that must never appear in a published tarball, even if a future
 // edit to the `files` allowlist widens it by accident.
 const DENYLIST_PATTERNS = [
-  /^config\/repos\.yaml$/,
-  /^config\/policy\.yaml$/,
-  /^config\/schedule\.yaml$/,
+  // Any config/*.yaml that is not an .example file is instance-local state
+  // (repos, policy, schedule, nodes with operator PATs) and must never ship.
+  /^config\/(?!.*\.example\.yaml$)[^/]+\.yaml$/,
   /(^|\/)\.env(\..+)?$/,
   /(^|\/)node_modules\//,
   /\.test\.(mjs|ts|tsx)$/,
