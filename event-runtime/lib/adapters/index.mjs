@@ -40,6 +40,7 @@ import * as claude from "./claude.mjs";
 import * as command from "./command.mjs";
 import * as cursor from "./cursor.mjs";
 import * as fake from "./fake.mjs";
+import * as hermes from "./hermes.mjs";
 import * as pi from "./pi.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
@@ -97,7 +98,16 @@ export class AdapterRegistrationError extends Error {
  * mutate the built-in set for the next one.
  */
 export function builtinAdapters() {
-  return Object.freeze({ actions, agy, claude, command, cursor, fake, pi });
+  return Object.freeze({
+    actions,
+    agy,
+    claude,
+    command,
+    cursor,
+    fake,
+    hermes,
+    pi,
+  });
 }
 
 /**
