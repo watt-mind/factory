@@ -114,7 +114,10 @@ function run(workspaceDir, extra = {}) {
     workspaceDir,
     timeoutMs: extra.timeoutMs ?? 5000,
     killGraceMs: extra.killGraceMs ?? 200,
-    env: { HERMES_FAKE_BEHAVIOR: extra.behavior ?? "happy", ...(extra.env ?? {}) },
+    env: {
+      HERMES_FAKE_BEHAVIOR: extra.behavior ?? "happy",
+      ...(extra.env ?? {}),
+    },
     config: extra.config ?? fakeConfig,
     onTrace: extra.onTrace,
     onUsage: extra.onUsage,
@@ -133,7 +136,11 @@ describe("adapter contract", () => {
 
   test("registers cleanly and is sandbox-guarded through the registry", () => {
     const registry = createAdapterRegistry({ builtins: {} });
-    registry.register("hermes", { execute, SANDBOX_SUPPORT }, { source: "test" });
+    registry.register(
+      "hermes",
+      { execute, SANDBOX_SUPPORT },
+      { source: "test" },
+    );
     expect(registry.has("hermes")).toBe(true);
   });
 });
@@ -209,7 +216,8 @@ describe("execute: delegates to the ACP engine", () => {
     expect(result.timedOut).toBe(false);
     expect(
       trace.find(
-        (t) => t.kind === "assistant_text" && t.payload.text === "hi from hermes",
+        (t) =>
+          t.kind === "assistant_text" && t.payload.text === "hi from hermes",
       ),
     ).toBeTruthy();
     expect(usages.length).toBeGreaterThan(0);
