@@ -29,6 +29,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   buildClaudeArgv,
@@ -3090,6 +3091,57 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       }),
     ).toBe(true);
     releaseClaimLock(lockFile);
+  });
+
+  test("same-identity dispatch claims share the supervisor lock when event home is isolated", async () => {
+    const previousEventHome = process.env.FACTORY_EVENT_HOME;
+    const previousLocksDir = process.env.FACTORY_LOCKS_DIR;
+    const repoName = "wt-worker";
+    const supervisorLock = dispatchLockPath(
+      repoName,
+      path.join(homedir(), ".factory", "locks"),
+    );
+    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-isolated-event-home-");
+    delete process.env.FACTORY_LOCKS_DIR;
+    let claimCalls = 0;
+
+    try {
+      expect(acquireClaimLock(supervisorLock)).toBe(true);
+      const db = openDb(":memory:");
+      queueRun(
+        db,
+        makeDispatchSpec({
+          input: { repo: repoName, ticket: "WM-877" },
+        }),
+      );
+
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({
+          dispatch: {
+            random: () => 0,
+            fetchTicket: () => readyDispatchTicket("WM-877"),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => {
+              claimCalls += 1;
+              return { ok: true, assignee: "shared-bot" };
+            },
+          },
+        }),
+      );
+
+      expect(summary.reasonCode).toBe("claim_lock_contention");
+      expect(claimCalls).toBe(0);
+    } finally {
+      releaseClaimLock(supervisorLock);
+      if (previousEventHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousEventHome;
+      if (previousLocksDir === undefined) delete process.env.FACTORY_LOCKS_DIR;
+      else process.env.FACTORY_LOCKS_DIR = previousLocksDir;
+    }
   });
 
   test("contended claim lock requeues with jittered backoff without consuming an attempt, then runs", async () => {
