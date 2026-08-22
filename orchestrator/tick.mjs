@@ -477,20 +477,20 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   // ----------------------------------------------------------------- claim ----
-  const cp = loadControlPlane();
-  const me = (await cp.raw(`query{ viewer{ id name } }`))?.viewer;
-  const states =
-    (
-      await cp.raw(
-        `query($t:String!){ team(id:$t){ states(first:50){ nodes{ id name } } } }`,
-        { t: repo.team },
-      )
-    )?.team?.states?.nodes ?? [];
-  const todoId = states.find((s) => s.name.toLowerCase() === "todo")?.id;
-  const blockedId = states.find((s) => s.name.toLowerCase() === "blocked")?.id;
-  const allLabels =
-    (await cp.raw(`query{ issueLabels(first:250){ nodes{ id name } } }`))
-      ?.issueLabels?.nodes ?? [];
+  // ONE handle, resolved from the REPO (WM-1006 cutover). This block used to
+  // call a bare `loadControlPlane()`, which resolves to the workspace default
+  // — so the dispatcher read its queue from the repo's plane and then tried to
+  // claim on the default one, passing a GitHub identifier to Linear:
+  //   Entity not found: Issue — Could not find referenced Issue.
+  // It failed safe (no mutation), but no ticket could ever be dispatched.
+  const cp = loadControlPlane({ repoName: repo.name });
+
+  // `unclaim()` works in label NAMES, not tracker-native ids, so it can run on
+  // any plane. `computeUnclaimAction` maps names -> ids through `allLabels`;
+  // giving it an identity table (id === name) makes it return names, which is
+  // exactly what `transition()` takes. Its signature is deliberately left
+  // alone — event-runtime/lib/unclaim.test.mjs pins it against releaseLabels.
+  const identityLabels = (names) => names.map((n) => ({ id: n, name: n }));
 
   async function claim(t) {
     // Adapter claim: In Progress + assignee + claim labels, then read-back.
@@ -511,38 +511,52 @@ export async function main(argv = process.argv.slice(2)) {
    * to Blocked with a question, or to In Review with a PR — keeps that state.
    */
   async function unclaim(t, why, log) {
-    const cur = (
-      await cp.raw(
-        `query($id:String!){ issue(id:$id){ state{name} assignee{id} labels(first:20){nodes{id name}} comments(last:10){nodes{body createdAt}} } }`,
-        { id: t.id },
-      )
-    )?.issue;
-    if (!cur || cur.state?.name !== "In Progress" || cur.assignee?.id !== me.id)
+    let ticket;
+    let comments;
+    try {
+      ticket = await cp.getTicket(t.identifier);
+      comments = await cp.listComments(t.identifier);
+    } catch {
       return false;
-    if (!(cur.labels?.nodes ?? []).some((l) => l.name === "ai:in-progress"))
+    }
+    if (!ticket || ticket.state?.name !== "In Progress") return false;
+    // Assignee identity is NOT checked here. Every agent authenticates as the
+    // same tracker account, so "is it still mine" is unanswerable (WM-1045);
+    // the ai:in-progress label below is the honest guard. An agent that moved
+    // its own ticket to Blocked or In Review no longer matches and is left be.
+    if (!(ticket.labels ?? []).some((l) => l.name === "ai:in-progress"))
       return false;
+    const cur = {
+      state: ticket.state,
+      labels: {
+        nodes: (ticket.labels ?? []).map((l) => ({ id: l.name, name: l.name })),
+      },
+      comments: { nodes: comments ?? [] },
+    };
 
     const action = computeUnclaimAction({
       issue: cur,
       why,
       log,
-      todoStateId: todoId,
-      blockedStateId: blockedId,
-      allLabels,
+      todoStateId: "Todo",
+      blockedStateId: "Blocked",
+      allLabels: identityLabels([
+        ...(ticket.labels ?? []).map((l) => l.name),
+        "ai:agent-ready",
+        "ai:blocked",
+      ]),
       threshold: DISPATCH_FAILURE_THRESHOLD,
     });
 
-    await cp.raw(
-      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
-      {
-        id: t.id,
-        in: {
-          stateId: action.stateId ?? undefined,
-          assigneeId: null,
-          labelIds: action.labelIds,
-        },
-      },
-    );
+    // action.labelIds are NAMES here (identity table above). Transition takes
+    // the complete resulting set as add/remove, so compute the delta.
+    const had = new Set((ticket.labels ?? []).map((l) => l.name));
+    const want = new Set(action.labelIds);
+    await cp.transition(t.identifier, action.stateId, {
+      add: [...want].filter((n) => !had.has(n)),
+      remove: [...had].filter((n) => !want.has(n)),
+      unassign: true,
+    });
     await cp.comment(t.identifier, action.commentBody);
 
     if (action.repeated) {
