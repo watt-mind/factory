@@ -18,6 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { ticketSlug } from "../../lib/ticket-slug.mjs";
 import { Database } from "bun:sqlite";
 import { leaseDir, liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
@@ -409,7 +410,10 @@ function materializeWorktree({
       `repo "${repoName}" declares no worktree lifecycle in config/repos.yaml (worktree_up/worktree_down/worktree_root) — the planner should have refused this`,
     );
   }
-  const worktreePath = path.join(repo.worktreeRoot, ticket);
+  // MUST match `ticket_slug()` in bin/worktree-common.sh — bash creates this
+  // directory, this looks it up. A mismatch searches a path that was never
+  // created and reads as "worktree_up succeeded but produced nothing" (#884).
+  const worktreePath = path.join(repo.worktreeRoot, ticketSlug(ticket));
   if (existsSync(worktreePath)) {
     const conflict = ownershipConflict({
       repo: repoName,
@@ -468,7 +472,7 @@ function materializeWorktree({
       // lifecycle lock, narrowing the ownership-check/preservation race.
       FACTORY_WORKTREE_EXPECTED_LEASE_FILE: path.join(
         leaseDir(),
-        `${repoName}-${ticket}.json`,
+        `${repoName}-${ticketSlug(ticket)}.json`,
       ),
       FACTORY_WORKTREE_EXPECTED_LEASE_PID: String(process.pid),
     },
