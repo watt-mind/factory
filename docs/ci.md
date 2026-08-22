@@ -39,6 +39,14 @@ The event-runtime merge lane is being split into parallel per-PR review with a l
 
 CI and Security use `concurrency.group` keyed by PR number for pull requests and by ref for pushes, with `cancel-in-progress` for both. A newer push to `develop` cancels the older develop run — only the latest develop head is verified — and a newer PR push cancels that PR's older run. Runs never wait in a concurrency group for a _different_ PR, so nothing is dropped across PRs; queueing across PRs happens in GitHub's runner queue for the `verify-lane` label.
 
+## Dependabot dependency policy
+
+Dependabot opens one weekly grouped pull request per npm ecosystem for minor
+and patch version updates. Regular semver-major updates are ignored: schedule
+each major upgrade deliberately in a ticket so its compatibility work can be
+planned and verified. This restriction applies only to version updates;
+Dependabot security updates, including major security fixes, remain enabled.
+
 ## Draft pull requests
 
 Draft pull requests run `Shadow runner fleet available`, but skip `Fast unit tests`, `Full verification`, `Timing-bound tests`, and Browser E2E so held work does not consume the verify lane. The required `Verify` check is a lightweight aggregate on the smoke-test runner: it succeeds explicitly for a draft, and for every other event it succeeds only when fleet health and both CI test jobs succeeded. This prevents a failed prerequisite from turning a skipped downstream job into a misleading successful required check.
