@@ -1148,9 +1148,7 @@ describe("planEvent worktree gate (WM-108)", () => {
         );
         expect(result.ok).toBe(true);
         expect(result.evidence.checks.ticket_trusted_author).toBeUndefined();
-        expect(
-          result.evidence.checks.ticket_body_pin_matches,
-        ).toBeUndefined();
+        expect(result.evidence.checks.ticket_body_pin_matches).toBeUndefined();
         expect(result.evidence.ticket.controlPlaneKind).toBeUndefined();
       });
     });

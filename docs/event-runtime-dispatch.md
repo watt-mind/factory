@@ -136,20 +136,20 @@ and skip both checks entirely, unaffected.
    that moment, which is how a legitimate maintainer edit after triage gets
    re-admitted. A ticket with **no** pin at all (labeled before this gate
    shipped, or through a path that predates it) is not itself a refusal —
-   only a *mismatched* pin proves tampering — so rollout does not strand
+   only a _mismatched_ pin proves tampering — so rollout does not strand
    every already-ready ticket.
 
 Both checks live inside the one shared admission function every dispatch path
 funnels through (automatic chain approval and operator-injected dispatch
 alike), so there is no operator bypass — the point is stopping bad-actor
-*content*, not bad-actor *operators*.
+_content_, not bad-actor _operators_.
 
 **Rejected: a verification-command allowlist.** Explicitly deferred
 (operator decision 2026-08-22, "operator-approved 1+2" only). Vetting a
 proposed Verification Command against a safe-command grammar is a much larger
 surface — arbitrary shell quoting, path traversal inside otherwise-innocuous
 test invocations — and these two gates already remove the two paths a
-stranger has to get *content* into a ticket in the first place: they can't
+stranger has to get _content_ into a ticket in the first place: they can't
 author a trusted-looking issue, and they can't edit one after it is trusted
 and pinned.
 
