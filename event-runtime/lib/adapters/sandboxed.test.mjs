@@ -307,6 +307,7 @@ describe("every adapter decides about def.sandbox (WM-313 conformance)", () => {
     "command",
     "cursor",
     "fake",
+    "hermes",
     "pi",
   ];
 
