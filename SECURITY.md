@@ -26,9 +26,13 @@ cannot be met.
 ## Supported versions
 
 Security fixes are made on the repository's active development branch and then
-included in the next release. Older commits and unmaintained forks are not
-supported. If you are unsure whether a deployment is affected, include its
-commit SHA in the report.
+included in the next release. The kernel is published to npm as
+[`@watt-mind/factory`](https://www.npmjs.com/package/@watt-mind/factory);
+only the latest published version and the repository's active development
+branch are supported. Older commits, older npm versions, and unmaintained
+forks are not supported. If you are unsure whether a deployment is affected,
+include its `@watt-mind/factory` version (or commit SHA, for a Git-checkout
+deployment) in the report.
 
 ## Autonomous-agent threat model
 

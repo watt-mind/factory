@@ -107,3 +107,29 @@ Overview therefore:
 
 Inbox `proposal_expired` items remain Needs-you Decide rows when they exist.
 Auto-expiry of leftover chain proposals is WM-445, not this.
+
+## Kernel npm distribution (WM-949 / gh-861)
+
+Decided 2026-08-21. The Factory kernel is distributed to npm as
+`@watt-mind/factory` under the `watt-mind` npm organization: a public
+package, Apache-2.0, `publishConfig.access: "public"`. `package.json` carries
+a `files` allowlist so a published tarball never contains test files,
+`test-support/`, or gitignored operator config (`config/repos.yaml`,
+`config/policy.yaml`, `config/schedule.yaml`, `.env*`) — `tools/publish.mjs
+--dry-run` gates that with `npm pack --dry-run` before any publish.
+
+Semver while pre-1.0: PATCH is fixes/docs, MINOR is a backward-compatible
+addition to the kernel's public surface, and a breaking change to a
+documented contract ships with upgrade guidance in the release notes.
+Releases are a `vX.Y.Z` tag on `deploy_branch` (`main`) with GitHub Release
+notes generated from merged PRs since the previous tag; this decision does
+not introduce automated tag/release/publish machinery, only the package
+metadata and the pre-publish gate.
+
+An instance pins an exact published version (matching the exact-pin
+discipline `templates/starter/` already applies with its Git commit pin),
+never a floating range — see [`docs/instances.md`](instances.md) for the
+upgrade contract. `templates/starter/package.json` and
+`tools/publish-starter.mjs` still validate a Git commit pin as of this
+decision; migrating the starter template itself to the npm-published pin is
+follow-up scope, not part of this change.

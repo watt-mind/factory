@@ -54,6 +54,12 @@ For the GitHub path, install Bun >= 1.3, Git >= 2.40, the current GitHub CLI,
 and one coding-agent harness. Follow [SETUP.md](../SETUP.md) for the complete
 clean-room install, including `gh auth login` and the harness login.
 
+This walkthrough clones the kernel directly. To adopt Factory for an
+organization instead, pin the published `@watt-mind/factory` npm package from
+a `templates/starter/`-based instance repository — see
+[docs/instances.md](instances.md) for the kernel/instance split and the
+upgrade contract.
+
 From the Factory clone, scaffold only local configuration and bind the
 GitHub control plane to the external sample repository you want to automate:
 

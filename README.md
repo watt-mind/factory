@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/watt-mind/factory/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/factory/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/%40watt-mind%2Ffactory)](https://www.npmjs.com/package/@watt-mind/factory)
 
 <!-- factory-dogfood-badge -->
 
@@ -213,7 +214,10 @@ Fork an instance, not the kernel. The
 [`factory-starter`](templates/starter/) scaffold keeps your repository
 routing, local policy, schedules, and optional packs in a repository that pins
 the factory as a dependency, so your organization can improve its own factory
-and still track the shared runtime.
+and still track the shared runtime. The kernel itself publishes to npm as
+[`@watt-mind/factory`](https://www.npmjs.com/package/@watt-mind/factory)
+(Apache-2.0), so an instance pins an exact released version rather than
+forking the runtime.
 
 [docs/instances.md](docs/instances.md) has the kernel/instance boundary, the
 upgrade path, and how to send reusable kernel improvements back upstream.

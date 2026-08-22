@@ -48,15 +48,25 @@ rules that protect the kernel namespace.
 
 ## Upgrade the kernel deliberately
 
-The starter pins `@watt-mind/factory` to a Git commit rather than a floating
-branch or range. That makes an upgrade a small, reviewable instance change:
+`@watt-mind/factory` publishes to npm as a public, Apache-2.0 package
+(WM-949). An instance should pin an exact version (`"@watt-mind/factory":
+"0.1.0"`, not a `^`/`~` range), the same exact-pin discipline
+[`templates/starter/`](../templates/starter/) already applies with its Git
+commit pin, so a kernel upgrade is always a reviewed, explicit change:
 
-1. Read the kernel release notes and migration guidance for the target commit
-   or release.
+1. Read the kernel release notes for the target version — each published
+   version has a corresponding tag and GitHub Release on
+   [`watt-mind/factory`](https://github.com/watt-mind/factory/releases).
 2. Update the pinned dependency in the instance's `package.json` and refresh
    its lockfile with `bun install`.
 3. Run the instance checks and inspect changes to local configuration or packs.
 4. Merge the dependency update through the instance's normal review policy.
+
+The package follows SemVer 2.0.0 while pre-1.0: PATCH releases are fixes and
+docs with no contract change, MINOR releases add to the kernel's public
+surface (CLI subcommands, extension/pack contracts, event-runtime APIs)
+without breaking an existing pin, and a breaking change to a documented
+contract ships with explicit upgrade guidance in the release notes.
 
 Never edit the installed dependency under `node_modules/`: it is regenerated
 on install and creates an unreviewable fork. If an upgrade needs a local
@@ -77,6 +87,20 @@ own pull request.
 
 This upstream path keeps improvements available to every instance while each
 instance remains free to evolve its own configuration and packs.
+
+## Validate a kernel release before publishing it
+
+From the kernel checkout, run:
+
+```sh
+bun tools/publish.mjs --dry-run
+```
+
+The command validates the publishable `package.json` fields (scoped name,
+SemVer version, public `publishConfig`, `bin`, `files` allowlist), runs
+`npm pack --dry-run --json`, and fails if the resulting tarball would contain
+a gitignored operator config, an `.env` file, or a test file. It never
+publishes or writes files.
 
 ## Validate the starter before publishing it
 
