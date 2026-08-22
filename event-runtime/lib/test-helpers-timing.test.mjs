@@ -164,4 +164,35 @@ describe("until and freePort (WM-918)", () => {
       server.stop(true);
     }
   });
+
+  test("no test precomputes a listening port from process.pid (WM-1037)", async () => {
+    // A port derived by modular arithmetic from the pid maps every pid onto a
+    // handful of slots, so two runs sharing a self-hosted runner can pick the
+    // same one. The loser does not get a clean error: serve exits, its waiter
+    // times out on "control API on", and the failure surfaces as an
+    // unrelated-looking flake elsewhere. freePort() asks the OS, which cannot
+    // collide. Comment lines are skipped so this rule can describe itself.
+    const suspect = new RegExp(`process\\.pid\\s*${"%"}`);
+    const files = new Set();
+    for (const pattern of ["**/*.test.mjs", "**/test-helpers*.mjs"]) {
+      const glob = new Bun.Glob(pattern);
+      for await (const rel of glob.scan({
+        cwd: REPO_ROOT,
+        onlyFiles: true,
+        dot: false,
+      })) {
+        if (!rel.includes("node_modules")) files.add(rel);
+      }
+    }
+    const offenders = [];
+    for (const rel of files) {
+      const source = readFileSync(path.join(REPO_ROOT, rel), "utf8");
+      for (const [index, line] of source.split("\n").entries()) {
+        const code = line.trim();
+        if (code.startsWith("//") || code.startsWith("*")) continue;
+        if (suspect.test(code)) offenders.push(`${rel}:${index + 1}: ${code}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
