@@ -2127,10 +2127,7 @@ describe("planAdmittedEvents", () => {
               state: { name: "Todo" },
               assignee: null,
               labels: {
-                nodes: [
-                  { name: "ai:agent-ready" },
-                  { name: "type:security" },
-                ],
+                nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
               },
               description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
             }),
