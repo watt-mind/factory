@@ -12,7 +12,7 @@ The dispatcher (`orchestrator/tick.mjs`) has done the setup: the ticket is `In P
 
 1. **Read the ticket** and restate your approach as a comment on it.
 2. **Implement**, touching only files matching its `Owned Paths`. Work discovered outside that set becomes a new `Triage` issue — never a widening of this one.
-3. **Verify** with the ticket's exact `Verification Command`. Never proceed past failing output; never weaken a test to get green.
+3. **Verify** with the ticket's exact `Verification Command` and the repo's configured `verify` command, on the final tree. Run **only** those two worktree gates: do **not** run `bun test` or the repo's full suite as a PR-opening gate. The full suite is CI's job, and concurrent dispatched worktrees make it a load-induced flake source. Never proceed past failing output; never weaken a test to get green.
 4. **UX critique** after verification and before opening the PR when this introduces or materially changes a user-completable flow, interaction, state transition, error/recovery path, responsive layout, authentication, payment, onboarding, or destructive action. Spawn `factory-ux-critic`, fix in-scope `FIX-FIRST` findings, maximum 2 rounds, and file the rest to `Triage`. Skip it for isolated styling, copy-only edits, static content, icons/assets, and internal/admin-only surfaces unless the ticket identifies UX risk. State `UX critique: required` or `UX critique: skipped — <reason>` in the PR.
 
    **The spawn prompt must carry the environment, spelled out** — the subagent does not inherit your working directory, and sibling worktrees for other tickets exist right now:
