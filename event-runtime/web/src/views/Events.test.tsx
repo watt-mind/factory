@@ -1146,6 +1146,71 @@ describe("Planner decisions explain themselves (WM-594)", () => {
     });
   });
 
+  test("a noop event whose proposal points at a REFUSED run (dedup target) still reads `noop`, not `refused` (WM-865)", async () => {
+    // `evt_noop_2`'s proposal is `noop`/`ticket_dispatch_already_live` and
+    // names `run_held-99` — a different, blocking run this event never
+    // planned. `run_refused_1` is what `evt_planned_1` actually planned and
+    // is REFUSED. Give the noop event's *own* `runId` the REFUSED run's id
+    // to reproduce the exact mis-attribution: `e.runId` alone must not be
+    // enough to call this event's decision `refused`.
+    const noopPointingAtRefusedRun = stubEvent(
+      "evt_noop_dedup_refused",
+      "noop",
+      {
+        source: "linear",
+        subject: "WM-545",
+        proposalId: "prop_noop_dedup_refused",
+        runId: "run_refused_1",
+      },
+    );
+    const proposalsWithDedup = [
+      ...proposals,
+      createProposalFixture({
+        id: "prop_noop_dedup_refused",
+        decision: "noop",
+        status: "resolved",
+        reason: "duplicate_run",
+        eventId: "evt_noop_dedup_refused",
+        eventSource: "linear",
+        runId: "run_refused_1",
+      }),
+    ];
+    await withApi(
+      {
+        events: async () => ({
+          events: [
+            noopEvent,
+            liveEvent,
+            refusedEvent,
+            plainEvent,
+            noopPointingAtRefusedRun,
+          ],
+        }),
+        proposalHistory: async () => ({ proposals: proposalsWithDedup }),
+        runs: async () => ({ runs }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "linear", eventId: "evt_noop_dedup_refused" },
+        });
+        const row = await waitFor(() => {
+          const el = r.container.querySelector(
+            '[data-testid="event-decision"]',
+          );
+          if (!el) throw new Error("decision row not rendered");
+          return el as HTMLElement;
+        });
+        expect(row.textContent).toContain("noop");
+        expect(row.textContent).not.toContain("refused");
+        const cell = r.container
+          .querySelector('td[title="evt_noop_dedup_refused"]')!
+          .closest("tr")!;
+        expect(cell.querySelector('[data-decision="refused"]')).toBeFalsy();
+      },
+    );
+  });
+
   test("noop badges carry the humanized reason as tooltip; reason:<code> filters the list", async () => {
     await withApi(apiWith(), async () => {
       const r = renderEvents();
