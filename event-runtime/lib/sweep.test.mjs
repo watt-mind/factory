@@ -178,7 +178,7 @@ describe("sweep chain: scan → approved apply (WM-74)", () => {
       "retire-shipped",
     ]);
     for (const action of Object.values(def.actionRegistry)) {
-      expect(action.argv[1]).toBe("{factoryRoot}/tools/linear.mjs");
+      expect(action.argv[1]).toBe("{factoryRoot}/tools/ticket.mjs");
       expect(["state", "comment"]).toContain(action.argv[2]);
     }
   });

@@ -13,7 +13,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write", "repo:write", "github:write"],
+    "services": ["tracker:write", "repo:write", "github:write"],
     "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"]
   },
   "limits": {

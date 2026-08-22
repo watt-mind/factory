@@ -17,7 +17,7 @@
     "filesystem": "workspace-only",
     "services": [
       "gh:write",
-      "linear:write",
+      "tracker:write",
       "notify:telegram",
       "event-runtime:write"
     ]

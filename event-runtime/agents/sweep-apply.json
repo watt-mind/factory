@@ -11,7 +11,7 @@
     "retire-shipped": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "state",
         "{issueId}",
         "Canceled"
@@ -20,7 +20,7 @@
     "mark-duplicate": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "state",
         "{issueId}",
         "Duplicate"
@@ -29,7 +29,7 @@
     "comment-evidence": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "comment",
         "{issueId}",
         "sweep: {reason}"
@@ -42,7 +42,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write"]
+    "services": ["tracker:write"]
   },
   "limits": {
     "timeout_seconds": 600,

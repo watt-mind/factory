@@ -180,7 +180,7 @@ describe("unblock chain: scan → approved apply (WM-73)", () => {
     ]);
     for (const action of Object.values(def.actionRegistry)) {
       expect(action.argv[0]).toBe("bun");
-      expect(action.argv[1]).toBe("{factoryRoot}/tools/linear.mjs");
+      expect(action.argv[1]).toBe("{factoryRoot}/tools/ticket.mjs");
       expect(action.argv).not.toContain("ai:blocked-add");
     }
   });

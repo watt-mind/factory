@@ -11,7 +11,7 @@
     "label-agent-ready": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "state",
         "{issueId}",
         "Todo",
@@ -22,7 +22,7 @@
     "move-to-todo": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "state",
         "{issueId}",
         "Todo"
@@ -31,7 +31,7 @@
     "write-detail": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "detail",
         "{issueId}",
         "{detail}"
@@ -40,7 +40,7 @@
     "needs-detail": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "comment",
         "{issueId}",
         "triage: {reason}"
@@ -49,7 +49,7 @@
     "mark-duplicate": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "comment",
         "{issueId}",
         "triage: possible duplicate — {reason}"
@@ -58,7 +58,7 @@
     "needs-human": {
       "argv": [
         "bun",
-        "{factoryRoot}/tools/linear.mjs",
+        "{factoryRoot}/tools/ticket.mjs",
         "comment",
         "{issueId}",
         "triage: needs a human decision — {reason}"
@@ -84,7 +84,7 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["linear:write"]
+    "services": ["tracker:write"]
   },
   "limits": {
     "timeout_seconds": 600,
