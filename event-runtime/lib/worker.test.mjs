@@ -5567,6 +5567,7 @@ describe("subprocess liveness ceilings scale with host load (WM-1025)", () => {
   const SOURCES = [
     "event-runtime/lib/worker.test.mjs",
     "event-runtime/work.test.mjs",
+    "event-runtime/cli/process-cleanup.test.mjs",
   ];
 
   test("no raw sub-30s timeoutMs literal bypasses loadAdjustedTimeout", () => {
@@ -5597,5 +5598,20 @@ describe("subprocess liveness ceilings scale with host load (WM-1025)", () => {
     // satisfy the grep above while still pinning the timeout at 5s.
     expect(EXECUTE_SPAWN_TIMEOUT_MS).toBe(loadAdjustedTimeout(5_000));
     expect(EXECUTE_SPAWN_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
+  });
+
+  test("process-cleanup polling waits scale their caller-provided ceilings", () => {
+    const root = path.resolve(import.meta.dir, "..", "..");
+    const source = readFileSync(
+      path.join(root, "event-runtime/cli/process-cleanup.test.mjs"),
+      "utf8",
+    );
+    for (const name of ["waitForFile", "waitForExit"]) {
+      expect(source).toMatch(
+        new RegExp(
+          `async function ${name}\\([^)]*timeoutMs[^)]*\\)\\s*\\{\\s*timeoutMs = loadAdjustedTimeout\\(timeoutMs\\);`,
+        ),
+      );
+    }
   });
 });
