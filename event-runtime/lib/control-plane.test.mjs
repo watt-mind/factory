@@ -668,12 +668,23 @@ describe("loadControlPlane selection", () => {
     return root;
   };
 
-  test("defaults to linear when the stanza or the file is absent", () => {
+  test("defaults to linear when the stanza is absent", () => {
     expect(
       controlPlaneKindFromPolicy(withPolicy("merge:\n  max_fix_rounds: 2\n")),
     ).toBe("linear");
-    expect(controlPlaneKindFromPolicy(withPolicy(null))).toBe("linear");
-    expect(loadControlPlane({ root: withPolicy(null) }).kind).toBe("linear");
+  });
+
+  test("falls back to config/policy.example.yaml, and fails closed when neither exists", () => {
+    const root = tmpDir("control-plane-policy-fallback-");
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    expect(() => controlPlaneKindFromPolicy(root)).toThrow(/policy\.yaml/);
+
+    writeFileSync(
+      path.join(root, "config", "policy.example.yaml"),
+      "controlPlane:\n  kind: memory\n",
+    );
+    expect(controlPlaneKindFromPolicy(root)).toBe("memory");
+    expect(loadControlPlane({ root }).kind).toBe("memory");
   });
 
   test("selects memory from policy and passes the seed through", async () => {
@@ -715,8 +726,16 @@ describe("loadControlPlane selection", () => {
     const withRepos = (policyYaml, reposYaml) => {
       const root = tmpDir("control-plane-repos-");
       mkdirSync(path.join(root, "config"), { recursive: true });
-      if (policyYaml !== null)
-        writeFileSync(path.join(root, "config", "policy.yaml"), policyYaml);
+      // null means "no explicit controlPlane stanza", not "no config file at
+      // all" — write the example so the policy reader still resolves.
+      writeFileSync(
+        path.join(
+          root,
+          "config",
+          policyYaml !== null ? "policy.yaml" : "policy.example.yaml",
+        ),
+        policyYaml ?? "",
+      );
       writeFileSync(path.join(root, "config", "repos.yaml"), reposYaml);
       return root;
     };
