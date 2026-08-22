@@ -38,7 +38,7 @@ import {
   effectiveOwnedPaths,
   pathsCollide,
 } from "./owned-paths.mjs";
-import { openBlockers, BLOCKING_RELATIONS_GQL } from "./blockers.mjs";
+import { openBlockers } from "./blockers.mjs";
 import { budgetExhausted } from "../lib/spend.mjs";
 import {
   LEASE_HEARTBEAT_MS,
@@ -357,30 +357,49 @@ export async function main(argv = process.argv.slice(2)) {
   const COMMAND_BODY = COMMAND_MD.replace(/^---\n[\s\S]*?\n---\n/, "");
   const promptFor = (id) => COMMAND_BODY.replaceAll("$ARGUMENTS", id);
 
-  const Q = `query($t:String!,$p:String!){ issues(first:250, filter:{
-    team:{key:{eq:$t}}, project:{name:{eq:$p}},
-    state:{ type:{ nin:["completed","canceled"] } } }){
-  nodes{ id identifier title description state{name} assignee{id} labels(first:20){nodes{name}} priority ${BLOCKING_RELATIONS_GQL} } } }`;
-
-  /** Current queue straight from Linear — never cached, because it changes under us. */
+  /**
+   * Current queue straight from the control plane — never cached, because it
+   * changes under us.
+   *
+   * WM-1008: this used to build a Linear GraphQL string and push it through
+   * `cp.raw()`, which meant `controlPlane.kind: github` produced an unsorted
+   * queue with blocker gating silently disabled — every verb "worked", so the
+   * factory looked healthy while dispatching in the wrong order. Priority
+   * ordering and blocker exclusion now live in the adapter, where every
+   * implementation is held to them by the shared contract suite.
+   */
   async function fetchState() {
-    const nodes =
-      (await loadControlPlane().raw(Q, { t: repo.team, p: repo.project }))
-        ?.issues?.nodes ?? [];
-    const has = (i, n) => (i.labels?.nodes ?? []).some((l) => l.name === n);
+    const cp = loadControlPlane({ repoName: repo.name });
+    const [running, ready] = await Promise.all([
+      cp.listTickets({
+        team: repo.team,
+        project: repo.project,
+        states: ["In Progress"],
+      }),
+      cp.listDispatchable({ team: repo.team, project: repo.project }),
+    ]);
     return {
-      inProgress: nodes.filter((i) => i.state?.name === "In Progress"),
-      // Assignee is NOT a gate: this workspace hasn't landed per-agent Linear
-      // identities (OPS-40) yet, so every claim -- human or agent -- writes the
-      // same shared account. That makes "has an assignee" indistinguishable
-      // from "was claimed and never cleared," which is exactly the reaper's
-      // job to fix, not dispatch's job to avoid by skipping the ticket forever.
-      // The actual collision guard is claim()'s read-back compare-and-swap
-      // below, which is assignee-based but per-ticket at claim time, not a
-      // blanket "already has anyone" skip.
-      ready: nodes
-        .filter((i) => i.state?.name === "Todo" && has(i, "ai:agent-ready"))
-        .sort((a, b) => (a.priority || 99) - (b.priority || 99)),
+      inProgress: running,
+      // `ready` arrives already filtered (Todo + ai:agent-ready + unassigned +
+      // no open blocker) and already ordered (priority asc, createdAt asc).
+      // Re-sorting or re-filtering here would be a second opinion that can
+      // drift from the adapter's, which is how this broke the first time.
+      ready,
+      // Blocked-but-otherwise-ready tickets. `listDispatchable` correctly
+      // excludes them, but they must stay VISIBLE: a ticket starved by a
+      // wrong or forgotten relation holds no slot and raises no error, so
+      // reporting it on its own line is the only way anyone finds out.
+      held: (
+        await cp.listTickets({
+          team: repo.team,
+          project: repo.project,
+          states: ["Todo"],
+        })
+      ).filter(
+        (t) =>
+          (t.labels ?? []).some((l) => l.name === "ai:agent-ready") &&
+          (t.blockedBy ?? []).length > 0,
+      ),
     };
   }
 
@@ -425,7 +444,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (!APPLY) {
     const picked = selectable(first, new Set(), Math.min(freeNow, MAX));
-    for (const t of first.ready) {
+    for (const t of [...first.held, ...first.ready]) {
       const blockers = openBlockers(t);
       if (blockers.length)
         console.log(
@@ -1142,7 +1161,7 @@ export async function main(argv = process.argv.slice(2)) {
       // starts" is invisible in exactly the mode that matters (see F-7). Keyed per
       // reason: a blocked ticket can unblock mid-run and then be worth re-warning
       // about its missing Owned Paths, and vice versa.
-      for (const t of state.ready) {
+      for (const t of [...state.held, ...state.ready]) {
         if (seen.has(t.identifier)) continue;
         const blockers = openBlockers(t);
         if (blockers.length && !warned.has(`${t.identifier}:blocked`)) {

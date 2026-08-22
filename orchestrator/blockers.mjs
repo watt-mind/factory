@@ -43,6 +43,11 @@ export const BLOCKING_RELATIONS_GQL =
  * `duplicate`/`related` relation types are ignored; only `blocks` gates.
  */
 export function openBlockers(issue) {
+  // WM-1008: the control-plane adapter resolves this and hands back a plain
+  // `blockedBy` array, so prefer it. The raw-relations path below stays for
+  // callers still reading Linear GraphQL directly; it is the fallback, not
+  // the contract.
+  if (Array.isArray(issue?.blockedBy)) return [...issue.blockedBy];
   return (issue?.inverseRelations?.nodes ?? [])
     .filter((r) => r.type === "blocks")
     .map((r) => r.issue)
