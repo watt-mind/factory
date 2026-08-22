@@ -1,7 +1,7 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
@@ -1371,6 +1371,76 @@ describe("planEvent worktree gate (WM-108)", () => {
         expect(fetchedInFlight).toBe(false);
       },
     );
+  });
+
+  test("refreshes pin-manifest closure requirements after manifests are added and removed", () => {
+    const repoPath = tmpDir("evrt-plan-closure-cache-");
+    const manifestDir = path.join(repoPath, "manifests");
+    const manifestPath = path.join(manifestDir, "generated.json");
+    mkdirSync(manifestDir, { recursive: true });
+    const yaml =
+      `repos:\n  - name: closure-cache\n    path: ${repoPath}\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `    owned_paths_policy:\n      pin_manifests:\n        - manifests/*.json\n`;
+    const ticket = {
+      identifier: "WM-948",
+      state: { name: "Todo" },
+      assignee: null,
+      labels: { nodes: [{ name: "ai:agent-ready" }] },
+      description: "## Owned Paths\n- generated/contracts.mjs\n",
+    };
+    const dispatch = {
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      fetchTicket: () => ticket,
+      fetchInFlight: () => [],
+    };
+
+    withReposRoot(yaml, () => {
+      // Cache an empty set first, exactly as a long-lived daemon does before
+      // a new generated-contract pin is committed.
+      expect(
+        worktreeDispatchAutoEligibility(
+          { repo: "closure-cache", ticket: "WM-948" },
+          dispatch,
+        ).ok,
+      ).toBe(true);
+
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ pins: { "generated/contracts.mjs": "sha256:pin" } }),
+      );
+      expect(
+        worktreeDispatchAutoEligibility(
+          { repo: "closure-cache", ticket: "WM-948" },
+          dispatch,
+        ).refusal?.reason,
+      ).toBe("owned_paths_not_closed");
+
+      // A changed existing manifest cannot retain its prior requirement.
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          pins: { "generated/other-contract.mjs": "sha256:new" },
+        }),
+      );
+      expect(
+        worktreeDispatchAutoEligibility(
+          { repo: "closure-cache", ticket: "WM-948" },
+          dispatch,
+        ).ok,
+      ).toBe(true);
+
+      // Removing the same manifest must evict its cached requirement too.
+      rmSync(manifestPath);
+      expect(
+        worktreeDispatchAutoEligibility(
+          { repo: "closure-cache", ticket: "WM-948" },
+          dispatch,
+        ).ok,
+      ).toBe(true);
+    });
   });
 
   test("flat labels array from the control-plane adapter still admits (WM-978)", () => {

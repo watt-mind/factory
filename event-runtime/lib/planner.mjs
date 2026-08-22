@@ -9,7 +9,7 @@
  * dead-lettered instead of wedging the sweep or silently vanishing.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -27,7 +27,7 @@ import { loadForge } from "../../lib/forge/index.mjs";
 import { budgetExhausted } from "../../lib/spend.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
-import { canonicalJson, hashJson } from "./canonical.mjs";
+import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
 import { hashHarnessRoots } from "./pins.mjs";
 import { isTrustedAssociation } from "./triage.mjs";
@@ -572,21 +572,82 @@ function fetchPullRequestDefault(payload) {
 // WM-1006: in-flight tickets come from the control-plane adapter via the
 // `inflight` CLI verb — never raw tracker GraphQL (plane-specific).
 
+// Cache parsed manifest requirements, not the closure result. A repo can have
+// many tickets planned by one long-lived daemon, but the manifest set is
+// mutable while it is running. Entries are kept per repo name and refreshed
+// whenever the policy or the matching manifest files change.
 const OWNED_PATHS_CLOSURE_CACHE = new Map();
+const MAX_OWNED_PATHS_CLOSURE_CACHE_ENTRIES = 128;
+
+function pinManifestFreshness(repo) {
+  const repoPath = path.resolve(repo.path);
+  const policy = repo.ownedPathsPolicy ?? {};
+  const patterns = Array.isArray(policy.pinManifests)
+    ? policy.pinManifests
+    : [];
+  const matchers = patterns.map(globToRegExp);
+  const manifests = [];
+
+  // Match the owned-paths reader's file-only traversal. Directory mtime alone
+  // cannot observe a changed existing manifest, so include matched file mtime,
+  // size, and content identity; the manifest list observes additions/removals.
+  if (matchers.length && existsSync(repoPath)) {
+    const pending = [repoPath];
+    while (pending.length) {
+      const dir = pending.pop();
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const filePath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          pending.push(filePath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const relativePath = path
+          .relative(repoPath, filePath)
+          .replace(/\\/g, "/");
+        if (!matchers.some((matcher) => matcher.test(relativePath))) continue;
+        const stat = statSync(filePath);
+        manifests.push({
+          path: relativePath,
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          hash: hashBytes(readFileSync(filePath)),
+        });
+      }
+    }
+  }
+
+  manifests.sort((a, b) => a.path.localeCompare(b.path));
+  return canonicalJson({ repoPath, policy, manifests });
+}
+
+function cacheOwnedPathsClosureRequirements(repoName, freshness, requirements) {
+  // Delete first to refresh insertion order. The small LRU bound keeps a
+  // daemon that observes transient repo names from retaining requirements
+  // forever, while replacement makes each per-repo entry directly evictable.
+  OWNED_PATHS_CLOSURE_CACHE.delete(repoName);
+  OWNED_PATHS_CLOSURE_CACHE.set(repoName, { freshness, requirements });
+  if (OWNED_PATHS_CLOSURE_CACHE.size > MAX_OWNED_PATHS_CLOSURE_CACHE_ENTRIES) {
+    OWNED_PATHS_CLOSURE_CACHE.delete(
+      OWNED_PATHS_CLOSURE_CACHE.keys().next().value,
+    );
+  }
+}
 
 function ownedPathsClosureDetails(repoName, repo, ticketDescription) {
   if (!repo?.ownedPathsPolicy) return [];
-  const cacheKey = `${repoName}::${repo.path}`;
-  if (!OWNED_PATHS_CLOSURE_CACHE.has(cacheKey)) {
+  const freshness = pinManifestFreshness(repo);
+  const cached = OWNED_PATHS_CLOSURE_CACHE.get(repoName);
+  if (!cached || cached.freshness !== freshness) {
     const requirements = repo.ownedPathsPolicy.pinManifests?.length
       ? readPinManifestRequirements(
           repo.path,
           repo.ownedPathsPolicy.pinManifests,
         )
       : [];
-    OWNED_PATHS_CLOSURE_CACHE.set(cacheKey, requirements);
+    cacheOwnedPathsClosureRequirements(repoName, freshness, requirements);
   }
-  const requirements = OWNED_PATHS_CLOSURE_CACHE.get(cacheKey);
+  const requirements = OWNED_PATHS_CLOSURE_CACHE.get(repoName).requirements;
   const ownedPaths = parseOwnedPaths(ticketDescription ?? "");
   return ownedPathsClosureGaps({
     ownedPaths,
