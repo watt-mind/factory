@@ -1067,8 +1067,9 @@ function defaultIsAlive(pid) {
 
 export function defaultLocksDir() {
   if (process.env.FACTORY_LOCKS_DIR) return process.env.FACTORY_LOCKS_DIR;
-  if (process.env.FACTORY_EVENT_HOME)
-    return path.join(process.env.FACTORY_EVENT_HOME, "locks");
+  // Ticket claims must share the dispatcher lock, not this runtime instance's
+  // private event home. Supervisors use one tracker identity, so an assignee
+  // read-back cannot distinguish two concurrent claims from this machine.
   return path.join(homedir(), ".factory", "locks");
 }
 
