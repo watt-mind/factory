@@ -1,139 +1,85 @@
 # factory
 
+[![CI](https://github.com/watt-mind/factory/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/factory/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+<!-- factory-dogfood-badge -->
+
+[![Maintained by the factory](https://img.shields.io/static/v1?label=Maintained+by+the+factory&message=742+PRs+merged+autonomously+this+month&color=0B6E4F)](https://github.com/watt-mind/factory/pulls?q=is%3Apr+is%3Amerged)
+
+<!-- /factory-dogfood-badge -->
+
 **The factory that builds software — and itself.**
 
 A runtime for self-improving agentic loops. Code is the first product line.
 
-Factory orchestrates coding agents (Claude Code, Codex, Gemini / Antigravity,
-Cursor, Pi). It does not compete with them. The tracker is the control plane,
-GitHub is the source of truth, and CI is the reward signal. Nothing merges
-because an agent said it was done — it merges because the tests passed and a
-reviewer (agent or human) approved.
+You already have a coding agent that can write a patch. What you probably do
+not have is the process around it: something that decides which work is ready,
+hands one agent one ticket in one worktree, re-runs the verification command
+itself, and holds the merge until CI and a reviewer agree. That is this.
 
-Runs on **[bun](https://bun.sh/)**. Licensed [Apache 2.0](LICENSE).
-
-## Why
-
-Watt Mind is an AI-native company: agents do the work from day one, and the
-factory is how that work is admitted, verified, and merged. The wedge is an
-unattended software factory. The same runtime already hosts other loops (infra
-ops, editorial). Software is first because the verification story is strongest
-there — tests, types, CI, a diff, a PR — not because the runtime is only for
-code.
-
-The factory holds no product state of its own. Tickets live in the tracker,
-truth lives in git, and a restart loses nothing. Agents are ephemeral workers;
-the loop is the standing process.
-
-Read the thesis and the primitives:
-
-- [docs/thesis.md](docs/thesis.md) — wedge-first positioning, and why the
-  runtime is more general than a software factory
-- [docs/model.md](docs/model.md) — factory primitives in this repository's own
-  vocabulary
-- [docs/architecture.md](docs/architecture.md) — why it is shaped this way,
-  including the choices that were wrong first
-- [docs/quickstart.md](docs/quickstart.md) — 15-minute `factory demo`
-
-## Harness support
-
-The **content** is portable; only the **packaging** isn't. `SKILL.md` is a
-shared workflow format, command bodies are Markdown, and each harness gets its
-native agent manifest.
-
-| Harness     | Context                   | Skills              | Commands                    | Agents                |
-| :---------- | :------------------------ | :------------------ | :-------------------------- | :-------------------- |
-| Claude Code | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`    | plugin `commands/`          | plugin `agents/`      |
-| Codex       | `AGENTS.md` (native)      | `~/.agents/skills/` | — (use `@factory-*` skills) | `~/.codex/agents/`    |
-| Gemini CLI  | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/` | —                           | `~/.gemini/agents/`   |
-| Antigravity | shares `~/.gemini/`       | via Gemini          | —                           | via Gemini            |
-| Cursor      | `.cursor/rules/`          | —                   | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
-| Pi          | `AGENTS.md` (native)      | `dist/pi/skills/`   | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
-
-```bash
-bun build/emit.mjs           # regenerate plugins/ and dist/
-bun build/emit.mjs --check   # CI: fail if the tree drifted from shared/
-bun build/emit.mjs --link    # symlink this machine's harnesses at shared/
-bun run link-repos           # symlink commands into every configured repo
-```
-
-`--link` / `--link-repos` symlink rather than copy, so a `git pull` updates
-every harness at once and there is no copy to go stale. Both refuse to
-overwrite a real file.
-
-> [!IMPORTANT]
-> **The plugin is a convenience layer, not the safety floor.** It reaches
-> Claude Code only. The non-negotiables live in `shared/floor.md` and are
-> committed into each repo's **`AGENTS.md`**, which every harness reads and
-> which travels with the checkout.
-
-**`shared/` is the source of truth. Everything in `plugins/` and `dist/` is
-generated — never edit it.** Four generated copies are only safer than four
-hand-written ones if CI proves they still match their source. If `--check`
-fails, move the rule into `shared/`; never edit the generated file.
-
-## Control plane
-
-v1 ships **Linear**, honestly. The interface is a `ControlPlane` adapter so
-the loops do not hard-wire one tracker. GitHub Issues is the first roadmap
-adapter — it makes a zero-third-party-account quickstart possible.
-
-| Adapter       | Status       | Role                                                                              |
-| :------------ | :----------- | :-------------------------------------------------------------------------------- |
-| Linear        | v1, shipping | Claim, labels, states, comments. One authority so two agents cannot both own work |
-| GitHub Issues | roadmap      | Same adapter; no third-party tracker account                                      |
-| Memory        | demo / tests | In-process adapter for `factory demo` and offline runs                            |
-
-GitHub stays the forge: the PR is the artifact, the branch is the work, CI is
-the reward signal. See [docs/model.md](docs/model.md) and
-[docs/architecture.md](docs/architecture.md).
-
-## Quickstart
-
-See [docs/quickstart.md](docs/quickstart.md) for the 15-minute path:
-`factory demo` runs a ticket end-to-end against a bundled demo repo, with the
-in-memory control plane and no third-party credentials.
+factory drives the coding agents you already use — Claude Code, Codex, Gemini
+/ Antigravity, Cursor, Pi. The tracker is the control plane, GitHub is the
+source of truth, and CI is the reward signal. Nothing merges because an agent
+said it was done; it merges because the tests passed and a reviewer (agent or
+human) approved.
 
 ![A recorded `factory demo` run: a ticket is claimed, implemented, verified, and merged.](docs/media/demo.gif)
 
-The GIF is the recorded demo; the command is the source of truth. Contributor
-setup (clone, `bun install`, checks) is in [CONTRIBUTING.md](CONTRIBUTING.md).
-First-time harness links and the event-runtime daemon are in
-[SETUP.md](SETUP.md).
+**Status:** the first commit landed on 2026-08-03. The badge above counts the
+pull requests the factory has since merged through its own loop. Young
+software, used in earnest every day — expect sharp edges, and please
+[file them](https://github.com/watt-mind/factory/issues).
 
-## Operator UI
+## Try it
 
-The web console the operator uses while loops run — live intake, runs, events,
-agents, the runtime graph, and a ticket journey. Additional stills live in
-[`docs/screenshots/`](docs/screenshots/).
+Bun 1.3+ and Git 2.40+, on macOS 13+ or Linux (x64 / arm64).
 
-![Overview — intake, execution, and fleet on one screen](docs/screenshots/01-overview.jpg)
+```bash
+git clone https://github.com/watt-mind/factory.git
+cd factory
+bun install
+bin/factory demo --dry   # print the plan — offline, and what CI runs
+bin/factory demo         # claim → implement → verify → PR → merge
+```
 
-![Runs — active and completed agent work](docs/screenshots/06-runs.jpg)
+The demo needs no accounts: no tracker token, no GitHub token, no model API
+key. It copies a bundled repository into a temporary checkout, implements the
+starter ticket, runs that repository's own tests, opens and merges a pull
+request on an in-memory forge, and leaves your clone untouched.
 
-![Events — admitted work and what the runtime did with it](docs/screenshots/07-events.jpg)
+To point the factory at a real repository,
+[docs/quickstart.md](docs/quickstart.md) has the path that needs only
+`gh auth login` and one coding-agent harness. [SETUP.md](SETUP.md) covers
+operator installation, harness links, and the event-runtime daemon.
 
-![Agents — roster, adapters, and capabilities](docs/screenshots/12-agents.jpg)
+## Why
 
-![Graph — registered routes and recommendation edges](docs/screenshots/15-graph.jpg)
+Coding agents are good at producing a diff and weak at everything around it:
+knowing which ticket is actually ready, staying out of the files another agent
+is editing, telling "the tests pass" apart from "I said the tests pass", and
+stopping to ask instead of guessing. Those are process problems, so the
+factory answers them with process.
 
-![Run detail — one agent session end to end](docs/screenshots/19-run-full.jpg)
+- **One ticket, one worktree, one agent process.** Two tickets run at the same
+  time only when their `Owned Paths` globs are disjoint.
+- **Every ticket carries a verification command**, re-run by the factory after
+  the agent reports done. An agent's own report is evidence, never the
+  decision.
+- **The gate is CI plus a review**, by an agent or a human, on a real pull
+  request.
+- **The factory holds no product state.** Tickets live in the tracker, truth
+  lives in git, and a restart loses nothing. Agents are ephemeral workers; the
+  loop is the standing process.
 
-![Ticket journey — Linear ticket through dispatch, PR, and CI](docs/screenshots/20-ticket-journey.jpg)
+The same runtime already hosts loops that have nothing to do with code (infra
+ops, editorial). Software came first because the verification story is
+strongest there: tests, types, CI, a diff, a pull request.
 
-![Command palette — jump anywhere from the keyboard](docs/screenshots/27-command-palette.jpg)
-
-## Fork your factory
-
-Fork an instance, not the kernel. The
-[`factory-starter`](templates/starter/) scaffold keeps your repository routing,
-local policy, schedules, and optional packs in a repository that pins Factory
-as a dependency. That lets your organization improve its own factory without
-diverging from the shared runtime.
-
-Read [docs/instances.md](docs/instances.md) for the kernel/instance boundary,
-an intentional upgrade path, and how to send reusable kernel improvements
-upstream as proposals and pull requests.
+For the longer argument, read [docs/thesis.md](docs/thesis.md) on positioning,
+[docs/model.md](docs/model.md) on the primitives, and
+[docs/architecture.md](docs/architecture.md) on why it is shaped this way,
+including the choices that were wrong first.
 
 ## The loop
 
@@ -143,76 +89,35 @@ Triage ──①triage──▶ ai:agent-ready ──②dispatch──▶ PR ─
                              reaper ◀── crashed claims ◀──────┘
 ```
 
-One ticket, one worktree, one agent process. Two tickets run together only
-when their `Owned Paths` globs are disjoint. Dispatch is rolling, not batched:
-when a ticket finishes, its slot refills immediately.
+Dispatch is rolling: the moment a ticket finishes, its slot refills. Commands
+are repo-agnostic verbs and `--repo` supplies the targets, so adding a
+repository is configuration rather than a second copy of every job. A
+repository without worktree scripts (`bin/worktree-up.sh` /
+`worktree-down.sh`) gets a safe concurrency of one; the dispatcher refuses it
+rather than inventing ports for tooling that does not exist.
 
-**Commands are repo-agnostic verbs; `--repo` supplies the targets.** Adding a
-repo is configuration, not a second copy of every job. A repo without
-industrialized worktree scripts (`bin/worktree-up.sh` / `worktree-down.sh`)
-has a safe concurrency of one agent; the dispatcher refuses it rather than
-inventing ports for tooling that does not exist.
+## Control plane
 
-## Layout
+Where work is admitted, claimed, and reviewed. It sits behind a `ControlPlane`
+adapter, so the loops never hard-wire one tracker.
 
-```
-shared/                           harness-neutral content, the only place to edit
-  floor.md                        the non-negotiables (goes into every AGENTS.md)
-  commands/                       the /factory-* commands
-  skills/                         ticket-spec (SKILL.md — a format all harnesses share)
-  agents/                         factory-{ux-critic,ci-doctor,infra-scout,merge-reviewer}
-build/emit.mjs                    shared/ -> per-harness packaging; --check guards drift
-plugins/core/                     GENERATED — the Claude Code plugin
-dist/{codex,gemini,cursor,pi}/    GENERATED — the other harnesses
-orchestrator/                     dispatch logic (owned-paths collision, tick)
-event-runtime/                    event-driven sidecar — intake, planner, worker, receipt
-runners/run-agent.sh              one harness session against one repo
-bin/factory                       the cwd-independent CLI
-bin/worktree-{up,down}.sh         this repo's own worktree lifecycle
-lib/, tools/                      helpers: transcripts, spend, schedule, Linear
-config/repos.yaml                 per-repo routing: team, base, worktree scripts, verify
-config/schedule.yaml              cadences
-config/policy.yaml                budgets, concurrency, escalation
-ee/                               reserved open-core seam (empty of product code)
-```
+| Adapter       | Status       | Notes                                                                                                                                                                              |
+| :------------ | :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linear        | v1           | Claim, labels, states, comments. One authority, so two agents cannot both own a ticket                                                                                             |
+| GitHub Issues | shipping     | Issues, labels, and a Projects `Status` field. No third-party account; today you create the Project and the labels by hand, from what `factory init --control-plane github` prints |
+| Memory        | demo / tests | In-process, for `factory demo` and offline runs                                                                                                                                    |
 
-## Open-core boundary
-
-Factory's orchestration, event runtime, shared agent workflows, harness
-packaging, and public extension contracts form the open core. The current
-repository is licensed under Apache License 2.0 and is intended to remain
-useful, buildable, and testable without private services or unpublished code.
-
-[`ee/`](ee/README.md) reserves an explicit seam for possible enterprise-only
-extensions. Core code may expose generic contracts that enterprise extensions
-implement, but it must not import or depend on enterprise implementations. The
-directory currently contains documentation only. If separately licensed code
-is added there in the future, it must carry explicit terms; placement under
-`ee/` alone does not override the repository license.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change, especially
-one that may cross this boundary.
-
-## Using it from a product repo
-
-```json
-// <repo>/.claude/settings.json
-{
-  "extraKnownMarketplaces": {
-    "factory": { "source": { "source": "github", "repo": "watt-mind/factory" } }
-  },
-  "enabledPlugins": ["core@factory"]
-}
-```
+GitHub is the forge either way: the pull request is the artifact, the branch
+is the work, CI is the gate.
 
 ## Commands
 
-Prefixed `factory-` so they're identifiable as ours and never collide with a
+Prefixed `factory-` so they are identifiable as ours and never collide with a
 repo-local or built-in command of the same name.
 
 | Command             | Does                                                                                           |
 | :------------------ | :--------------------------------------------------------------------------------------------- |
-| `/factory-work`     | Claims agent-ready tickets, dispatches them rolling (not batched), lands the PRs               |
+| `/factory-work`     | Claims agent-ready tickets, dispatches them rolling, lands the PRs                             |
 | `/factory-ticket`   | Implements exactly one already-claimed ticket in the current worktree — what `tick.mjs` spawns |
 | `/factory-merge`    | Reviews open PRs, fixes what's mechanical, merges what qualifies                               |
 | `/factory-ship`     | Opens the `develop` → deploy-branch PR, waits for CI, merges, verifies the deploy              |
@@ -220,7 +125,7 @@ repo-local or built-in command of the same name.
 | `/factory-unblock`  | Re-examines `ai:blocked` holds and releases the ones new evidence resolved                     |
 | `/factory-sweep`    | Retires tickets overtaken by events — `Canceled`/`Duplicate` with evidence, never a delete     |
 | `/factory-audit`    | Grades a repo against project-conventions `PC-01`..`PC-20`, files the gaps                     |
-| `/factory-capture`  | Files a Linear issue from the conversation — capture only, never implement                     |
+| `/factory-capture`  | Files an issue from the conversation — capture only, never implement                           |
 | `/factory-friction` | Files harness friction seen in an interactive session, where no transcript exists              |
 | `/factory-retro`    | Turns measured friction into harness changes                                                   |
 | `/factory-report`   | Read-only pipeline snapshot across the configured repos                                        |
@@ -240,7 +145,8 @@ single recommended next action.
 
 ## Agents
 
-Agents are isolated specialist contexts, not workflow entry points.
+Isolated specialist contexts, so a large body of evidence can be examined
+without it landing in the calling session's context.
 
 | Agent                    | Does                                                                                                               |
 | :----------------------- | :----------------------------------------------------------------------------------------------------------------- |
@@ -249,22 +155,130 @@ Agents are isolated specialist contexts, not workflow entry points.
 | `factory-ci-doctor`      | Diagnoses one red Actions run and classifies it `TICKET` / `ENV` / `FLAKE`, keeping the job logs out of the caller |
 | `factory-infra-scout`    | Answers questions that need SSH or container output, returning a verdict rather than the dumps                     |
 
+## Harnesses
+
+The **content** is portable; only the **packaging** is not. `SKILL.md` is a
+shared workflow format, command bodies are Markdown, and each harness gets its
+native agent manifest.
+
+| Harness     | Context                   | Skills              | Commands                    | Agents                |
+| :---------- | :------------------------ | :------------------ | :-------------------------- | :-------------------- |
+| Claude Code | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`    | plugin `commands/`          | plugin `agents/`      |
+| Codex       | `AGENTS.md` (native)      | `~/.agents/skills/` | — (use `@factory-*` skills) | `~/.codex/agents/`    |
+| Gemini CLI  | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/` | —                           | `~/.gemini/agents/`   |
+| Antigravity | shares `~/.gemini/`       | via Gemini          | —                           | via Gemini            |
+| Cursor      | `.cursor/rules/`          | —                   | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
+| Pi          | `AGENTS.md` (native)      | `dist/pi/skills/`   | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
+
+> [!IMPORTANT]
+> **The plugin is a convenience layer, not the safety floor.** It reaches
+> Claude Code only. The non-negotiables live in `shared/floor.md` and are
+> committed into each repo's **`AGENTS.md`**, which every harness reads and
+> which travels with the checkout.
+
+From a repository you want to automate with Claude Code:
+
+```json
+// <repo>/.claude/settings.json
+{
+  "extraKnownMarketplaces": {
+    "factory": { "source": { "source": "github", "repo": "watt-mind/factory" } }
+  },
+  "enabledPlugins": ["core@factory"]
+}
+```
+
+## Operator UI
+
+The web console an operator watches while loops run: live intake, runs,
+events, agents, the runtime graph, and a ticket journey.
+
+![Overview — intake, execution, and fleet on one screen](docs/screenshots/01-overview.jpg)
+
+![Ticket journey — one ticket through dispatch, PR, and CI](docs/screenshots/20-ticket-journey.jpg)
+
+Twenty-odd more stills — run detail, proposals, chains, schedules, the command
+palette — are in [`docs/screenshots/`](docs/screenshots/).
+
+## Fork your factory
+
+Fork an instance, not the kernel. The
+[`factory-starter`](templates/starter/) scaffold keeps your repository
+routing, local policy, schedules, and optional packs in a repository that pins
+the factory as a dependency, so your organization can improve its own factory
+and still track the shared runtime.
+
+[docs/instances.md](docs/instances.md) has the kernel/instance boundary, the
+upgrade path, and how to send reusable kernel improvements back upstream.
+
+## Layout
+
+```
+shared/                           harness-neutral content, the only place to edit
+  floor.md                        the non-negotiables (goes into every AGENTS.md)
+  commands/                       the /factory-* commands
+  skills/                         ticket-spec (SKILL.md — a format all harnesses share)
+  agents/                         factory-{ux-critic,ci-doctor,infra-scout,merge-reviewer}
+build/emit.mjs                    shared/ -> per-harness packaging; --check guards drift
+plugins/core/                     GENERATED — the Claude Code plugin
+dist/{codex,gemini,cursor,pi}/    GENERATED — the other harnesses
+orchestrator/                     dispatch logic (owned-paths collision, tick)
+event-runtime/                    event-driven sidecar — intake, planner, worker, receipt
+runners/run-agent.sh              one harness session against one repo
+bin/factory                       the cwd-independent CLI
+bin/worktree-{up,down}.sh         this repo's own worktree lifecycle
+lib/, tools/                      helpers: transcripts, spend, schedule, trackers
+config/repos.yaml                 per-repo routing: team, base, worktree scripts, verify
+config/schedule.yaml              cadences
+config/policy.yaml                budgets, concurrency, escalation
+ee/                               reserved open-core seam (empty of product code)
+```
+
+Everything under `plugins/` and `dist/` is generated from `shared/`, and CI
+fails if the tree drifts. [CONTRIBUTING.md](CONTRIBUTING.md) has the rules for
+changing it.
+
+## Open-core boundary
+
+The orchestration, event runtime, shared agent workflows, harness packaging,
+and public extension contracts form the open core. This repository is licensed
+under Apache License 2.0 and is meant to stay useful, buildable, and testable
+without private services or unpublished code.
+
+[`ee/`](ee/README.md) reserves an explicit seam for possible enterprise-only
+extensions. Core code may expose generic contracts that enterprise extensions
+implement, but it must not import or depend on enterprise implementations. The
+directory currently contains documentation only. If separately licensed code
+is added there in the future, it must carry explicit terms; placement under
+`ee/` alone does not override the repository license.
+
 ## Docs
 
-| Doc                                                | What it is                                                    |
-| :------------------------------------------------- | :------------------------------------------------------------ |
-| [docs/thesis.md](docs/thesis.md)                   | Positioning: wedge-first unattended software factory          |
-| [docs/model.md](docs/model.md)                     | Public primitives in this repository's vocabulary             |
-| [docs/quickstart.md](docs/quickstart.md)           | 15-minute `factory demo`                                      |
-| [docs/architecture.md](docs/architecture.md)       | Why the factory is shaped this way                            |
-| [docs/orchestrator.md](docs/orchestrator.md)       | Master orchestrator guide and operating loops                 |
-| [ADOPTERS.md](ADOPTERS.md)                         | Organizations and teams using the factory                     |
-| [PACKS.md](PACKS.md)                               | Directory of reusable factory packs                           |
-| [SETUP.md](SETUP.md)                               | First-time setup, harness links, event-runtime daemon         |
-| [CONTRIBUTING.md](CONTRIBUTING.md)                 | Setup, tests, commit conventions, CLA                         |
-| [SECURITY.md](SECURITY.md)                         | Vulnerability reporting and the autonomous-agent threat model |
-| [ee/README.md](ee/README.md)                       | Open-core / enterprise seam                                   |
-| [event-runtime/README.md](event-runtime/README.md) | How to run the event-runtime sidecar                          |
+| Doc                                                | What it is                                                     |
+| :------------------------------------------------- | :------------------------------------------------------------- |
+| [docs/quickstart.md](docs/quickstart.md)           | The offline demo, then the first real pull request             |
+| [docs/thesis.md](docs/thesis.md)                   | Positioning: an unattended software factory first              |
+| [docs/model.md](docs/model.md)                     | Public primitives in this repository's vocabulary              |
+| [docs/architecture.md](docs/architecture.md)       | Why the factory is shaped this way                             |
+| [docs/orchestrator.md](docs/orchestrator.md)       | Master orchestrator guide and operating loops                  |
+| [SETUP.md](SETUP.md)                               | First-time setup, harness links, event-runtime daemon          |
+| [ROADMAP.md](ROADMAP.md)                           | Now / Next / Later across harnesses, packs, and control planes |
+| [PACKS.md](PACKS.md)                               | Directory of reusable factory packs                            |
+| [ADOPTERS.md](ADOPTERS.md)                         | Organizations and teams using the factory                      |
+| [SECURITY.md](SECURITY.md)                         | Vulnerability reporting and the autonomous-agent threat model  |
+| [ee/README.md](ee/README.md)                       | Open-core / enterprise seam                                    |
+| [event-runtime/README.md](event-runtime/README.md) | How to run the event-runtime sidecar                           |
+
+## Contributing
+
+Bug reports, packs, harness support, and control-plane adapters are all
+welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests, and commit
+conventions; contributions are accepted under the [CLA](CLA.md), and everyone
+is held to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Questions and show-and-tell belong in
+[Discussions](https://github.com/watt-mind/factory/discussions). Security
+issues go through [SECURITY.md](SECURITY.md) rather than a public issue.
 
 ## License
 
