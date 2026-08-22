@@ -107,7 +107,7 @@ built-in bare-namespace root.
 
 ## Harness content pins (WM-855)
 
-A pack or extension may separately contribute *harness* content —
+A pack or extension may separately contribute _harness_ content —
 skills, commands, and subagents materialized into a run's workspace rather
 than registered as agents (`contributes.harness`, WM-849; see
 [`extensions.md`](extensions.md)). That content is content-hash pinned the

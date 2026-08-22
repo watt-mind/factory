@@ -124,5 +124,27 @@ export function verifyHarnessPins(roots, { file = HARNESS_PINS_FILE } = {}) {
         );
       }
     }
+    // Fail closed on deletions too: a pinned file missing from the current
+    // content is drift, not silence (WM-855 — verification must not pass
+    // trivially when a harness root shrinks or a manifest stops declaring
+    // a contributed dir).
+    for (const rel of Object.keys(expected.files ?? {})) {
+      if (!(rel in files)) {
+        throw new HarnessPinError(
+          `harness pack "${plugin}": pinned file "${rel}" is missing — re-pin instead of deleting in place`,
+        );
+      }
+    }
+  }
+  // A plugin that was pinned but no longer appears in the computed roots
+  // (root removed, or its manifest stopped declaring a contributed dir) is
+  // the same drift as a missing file — catch it here rather than passing
+  // silently because the loop above only iterates `computed`.
+  for (const plugin of Object.keys(pinned)) {
+    if (!(plugin in computed)) {
+      throw new HarnessPinError(
+        `harness pack "${plugin}" is pinned but no longer contributes harness content — run: bun event-runtime/cli.mjs update-pins`,
+      );
+    }
   }
 }

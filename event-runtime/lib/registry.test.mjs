@@ -1209,10 +1209,7 @@ describe("loadRegistry harnessRoots pin validation (WM-855)", () => {
       roots: [harness],
       file: path.join(root, "pins.json"),
     });
-    writeFileSync(
-      path.join(harness.commands, "hello.md"),
-      "# hello v2\n",
-    );
+    writeFileSync(path.join(harness.commands, "hello.md"), "# hello v2\n");
     expect(() =>
       loadRegistry({
         root,

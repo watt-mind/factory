@@ -1,6 +1,6 @@
 import { withTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-pins-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   HarnessPinError,
@@ -92,6 +92,32 @@ describe("updateHarnessPins / verifyHarnessPins", () => {
       writeFileSync(path.join(dir, "commands", "hello.md"), "# hello v2\n");
       expect(() => verifyHarnessPins([root], { file })).toThrow(
         /does not match pin/,
+      );
+    });
+  });
+
+  test("verifyHarnessPins throws when a pinned file is deleted, not just changed", () => {
+    withTmpDir("pins-deleted-file-", (dir) => {
+      const root = makeRoot(dir);
+      const file = path.join(dir, "pins.json");
+      updateHarnessPins({ roots: [root], file });
+      rmSync(path.join(dir, "commands", "hello.md"));
+      expect(() => verifyHarnessPins([root], { file })).toThrow(
+        /pinned file "commands\/hello\.md" is missing/,
+      );
+    });
+  });
+
+  test("verifyHarnessPins throws when a whole root's content disappears", () => {
+    withTmpDir("pins-removed-root-", (dir) => {
+      const root = makeRoot(dir);
+      const file = path.join(dir, "pins.json");
+      updateHarnessPins({ roots: [root], file });
+      // Simulate a manifest that stopped declaring a contributed dir, or a
+      // root removed entirely — verifyHarnessPins is called with an empty
+      // roots list, but the pin on disk still names the plugin.
+      expect(() => verifyHarnessPins([], { file })).toThrow(
+        /"core" is pinned but no longer contributes harness content/,
       );
     });
   });
