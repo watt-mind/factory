@@ -30,7 +30,14 @@ For each issue in `Triage` state, plus any `Todo` issue that is missing the `ai:
 
    **Set `blocked by` relations while routing.** If this ticket consumes another open ticket's output — a helper it introduces, a schema it migrates, a decision it records — add the Linear `blocked by` relation now. Dispatch reads it: a ticket with an unfinished blocker never enters the ready queue, and is released automatically the tick after the blocker reaches `Done`. Owned Paths cannot express this (disjoint files, real dependency), and a relation nobody sets is a dependency nobody enforces. This is most of the value of decomposing an epic: the pieces carry their order with them. Only `blocked by` gates dispatch — `related` is annotation.
 
-4. **Promote or hold** — if all five sections are now solid, update the description, add `ai:agent-ready`, move to `Todo`. If something genuinely needs a human decision (unclear product intent, missing credentials, ambiguous scope), move it to `Blocked` + `ai:blocked` and comment exactly what's missing, phrased as questions I can answer.
+4. **Promote or hold** — if all five sections are now solid, update the description, add `ai:agent-ready` **and a `tier:*` label** (see below), move to `Todo`, and post a promotion comment stating the tier and why. If something genuinely needs a human decision (unclear product intent, missing credentials, ambiguous scope), move it to `Blocked` + `ai:blocked` and comment exactly what's missing, phrased as questions I can answer.
+
+   **Sizing rule for the `tier:*` label** (closed vocabulary: `tier:light`, `tier:standard`, `tier:strong`):
+   - `tier:light` — one or two files in `Owned Paths`, no path under `escalate_paths` (`config/repos.yaml`), `type:docs` / copy / config-value changes, or a `type:bug` with a repro and a one-line expected fix.
+   - `tier:strong` — any path under `escalate_paths` (auth, payments, migrations, prod infra), `type:security`, cross-package or architecture work (`area:architecture`), anything whose acceptance criteria say "design"/"decide" or list open questions, or a ticket that previously failed verification.
+   - `tier:standard` — everything else (the default).
+
+   A ticket may carry at most one `tier:*` label. If one is already present, leave it — don't recompute or overwrite an existing tier decision.
 
    **A hold means `Blocked`, not a comment on a ticket left in `Triage`.** A held ticket that stays in `Triage` is picked up by the next triage tick, and the one after that — the stage re-derives the same conclusion and posts it again forever. CLNT-504 collected **ten** near-identical hold comments this way, CLNT-521 seven. `Blocked` takes it out of the sweep, puts it in the queue report's `BLOCKED — needs a human` section, and one answer from me releases it.
 

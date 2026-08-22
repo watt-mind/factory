@@ -11,7 +11,17 @@ So the job is not "spec everything" — it's **sorting tickets into three piles*
 
 ## The three outcomes
 
-**Auto-specifiable** — the problem is unambiguous and the answer is in the code. Explore read-only, write all five sections, promote to `Todo` + `ai:agent-ready`.
+**Auto-specifiable** — the problem is unambiguous and the answer is in the code. Explore read-only, write all five sections, promote to `Todo` + `ai:agent-ready` **plus a `tier:*` label**.
+
+### Sizing the `tier:*` label
+
+Closed vocabulary, at most one per ticket: `tier:light`, `tier:standard`, `tier:strong`.
+
+- `tier:light` — one or two files in `Owned Paths`, no path under `escalate_paths` (`config/repos.yaml`), `type:docs` / copy / config-value changes, or a `type:bug` with a repro and a one-line expected fix.
+- `tier:strong` — any path under `escalate_paths` (auth, payments, migrations, prod infra), `type:security`, cross-package or architecture work (`area:architecture`), anything whose acceptance criteria say "design"/"decide" or list open questions, or a ticket that previously failed verification.
+- `tier:standard` — everything else (the default).
+
+If the ticket already carries a `tier:*` label, leave it — don't recompute or overwrite an existing tier decision. State the tier and why in the promotion comment.
 
 **Answerable from written decisions** — intent is unclear but already recorded: the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, or a prior ticket in the same area. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
 
