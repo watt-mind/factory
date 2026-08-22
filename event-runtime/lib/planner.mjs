@@ -499,7 +499,8 @@ function fetchPullRequestDefault(payload) {
   }
 }
 
-const IN_FLIGHT_QUERY = `query($t:String!,$p:String!){ issues(first:250, filter:{ team:{key:{eq:$t}}, project:{name:{eq:$p}}, state:{name:{eq:"In Progress"}} }){ nodes{ identifier description } } }`;
+// WM-1006: in-flight tickets come from the control-plane adapter via the
+// `inflight` CLI verb — never raw tracker GraphQL (plane-specific).
 
 const OWNED_PATHS_CLOSURE_CACHE = new Map();
 
@@ -530,19 +531,20 @@ function fetchInFlightDefault(repoConfig) {
       "bun",
       [
         linearCli(),
-        "raw",
-        IN_FLIGHT_QUERY,
-        "--var",
-        `t=${repoConfig.team}`,
-        "--var",
-        `p=${repoConfig.project}`,
+        "inflight",
+        "--team",
+        String(repoConfig.team),
+        "--project",
+        String(repoConfig.project),
+        "--json",
       ],
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
-    return JSON.parse(out)?.issues?.nodes ?? [];
+    const rows = JSON.parse(out);
+    return Array.isArray(rows) ? rows : [];
   } catch (err) {
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");

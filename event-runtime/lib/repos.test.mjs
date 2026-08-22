@@ -394,6 +394,7 @@ describe("reposView is what the control API serves", () => {
     for (const row of rows) {
       expect(Object.keys(row).sort()).toEqual([
         "base",
+        "controlPlane",
         "deployBranch",
         "deployment",
         "effective",
@@ -505,12 +506,15 @@ describe("control_plane on a repo entry", () => {
     );
   });
 
-  test("reposView does not publish it yet (see follow-up)", () => {
-    const root = factoryRoot(
+  test("reposView publishes controlPlane, null for inherit and explicit for a pinned repo", () => {
+    const inherit = factoryRoot("repos:\n  - name: a\n    path: /tmp/a\n");
+    expect(reposView(loadRepos({ root: inherit }))[0].controlPlane).toBeNull();
+
+    const pinned = factoryRoot(
       "repos:\n  - name: a\n    path: /tmp/a\n    control_plane: github\n",
     );
-    expect(reposView(loadRepos({ root }))[0]).not.toHaveProperty(
-      "controlPlane",
+    expect(reposView(loadRepos({ root: pinned }))[0].controlPlane).toBe(
+      "github",
     );
   });
 });
