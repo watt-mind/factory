@@ -615,6 +615,28 @@ const VERBS = {
     );
   },
 
+  async inflight() {
+    // In Progress tickets for a team/project — the planner's Owned Paths
+    // collision set (WM-1006: control-plane-neutral, replaces raw Linear GQL).
+    const team = flag("team") ?? teamOf(positional[0] ?? "");
+    if (!team) throw new Error(`usage: inflight --team WM [--project Factory]`);
+    const rows = await controlPlane().listTickets({
+      team,
+      project: flag("project") ?? undefined,
+      states: ["In Progress"],
+    });
+    const slim = rows.map((i) => ({
+      identifier: i.identifier,
+      description: i.description ?? "",
+    }));
+    out(
+      slim,
+      slim.length
+        ? slim.map((i) => i.identifier).join("\n")
+        : "no in-progress tickets",
+    );
+  },
+
   async queue() {
     const team = flag("team") ?? teamOf(positional[0] ?? "");
     if (!team) throw new Error(`usage: queue --team CLNT`);

@@ -320,10 +320,10 @@ export function reposView(repos) {
     github: repo.github,
     team: repo.team,
     project: repo.project,
-    // controlPlane is deliberately NOT published here yet: the view is an
-    // allow-list with an exact-shape contract test in api-registry.test.mjs,
-    // which is outside WM-1007's Owned Paths. Surfacing it to operators is
-    // filed separately.
+    // null means "inherits config/policy.yaml"; an explicit value means the
+    // repo is pinned to that tracker. Distinguishable over the wire so an
+    // operator can tell one from the other (gh-870).
+    controlPlane: repo.controlPlane,
     base: repo.base,
     deployBranch: repo.deployBranch,
     reportOnly: repo.reportOnly,

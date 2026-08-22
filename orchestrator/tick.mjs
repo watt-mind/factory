@@ -33,7 +33,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
-import { ticketSlug } from "../lib/ticket-slug.mjs";
+import { ticketFileName, ticketSlug } from "../lib/ticket-slug.mjs";
 import {
   parseOwnedPaths,
   effectiveOwnedPaths,
@@ -176,7 +176,10 @@ export function preserveWip(wt, ticketIdentifier) {
         encoding: "utf8",
       });
       if (diff.stdout) {
-        const patchPath = path.join(tmpdir(), `${ticketIdentifier}-wip.patch`);
+        const patchPath = path.join(
+          tmpdir(),
+          ticketFileName(ticketIdentifier, { suffix: "wip", ext: "patch" }),
+        );
         writeFileSync(patchPath, diff.stdout);
         return { preserved: true, method: "patch", patchPath };
       }
@@ -202,7 +205,10 @@ export function preserveWip(wt, ticketIdentifier) {
       encoding: "utf8",
     });
     if (diff.stdout) {
-      const patchPath = path.join(tmpdir(), `${ticketIdentifier}-wip.patch`);
+      const patchPath = path.join(
+        tmpdir(),
+        ticketFileName(ticketIdentifier, { suffix: "wip", ext: "patch" }),
+      );
       writeFileSync(patchPath, diff.stdout);
       return { preserved: true, method: "patch", patchPath };
     }
@@ -679,7 +685,11 @@ export async function main(argv = process.argv.slice(2)) {
 
     const log = path.join(
       LOG_DIR,
-      `${repo.name}-${t.identifier}-${stamp}.jsonl`,
+      ticketFileName(t.identifier, {
+        prefix: repo.name,
+        suffix: stamp,
+        ext: "jsonl",
+      }),
     );
     const out = createWriteStream(log);
     const budget = String(
