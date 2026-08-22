@@ -1,4 +1,8 @@
+import path from "node:path";
 import { updatePins } from "../lib/registry.mjs";
+import { updateHarnessPins } from "../lib/pins.mjs";
+import { collectHarnessRoots } from "../lib/extensions.mjs";
+import { FACTORY_ROOT } from "../lib/config.mjs";
 import { fail } from "./shared.mjs";
 
 const USAGE = "usage: update-pins [--pack NAME] [--check]";
@@ -29,6 +33,18 @@ export default function updatePinsCommand(args = []) {
   try {
     const changed =
       pack === undefined ? updatePins({ check }) : updatePins({ pack, check });
+    // Harness content (contributes.harness, WM-849) is pack-independent —
+    // one top-level event-runtime/pins.json covers shared/ plus every
+    // policy-listed extension, so it only re-pins on the bare invocation.
+    if (pack === undefined) {
+      const { roots, anomalies } = collectHarnessRoots({
+        root: FACTORY_ROOT,
+        builtin: path.join(FACTORY_ROOT, "shared"),
+      });
+      for (const anomaly of anomalies) console.error(`harness: ${anomaly}`);
+      const harnessChanged = updateHarnessPins({ roots, check });
+      changed.push(...harnessChanged.map((name) => `harness:${name}`));
+    }
     if (check && changed.length) {
       fail(
         `pins stale: ${changed.join(", ")} — run: bun event-runtime/cli.mjs update-pins`,

@@ -17,6 +17,7 @@ import { MEMO_KINDS, SUBJECT_TYPES } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";
 import { contractViewRel, validateArtifactView } from "./artifact-view.mjs";
 import { PANELS_DIR, loadPanelDir, mergePanels } from "./panel-view.mjs";
+import { HarnessPinError, verifyHarnessPins } from "./pins.mjs";
 
 export class RegistryError extends Error {
   constructor(message) {
@@ -896,6 +897,16 @@ export function loadRegistry({
     throw new RegistryError("panelRoots must be an array");
   if (!Array.isArray(harnessRoots))
     throw new RegistryError("harnessRoots must be an array");
+  if (harnessRoots.length > 0) {
+    try {
+      verifyHarnessPins(harnessRoots, {
+        file: path.join(path.resolve(root), "pins.json"),
+      });
+    } catch (err) {
+      if (err instanceof HarnessPinError) throw new RegistryError(err.message);
+      throw err;
+    }
+  }
 
   const builtIn = {
     kind: "fs",
