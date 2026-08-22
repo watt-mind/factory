@@ -183,7 +183,7 @@ describe("registry", () => {
     // Regenerated (#924): triage-scan selects its configured control plane and
     // fails closed when a GitHub Project title does not match.
     const expected =
-      "sha256:2b94b0d9df14f622af0f875a4425c3583674afd0b875a0d470eec03ba2f5ac10";
+      "sha256:b6bed8921ffd5cc2be169659c2e6928c4ca44c2dc83c38be42f2af1c1f49d9dc";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

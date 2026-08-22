@@ -28,7 +28,7 @@ You never modify it, never run its build, never install anything. Write
    `$FACTORY_ROOT/config/repos.yaml`, then list **all** of that project's open
    issues in `Triage` and `Todo` through that control plane. Do not issue
    Linear-shaped queries for a repository configured with `control_plane:
-   github`: GitHub Projects v2 owns the status, so enumerate the exact-titled
+github`: GitHub Projects v2 owns the status, so enumerate the exact-titled
    board's items and their `Status` values instead. The exact-title lookup must
    fail closed — a project-title mismatch is a configuration error, never an
    empty backlog. For Linear, hard-code the state list as
