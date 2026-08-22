@@ -35,6 +35,13 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    - its labels include `ai:agent-ready`; and
    - its `assignee` field is `null`.
 
+   Exclude a ticket before ordering when its labels include `ai:escalated` or
+   `type:security` (or any other label containing `security`, case
+   insensitively). The dispatch planner must refuse those tickets, so including
+   them in a bounded batch can exhaust the scan and strand dispatchable work.
+   These excluded tickets are not candidates and must not appear in `plan`,
+   `deferred`, or `evidence.candidates`.
+
    Apply this filter before ordering, cap checks, or path checks. `Blocked`,
    `Backlog`, `In Progress`, `In Review`, and `Done` are never candidates. Any
    assignee at all is the ticket lock (docs/event-runtime-dispatch.md §2) and

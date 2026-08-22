@@ -1431,10 +1431,13 @@ function insertProposal(
   return db.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
 }
 
-function setEventStatus(db, event, status) {
+function setEventStatus(db, event, status, reason = null) {
   db.query(
-    `UPDATE events SET status = ? WHERE source = ? AND event_id = ?`,
-  ).run(status, event.source, event.event_id);
+    `UPDATE events
+     SET status = ?,
+         last_plan_error = CASE WHEN ? = 'noop' THEN ? ELSE last_plan_error END
+     WHERE source = ? AND event_id = ?`,
+  ).run(status, status, reason, event.source, event.event_id);
 }
 
 function isIdempotencyKeyCollision(err) {
@@ -1486,7 +1489,7 @@ function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
     at,
     ttlSeconds,
   });
-  setEventStatus(db, event, "noop");
+  setEventStatus(db, event, "noop", reason);
   return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
 }
 
@@ -1658,7 +1661,7 @@ export function planEvent(
         at,
         ttlSeconds,
       });
-      setEventStatus(db, event, "noop");
+      setEventStatus(db, event, "noop", "observed");
       return { decision: "noop", proposal, reason: "observed" };
     }
 
@@ -1758,7 +1761,7 @@ export function planEvent(
         at,
         ttlSeconds,
       });
-      setEventStatus(db, event, "noop");
+      setEventStatus(db, event, "noop", "previous_run_in_flight");
       return {
         decision: "noop",
         proposal,
@@ -1803,7 +1806,7 @@ export function planEvent(
         at,
         ttlSeconds,
       });
-      setEventStatus(db, event, "noop");
+      setEventStatus(db, event, "noop", ticketWorktreeBlocker.reason);
       return {
         decision: "noop",
         proposal,
@@ -1831,7 +1834,7 @@ export function planEvent(
         at,
         ttlSeconds,
       });
-      setEventStatus(db, event, "noop");
+      setEventStatus(db, event, "noop", worktreeRefusal.reason);
       return {
         decision: "noop",
         proposal,
@@ -1971,7 +1974,7 @@ export function planEvent(
         at,
         ttlSeconds,
       });
-      setEventStatus(db, event, "noop");
+      setEventStatus(db, event, "noop", "duplicate_run");
       return {
         decision: "noop",
         proposal,
@@ -2080,7 +2083,7 @@ export function planEvent(
         at,
         ttlSeconds,
       });
-      setEventStatus(db, event, "noop");
+      setEventStatus(db, event, "noop", reason);
       return { decision: "noop", proposal, runId: winner.run_id, reason };
     }
     const proposal = insertProposal(db, {
@@ -2177,7 +2180,7 @@ export function archiveDeadLetteredEvent(
 export function planAdmittedEvents(db, registry, opts = {}) {
   const rows = db
     .query(
-      `SELECT source, event_id FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
+      `SELECT source, event_id, type FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
     )
     .all();
   const cache = opts.linearReadCache ?? createLinearReadCache();
@@ -2186,10 +2189,26 @@ export function planAdmittedEvents(db, registry, opts = {}) {
   let planned = 0;
   let failed = 0;
   let deadLettered = 0;
-  for (const { source, event_id: eventId } of rows) {
+  const log = opts.log ?? console.log;
+  for (const { source, event_id: eventId, type } of rows) {
     try {
       const outcome = planEvent(db, registry, { source, eventId }, planOpts);
       if (outcome?.reason === "linear_rate_limited") continue;
+      if (
+        type === "factory.dispatch.requested" &&
+        outcome?.decision === "noop" &&
+        outcome.reason
+      ) {
+        // Planner decisions are otherwise only visible through the database.
+        // Keep one compact, per-event line in serve.log for chain noops; a
+        // logger fault must never turn a successfully persisted plan into a
+        // retryable planning failure.
+        try {
+          log(`planned noop (${outcome.reason}) — ${source}:${eventId}`);
+        } catch {
+          // Observability is best-effort after the durable decision is made.
+        }
+      }
       planned += 1;
     } catch (err) {
       if (isBusyError(err)) {

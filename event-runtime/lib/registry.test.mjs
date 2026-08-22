@@ -171,6 +171,8 @@ describe("registry", () => {
     // verification in worktrees; full suites remain CI-only.
     // Regenerated (WM-1039 rebase over tracker-neutral sweep)
     // Regenerated (WM-1006 cutover: ticket patterns accept GitHub owner/repo#N ids; schemas re-pinned)
+    // Regenerated (#969): work-scan excludes tickets the dispatch gate must
+    // noop, so a security-heavy queue cannot exhaust the dispatch batch.
     // Regenerated (#846/WM-696): triage-scan/triage-apply admit tier/tierReason
     // for model-tier sizing on promotion; both agent definitions are registry inputs.
     // Regenerated (#846 fix round): label-agent-ready removes all three
@@ -183,7 +185,7 @@ describe("registry", () => {
     // Regenerated (#924): triage-scan selects its configured control plane and
     // fails closed when a GitHub Project title does not match.
     const expected =
-      "sha256:b6bed8921ffd5cc2be169659c2e6928c4ca44c2dc83c38be42f2af1c1f49d9dc";
+      "sha256:221bd1d7193e177898470c60c0e7c11e91574886e4c4b3671f99462ce8a95f24";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

@@ -2095,6 +2095,67 @@ describe("planEvent runtime overlay (WM-887)", () => {
 });
 
 describe("planAdmittedEvents", () => {
+  test("records and logs a typed reason for a nooped dispatch", () => {
+    const root = tmpDir("evrt-plan-noop-");
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+    );
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    try {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "dispatch-security",
+        correlationId: "dispatch-security",
+        payload: { repo: "gated", ticket: "WM-969" },
+      });
+      const lines = [];
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW,
+          dispatch: {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-969",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: {
+                nodes: [
+                  { name: "ai:agent-ready" },
+                  { name: "type:security" },
+                ],
+              },
+              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+            }),
+            fetchInFlight: () => [],
+          },
+          log: (line) => lines.push(line),
+        }),
+      ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+
+      expect(
+        db
+          .query(
+            `SELECT status, last_plan_error FROM events WHERE source = ? AND event_id = ?`,
+          )
+          .get(ref.source, ref.eventId),
+      ).toEqual({ status: "noop", last_plan_error: "ticket_security" });
+      expect(lines).toEqual([
+        `planned noop (ticket_security) — ${ref.source}:${ref.eventId}`,
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  });
+
   test("dead-letters an event after DEAD_LETTER_AFTER consecutive plan failures (§13)", () => {
     const db = openDb(":memory:");
     const ref = admit(db);
