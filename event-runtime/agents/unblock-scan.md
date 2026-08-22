@@ -25,7 +25,7 @@ You never modify it, never run its build, never install anything. Write
 ## Method
 
 1. List the repo's open issues carrying `ai:blocked`, **oldest hold first**:
-   `factory linear issues --repo <name>` (or `bun "$FACTORY_ROOT/tools/linear.mjs"`).
+   `factory ticket issues --repo <name>` (or `bun "$FACTORY_ROOT/tools/ticket.mjs"`).
 2. For each, reconstruct the hold: what did the blocking comment say is
    missing?
 3. Hunt for **new** evidence that the hold has resolved without a reply:

@@ -12,7 +12,7 @@ Repo → team/project mapping, and the full `ai:*`/`source:*`/`type:*`/`area:*` 
 
 If the current working directory matches a repo in `config/repos.yaml`, use its `team`/`project`. Otherwise infer team/project from what the conversation was actually about — ask if it's genuinely ambiguous rather than guessing.
 
-**Search for duplicates first** (`factory linear`, per `docs/protocol.md` §13) — don't file a second issue for something already tracked; comment on the existing one with the new evidence instead and report that back, not a new issue.
+**Search for duplicates first** (`factory ticket`, per `docs/protocol.md` §13) — don't file a second issue for something already tracked; comment on the existing one with the new evidence instead and report that back, not a new issue.
 
 ## 3. Label and specify
 

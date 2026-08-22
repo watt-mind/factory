@@ -16,7 +16,7 @@ Registered actions — each resolves to one fixed, non-shell-interpolated argv:
 | `needs-human`       | `comment {issueId} "<reason>"`                                                                                                   |
 
 `write-detail` is intentionally separate from `label-agent-ready`. It calls
-`tools/linear.mjs detail`, which preserves the description read immediately
+`tools/ticket.mjs detail`, which preserves the description read immediately
 before the mutation and appends only the approved Markdown suffix. Its
 `DETAIL_CHANGED` outcome no longer chains into an immediate re-scan (WM:
 operator decision 2026-08-18, to stop burning the pi/codex adapter's quota on

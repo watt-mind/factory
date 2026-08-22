@@ -50,7 +50,7 @@
   },
   "mutating": true,
   "pins": {
-    "agents/sweep-apply.md": "sha256:7d48b3ee14077107110246a2e5fdda7c0997fd47f8b4d047f859fa883a4203da",
+    "agents/sweep-apply.md": "sha256:373e0bd369792c9fee300a90b1ef833499fb9cdc53c5993e9598c882dd56aa8d",
     "schemas/sweep-apply.input.json": "sha256:5af257704ff1a7a6753e27bbe6916cc0b0946c8b4a23250bf592dd139273ec44",
     "schemas/sweep-applied.output.json": "sha256:75524150caebdaeffeb1dee800169a0ac423d3d6549d5491185eefe5351dacfd"
   }

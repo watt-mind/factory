@@ -167,7 +167,7 @@ describe("registry", () => {
     // Regenerated (WM-938): dispatch pins explicit PR bases and merge-scan
     // surfaces wrong-base PRs; both agent definitions are registry inputs.
     const expected =
-      "sha256:7b8947e3cb825922f935f7821ff085403a80747edf0a2fd2ce81fb520991a1f8";
+      "sha256:5a8aeabaab1f3f111286106bb15ec76977c88340cb7578045e6cf74a1dd346fc";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -339,7 +339,7 @@ describe("registry", () => {
     // WM-812 adds decision-memo declarations and re-pins the dispatch brief.
     // WM-938 adds the explicit-base PR command and re-pins dispatch.
     expect(computeDefHash(def)).toBe(
-      "sha256:85b4dd48a2eacc1fb8d238bf72dbe98a442988b5ef74c28f130ed59e9da83323",
+      "sha256:d004d6500d8ba0cac57573f8d0836a1ec2f18e083dd414d0348adb230387f893",
     );
   });
 

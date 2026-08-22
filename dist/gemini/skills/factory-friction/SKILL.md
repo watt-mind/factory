@@ -33,7 +33,7 @@ Same bar as `docs/friction-log.md` — only two things:
 
 ## 4. Search before filing
 
-Search Linear (`factory linear` or `docs/protocol.md` §13) for:
+Search Linear (`factory ticket` or `docs/protocol.md` §13) for:
 
 - Existing `FIP:` issues describing the same shape
 - Prior issues whose body contains `## Session friction` with the same **Shape**
@@ -75,7 +75,7 @@ Factory-wide items: prefix the title with `FIP:`. Do not write the full §5 agen
 - **`area:*`** — `area:factory` for OPS/FIP items; match the repo's area labels for product-repo friction
 - **State:** `Triage` only — never `Todo` + `ai:agent-ready` from this command
 
-Use `factory linear file ...` from a worktree.
+Use `factory ticket file ...` from a worktree.
 
 ## 8. Report
 

@@ -4,7 +4,7 @@ Not a prompt: this definition applies an **approved per-issue action list**
 via the deterministic actions adapter in item-list mode
 (`lib/adapters/actions.mjs`). No model runs.
 
-Registered actions — each resolves to one fixed `tools/linear.mjs` invocation:
+Registered actions — each resolves to one fixed `tools/ticket.mjs` invocation:
 
 | action id          | effect                                                                                 |
 | :----------------- | :------------------------------------------------------------------------------------- |

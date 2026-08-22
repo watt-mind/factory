@@ -7,7 +7,7 @@ description: Re-examine held (ai:blocked) tickets for new evidence and release t
 
 The user's accompanying request is this workflow's argument string. Wherever these instructions refer to `$ARGUMENTS`, interpret it as that request.
 
-Re-examine the `ai:blocked` holds for the repository I'm currently in: some blockers resolve without anyone commenting on the ticket — the dependency merged, the credential got documented, the code moved on — and this sweep is what notices. Resolve the team from the repo via `config/repos.yaml` (`docs/protocol.md` §1). Use `factory linear`; on failure retry once then fall back to `factory linear raw` per the floor.
+Re-examine the `ai:blocked` holds for the repository I'm currently in: some blockers resolve without anyone commenting on the ticket — the dependency merged, the credential got documented, the code moved on — and this sweep is what notices. Resolve the team from the repo via `config/repos.yaml` (`docs/protocol.md` §1). Use `factory ticket`; on failure retry once then fall back to `factory ticket raw` per the floor.
 
 Target: every open ticket in `Blocked` or `Triage` carrying `ai:blocked`, **oldest hold first** — the longest-stuck ticket has waited longest for this look. Interpret $ARGUMENTS as specific issue IDs or a max count; default is up to 10.
 

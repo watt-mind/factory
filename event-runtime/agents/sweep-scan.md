@@ -25,8 +25,8 @@ You never modify it, never run its build, never install anything. Write
 ## Method
 
 1. List the repo's open issues in `Backlog`, `Triage`, and `Todo`,
-   oldest-updated first: `factory linear issues --repo <name>` (or
-   `bun "$FACTORY_ROOT/tools/linear.mjs"`). **Skip, always:** anything
+   oldest-updated first: `factory ticket issues --repo <name>` (or
+   `bun "$FACTORY_ROOT/tools/ticket.mjs"`). **Skip, always:** anything
    `In Progress`, `In Review`, carrying `ai:blocked`, with an open PR, or
    with recent human activity — those are live claims, holds, or
    conversations, not this route's to touch.

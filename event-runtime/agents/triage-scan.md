@@ -26,8 +26,8 @@ You never modify it, never run its build, never install anything. Write
 
 1. Resolve the repo's Linear team and project from
    `$FACTORY_ROOT/config/repos.yaml`, then list **all** of that project's open
-   issues in `Triage` and `Todo` with paginated `factory linear raw` queries (or
-   `bun "$FACTORY_ROOT/tools/linear.mjs" raw`). Hard-code the state list as
+   issues in `Triage` and `Todo` with paginated `factory ticket raw` queries (or
+   `bun "$FACTORY_ROOT/tools/ticket.mjs" raw`). Hard-code the state list as
    `in:["Triage","Todo"]` in the GraphQL document: `linear.mjs raw` passes every
    `--var` value as a string, so passing a JSON-looking array through `--var`
    silently searches for one state with that literal name and can return a

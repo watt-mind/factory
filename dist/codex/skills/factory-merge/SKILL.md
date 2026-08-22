@@ -78,7 +78,7 @@ Why this matters: a legalease run on 2026-08-04 landed 3 PRs in 15 minutes again
 
 If the repo has GitHub's native merge queue enabled, prefer it over any of this — it tests batches and drops the failures for you.
 
-After each batch: confirm base-branch CI passes **and the post-deploy smoke check is green** where the repo has one (per §7's `Done` condition — merged, base CI green, deployed and responding), then move the Linear ticket to `Done` (`factory linear state <ID> Done --remove ai:needs-review --remove ai:escalated --remove ai:blocked`). Then clean up **in this order**: remove the ticket's worktree first (`bin/worktree-down.sh <ISSUE-ID>` where the repo provides it, so the ticket's database is dropped too), and only then delete the branch. Git refuses to delete a branch checked out in a worktree, so `gh pr merge --delete-branch` fails **every time** a ticket was worked in one — merge without that flag and delete the branch after teardown.
+After each batch: confirm base-branch CI passes **and the post-deploy smoke check is green** where the repo has one (per §7's `Done` condition — merged, base CI green, deployed and responding), then move the Linear ticket to `Done` (`factory ticket state <ID> Done --remove ai:needs-review --remove ai:escalated --remove ai:blocked`). Then clean up **in this order**: remove the ticket's worktree first (`bin/worktree-down.sh <ISSUE-ID>` where the repo provides it, so the ticket's database is dropped too), and only then delete the branch. Git refuses to delete a branch checked out in a worktree, so `gh pr merge --delete-branch` fails **every time** a ticket was worked in one — merge without that flag and delete the branch after teardown.
 
 Resolve that branch from the PR you just merged; never from the ticket ID, and never from a name left over from an earlier PR in the batch — and before deleting it, run `factory branch-guard` to mechanically verify that the branch is not protected (`base` / `deploy_branch` / `develop` / `master` / `main`) and that no **other open PR** still has it as its head (WM-17, WM-51):
 
@@ -103,7 +103,7 @@ If base CI or the smoke check breaks after a batch, stop merging further batches
 
 Reviewing diffs is where follow-up work surfaces. Anything the review reveals that doesn't block this merge — defects elsewhere, missing test coverage, tech debt, refactor opportunities, UX rough edges, improvement ideas — gets a Linear issue in `Triage` **at the moment you spot it**: correct team/project, `type:*` + `area:*` + `source:agent` labels, evidence-based priority, linked to the PR and ticket that surfaced it. A finding mentioned only in this report or a PR comment is a finding lost. Filing is cheap; err on the side of filing. This applies to escalated and left-open PRs too, not just merged ones.
 
-**Order of operations for discovered work:** File follow-ups first via `factory linear file`, collect the returned issue identifiers, and then author summary and handoff comments referencing those real IDs. Ticket IDs cannot be known prior to creation; pre-writing cross-references in comments or reports before filing produces fake or broken identifiers.
+**Order of operations for discovered work:** File follow-ups first via `factory ticket file`, collect the returned issue identifiers, and then author summary and handoff comments referencing those real IDs. Ticket IDs cannot be known prior to creation; pre-writing cross-references in comments or reports before filing produces fake or broken identifiers.
 
 ## Capture session friction (interactive runs only)
 
