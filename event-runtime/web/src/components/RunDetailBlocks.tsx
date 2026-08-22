@@ -1157,11 +1157,30 @@ export function RunDetailBlocks({
         </Section>
       )}
 
+      {d.receipt?.harnessPins && (
+        <Section title="Harness">
+          <KV
+            k="materialized files"
+            v={String(Object.keys(d.receipt.harnessPins).length)}
+            mono={false}
+          />
+          {Object.entries(d.receipt.harnessPins).map(([file, hash]) => (
+            <KV key={file} k={file} v={String(hash)} />
+          ))}
+        </Section>
+      )}
+
       {d.receipt && (
         <Section title="Receipt">
-          {Object.entries(d.receipt).map(([k, v]) => (
-            <KV key={k} k={k} v={v} />
-          ))}
+          {Object.entries(d.receipt)
+            .filter(([k]) => k !== "harnessPins")
+            .map(([k, v]) => (
+              <KV
+                key={k}
+                k={k}
+                v={typeof v === "string" || v === null ? v : JSON.stringify(v)}
+              />
+            ))}
         </Section>
       )}
     </>

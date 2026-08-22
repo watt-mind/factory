@@ -331,6 +331,7 @@ export default async function serve(args) {
   const registry = loadRegistry({
     packRoots: extensions.packRoots,
     panelRoots: extensions.panelRoots,
+    harnessRoots: extensions.harnessRoots,
   });
   registry.anomalies.push(...extensions.anomalies);
   const startedConnectors = await startConnectors({ db, registry, log });

@@ -57,6 +57,7 @@ export function attestReceipt(receipt, { def, spec } = {}) {
  *   evidenceSetHash?: string|null,
  *   journalHead?: string|null,
  *   verificationStatus?: string,
+ *   harnessPins?: Record<string, string>|null,
  *   extraReceipt?: object
  * }} opts
  * @returns {object} Compact receipt
@@ -69,6 +70,7 @@ export function createReceipt({
   evidenceSetHash = null,
   journalHead = null,
   verificationStatus = "passed",
+  harnessPins = null,
   extraReceipt = null,
 }) {
   const base = extraReceipt ?? {
@@ -80,6 +82,12 @@ export function createReceipt({
     verificationStatus,
   };
   const defHash = spec?.defHash ?? (def ? computeDefHash(def) : null);
+  const receiptHarnessPins =
+    harnessPins && Object.keys(harnessPins).length > 0
+      ? harnessPins
+      : base.harnessPins && Object.keys(base.harnessPins).length > 0
+        ? base.harnessPins
+        : null;
   return {
     ...base,
     runId: base.runId ?? spec?.runId ?? runId,
@@ -93,5 +101,6 @@ export function createReceipt({
         : evidenceSetHash,
     journalHead: journalHead ?? base.journalHead ?? null,
     verificationStatus: base.verificationStatus ?? verificationStatus,
+    ...(receiptHarnessPins ? { harnessPins: receiptHarnessPins } : {}),
   };
 }
