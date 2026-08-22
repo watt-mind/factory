@@ -65,8 +65,16 @@ test("formatPulse renders structured pulse text", () => {
 });
 
 test("gatherPulse handles unreachable API gracefully", async () => {
+  // A hardcoded port assumes nothing else is listening on it, which a
+  // stranger process (or a concurrent worktree) can invalidate (#876).
+  // Bind loopback:0 to get an OS-assigned port, then release it
+  // immediately so it is unreachable when gatherPulse fetches it.
+  const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const port = probe.port;
+  probe.stop(true);
+
   const pulse = await gatherPulse({
-    port: 59999, // unreachable port
+    port,
     fetchLinear: false,
     fetchGitHub: false,
   });
