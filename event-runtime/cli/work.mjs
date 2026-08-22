@@ -90,7 +90,10 @@ export default async function work(args) {
 
   ensureHome();
   const db = openDb();
-  const registry = loadRegistry({ packRoots: extensions.packRoots });
+  const registry = loadRegistry({
+    packRoots: extensions.packRoots,
+    harnessRoots: extensions.harnessRoots,
+  });
   registry.anomalies.push(...extensions.anomalies);
   const pv = policyVersion();
   const workerId = flagValue(args, "--worker-id") ?? newWorkerId();

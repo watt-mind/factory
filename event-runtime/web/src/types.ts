@@ -29,6 +29,21 @@ export interface RunSpec {
   timeoutSeconds: number;
   maxAttempts: number;
   idempotencyKey: string;
+  harness?: {
+    skills?: string[];
+    commands?: string[];
+    subagents?: string[];
+  };
+  /** Approved source-content pins for the declared harness components. */
+  harnessPins?: Record<
+    string,
+    {
+      origin: string;
+      name: string;
+      version: string;
+      files: Record<string, string>;
+    }
+  >;
   placement?: Record<string, unknown> | null;
   /**
    * Declared intent and the model it resolved to at plan time (WM-135). Both
@@ -399,10 +414,13 @@ export interface DeadlineExtensionReceipt {
   override: boolean;
 }
 
-export type RunReceipt = Record<string, string | null> & {
+export interface RunReceipt {
+  [key: string]: string | null | Record<string, string> | undefined;
   /** Canonical JSON array of DeadlineExtensionReceipt records. */
   readonly deadlineExtensions?: string;
-};
+  /** Hashes of the emitted harness files actually copied into the workspace. */
+  readonly harnessPins?: Record<string, string>;
+}
 
 export interface RunDetail {
   run: {
