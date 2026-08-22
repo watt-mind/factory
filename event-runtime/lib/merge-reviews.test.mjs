@@ -44,6 +44,7 @@ function pr({
   isDraft = false,
   state = "OPEN",
   title = `Fixes WM-${number}`,
+  body = "",
   mergeable = "MERGEABLE",
   mergeStateStatus = "CLEAN",
   files = OWNED,
@@ -60,6 +61,7 @@ function pr({
     headRefName,
     baseRefName,
     title,
+    body,
     mergeable,
     mergeStateStatus,
     files,
@@ -390,6 +392,33 @@ describe("merge_reviews ledger keying (WM-907 / WM-936)", () => {
 });
 
 describe("merge-scan enumerator (WM-907)", () => {
+  test("canonicalizes GitHub ref slugs and falls back to a Fixes body reference", () => {
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db: openDb(":memory:"),
+      forge: forgeWith([
+        pr({ number: 877, headRefName: "feat/gh-877" }),
+        pr({ number: 878, headRefName: "gh-878" }),
+        pr({ number: 879, headRefName: "879" }),
+        pr({
+          number: 880,
+          headRefName: "feat/no-ticket",
+          body: "Fixes watt-mind/factory#880",
+        }),
+        pr({ number: 123, headRefName: "feat/WM-123" }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.reviews.map((row) => row.ticket)).toEqual([
+      "watt-mind/factory#877",
+      "watt-mind/factory#878",
+      "watt-mind/factory#879",
+      "watt-mind/factory#880",
+      "WM-123",
+    ]);
+  });
+
   test("emits reviews only for ledger misses", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
@@ -553,6 +582,33 @@ describe("merge-scan enumerator (WM-907)", () => {
 });
 
 describe("merge-scan enumerator (WM-936)", () => {
+  test("uses the canonical GitHub ticket in merge-fix input", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 877,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(877),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 877,
+          headRefName: "feat/gh-877",
+          mergeStateStatus: "BEHIND",
+        }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.fix).toHaveLength(1);
+    expect(result.artifact.fix[0].ticket).toBe("watt-mind/factory#877");
+  });
+
   test("base moved with head unchanged is a hit and emits no review", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {

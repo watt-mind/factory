@@ -31,6 +31,10 @@ export const MERGE_REVIEW_AGENT = "merge-review@1";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const TICKET = /[A-Z]+-[0-9]+/;
+const GITHUB_REF_TICKET = /(?:^|\/)gh-([0-9]+)$/i;
+const BARE_GITHUB_REF_TICKET = /^([0-9]+)$/;
+const GITHUB_BODY_TICKET =
+  /(?:^|\n)\s*fixes\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+)\b/i;
 const PR_LIST_FIELDS = [
   "number",
   "state",
@@ -39,6 +43,7 @@ const PR_LIST_FIELDS = [
   "headRefName",
   "baseRefName",
   "title",
+  "body",
   "mergeable",
   "mergeStateStatus",
 ];
@@ -69,10 +74,21 @@ function asPr(value) {
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
-function ticketFromRef(headRef, title) {
+function ticketFromRef(headRef, title, body, github) {
+  const githubRef =
+    typeof headRef === "string"
+      ? (headRef.match(GITHUB_REF_TICKET) ??
+        headRef.match(BARE_GITHUB_REF_TICKET))
+      : null;
+  if (githubRef && typeof github === "string" && github.length > 0) {
+    return `${github}#${githubRef[1] ?? githubRef[2]}`;
+  }
   const fromRef =
     typeof headRef === "string" ? headRef.toUpperCase().match(TICKET) : null;
   if (fromRef) return fromRef[0];
+  const fromBody =
+    typeof body === "string" ? body.match(GITHUB_BODY_TICKET) : null;
+  if (fromBody) return fromBody[1];
   const fromTitle =
     typeof title === "string" ? title.toUpperCase().match(TICKET) : null;
   return fromTitle ? fromTitle[0] : null;
@@ -226,7 +242,7 @@ function reviewItemFromPr(pr) {
   return item;
 }
 
-function normalizeListedPr(raw, baseSha) {
+function normalizeListedPr(raw, baseSha, github) {
   const number = asPr(raw?.number);
   const headSha = asSha(raw?.headRefOid);
   const base = asSha(baseSha);
@@ -239,7 +255,7 @@ function normalizeListedPr(raw, baseSha) {
     baseSha: base,
     headRef: typeof raw.headRefName === "string" ? raw.headRefName : null,
     baseRefName: typeof raw.baseRefName === "string" ? raw.baseRefName : null,
-    ticket: ticketFromRef(raw.headRefName, raw.title),
+    ticket: ticketFromRef(raw.headRefName, raw.title, raw.body, github),
     mergeable:
       typeof raw.mergeable === "string" ? raw.mergeable.toUpperCase() : "",
     mergeStateStatus:
@@ -249,14 +265,14 @@ function normalizeListedPr(raw, baseSha) {
   };
 }
 
-function classifySelectedPr(raw, { base, baseSha }) {
+function classifySelectedPr(raw, { base, baseSha, github }) {
   if (!raw) return { invalid: "missing" };
   const state = typeof raw.state === "string" ? raw.state.toUpperCase() : "";
   if (state && state !== "OPEN") return { invalid: "closed" };
   if (raw.isDraft === true) return { invalid: "draft" };
   const baseRef = typeof raw.baseRefName === "string" ? raw.baseRefName : "";
   if (baseRef && baseRef !== base) return { invalid: "wrong-base" };
-  const pr = normalizeListedPr(raw, baseSha);
+  const pr = normalizeListedPr(raw, baseSha, github);
   if (!pr) return { invalid: "missing" };
   return { pr };
 }
@@ -473,7 +489,11 @@ export function enumerateMergeScan({
         invalid.push({ pr: entry.number, reason: "missing" });
         continue;
       }
-      const classified = classifySelectedPr(entry.raw, { base, baseSha });
+      const classified = classifySelectedPr(entry.raw, {
+        base,
+        baseSha,
+        github,
+      });
       if (classified.invalid) {
         invalid.push({ pr: entry.number, reason: classified.invalid });
       } else {
@@ -504,7 +524,7 @@ export function enumerateMergeScan({
   const targets = [];
   const wrongBase = [];
   for (const entry of listed) {
-    const pr = normalizeListedPr(entry.raw, baseSha);
+    const pr = normalizeListedPr(entry.raw, baseSha, github);
     if (!pr) continue;
     if (pr.isDraft) continue;
     if (pr.baseRefName && pr.baseRefName !== base) {
@@ -854,7 +874,7 @@ export function enumerateMergePlan({
 
   const candidates = [];
   for (const raw of open) {
-    const pr = normalizeListedPr(raw, baseSha);
+    const pr = normalizeListedPr(raw, baseSha, github);
     if (!pr || pr.isDraft) continue;
     if (pr.baseRefName && pr.baseRefName !== base) continue;
     const hit = lookupMergeReview(db, {
