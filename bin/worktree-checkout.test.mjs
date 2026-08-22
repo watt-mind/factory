@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 const UP = path.resolve(import.meta.dir, "worktree-up.sh");
 const DOWN = path.resolve(import.meta.dir, "worktree-down.sh");
@@ -1520,4 +1520,75 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
     rmSync(tempWtRoot, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticketId}`] });
   }
+});
+
+// ------------------------------------------------ GitHub ticket ids (#881) ---
+// After the WM-1006 cutover the worker passes GitHub identifiers. The scripts
+// validated `^[A-Z]+-[0-9]+` only, so a claim landed and then worktree creation
+// died — leaving a claimed ticket with no work happening.
+describe("ticket id forms", () => {
+  const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
+  /** Run a helper from worktree-common.sh and return its stdout. */
+  const call = (fn, arg) => {
+    const r = Bun.spawnSync({
+      cmd: ["bash", "-c", `source "${COMMON}"; ${fn} ${JSON.stringify(arg)}`],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return { out: r.stdout.toString().trim(), code: r.exitCode };
+  };
+
+  test("accepts tracker-key and GitHub contract forms, rejects bare numbers", () => {
+    for (const id of [
+      "OPS-123",
+      "OPS-123-scratch",
+      "watt-mind/factory#881",
+      "#881",
+    ]) {
+      expect(call("ticket_is_valid", id).code).toBe(0);
+    }
+    expect(call("ticket_is_valid", "not a ticket").code).not.toBe(0);
+  });
+
+  test("slugs are filesystem- and ref-safe", () => {
+    const slug = call("ticket_slug", "watt-mind/factory#881").out;
+    expect(slug).toBe("gh-881");
+    expect(slug).not.toContain("/");
+    expect(slug).not.toContain("#");
+    // Tracker-key ids are unchanged, so existing worktrees keep their paths.
+    expect(call("ticket_slug", "OPS-123").out).toBe("OPS-123");
+  });
+
+  test("slug is idempotent", () => {
+    // The lifecycle lock and the prune loop slugify defensively; a
+    // non-idempotent slug would produce gh-gh-881 or die on its own output.
+    const once = call("ticket_slug", "watt-mind/factory#881").out;
+    expect(call("ticket_slug", once).out).toBe(once);
+  });
+
+  test("both GitHub forms agree on slug AND port", () => {
+    // They resolve to one directory, so a differing port would be a torn
+    // allocation: same worktree, two port leases.
+    const a = "watt-mind/factory#881";
+    const b = "#881";
+    expect(call("ticket_slug", a).out).toBe(call("ticket_slug", b).out);
+    expect(call("ticket_api_port", a).out).toBe(call("ticket_api_port", b).out);
+  });
+
+  test("distinct tickets do not share a port", () => {
+    const p = (id) => call("ticket_api_port", id).out;
+    expect(p("OPS-123")).not.toBe(p("watt-mind/factory#123"));
+    expect(p("OPS-123")).not.toBe(p("OPS-123-scratch"));
+  });
+
+  test("ticket_number extracts the number from every form", () => {
+    for (const [id, want] of [
+      ["OPS-123", "123"],
+      ["watt-mind/factory#881", "881"],
+      ["#881", "881"],
+      ["gh-881", "881"],
+    ]) {
+      expect(call("ticket_number", id).out).toBe(want);
+    }
+  });
 });

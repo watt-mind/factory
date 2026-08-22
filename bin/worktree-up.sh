@@ -89,7 +89,7 @@ try_worktree_lifecycle_lock() { # <ticket>
   common=$(git -C "$REPO" rev-parse --git-common-dir)
   [[ "$common" == /* ]] || common="$REPO/$common"
   root="$common/factory-worktree-locks"
-  lock="$root/$1.lock"
+  lock="$root/$(ticket_slug "$1").lock"
   mkdir -p "$root"
   if ! mkdir "$lock" 2>/dev/null; then
     holder=$(cat "$lock/pid" 2>/dev/null || true)
@@ -117,10 +117,14 @@ if [[ "$HERE" -eq 1 ]]; then
   LABEL="here"
 else
   [[ -n "$TICKET" ]] || die "usage: worktree-up.sh <TICKET-ID> [type] [slug] | --here   (--checkout-only, --no-seed, --no-fetch, --reseed, --resume)"
-  [[ "$TICKET" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] || die "ticket must look like OPS-123 or OPS-123-scratch"
-  WT="$WT_ROOT/$TICKET"
-  LABEL="$TICKET"
-  BRANCH="$TYPE/$TICKET${SLUG:+-$SLUG}"
+  # Accepts ABC-123 and owner/repo#123 (#881). The directory and
+  # branch use the slug, since `/` and `#` are not usable in either.
+  ticket_is_valid "$TICKET" || die "ticket must look like OPS-123 or owner/repo#123 (got '$TICKET')"
+  TICKET_SLUG="$(ticket_slug "$TICKET")"
+  WT="$WT_ROOT/$TICKET_SLUG"
+  LABEL="$TICKET_SLUG"
+  # Slug, not raw id: `owner/repo#123` would make an invalid ref (#881).
+  BRANCH="$TYPE/$TICKET_SLUG${SLUG:+-$SLUG}"
 
   try_worktree_lifecycle_lock "$TICKET" \
     || die "worktree_lifecycle_busy: another process is provisioning or removing $TICKET"

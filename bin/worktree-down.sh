@@ -39,7 +39,7 @@ worktree_lifecycle_lock_path() { # <ticket>
   local common
   common=$(git -C "$REPO" rev-parse --git-common-dir)
   [[ "$common" == /* ]] || common="$REPO/$common"
-  printf '%s/factory-worktree-locks/%s.lock' "$common" "$1"
+  printf '%s/factory-worktree-locks/%s.lock' "$common" "$(ticket_slug "$1")"
 }
 
 try_worktree_lifecycle_lock() { # <ticket>
@@ -164,6 +164,10 @@ if [[ "$HERE" -eq 1 ]]; then
   WT="$REPO"
 else
   [[ -n "$TICKET" ]] || die "usage: worktree-down.sh <TICKET-ID> [--force] | --here | --prune"
+  # Same slug as worktree-up.sh, or a GitHub-id worktree can be created and
+  # never torn down — which leaks disk and a port lease (#881).
+  ticket_is_valid "$TICKET" || die "ticket must look like OPS-123 or owner/repo#123 (got '$TICKET')"
+  TICKET="$(ticket_slug "$TICKET")"
   WT="$WT_ROOT/$TICKET"
   [[ -d "$WT" ]] || die "no worktree at $WT"
 

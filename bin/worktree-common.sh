@@ -193,16 +193,58 @@ provision_instance_local_configs() { # <checkout> [primary-checkout]
 
 repo_root() { git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel; }
 
-ticket_number() {
-  [[ "$1" =~ ^[A-Z]+-([0-9]+) ]] || die "ticket must look like OPS-123 (got '$1')"
-  printf '%s' "${BASH_REMATCH[1]}"
+# Accepted ticket id forms (WM-1006 cutover, #881):
+#   ABC-123 / ABC-123-scratch   tracker-key form (Linear)
+#   owner/repo#123 / #123       GitHub forms
+#
+# A BARE number is deliberately NOT accepted: `worktree-up.sh 123` is far more
+# likely a typo than an intent, the existing arg-parsing test guards it as
+# such, and the GitHub adapter always emits the `owner/repo#123` contract form
+# anyway (issueIdentifier), so nothing needs it.
+ticket_is_valid() {
+  [[ "$1" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] && return 0
+  [[ "$1" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#[0-9]+$ ]] && return 0
+  [[ "$1" =~ ^\#[0-9]+$ ]] && return 0
+  [[ "$1" =~ ^gh-[0-9]+$ ]] && return 0
+  return 1
 }
 
-# Preferred even API port for a ticket. Hashes the full id so a numeric
-# collision (N and N+200) or a -scratch suffix cannot share a port.
+ticket_number() {
+  [[ "$1" =~ ^[A-Z]+-([0-9]+) ]] && { printf '%s' "${BASH_REMATCH[1]}"; return; }
+  [[ "$1" =~ \#([0-9]+)$ ]] && { printf '%s' "${BASH_REMATCH[1]}"; return; }
+  [[ "$1" =~ ^gh-([0-9]+)$ ]] && { printf '%s' "${BASH_REMATCH[1]}"; return; }
+  die "ticket must look like OPS-123 or owner/repo#123 (got '$1')"
+}
+
+# Filesystem- and git-ref-safe name for a ticket id.
+#
+# `owner/repo#123` cannot be a directory component or a branch segment: `/`
+# nests a path and `#` is awkward in refs and shell. Both GitHub forms collapse
+# to `gh-123`. That is unambiguous in practice because `worktree_root` is
+# per-repo, so two different repositories' #123 never share a root — and PORTS
+# hash the full original id (ticket_api_port), not this slug, so even a
+# hypothetical name clash cannot produce a port clash.
+# IDEMPOTENT: slug(slug(x)) == slug(x). Callers slugify defensively (the
+# lifecycle lock, the prune loop over existing directory names), and a
+# non-idempotent version would turn `gh-881` into `gh-gh-881` or die.
+ticket_slug() {
+  [[ "$1" =~ ^gh-[0-9]+$ ]] && { printf '%s' "$1"; return; }
+  if [[ "$1" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]]; then
+    printf '%s' "$1"
+  else
+    printf 'gh-%s' "$(ticket_number "$1")"
+  fi
+}
+
+# Preferred even API port for a ticket. Hashes the SLUG so a numeric collision
+# (N and N+200) or a -scratch suffix cannot share a port, while the two GitHub
+# id forms — `owner/repo#123` and `123` — agree with each other. Hashing the
+# raw id gave those two the same worktree directory but different ports, which
+# is a torn allocation waiting to happen (#881). For `ABC-123` the slug is the
+# id, so existing Linear ports are unchanged.
 ticket_api_port() {
   local hash
-  hash=$(printf '%s' "$1" | cksum | awk '{print $1}')
+  hash=$(printf '%s' "$(ticket_slug "$1")" | cksum | awk '{print $1}')
   printf '%s' "$((PORT_BASE + 2 * (hash % PORT_SPAN)))"
 }
 
