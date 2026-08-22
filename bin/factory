@@ -42,10 +42,10 @@ show_banner() {
   echo '  ║   ██║     ██║  ██║╚██████╗   ██║   ╚██████╔╝██║  ██║   ██║    ║'
   echo '  ║   ╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ║'
   echo '  ║                                                               ║'
-  _pad "${_d}Agent control plane · Linear · dispatch · merge${_r}"
+  _pad "${_d}A runtime for self-improving agentic loops${_r}"
   echo '  ║                                                               ║'
-  _pad "${_m}▸ Proprietary software of Watt Mind${_r}"
-  _pad "${_d}Unauthorized use or distribution is prohibited.${_r}"
+  _pad "${_m}▸ Apache-2.0 · github.com/watt-mind/factory${_r}"
+  _pad "${_d}New here? Run: factory demo${_r}"
   echo '  ║                                                               ║'
   echo '  ╚═══════════════════════════════════════════════════════════════╝'
   printf '%s\n' "$_r"
