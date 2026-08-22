@@ -12,9 +12,7 @@ function testFileForCaller() {
     /(?:file:\/\/)?[^()\s]+\.test\.mjs(?=:\d+:\d+)/,
   );
   if (!match) return null;
-  return match[0].startsWith("file:")
-    ? match[0]
-    : pathToFileURL(match[0]).href;
+  return match[0].startsWith("file:") ? match[0] : pathToFileURL(match[0]).href;
 }
 
 /**
