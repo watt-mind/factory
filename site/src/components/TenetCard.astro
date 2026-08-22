@@ -1,0 +1,29 @@
+---
+import controlPlaneSvg from "../assets/tenet-icons/a-03-control-plane.svg?raw";
+import multiHarnessSvg from "../assets/tenet-icons/a-04-multi-harness.svg?raw";
+import verificationSvg from "../assets/tenet-icons/a-02-verification.svg?raw";
+import worktreeSvg from "../assets/tenet-icons/a-01-worktree.svg?raw";
+
+interface Props {
+  icon: "worktree" | "verification" | "control-plane" | "multi-harness";
+  title: string;
+}
+
+const { icon, title } = Astro.props;
+const icons = {
+  worktree: worktreeSvg,
+  verification: verificationSvg,
+  "control-plane": controlPlaneSvg,
+  "multi-harness": multiHarnessSvg,
+};
+---
+
+<article class="tenet-card">
+  <div class="tenet-card__illustration" aria-hidden="true" set:html={icons[icon]} />
+  <div class="tenet-card__copy">
+    <h3>{title}</h3>
+    <div class="tenet-card__body">
+      <slot />
+    </div>
+  </div>
+</article>

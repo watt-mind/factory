@@ -29,6 +29,8 @@ import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
+import { hashHarnessRoots } from "./pins.mjs";
+import { isTrustedAssociation } from "./triage.mjs";
 import { listMemos } from "./memos.mjs";
 import {
   artifactsRoot,
@@ -207,6 +209,68 @@ export function harnessFromDef(def) {
   return normalizeHarness(def.harness, def.ref ?? def.id ?? "harness");
 }
 
+/**
+ * The catalog defaults to the built-in shared pack when no extension roots
+ * were supplied, matching worker.mjs's materialization lookup. Keep the
+ * source pins in the approved RunSpec even for a core-only runtime.
+ */
+function harnessRootsForSpec(registry) {
+  if (Array.isArray(registry?.harnessRoots) && registry.harnessRoots.length) {
+    return registry.harnessRoots;
+  }
+  const dir = path.join(FACTORY_ROOT, "shared");
+  return [
+    {
+      dir,
+      plugin: "core",
+      origin: "builtin",
+      name: "factory/core",
+      version: "0.1.0",
+      floor: path.join(dir, "floor.md"),
+      commands: path.join(dir, "commands"),
+      skills: path.join(dir, "skills"),
+      subagents: path.join(dir, "agents"),
+    },
+  ];
+}
+
+/**
+ * Pin only the declared source components, not every component currently in a
+ * harness catalog. The worker separately attests the emitted bytes it copied
+ * into the workspace because emit output may legitimately transform them.
+ */
+export function harnessPinsForSpec(registry, harness) {
+  if (!harness || typeof harness !== "object") return undefined;
+  const roots = harnessRootsForSpec(registry);
+  const catalogPins = hashHarnessRoots(roots);
+  const selected = {};
+
+  for (const root of roots) {
+    const files = catalogPins[root.plugin]?.files ?? {};
+    const picked = {};
+    for (const kind of HARNESS_KINDS) {
+      const dir = root[kind];
+      const names = Array.isArray(harness[kind]) ? harness[kind] : [];
+      if (typeof dir !== "string") continue;
+      for (const name of names) {
+        const source = path.relative(
+          root.dir,
+          path.join(dir, kind === "skills" ? name : `${name}.md`),
+        );
+        for (const [file, hash] of Object.entries(files)) {
+          if (file === source || file.startsWith(`${source}/`)) {
+            picked[file] = hash;
+          }
+        }
+      }
+    }
+    if (Object.keys(picked).length > 0) {
+      selected[root.plugin] = { ...catalogPins[root.plugin], files: picked };
+    }
+  }
+  return Object.keys(selected).length > 0 ? selected : undefined;
+}
+
 export function normalizeHarness(raw, source = "harness") {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(
@@ -301,7 +365,13 @@ export function buildRunSpec(
     // worker materializes into the run workspace. Omitted when the
     // definition does not declare the field, so undeclared specs stay
     // byte-identical to before.
-    ...(def.harness !== undefined ? { harness: harnessFromDef(def) } : {}),
+    ...(def.harness !== undefined
+      ? (() => {
+          const harness = harnessFromDef(def);
+          const harnessPins = harnessPinsForSpec(registry, harness);
+          return { harness, ...(harnessPins ? { harnessPins } : {}) };
+        })()
+      : {}),
     // Model-tier routing (WM-135), the house repoPin pattern: the tier is
     // resolved HERE, at plan time, and the concrete value is pinned so the
     // proposal, receipt, and inspect output all name the exact model. Fields
@@ -753,6 +823,13 @@ function evidenceTicket(ticket, ticketId) {
     ownedPaths: effectiveOwnedPaths(description),
     ownedPathsParsed: parsed.length > 0,
     descriptionHash: hashJson(description),
+    // WM-879: github-plane trust facts. `controlPlaneKind` is undefined for
+    // every other plane (Linear, memory), which is what keeps the gates
+    // below github-only without a separate repo-config lookup.
+    controlPlaneKind: ticket?.controlPlaneKind ?? undefined,
+    authorAssociation: ticket?.authorAssociation ?? null,
+    lastEditorAssociation: ticket?.lastEditorAssociation ?? null,
+    readyPinHash: ticket?.readyPinHash ?? null,
   };
 }
 
@@ -949,6 +1026,32 @@ export function worktreeDispatchAutoEligibility(
   }
   if (evidence.ticket.labels.includes("ai:escalated")) {
     return refusal("ticket_escalated", evidence);
+  }
+
+  // WM-879: the github control plane is a public repo — the label gate above
+  // keeps stranger-created issues out only until someone with triage
+  // permission labels one, and covers nothing after that label is applied.
+  // These two checks close that window; every dispatch path (auto and
+  // operator-injected) funnels through this one function, so there is no
+  // bypass. Linear/memory tickets carry no `controlPlaneKind`, so they skip
+  // both checks entirely — unaffected by construction.
+  if (evidence.ticket.controlPlaneKind === "github") {
+    const trustedAuthor =
+      isTrustedAssociation(evidence.ticket.authorAssociation) &&
+      isTrustedAssociation(evidence.ticket.lastEditorAssociation);
+    evidence.checks.ticket_trusted_author = trustedAuthor;
+    if (!trustedAuthor) return refusal("ticket_untrusted_author", evidence);
+
+    // Absent pin (never labeled through a pin-aware path) is not itself a
+    // refusal — only a MISMATCHED pin proves the body changed since it was
+    // marked ready. Refusing on absence would strand every ticket labeled
+    // before this gate shipped.
+    const pinMatches =
+      !evidence.ticket.readyPinHash ||
+      evidence.ticket.readyPinHash === evidence.ticket.descriptionHash;
+    evidence.checks.ticket_body_pin_matches = pinMatches;
+    if (!pinMatches)
+      return refusal("ticket_body_changed_since_ready", evidence);
   }
 
   const blockers = openBlockers(ticket);

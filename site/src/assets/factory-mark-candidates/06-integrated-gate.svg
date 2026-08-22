@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="integrated-gate-title integrated-gate-desc"
+>
+  <title id="integrated-gate-title">Factory integrated gate mark</title>
+  <desc id="integrated-gate-desc">
+    A closed rounded envelope with an inner envelope docked against its right
+    wall; the shared wall segment is a teal gate through which a bar from the
+    central core exits.
+  </desc>
+  <g
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <rect x="120" y="70" width="304" height="280" rx="32" />
+    <path
+      d="M 424 142 H 212 A 20 20 0 0 0 192 162 V 258 A 20 20 0 0 0 212 278 H 424"
+    />
+  </g>
+  <path
+    d="M 424 142 V 278"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+  <rect x="240" y="178" width="64" height="64" rx="12" fill="#dde4e1" />
+  <path
+    d="M 304 210 H 520"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+</svg>

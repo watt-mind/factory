@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="b04-title b04-desc"
+>
+  <title id="b04-title">Multi-harness fan</title>
+  <desc id="b04-desc">
+    A teal input rail reaching a switch point from which three parallel lanes
+    diverge.
+  </desc>
+  <path
+    d="M 24 80 H 56"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 56 80 L 88 48 H 136"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 56 80 H 136"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 56 80 L 88 112 H 136"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

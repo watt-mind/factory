@@ -1,9 +1,36 @@
 import { afterAll, afterEach } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const tracked = new Map();
+const registeredTestCleanupOwners = new Set();
 let handlingSignal = false;
 const defaultTestMarker = `spawn-tracked-${process.pid}`;
+
+function testFileForCaller() {
+  const match = new Error().stack?.match(
+    /(?:file:\/\/)?[^()\s]+\.test\.mjs(?=:\d+:\d+)/,
+  );
+  if (!match) return null;
+  return match[0].startsWith("file:") ? match[0] : pathToFileURL(match[0]).href;
+}
+
+/**
+ * Bind process cleanup to the importing test file rather than to this shared
+ * module's first loader. Tracked entries retain the same owner, so one file's
+ * afterAll cannot tear down another file's suite fixture.
+ */
+export function registerTestProcessCleanup(owner = testFileForCaller()) {
+  if (!owner) {
+    throw new Error(
+      "registerTestProcessCleanup must be called from a .test.mjs file",
+    );
+  }
+  if (registeredTestCleanupOwners.has(owner)) return;
+  registeredTestCleanupOwners.add(owner);
+  afterEach(() => cleanupTrackedProcesses({ scope: "test", owner }));
+  afterAll(() => cleanupTrackedProcesses({ scope: "all", owner }));
+}
 
 function processGroupForPid(pid) {
   if (process.platform === "win32") return null;
@@ -55,11 +82,14 @@ function isAlive(entry) {
  * detached group; notifier fixtures use group:false because they have no
  * descendants and share the test runner's process group.
  */
-export function trackProcess(pid, { group = true, scope = "test" } = {}) {
+export function trackProcess(
+  pid,
+  { group = true, scope = "test", owner = testFileForCaller() } = {},
+) {
   if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) {
     throw new Error(`cannot track invalid test process pid ${pid}`);
   }
-  const entry = { pid: Number(pid), group, scope };
+  const entry = { pid: Number(pid), group, scope, owner };
   if (entry.group && testRunnerPgid !== null && entry.pid === testRunnerPgid) {
     throw new Error(
       `refusing to track the test runner process group ${testRunnerPgid}`,
@@ -186,9 +216,12 @@ export function spawnTracked(command, args = [], options = {}, tracking = {}) {
 export async function cleanupTrackedProcesses({
   scope = "all",
   graceMs = 250,
+  owner = testFileForCaller(),
 } = {}) {
   const entries = [...tracked.values()].filter(
-    (entry) => scope === "all" || entry.scope === scope,
+    (entry) =>
+      (scope === "all" || entry.scope === scope) &&
+      (owner === null || entry.owner === owner),
   );
   for (const entry of entries) signalTracked(entry, "SIGTERM");
 
@@ -207,8 +240,6 @@ function cleanupTrackedProcessesSync() {
   tracked.clear();
 }
 
-afterEach(() => cleanupTrackedProcesses({ scope: "test" }));
-afterAll(() => cleanupTrackedProcesses({ scope: "all" }));
 process.once("exit", cleanupTrackedProcessesSync);
 
 // Bun may terminate a timed-out test file with a signal, which does not emit

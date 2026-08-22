@@ -35,8 +35,11 @@ import { preflight, SandboxUnavailableError } from "../sandbox/gondolin.mjs";
 import { SANDBOX_CONSOLE_FILE } from "./sandboxed.mjs";
 import {
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 describe("isHarnessDenial (WM-127, no confirmed pi refusal shapes yet)", () => {
   test("nothing matches — pi enforces read-only by tool non-exposure, not runtime denial", () => {

@@ -1,0 +1,42 @@
+/* Hallmark · genre: modern-minimal · design-system: Watt Mind · designed-as-app */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V4 */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap");
+
+:root {
+  --wm-color-surface: oklch(18.77% 0.01139 175.67);
+  --wm-color-surface-lowest: oklch(16.158% 0.00971 183.85);
+  --wm-color-surface-low: oklch(22.29% 0.01102 176.05);
+  --wm-color-surface-container: oklch(23.999% 0.01086 176.18);
+  --wm-color-surface-high: oklch(28.281% 0.00867 184.63);
+  --wm-color-surface-highest: oklch(32.552% 0.01017 176.63);
+  --wm-color-on-surface: oklch(91.268% 0.00852 168.74);
+  --wm-color-on-surface-variant: oklch(82.637% 0.01726 178.17);
+  --wm-color-primary: oklch(81.137% 0.12259 182.52);
+  --wm-color-primary-container: oklch(70.375% 0.12302 182.5);
+  --wm-color-on-primary: oklch(30.244% 0.05381 183.18);
+  --wm-color-outline: oklch(65.329% 0.01821 177.96);
+  --wm-color-outline-variant: oklch(39.325% 0.01702 185.19);
+  --wm-color-grid: oklch(39.325% 0.01702 185.19 / 0.42);
+  --wm-color-panel: oklch(23.999% 0.01086 176.18 / 0.72);
+  --wm-color-panel-hover: oklch(28.281% 0.00867 184.63 / 0.88);
+  --wm-color-focus: var(--wm-color-primary);
+  --wm-font-display: "Plus Jakarta Sans", system-ui, sans-serif;
+  --wm-font-body: "Inter", system-ui, sans-serif;
+  --wm-font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --wm-space-3xs: 0.25rem;
+  --wm-space-2xs: 0.5rem;
+  --wm-space-xs: 0.75rem;
+  --wm-space-sm: 1rem;
+  --wm-space-md: 1.5rem;
+  --wm-space-lg: 2rem;
+  --wm-space-xl: 3rem;
+  --wm-space-2xl: 4rem;
+  --wm-space-3xl: 6rem;
+  --wm-radius-sm: 0.25rem;
+  --wm-radius-md: 0.5rem;
+  --wm-radius-lg: 0.75rem;
+  --wm-rule: 1px solid var(--wm-color-outline-variant);
+  --wm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --wm-duration-short: 180ms;
+  --wm-text-hero: clamp(3.5rem, 7vw, 6.75rem);
+}

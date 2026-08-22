@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="dynamic-aperture-title dynamic-aperture-desc"
+>
+  <title id="dynamic-aperture-title">Factory dynamic aperture mark</title>
+  <desc id="dynamic-aperture-desc">
+    From a round terminus a single path folds outward through right-angle
+    corners and two parallel diagonals, its final run passing through a teal
+    gate at the outer boundary and leaving the figure.
+  </desc>
+  <circle cx="272" cy="210" r="16" fill="#dde4e1" />
+  <path
+    d="M 272 210 H 328 V 154 H 216 V 226 L 256 266 H 384 V 98 H 160 V 250 L 232 322 H 480"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 352 322 H 416"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="butt"
+  />
+</svg>

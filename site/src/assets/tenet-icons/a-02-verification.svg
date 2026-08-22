@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="a02-title a02-desc"
+>
+  <title id="a02-title">Verification gate</title>
+  <desc id="a02-desc">
+    A chamfered bounded region closed by a short teal gate, with a path
+    continuing out past it.
+  </desc>
+  <path
+    d="M 100 80 V 40 H 28 V 104 L 44 120 H 132"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 100 80 V 116"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="butt"
+  />
+</svg>

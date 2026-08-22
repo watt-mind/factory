@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="precision-loop-title precision-loop-desc"
+>
+  <title id="precision-loop-title">Factory precision loop mark</title>
+  <desc id="precision-loop-desc">
+    A continuous loop of two circles joined by straight tangents with a single
+    teal over-strand crossing at the centre.
+  </desc>
+  <defs>
+    <mask
+      id="precision-loop-weave"
+      maskUnits="userSpaceOnUse"
+      x="0"
+      y="0"
+      width="640"
+      height="420"
+    >
+      <rect x="0" y="0" width="640" height="420" fill="#ffffff" />
+      <path
+        d="M 296 239 L 344 181"
+        fill="none"
+        stroke="#000000"
+        stroke-width="42"
+        stroke-linecap="butt"
+      />
+    </mask>
+  </defs>
+  <path
+    d="M 270 150 A 96 96 0 1 0 270 270 L 370 150 A 96 96 0 1 1 370 270 Z"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    mask="url(#precision-loop-weave)"
+  />
+  <path
+    d="M 270 270 L 370 150"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="18"
+    stroke-linecap="butt"
+  />
+</svg>

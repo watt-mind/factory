@@ -1,0 +1,240 @@
+---
+import { LinkButton } from "@astrojs/starlight/components";
+
+const { data } = Astro.locals.starlightRoute.entry;
+const { title = data.title, tagline, actions = [] } = data.hero || {};
+
+const stages = [
+  { number: "01", name: "Claim", detail: "ready ticket" },
+  { number: "02", name: "Isolate", detail: "one worktree" },
+  { number: "03", name: "Build", detail: "bounded agent" },
+  { number: "04", name: "Prove", detail: "tests + review" },
+];
+---
+
+<section class="hero home-hero" aria-labelledby="_top">
+  <div class="home-hero__statement">
+    <h1 id="_top" data-page-title set:html={title} />
+  </div>
+
+  <div class="home-hero__support">
+    {tagline && <p class="home-hero__lede" set:html={tagline} />}
+    {
+      actions.length > 0 && (
+        <div class="home-hero__actions">
+          {actions.map(
+            ({
+              attrs: { class: className, ...attrs } = {},
+              icon,
+              link: href,
+              text,
+              variant,
+            }) => (
+              <LinkButton
+                {href}
+                {variant}
+                icon={icon?.name}
+                class:list={[className]}
+                {...attrs}
+              >
+                {text}
+                {icon?.html && <Fragment set:html={icon.html} />}
+              </LinkButton>
+            ),
+          )}
+        </div>
+      )
+    }
+  </div>
+
+  <div class="home-hero__runtime">
+    <p class="home-hero__runtime-label">One bounded execution path</p>
+    <ol aria-label="Factory execution path">
+      {
+        stages.map(({ number, name, detail }) => (
+          <li>
+            <span class="home-hero__stage-number">{number}</span>
+            <strong>{name}</strong>
+            <span>{detail}</span>
+          </li>
+        ))
+      }
+    </ol>
+  </div>
+</section>
+
+<style>
+  /* Hallmark · genre: modern-minimal · macrostructure: asymmetric typographic marquee · design-system: design.md · designed-as-app */
+  /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 · contrast: pass (40–41) · mobile: pass (34, 49, 50–57) */
+  @layer starlight.core {
+    .home-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--wm-space-xl);
+      min-width: 0;
+      padding-block: var(--wm-space-xl) var(--wm-space-2xl);
+    }
+
+    .home-hero__statement,
+    .home-hero__support,
+    .home-hero__runtime {
+      min-width: 0;
+    }
+
+    .home-hero h1 {
+      max-width: 11ch;
+      margin: 0;
+      color: var(--sl-color-white);
+      font-family: var(--wm-font-display);
+      font-size: var(--wm-text-hero);
+      font-style: normal;
+      font-weight: 800;
+      letter-spacing: -0.055em;
+      line-height: 0.98;
+      overflow-wrap: anywhere;
+    }
+
+    .home-hero__support {
+      display: flex;
+      flex-direction: column;
+      gap: var(--wm-space-md);
+      align-self: end;
+    }
+
+    .home-hero__lede {
+      max-width: 33rem;
+      margin: 0;
+      color: var(--sl-color-gray-2);
+      font-size: var(--sl-text-lg);
+      line-height: 1.65;
+    }
+
+    .home-hero__actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--wm-space-xs);
+      align-items: center;
+    }
+
+    .home-hero :global(.sl-link-button) {
+      min-height: 3rem;
+      border-radius: var(--wm-radius-md);
+      font-weight: 600;
+      white-space: nowrap;
+      transition:
+        transform var(--wm-duration-short) var(--wm-ease-out),
+        background-color var(--wm-duration-short) var(--wm-ease-out),
+        border-color var(--wm-duration-short) var(--wm-ease-out);
+    }
+
+    .home-hero :global(.sl-link-button:hover) {
+      transform: translateY(-2px);
+    }
+
+    .home-hero :global(.sl-link-button:active) {
+      transform: translateY(0);
+    }
+
+    .home-hero :global(.sl-link-button[aria-disabled="true"]),
+    .home-hero :global(.sl-link-button:not([href])) {
+      cursor: not-allowed;
+      opacity: 0.55;
+      pointer-events: none;
+    }
+
+    .home-hero__runtime {
+      padding-block-start: var(--wm-space-sm);
+      border-top: var(--wm-rule);
+    }
+
+    .home-hero__runtime-label {
+      margin: 0 0 var(--wm-space-sm);
+      color: var(--sl-color-gray-2);
+      font-family: var(--wm-font-mono);
+      font-size: var(--sl-text-xs);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .home-hero__runtime ol {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--wm-space-md) 0;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .home-hero__runtime li {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: var(--wm-space-3xs) var(--wm-space-xs);
+      min-width: 0;
+      padding-inline: var(--wm-space-sm);
+      border-inline-start: var(--wm-rule);
+    }
+
+    .home-hero__stage-number {
+      grid-row: 1 / span 2;
+      color: var(--wm-color-primary);
+      font-family: var(--wm-font-mono);
+      font-size: var(--sl-text-xs);
+      line-height: 1.7;
+    }
+
+    .home-hero__runtime strong {
+      color: var(--sl-color-white);
+      font-family: var(--wm-font-display);
+      font-size: var(--sl-text-base);
+      font-weight: 700;
+      line-height: 1.25;
+    }
+
+    .home-hero__runtime li > span:last-child {
+      color: var(--sl-color-gray-2);
+      font-family: var(--wm-font-mono);
+      font-size: var(--sl-text-xs);
+      line-height: 1.4;
+    }
+
+    @media (min-width: 50rem) {
+      .home-hero {
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        column-gap: var(--wm-space-md);
+        min-height: min(72dvh, 48rem);
+        padding-block: var(--wm-space-xl) var(--wm-space-3xl);
+      }
+
+      .home-hero__statement {
+        grid-column: 1 / span 8;
+        align-self: center;
+      }
+
+      .home-hero__support {
+        grid-column: 9 / -1;
+        align-self: center;
+      }
+
+      .home-hero__runtime {
+        grid-column: 1 / -1;
+        align-self: end;
+      }
+
+      .home-hero__runtime ol {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+
+    @media (hover: none), (pointer: coarse) {
+      .home-hero :global(.sl-link-button) {
+        min-height: 3rem;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .home-hero :global(.sl-link-button) {
+        transition-duration: 0.01ms;
+      }
+    }
+  }
+</style>

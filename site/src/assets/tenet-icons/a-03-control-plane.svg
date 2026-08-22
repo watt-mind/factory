@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="a03-title a03-desc"
+>
+  <title id="a03-title">Pluggable control plane</title>
+  <desc id="a03-desc">
+    A vertical spine beside two identical sockets, with a teal coupler docking
+    the spine into the upper socket.
+  </desc>
+  <path
+    d="M 36 28 V 132"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 60 32 H 124 V 48 L 108 64 H 60"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 60 96 H 124 V 112 L 108 128 H 60"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 36 48 H 72"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+</svg>

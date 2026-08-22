@@ -4,7 +4,10 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-intake-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { spawnTracked } from "./test-helpers-process.mjs";
+import {
+  registerTestProcessCleanup,
+  spawnTracked,
+} from "./test-helpers-process.mjs";
 import { freePort, loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 import {
   GH_SECRET,
@@ -39,6 +42,8 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);

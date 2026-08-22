@@ -104,3 +104,47 @@ bun event-runtime/cli.mjs update-pins --pack dreaming
 Configured packs are read-only extensions and may not declare an agent with
 `mutating: true`. The full kernel admission rules remain available only to the
 built-in bare-namespace root.
+
+## Harness content pins (WM-855)
+
+A pack or extension may separately contribute _harness_ content —
+skills, commands, and subagents materialized into a run's workspace rather
+than registered as agents (`contributes.harness`, WM-849; see
+[`extensions.md`](extensions.md)). That content is content-hash pinned the
+same way prompts and schemas are: the same bare `update-pins` run that
+re-pins built-in agent definitions also hashes every file under the built-in
+`shared/` harness root and every policy-listed extension's declared
+`contributes.harness` paths (floor doc, `commands/`, `skills/`,
+`subagents/`), and writes them to one top-level
+`event-runtime/pins.json` — a flat map from harness plugin name to its
+`{ origin, name, version, files }` pin record:
+
+```json
+{
+  "core": {
+    "origin": "builtin",
+    "name": "factory/core",
+    "version": "0.1.0",
+    "files": {
+      "floor.md": "sha256:...",
+      "commands/factory-audit.md": "sha256:..."
+    }
+  }
+}
+```
+
+`event-runtime/lib/pins.mjs` owns the hashing/update/validate logic
+(`hashHarnessRoots`, `updateHarnessPins`, `verifyHarnessPins`); `loadRegistry`
+validates a supplied `harnessRoots` array against this file at load time,
+failing closed exactly like the per-agent pin check, on either an unpinned
+file or content that has drifted from its pin:
+
+```sh
+bun event-runtime/cli.mjs update-pins --check
+```
+
+Wiring live `harnessRoots` into the running server's `loadRegistry({ ... })`
+call (`event-runtime/cli/serve.mjs`, `event-runtime/cli/work.mjs`), recording
+the per-run materialized-harness content hash on `RunSpec`/execution
+receipts, and surfacing harness pins on the Web UI's Run detail view are
+tracked as follow-up work, outside this ticket's owned paths.

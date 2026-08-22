@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="verification-seam-title verification-seam-desc"
+>
+  <title id="verification-seam-title">Factory verification seam mark</title>
+  <desc id="verification-seam-desc">
+    Two concentric rounded envelopes around a solid core; the core continues as
+    a bar that breaks through the inner envelope and exits through a teal-edged
+    seam in the outer boundary.
+  </desc>
+  <defs>
+    <mask
+      id="verification-seam-cut"
+      maskUnits="userSpaceOnUse"
+      x="0"
+      y="0"
+      width="640"
+      height="420"
+    >
+      <rect x="0" y="0" width="640" height="420" fill="#ffffff" />
+      <path
+        d="M 332 210 H 380"
+        fill="none"
+        stroke="#000000"
+        stroke-width="40"
+        stroke-linecap="butt"
+      />
+    </mask>
+  </defs>
+  <g
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path
+      d="M 404 286 V 318 A 36 36 0 0 1 368 354 H 152 A 36 36 0 0 1 116 318 V 102 A 36 36 0 0 1 152 66 H 368 A 36 36 0 0 1 404 102 V 134"
+    />
+    <rect
+      x="164"
+      y="114"
+      width="192"
+      height="192"
+      rx="24"
+      mask="url(#verification-seam-cut)"
+    />
+  </g>
+  <g fill="none" stroke="#4fdbc8" stroke-width="16" stroke-linecap="round">
+    <path d="M 404 134 V 178" />
+    <path d="M 404 242 V 286" />
+  </g>
+  <rect x="228" y="178" width="64" height="64" rx="12" fill="#dde4e1" />
+  <path
+    d="M 292 210 H 520"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+</svg>

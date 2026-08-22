@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 160 160"
+  role="img"
+  aria-labelledby="a01-title a01-desc"
+>
+  <title id="a01-title">Isolated worktrees</title>
+  <desc id="a01-desc">
+    Two chamfered regions separated by a single teal wall.
+  </desc>
+  <path
+    d="M 76 40 H 28 V 104 L 44 120 H 76"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 84 40 H 132 V 104 L 116 120 H 84"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 80 36 V 124"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+</svg>

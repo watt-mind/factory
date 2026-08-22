@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="continuous-recursion-title continuous-recursion-desc"
+>
+  <title id="continuous-recursion-title">
+    Factory continuous recursion mark
+  </title>
+  <desc id="continuous-recursion-desc">
+    A single path forms a small chamfered envelope that unfolds into a larger
+    copy of itself; the final run passes through a short teal gate at the outer
+    boundary and continues out of the figure.
+  </desc>
+  <path
+    d="M 328 242 V 166 H 216 V 250 L 252 286 H 384 V 90 H 160 V 258 L 232 330 H 480"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 352 330 H 416"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="butt"
+  />
+</svg>

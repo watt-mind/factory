@@ -9,6 +9,7 @@ import { cleanupTmpDirs, tmpDir } from "../test-support/tmp.mjs";
 export {
   cleanupTrackedProcesses,
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   spawnTracked,
   trackMarkedFakeRuntimeGroups,
   trackProcess,

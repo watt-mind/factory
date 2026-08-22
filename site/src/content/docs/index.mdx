@@ -1,0 +1,127 @@
+---
+title: factory
+description: The factory that builds software — and itself. A runtime for self-improving agentic loops.
+template: splash
+hero:
+  title: The factory that builds software — and itself.
+  tagline: One agent-ready ticket in. One isolated, independently verified pull request out. Every run improves the next.
+  actions:
+    - text: Connect Your Repo
+      link: /factory/getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: The Thesis
+      link: /factory/concepts/thesis/
+      icon: open-book
+      variant: secondary
+    - text: View on GitHub
+      link: https://github.com/watt-mind/factory
+      icon: external
+      variant: minimal
+---
+
+import {
+  Card,
+  CardGrid,
+  LinkCard,
+  Tabs,
+  TabItem,
+} from "@astrojs/starlight/components";
+import TenetCard from "../../components/TenetCard.astro";
+
+## Point It at Your Repo
+
+factory runs on a repository you already have — your branch, your tests, your tracker. Connecting one takes a few decisions only that repo can answer, so the fast path is a prompt you hand to the coding agent you already use:
+
+```bash
+factory onboard --repo ~/Develop/yourapp | pbcopy
+```
+
+Paste it into Claude Code, Codex, Gemini, Cursor, or Pi with your repository open. It surveys the repo, wires up the control plane, files the first agent-ready ticket, and stops at a gate it cannot talk its way past: `factory doctor` and `factory queue` green.
+
+No checkout yet? The [Connect Your Repo](/factory/getting-started/quickstart/) page carries the same prompt — its first steps clone factory for you.
+
+---
+
+## Measured in Production
+
+Not a demo benchmark — real dogfooding numbers across 17 days of continuous unattended operation:
+
+<CardGrid>
+  <Card title="1,825 Tickets Dispatched">
+    Dispatched across client repositories, infrastructure ops, and factory
+    self-maintenance.
+  </Card>
+  <Card title="1,620 Merged PRs">
+    Merged strictly after tests passed, CI turned green, and reviewer checks
+    succeeded.
+  </Card>
+  <Card title="87% Zero Touch">
+    Never visited Blocked, required zero human keyboard interaction from claim
+    to merge.
+  </Card>
+  <Card title="38 Min Median Merge">
+    Median wall-clock duration from agent claim to merged pull request.
+  </Card>
+</CardGrid>
+
+---
+
+## The Autonomous Loop
+
+<iframe
+  class="diagram-embed diagram-embed--loop"
+  src="/factory/diagrams/autonomous-loop.html"
+  title="The autonomous software loop"
+  loading="lazy"
+></iframe>
+
+---
+
+## Core Tenets
+
+<div class="tenet-card-grid">
+  <TenetCard icon="worktree" title="One Ticket, One Worktree">
+    Complete filesystem, database, and port isolation. Parallel runs are safe
+    because Owned Paths are disjoint.
+  </TenetCard>
+  <TenetCard icon="verification" title="Verification as a Gate">
+    An agent's report is commentary; the test exit code is evidence. Nothing
+    merges on self-attestation.
+  </TenetCard>
+  <TenetCard icon="control-plane" title="Pluggable Control Plane">
+    Works out-of-the-box with **GitHub Issues** and **Linear**. Truth lives in
+    git; tasks live in the tracker.
+  </TenetCard>
+  <TenetCard icon="multi-harness" title="Multi-Harness Architecture">
+    Drives the coding agents you already use: Claude Code, Gemini / Antigravity,
+    OpenAI Codex, Cursor, and Pi.
+  </TenetCard>
+</div>
+
+---
+
+## Explore the Documentation
+
+<CardGrid>
+  <LinkCard
+    title="Getting Started Guide"
+    description="Connect a repository you already have, then dispatch your first ticket."
+    href="/factory/getting-started/quickstart/"
+  />
+  <LinkCard
+    title="Core Architecture"
+    description="Learn how Owned Paths, worktrees, and verification gates work."
+    href="/factory/concepts/thesis/"
+  />
+  <LinkCard
+    title="Contributor Hub"
+    description="How to write Harness Adapters, custom Packs, and contribute to Factory."
+    href="/factory/contributing/guide/"
+  />
+  <LinkCard
+    title="The Public Friction Log"
+    description="Real-world harness edge cases, failure modes, and architectural fixes."
+    href="/factory/contributing/friction-log/"
+  />
+</CardGrid>

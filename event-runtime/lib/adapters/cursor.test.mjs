@@ -30,9 +30,12 @@ import {
 } from "./cursor.mjs";
 import {
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
 import { loadAdjustedTimeout, until } from "../test-helpers-timing.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 describe("isHarnessDenial (WM-127, no confirmed Cursor refusal shapes yet)", () => {
   test("nothing matches — empty until a Cursor-authored shape is observed", () => {

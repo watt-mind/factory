@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="recursive-aperture-title recursive-aperture-desc"
+>
+  <title id="recursive-aperture-title">Factory recursive aperture mark</title>
+  <desc id="recursive-aperture-desc">
+    A solid core from which a single path folds outward through repeated
+    right-angle corners, its last run leaving the figure; a short teal segment
+    closes the outer boundary at the exit.
+  </desc>
+  <rect x="248" y="186" width="48" height="48" rx="10" fill="#dde4e1" />
+  <path
+    d="M 296 210 H 328 V 154 H 216 V 266 H 384 V 98 H 160 V 322 H 480"
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 384 266 V 314"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="butt"
+  />
+</svg>

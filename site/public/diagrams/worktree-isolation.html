@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>One ticket, one isolated worktree</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Plus+Jakarta+Sans:wght@500;600;700;800&amp;display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      :root {
+        color-scheme: light dark;
+        --paper: oklch(98% 0.004 178);
+        --ink: oklch(18.77% 0.01139 175.67);
+        --muted: oklch(39.325% 0.01702 185.19);
+        --soft: oklch(55% 0.018 178);
+        --accent: oklch(57% 0.11 182.52);
+        --accent-tint: oklch(92% 0.04 182.52);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.2);
+        --display: "Plus Jakarta Sans", system-ui, sans-serif;
+        --sans: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --paper: oklch(18.77% 0.01139 175.67);
+          --ink: oklch(91.268% 0.00852 168.74);
+          --muted: oklch(82.637% 0.01726 178.17);
+          --soft: oklch(65.329% 0.01821 177.96);
+          --accent: oklch(81.137% 0.12259 182.52);
+          --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+          --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+        }
+      }
+
+      :root[data-theme="dark"] {
+        --paper: oklch(18.77% 0.01139 175.67);
+        --ink: oklch(91.268% 0.00852 168.74);
+        --muted: oklch(82.637% 0.01726 178.17);
+        --soft: oklch(65.329% 0.01821 177.96);
+        --accent: oklch(81.137% 0.12259 182.52);
+        --accent-tint: oklch(70.375% 0.12302 182.5 / 0.13);
+        --rule: oklch(39.325% 0.01702 185.19 / 0.72);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        padding: 32px 40px;
+        background-color: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+      }
+
+      .frame {
+        width: 100%;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font: 500 8px var(--mono);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        color: var(--ink);
+        font: 700 28px/1.12 var(--display);
+        letter-spacing: -0.035em;
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: calc(100vh - 112px);
+      }
+
+      .route {
+        fill: none;
+        stroke: var(--muted);
+        stroke-width: 1.4;
+      }
+
+      .step,
+      .endpoint {
+        fill: var(--paper);
+        stroke: var(--ink);
+        stroke-width: 1.2;
+      }
+
+      .endpoint {
+        stroke: var(--muted);
+      }
+
+      .step.focal {
+        fill: var(--accent-tint);
+        stroke: var(--accent);
+        stroke-width: 1.5;
+      }
+
+      .isolation-zone {
+        fill: var(--paper);
+        fill-opacity: 0.76;
+        stroke: var(--accent);
+        stroke-width: 1.4;
+        stroke-dasharray: 7 5;
+      }
+
+      .resource-rule {
+        stroke: var(--rule);
+        stroke-width: 1;
+      }
+
+      .node-name {
+        fill: var(--ink);
+        font: 600 16px var(--sans);
+        text-anchor: middle;
+      }
+
+      .node-name.focal,
+      .zone-label {
+        fill: var(--accent);
+      }
+
+      .node-detail,
+      .route-label,
+      .zone-label {
+        font: 400 11px var(--mono);
+        text-anchor: middle;
+      }
+
+      .node-detail,
+      .route-label {
+        fill: var(--soft);
+      }
+
+      .zone-label {
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .resource-value {
+        fill: var(--ink);
+        font: 500 14px var(--mono);
+        text-anchor: middle;
+      }
+
+      @media (max-width: 700px) {
+        body {
+          padding: 24px;
+        }
+
+        h1 {
+          font-size: 22px;
+        }
+
+        svg {
+          height: calc(100vh - 96px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="frame">
+      <p class="eyebrow">Isolation flow · Factory</p>
+      <h1>The worktree is an environment boundary, not just a branch</h1>
+      <svg
+        viewBox="0 0 1120 680"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-labelledby="worktree-title worktree-desc"
+      >
+        <title id="worktree-title">One ticket, one isolated worktree</title>
+        <desc id="worktree-desc">
+          Dispatching ticket WM-101 creates a worktree with its own branch,
+          dynamic port, database, and runtime environment. Implementation and
+          independent verification happen inside that boundary. Teardown then
+          removes a clean worktree or retains useful evidence.
+        </desc>
+        <defs>
+          <marker
+            id="worktree-arrow"
+            markerWidth="8"
+            markerHeight="6"
+            refX="7"
+            refY="3"
+            orient="auto"
+          >
+            <polygon points="0 0, 8 3, 0 6" fill="context-stroke" />
+          </marker>
+        </defs>
+
+        <!-- Main flow and decision branches sit behind every node. -->
+        <path
+          class="route"
+          d="M560 88 V124"
+          marker-end="url(#worktree-arrow)"
+        />
+        <path
+          class="route"
+          d="M560 204 V248"
+          marker-end="url(#worktree-arrow)"
+        />
+        <path
+          class="route"
+          d="M560 416 V452"
+          marker-end="url(#worktree-arrow)"
+        />
+        <path
+          class="route"
+          d="M560 524 V552"
+          marker-end="url(#worktree-arrow)"
+        />
+        <path
+          class="route"
+          d="M464 596 H292 V628"
+          marker-end="url(#worktree-arrow)"
+        />
+        <path
+          class="route"
+          d="M656 596 H828 V628"
+          marker-end="url(#worktree-arrow)"
+        />
+
+        <text x="590" y="110" class="route-label">setup</text>
+        <text x="600" y="440" class="route-label">inside boundary</text>
+        <text x="332" y="584" class="route-label">clean</text>
+        <text x="788" y="584" class="route-label">ambiguous / useful</text>
+
+        <rect class="endpoint" x="452" y="24" width="216" height="64" rx="24" />
+        <text x="560" y="52" class="node-name">Ticket dispatched</text>
+        <text x="560" y="72" class="node-detail">WM-101</text>
+
+        <rect class="step" x="424" y="124" width="272" height="80" rx="6" />
+        <text x="560" y="158" class="node-name">worktree-up.sh WM-101</text>
+        <text x="560" y="180" class="node-detail">
+          allocate before the agent starts
+        </text>
+
+        <rect
+          class="isolation-zone"
+          x="128"
+          y="248"
+          width="864"
+          height="168"
+          rx="10"
+        />
+        <text x="560" y="276" class="zone-label">
+          Isolation boundary · WM-101
+        </text>
+        <line class="resource-rule" x1="344" y1="296" x2="344" y2="388" />
+        <line class="resource-rule" x1="560" y1="296" x2="560" y2="388" />
+        <line class="resource-rule" x1="776" y1="296" x2="776" y2="388" />
+
+        <text x="236" y="326" class="node-detail">FILESYSTEM</text>
+        <text x="236" y="356" class="resource-value">.worktrees/WM-101</text>
+        <text x="236" y="378" class="node-detail">ticket branch</text>
+
+        <text x="452" y="326" class="node-detail">PORT</text>
+        <text x="452" y="356" class="resource-value">localhost:52101</text>
+        <text x="452" y="378" class="node-detail">dynamic allocation</text>
+
+        <text x="668" y="326" class="node-detail">DATABASE</text>
+        <text x="668" y="356" class="resource-value">WM-101 isolated DB</text>
+        <text x="668" y="378" class="node-detail">SQLite or Postgres</text>
+
+        <text x="884" y="326" class="node-detail">RUNTIME</text>
+        <text x="884" y="356" class="resource-value">local environment</text>
+        <text x="884" y="378" class="node-detail">process + daemon state</text>
+
+        <rect
+          class="step focal"
+          x="392"
+          y="452"
+          width="336"
+          height="72"
+          rx="6"
+        />
+        <text x="560" y="482" class="node-name focal">
+          Implement → independently verify
+        </text>
+        <text x="560" y="504" class="node-detail">
+          no shared filesystem, port, database, or process
+        </text>
+
+        <polygon class="step" points="560,552 656,596 560,640 464,596" />
+        <text x="560" y="592" class="node-name">Teardown</text>
+        <text x="560" y="612" class="node-detail">worktree-down.sh</text>
+
+        <rect
+          class="endpoint"
+          x="196"
+          y="628"
+          width="192"
+          height="48"
+          rx="20"
+        />
+        <text x="292" y="657" class="node-name">Remove worktree</text>
+
+        <rect
+          class="endpoint"
+          x="732"
+          y="628"
+          width="192"
+          height="48"
+          rx="20"
+        />
+        <text x="828" y="657" class="node-name">Retain evidence</text>
+      </svg>
+    </main>
+  </body>
+</html>

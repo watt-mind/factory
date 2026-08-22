@@ -29,6 +29,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   buildClaudeArgv,
@@ -40,7 +41,7 @@ import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
-import { canonicalJson, hashJson } from "./canonical.mjs";
+import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { artifactsRoot, resolveConfigPath } from "./config.mjs";
 import { openDb, runUsage } from "./db.mjs";
 import {
@@ -74,6 +75,7 @@ import {
   extendRunDeadline,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
+  materializeRunHarness,
   reapExpiredLeases,
   releaseClaimLock,
   repositoryIsClean,
@@ -91,10 +93,13 @@ import {
 import {
   cleanupTrackedProcesses,
   processOwnerWatchdogSource,
+  registerTestProcessCleanup,
   trackMarkedFakeRuntimeGroups,
   trackProcess,
   trackProcessGroupsMatching,
 } from "./test-helpers-process.mjs";
+
+registerTestProcessCleanup(import.meta.url);
 
 const registry = loadRegistry();
 const adapters = { fake };
@@ -185,6 +190,82 @@ function opts(extra = {}) {
 }
 
 describe("worker", () => {
+  test("materialized harness entries record hashes for every copied file", () => {
+    const factoryRoot = tmpDir("evrt-harness-source-");
+    const workspaceDir = tmpDir("evrt-harness-workspace-");
+    const catalog = path.join(factoryRoot, "catalog");
+    const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
+    mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(catalog, "skills", "demo", "SKILL.md"),
+      "catalog\n",
+    );
+    writeFileSync(path.join(source, "SKILL.md"), "first\n");
+    writeFileSync(path.join(source, "notes.md"), "second\n");
+
+    const written = materializeRunHarness({
+      spec: { harness: { skills: ["demo"] } },
+      adapterKey: "fake",
+      adapter: {
+        HARNESS_LAYOUT: {
+          skills: {
+            source: (name) => ["dist", "fake", "skills", name],
+            dest: (name) => [".fake", "skills", name],
+            type: "dir",
+          },
+        },
+      },
+      workspaceDir,
+      registry: { harnessRoots: [{ skills: path.join(catalog, "skills") }] },
+      factoryRoot,
+    });
+
+    expect(written).toEqual([
+      {
+        kind: "skills",
+        name: "demo",
+        dest: ".fake/skills/demo",
+        pins: {
+          ".fake/skills/demo/SKILL.md": hashBytes("first\n"),
+          ".fake/skills/demo/notes.md": hashBytes("second\n"),
+        },
+      },
+    ]);
+  });
+
+  test("completed receipts attest emitted harness files", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({ harness: { commands: ["factory-ticket"] } }),
+    );
+    const materializingFake = {
+      ...fake,
+      HARNESS_LAYOUT: {
+        commands: {
+          source: (name) => ["plugins", "core", "commands", `${name}.md`],
+          dest: (name) => [".fake", "commands", `${name}.md`],
+          type: "file",
+        },
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake: materializingFake },
+      opts(),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(summary.receipt.harnessPins).toEqual({
+      ".fake/commands/factory-ticket.md": hashBytes(
+        readFileSync("plugins/core/commands/factory-ticket.md"),
+      ),
+    });
+  });
+
   test("provisions present instance configs into an ignored checkout and skips absent files", () => {
     const factoryRoot = tmpDir("evrt-instance-config-source-");
     const checkout = tmpDir("evrt-instance-config-checkout-");
@@ -3090,6 +3171,58 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       }),
     ).toBe(true);
     releaseClaimLock(lockFile);
+  });
+
+  test("same-identity dispatch claims share the supervisor lock when event home is isolated", async () => {
+    const previousEventHome = process.env.FACTORY_EVENT_HOME;
+    const previousLocksDir = process.env.FACTORY_LOCKS_DIR;
+    const repoName = "wt-worker";
+    const supervisorLock = dispatchLockPath(
+      repoName,
+      path.join(homedir(), ".factory", "locks"),
+    );
+    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-isolated-event-home-");
+    delete process.env.FACTORY_LOCKS_DIR;
+    let claimCalls = 0;
+
+    try {
+      expect(acquireClaimLock(supervisorLock)).toBe(true);
+      const db = openDb(":memory:");
+      queueRun(
+        db,
+        makeDispatchSpec({
+          input: { repo: repoName, ticket: "WM-877" },
+        }),
+      );
+
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({
+          dispatch: {
+            random: () => 0,
+            fetchTicket: () => readyDispatchTicket("WM-877"),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => {
+              claimCalls += 1;
+              return { ok: true, assignee: "shared-bot" };
+            },
+          },
+        }),
+      );
+
+      expect(summary.reasonCode).toBe("claim_lock_contention");
+      expect(claimCalls).toBe(0);
+    } finally {
+      releaseClaimLock(supervisorLock);
+      if (previousEventHome === undefined)
+        delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousEventHome;
+      if (previousLocksDir === undefined) delete process.env.FACTORY_LOCKS_DIR;
+      else process.env.FACTORY_LOCKS_DIR = previousLocksDir;
+    }
   });
 
   test("contended claim lock requeues with jittered backoff without consuming an attempt, then runs", async () => {

@@ -29,9 +29,11 @@ import {
   spawnWorker,
   waitFor,
   registerCliTmpCleanup,
+  registerTestProcessCleanup,
 } from "./test-helpers.mjs";
 
 registerCliTmpCleanup();
+registerTestProcessCleanup(import.meta.url);
 
 describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {

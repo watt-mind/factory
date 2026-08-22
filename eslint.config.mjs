@@ -16,6 +16,8 @@ export default [
       "dist/",
       "graphify-out/",
       "event-runtime/web/dist",
+      "site/dist",
+      "site/.astro",
       "evals/**/fixtures",
     ],
   },

@@ -1,0 +1,758 @@
+---
+import current from "../assets/factory-mark-candidates/00-engineering-loop.svg";
+import boundedFlow from "../assets/factory-mark-candidates/04-bounded-flow.svg";
+import controlPlane from "../assets/factory-mark-candidates/02-control-plane.svg";
+import precisionLoop from "../assets/factory-mark-candidates/01-precision-loop.svg";
+import recursiveGate from "../assets/factory-mark-candidates/03-recursive-gate.svg";
+import recursiveGateFinal from "../assets/factory-mark-candidates/05-recursive-gate-final.svg";
+import integratedGate from "../assets/factory-mark-candidates/06-integrated-gate.svg";
+import verificationSeam from "../assets/factory-mark-candidates/07-verification-seam.svg";
+import recursiveAperture from "../assets/factory-mark-candidates/08-recursive-aperture.svg";
+import dynamicAperture from "../assets/factory-mark-candidates/09-dynamic-aperture.svg";
+import continuousGate from "../assets/factory-mark-candidates/10-continuous-gate.svg";
+import reducedAperture from "../assets/factory-mark-candidates/11-reduced-aperture.svg";
+import chamferedRecursion from "../assets/factory-mark-candidates/12-chamfered-recursion.svg";
+import continuousRecursion from "../assets/factory-mark-candidates/13-continuous-recursion.svg";
+import apertureWorktree from "../assets/tenet-icons/a-01-worktree.svg";
+import apertureVerification from "../assets/tenet-icons/a-02-verification.svg";
+import apertureControlPlane from "../assets/tenet-icons/a-03-control-plane.svg";
+import apertureMultiHarness from "../assets/tenet-icons/a-04-multi-harness.svg";
+import railWorktree from "../assets/tenet-icons/b-01-worktree.svg";
+import railVerification from "../assets/tenet-icons/b-02-verification.svg";
+import railControlPlane from "../assets/tenet-icons/b-03-control-plane.svg";
+import railMultiHarness from "../assets/tenet-icons/b-04-multi-harness.svg";
+
+const tenetSystems = [
+  {
+    label: "System A",
+    name: "Aperture family",
+    note: "Directly extends the finalist mark through chamfered boundaries and load-bearing gates.",
+    icons: [
+      {
+        name: "One ticket, one worktree",
+        source: apertureWorktree,
+        note: "Two complete regions exist because one shared teal wall keeps them disjoint.",
+      },
+      {
+        name: "Verification as a gate",
+        source: apertureVerification,
+        note: "A bounded run can continue only through the short verification gate.",
+      },
+      {
+        name: "Pluggable control plane",
+        source: apertureControlPlane,
+        note: "One stable spine docks into interchangeable tracker apertures.",
+      },
+      {
+        name: "Multi-harness architecture",
+        source: apertureMultiHarness,
+        note: "One control input drives three independent chamfered lanes.",
+      },
+    ],
+  },
+  {
+    label: "System B",
+    name: "Rail family",
+    note: "A more operational language built from tracks, switch points, docking ports, and gates.",
+    icons: [
+      {
+        name: "One ticket, one worktree",
+        source: railWorktree,
+        note: "A worktree leaves the main rail for its own isolated siding.",
+      },
+      {
+        name: "Verification as a gate",
+        source: railVerification,
+        note: "Only the evidence rail crosses the gate; commentary stops short.",
+      },
+      {
+        name: "Pluggable control plane",
+        source: railControlPlane,
+        note: "Two tracker ports meet the same stable control span.",
+      },
+      {
+        name: "Multi-harness architecture",
+        source: railMultiHarness,
+        note: "A single switch fans control into three parallel harness rails.",
+      },
+    ],
+  },
+];
+
+const candidates = [
+  {
+    label: "Round 4 · 12",
+    name: "Chamfered Recursion",
+    source: chamferedRecursion,
+    note: "Nested self-similar apertures converge on one load-bearing verification gate before the accepted exit.",
+  },
+  {
+    label: "Round 4 · 13",
+    name: "Continuous Recursion",
+    source: continuousRecursion,
+    note: "One path unfolds from a small bounded envelope into a larger copy and crosses a short verification gate.",
+  },
+  {
+    label: "Previous homepage",
+    name: "Engineering loop",
+    source: current,
+    note: "The current homepage experiment: expressive, but busy at small sizes.",
+  },
+  {
+    label: "Fable finalist",
+    name: "Recursive Gate — refined",
+    source: recursiveGateFinal,
+    note: "Nested bounded execution meets one load-bearing verification gate and exits as accepted evidence.",
+  },
+  {
+    label: "Round 2 · 06",
+    name: "Integrated Gate",
+    source: integratedGate,
+    note: "A closed envelope and docked inner boundary share one teal gate, with accepted work continuing through it.",
+  },
+  {
+    label: "Round 2 · 07",
+    name: "Verification Seam",
+    source: verificationSeam,
+    note: "Two bounded execution envelopes open only at a marked verification seam.",
+  },
+  {
+    label: "Round 2 · 08",
+    name: "Recursive Aperture",
+    source: recursiveAperture,
+    note: "One continuous recursive path grows from a core, crosses its outer boundary, and leaves a verified result.",
+  },
+  {
+    label: "Round 3 · 09",
+    name: "Dynamic Aperture",
+    source: dynamicAperture,
+    note: "Parallel chamfers add forward motion while the verified gate sits directly in the exit run.",
+  },
+  {
+    label: "Round 3 · 10",
+    name: "Continuous Gate",
+    source: continuousGate,
+    note: "The path itself changes from warm white to teal as accepted work crosses the outer boundary.",
+  },
+  {
+    label: "Round 3 · 11",
+    name: "Reduced Aperture",
+    source: reducedAperture,
+    note: "A smaller open aperture repeats inside the outer one, replacing maze-like turns with true self-similarity.",
+  },
+  {
+    label: "Fable 01",
+    name: "Precision Loop",
+    source: precisionLoop,
+    note: "A continuous loop reduced to two circles, two tangents, and one clear weave.",
+  },
+  {
+    label: "Fable 02",
+    name: "Control Plane",
+    source: controlPlane,
+    note: "One admitted input reaches a deterministic router and three bounded lanes.",
+  },
+  {
+    label: "Fable 03",
+    name: "Recursive Gate",
+    source: recursiveGate,
+    note: "Nested execution boundaries, a bounded core, and one visible acceptance gate.",
+  },
+  {
+    label: "Fable 04",
+    name: "Bounded Flow",
+    source: boundedFlow,
+    note: "Parallel paths converge through verification into one durable result.",
+  },
+];
+
+const docDiagrams = [
+  {
+    name: "Claim read-back",
+    diagram: "/factory/diagrams/concept-guides.html#claim-readback",
+    page: "/factory/concepts/control-plane/",
+  },
+  {
+    name: "Owned Paths",
+    diagram: "/factory/diagrams/concept-guides.html#owned-paths",
+    page: "/factory/concepts/owned-paths/",
+  },
+  {
+    name: "Verification gate",
+    diagram: "/factory/diagrams/concept-guides.html#verification-gate",
+    page: "/factory/concepts/verification/",
+  },
+  {
+    name: "Agent-ready ticket",
+    diagram: "/factory/diagrams/concept-guides.html#agent-ready",
+    page: "/factory/contributing/agent-ready-tasks/",
+  },
+  {
+    name: "Offline demo",
+    diagram: "/factory/diagrams/concept-guides.html#quickstart-sequence",
+    page: "/factory/getting-started/quickstart/",
+  },
+  {
+    name: "First real PR",
+    diagram: "/factory/diagrams/concept-guides.html#first-real-pr",
+    page: "/factory/getting-started/first-pr/",
+  },
+  {
+    name: "Harness routing",
+    diagram: "/factory/diagrams/concept-guides.html#harness-routing",
+    page: "/factory/harnesses/overview/",
+  },
+  {
+    name: "Gondolin boundary",
+    diagram: "/factory/diagrams/concept-guides.html#sandbox-boundary",
+    page: "/factory/harnesses/agents/",
+  },
+  {
+    name: "Kernel and packs",
+    diagram: "/factory/diagrams/concept-guides.html#pack-boundary",
+    page: "/factory/packs/overview/",
+  },
+  {
+    name: "Multi-repo fleet",
+    diagram: "/factory/diagrams/concept-guides.html#multi-repo-fleet",
+    page: "/factory/operator/multi-repo/",
+  },
+  {
+    name: "Infrastructure ops loop",
+    diagram: "/factory/diagrams/concept-guides.html#non-code-ops-loop",
+    page: "/factory/packs/non-code/",
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Factory mark lab</title>
+    <meta
+      name="description"
+      content="Side-by-side Factory symbol candidates generated with Claude Fable."
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Factory · mark harness</p>
+        <h1>Factory brand lab</h1>
+        <p class="intro">
+          Two coordinated icon systems for the four core tenets come first. The
+          final mark synthesis and complete iteration trail follow below. Every
+          idea is tested at both presentation and small-icon scale.
+        </p>
+      </header>
+
+      <section class="diagram-atlas-section" aria-labelledby="diagram-atlas-heading">
+        <div class="section-heading">
+          <p class="eyebrow">Documentation · diagram atlas</p>
+          <h2 id="diagram-atlas-heading">Concept visuals in context</h2>
+          <p>
+            The complete relationship-heavy documentation set. Each preview
+            links to the page where the diagram carries the explanation.
+          </p>
+        </div>
+        <div class="diagram-grid">
+          {
+            docDiagrams.map((item) => (
+              <article class="diagram-card">
+                <iframe
+                  src={item.diagram}
+                  title={`${item.name} diagram`}
+                  loading="lazy"
+                />
+                <div class="diagram-caption">
+                  <h3>{item.name}</h3>
+                  <a href={item.page}>Open documentation page →</a>
+                </div>
+              </article>
+            ))
+          }
+        </div>
+      </section>
+
+      <section class="tenet-section" aria-labelledby="tenet-heading">
+        <div class="section-heading">
+          <p class="eyebrow">Core tenets · two directions</p>
+          <h2 id="tenet-heading">One family, four principles</h2>
+          <p>
+            System A inherits the chamfered aperture mark. System B translates
+            the same semantics into a more operational rail language.
+          </p>
+        </div>
+        <div class="system-grid">
+          {
+            tenetSystems.map((system) => (
+              <article class="tenet-system">
+                <div class="system-header">
+                  <div>
+                    <p class="eyebrow">{system.label}</p>
+                    <h3>{system.name}</h3>
+                  </div>
+                  <p>{system.note}</p>
+                </div>
+                <div class="tenet-grid">
+                  {system.icons.map((icon) => (
+                    <figure class="tenet-card">
+                      <div class="tenet-stage">
+                        <img src={icon.source.src} alt={`${icon.name} symbol`} />
+                        <span class="tenet-small" aria-label="32 pixel icon test">
+                          <img src={icon.source.src} alt="" />
+                        </span>
+                      </div>
+                      <figcaption>
+                        <h4>{icon.name}</h4>
+                        <p>{icon.note}</p>
+                      </figcaption>
+                    </figure>
+                  ))}
+                </div>
+              </article>
+            ))
+          }
+        </div>
+      </section>
+
+      <div class="section-heading mark-heading">
+        <p class="eyebrow">Factory mark · full trail</p>
+        <h2>Final synthesis and iterations</h2>
+        <p>
+          Round four remains the leading mark comparison; earlier rounds document
+          how the recursive aperture was reduced.
+        </p>
+      </div>
+
+      <section class="grid" aria-label="Factory mark candidates">
+        {
+          candidates.map((candidate) => (
+            <article class="candidate">
+              <div class="meta">
+                <span>{candidate.label}</span>
+                <span>640 × 420 SVG</span>
+              </div>
+              <div class="stage">
+                <img src={candidate.source.src} alt={`${candidate.name} Factory symbol`} />
+              </div>
+              <div class="caption">
+                <div>
+                  <h2>{candidate.name}</h2>
+                  <p>{candidate.note}</p>
+                </div>
+                <div class="icon-test" aria-label="48 pixel icon test">
+                  <img src={candidate.source.src} alt="" />
+                </div>
+              </div>
+            </article>
+          ))
+        }
+      </section>
+    </main>
+  </body>
+</html>
+
+<style>
+  /* Hallmark · genre: modern-minimal · macrostructure: Catalogue · design-system: site/design.md · designed-as-app */
+  /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
+  :root {
+    --paper: oklch(18.77% 0.01139 175.67);
+    --paper-low: oklch(16.158% 0.00971 183.85);
+    --panel: oklch(23.999% 0.01086 176.18 / 0.72);
+    --ink: oklch(91.268% 0.00852 168.74);
+    --muted: oklch(82.637% 0.01726 178.17);
+    --rule: oklch(39.325% 0.01702 185.19);
+    --accent: oklch(81.137% 0.12259 182.52);
+    --font-display: "Plus Jakarta Sans", system-ui, sans-serif;
+    --font-body: "Inter", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+    --space-xs: 0.75rem;
+    --space-sm: 1rem;
+    --space-md: 1.5rem;
+    --space-lg: 2rem;
+    --space-xl: 3rem;
+    --radius: 0.75rem;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    min-height: 100%;
+    overflow-x: clip;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+  }
+
+  main {
+    width: min(100% - 2rem, 90rem);
+    margin: 0 auto;
+    padding: clamp(3rem, 7vw, 7rem) 0;
+  }
+
+  header {
+    max-width: 48rem;
+    margin-bottom: var(--space-xl);
+  }
+
+  .eyebrow,
+  .meta {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .eyebrow {
+    margin: 0 0 var(--space-sm);
+    color: var(--accent);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    overflow-wrap: anywhere;
+    font-family: var(--font-display);
+    font-style: normal;
+    letter-spacing: -0.035em;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(2.5rem, 7vw, 5.5rem);
+    line-height: 0.98;
+  }
+
+  .intro {
+    max-width: 42rem;
+    margin: var(--space-md) 0 0;
+    color: var(--muted);
+    font-size: 1.05rem;
+    line-height: 1.7;
+  }
+
+  .section-heading {
+    max-width: 46rem;
+    margin-bottom: var(--space-lg);
+  }
+
+  .section-heading h2 {
+    margin: 0;
+    font-size: clamp(2rem, 4vw, 3.25rem);
+    line-height: 1.05;
+  }
+
+  .section-heading > p:last-child {
+    margin: var(--space-sm) 0 0;
+    color: var(--muted);
+    line-height: 1.65;
+  }
+
+  .tenet-section {
+    margin-bottom: clamp(4rem, 8vw, 7rem);
+  }
+
+  .diagram-atlas-section {
+    margin-bottom: clamp(4rem, 8vw, 7rem);
+  }
+
+  .diagram-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-md);
+  }
+
+  .diagram-card {
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--panel);
+  }
+
+  .diagram-card iframe {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border: 0;
+    background: var(--paper);
+  }
+
+  .diagram-caption {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    border-top: 1px solid var(--rule);
+  }
+
+  .diagram-caption h3 {
+    margin: 0;
+    font-size: 1rem;
+  }
+
+  .diagram-caption a {
+    color: var(--accent);
+    font: 600 0.75rem var(--font-mono);
+    text-decoration: none;
+  }
+
+  .diagram-caption a:hover {
+    text-decoration: underline;
+  }
+
+  .system-grid {
+    display: grid;
+    gap: var(--space-md);
+  }
+
+  .tenet-system {
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--panel);
+    backdrop-filter: blur(12px);
+  }
+
+  .system-header {
+    display: grid;
+    grid-template-columns: minmax(12rem, 0.8fr) minmax(0, 1.2fr);
+    gap: var(--space-lg);
+    align-items: end;
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .system-header .eyebrow {
+    margin-bottom: 0.5rem;
+  }
+
+  .system-header h3 {
+    margin: 0;
+    font-size: 1.5rem;
+  }
+
+  .system-header > p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .tenet-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .tenet-card {
+    min-width: 0;
+    margin: 0;
+    border-right: 1px solid var(--rule);
+  }
+
+  .tenet-card:last-child {
+    border-right: 0;
+  }
+
+  .tenet-stage {
+    position: relative;
+    display: grid;
+    min-height: 13rem;
+    place-items: center;
+    padding: var(--space-md);
+    background: var(--paper-low);
+  }
+
+  .tenet-stage > img {
+    display: block;
+    width: min(100%, 9rem);
+    height: auto;
+  }
+
+  .tenet-small {
+    position: absolute;
+    right: var(--space-sm);
+    bottom: var(--space-sm);
+    display: grid;
+    width: 3rem;
+    height: 3rem;
+    border: 1px solid var(--rule);
+    border-radius: 0.5rem;
+    place-items: center;
+    background: var(--paper);
+  }
+
+  .tenet-small img {
+    width: 2rem;
+    height: 2rem;
+  }
+
+  .tenet-card figcaption {
+    min-height: 10rem;
+    padding: var(--space-md);
+    border-top: 1px solid var(--rule);
+  }
+
+  .tenet-card h4 {
+    margin: 0 0 var(--space-xs);
+    font-size: 1rem;
+    line-height: 1.3;
+  }
+
+  .tenet-card p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
+  .mark-heading {
+    margin-bottom: var(--space-xl);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-md);
+  }
+
+  .candidate {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--panel);
+    backdrop-filter: blur(12px);
+  }
+
+  .meta {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    border-bottom: 1px solid var(--rule);
+    color: var(--muted);
+  }
+
+  .stage {
+    display: grid;
+    min-height: 18rem;
+    place-items: center;
+    padding: var(--space-lg);
+    background: var(--paper-low);
+  }
+
+  .stage img {
+    display: block;
+    width: min(100%, 34rem);
+    height: auto;
+  }
+
+  .caption {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-md);
+    align-items: center;
+    padding: var(--space-md);
+  }
+
+  h2 {
+    margin: 0 0 var(--space-xs);
+    font-size: 1.25rem;
+  }
+
+  .caption p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .icon-test {
+    display: grid;
+    width: 4.5rem;
+    height: 4.5rem;
+    border: 1px solid var(--rule);
+    border-radius: 0.5rem;
+    place-items: center;
+    background: var(--paper-low);
+  }
+
+  .icon-test img {
+    width: 3rem;
+    height: 3rem;
+    object-fit: contain;
+  }
+
+  @media (max-width: 48rem) {
+    .diagram-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .stage {
+      min-height: 13rem;
+      padding: var(--space-sm);
+    }
+
+    .meta {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .system-header {
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+      gap: var(--space-sm);
+    }
+
+    .tenet-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .tenet-card:nth-child(2) {
+      border-right: 0;
+    }
+
+    .tenet-card:nth-child(-n + 2) {
+      border-bottom: 1px solid var(--rule);
+    }
+  }
+
+  @media (max-width: 30rem) {
+    .tenet-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .tenet-card,
+    .tenet-card:nth-child(2) {
+      border-right: 0;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    .tenet-card:last-child {
+      border-bottom: 0;
+    }
+  }
+</style>

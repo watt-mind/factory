@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="bounded-flow-title bounded-flow-desc"
+>
+  <title id="bounded-flow-title">Factory bounded flow mark</title>
+  <desc id="bounded-flow-desc">
+    Three parallel lanes converge into one teal acceptance node and continue as
+    a single line into a solid teal result block.
+  </desc>
+  <g
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M 88 138 H 224 C 320 138 320 210 416 210" />
+    <path d="M 88 210 H 416" />
+    <path d="M 88 282 H 224 C 320 282 320 210 416 210" />
+    <path d="M 416 210 H 488" />
+  </g>
+  <circle cx="416" cy="210" r="18" fill="#14b8a6" />
+  <rect x="488" y="174" width="72" height="72" rx="14" fill="#4fdbc8" />
+</svg>

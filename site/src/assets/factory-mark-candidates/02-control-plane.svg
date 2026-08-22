@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="control-plane-title control-plane-desc"
+>
+  <title id="control-plane-title">Factory control plane mark</title>
+  <desc id="control-plane-desc">
+    A rounded boundary with one admission opening; an inbound line meets a teal
+    router node and is routed into three lanes that end on the far edge.
+  </desc>
+  <g
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path
+      d="M 160 238 V 294 A 28 28 0 0 0 188 322 H 532 A 28 28 0 0 0 560 294 V 126 A 28 28 0 0 0 532 98 H 188 A 28 28 0 0 0 160 126 V 182"
+    />
+    <path d="M 80 210 H 256" />
+    <path d="M 256 210 H 296 C 340 210 340 150 384 150 H 560" />
+    <path d="M 256 210 H 560" />
+    <path d="M 256 210 H 296 C 340 210 340 270 384 270 H 560" />
+  </g>
+  <circle cx="256" cy="210" r="18" fill="#4fdbc8" />
+</svg>

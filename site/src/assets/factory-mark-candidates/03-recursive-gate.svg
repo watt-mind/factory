@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 420"
+  role="img"
+  aria-labelledby="recursive-gate-title recursive-gate-desc"
+>
+  <title id="recursive-gate-title">Factory recursive gate mark</title>
+  <desc id="recursive-gate-desc">
+    Two nested rounded frames around a solid teal core; a line leaves the core
+    through each frame opening and crosses a teal gate bar set into the outer
+    boundary.
+  </desc>
+  <g
+    fill="none"
+    stroke="#dde4e1"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path
+      d="M 424 262 V 318 A 40 40 0 0 1 384 358 H 168 A 40 40 0 0 1 128 318 V 102 A 40 40 0 0 1 168 62 H 384 A 40 40 0 0 1 424 102 V 158"
+    />
+    <path
+      d="M 376 242 V 282 A 28 28 0 0 1 348 310 H 204 A 28 28 0 0 1 176 282 V 138 A 28 28 0 0 1 204 110 H 348 A 28 28 0 0 1 376 138 V 178"
+    />
+    <path d="M 276 210 H 528" />
+  </g>
+  <rect x="240" y="174" width="72" height="72" rx="12" fill="#14b8a6" />
+  <path
+    d="M 424 182 V 238"
+    fill="none"
+    stroke="#4fdbc8"
+    stroke-width="16"
+    stroke-linecap="round"
+  />
+</svg>
