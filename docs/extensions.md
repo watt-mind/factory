@@ -873,7 +873,7 @@ org; the workflow does not create it.
 
 ## Policy-granted mutating packs
 
-_Status: design — nothing built. Tracking: this ticket (WM-854, migrated from
+_Status: design — nothing built. Tracking: this ticket (#854, migrated from
 WM-846); implementation lands as follow-up tickets under WM-834, filed once
 this design is ratified._
 
@@ -881,10 +881,10 @@ this design is ratified._
 read-only and **may not declare an agent with `mutating: true`**
 (`event-runtime/lib/registry.mjs`, WM-468 decision 4). That is the right
 default — a pack is content an agent can author (§Trust model above) — but it
-means a shipped loop can only ever *propose*, never *apply*, even for the
+means a shipped loop can only ever _propose_, never _apply_, even for the
 narrow, deterministic remediation work the kernel's own bare namespace
 already does (the `keephq.disk-alert.raised` closed-action-registry flow,
-`docs/event-runtime.md` §14, OPS-208). This section designs the opt-in
+`docs/event-runtime.md` §11/§15, OPS-208). This section designs the opt-in
 exception: a named, pinned, scope-limited **grant** that lets one specific
 configured pack cross that line, without weakening it for every other pack
 and without changing what "mutating" is allowed to mean.
@@ -899,9 +899,10 @@ Three shapes were considered:
   `policy.yaml`, operator-only, names the pack, the capability scopes it may
   exercise, and the pinned content hash the grant applies to. **Recommended**
   — it reuses every enforcement mechanism this document and
-  `docs/event-runtime.md` §14 already have (closed-by-construction admission,
-  watched approval, content pins, `approve.before` hooks) instead of adding a
-  new one, and it keeps the default (no grant) identical to today.
+  `event-runtime/lib/registry.mjs` (lines 579-615) already have
+  (closed-by-construction admission, watched approval, content pins,
+  `approve.before` hooks) instead of adding a new one, and it keeps the
+  default (no grant) identical to today.
 - **Option C — code extension tier only.** Require mutating work to arrive as
   an adapter or connector (§Connectors), never a pack agent. Rejected: it
   throws away the closed-action-registry and closed-argv admission forms that
@@ -916,20 +917,20 @@ Three shapes were considered:
 
 A grant lifts the **pack-origin** refusal at `registry.mjs`'s WM-468 check for
 one named pack. It changes nothing else in that function: every mutating
-agent definition in a granted pack still has to pass the same §14
-closed-by-construction test every built-in mutating definition passes today
+agent definition in a granted pack still has to pass the same
+`registry.mjs` (lines 579-615) closed-by-construction test every built-in mutating definition passes today
 — closed argv, closed action registry, closed item list, or a tier-2
 worktree agent under the dispatch coordination design
 (`docs/event-runtime-dispatch.md` §5–§7). An LLM-driven pack agent that is
 none of those four shapes is refused exactly as it is today, grant or not.
-The grant answers *may this pack's agents be admitted for evaluation at all*;
-it does not relax *what evaluation demands of them*.
+The grant answers _may this pack's agents be admitted for evaluation at all_;
+it does not relax _what evaluation demands of them_.
 
 ### `policy.yaml` grant schema
 
 A grant is an addition to a pack's existing `packs:` entry
 (`docs/kernel-and-packs.md` §Enabling a pack) or an extension's `contributes.packs`
-entry (§Enabling above) — never a new top-level allowlist, so a pack's
+entry (## Enabling an extension, above) — never a new top-level allowlist, so a pack's
 mutating status is visible at the same place its namespace already is:
 
 ```yaml
@@ -942,20 +943,20 @@ packs:
       pin: sha256:… # of the pack's full pins.json content set, §Content pins below
 ```
 
-| Key                    | Meaning                                                                                                                                                                     |
-| :---------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mutatingGrant.scopes`  | Non-empty array of named capability scopes (below). An agent definition whose closed shape names a host, action, or capability outside the granted scopes is refused at load — the analogue of `def.hosts`/`def.repos` allow-lists, now checked against the grant instead of only the definition. |
-| `mutatingGrant.pin`     | The pack's full content pin hash (§Content pins). A grant whose `pin` does not match the pack's current `update-pins --pack` output is refused as a configuration anomaly — the pack loads as a **read-only** pack (its non-mutating agents still register) rather than failing the whole extension, so a routine content change degrades safely to the pre-grant default instead of taking the pack down. |
+| Key                    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                    |
+| :--------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mutatingGrant.scopes` | Non-empty array of named capability scopes (below). An agent definition whose closed shape names a host, action, or capability outside the granted scopes is refused at load — the analogue of `def.hosts`/`def.repos` allow-lists, now checked against the grant instead of only the definition.                                                                                                          |
+| `mutatingGrant.pin`    | The pack's full content pin hash (§Content pins). A grant whose `pin` does not match the pack's current `update-pins --pack` output is refused as a configuration anomaly — the pack loads as a **read-only** pack (its non-mutating agents still register) rather than failing the whole extension, so a routine content change degrades safely to the pre-grant default instead of taking the pack down. |
 
 Named scopes, closed at four for this design (new scopes are their own
 ticket, never a free-form string a pack can invent for itself):
 
-| Scope             | Unlocks                                                                                                  |
-| :----------------- | :-------------------------------------------------------------------------------------------------------- |
-| `git.push`         | A closed-argv or closed-item-list definition whose fixed template pushes to a repo remote.                 |
-| `pr.merge`         | A closed-argv or closed-item-list definition whose fixed template merges or closes a pull request.          |
-| `shell.remediate`  | A closed-action-registry definition (`actionRegistry`/`hosts`/`exec`) — the OPS-208 shape, extended to granted packs. |
-| `tracker.write`    | A closed-argv or closed-item-list definition whose fixed template writes to the issue tracker (state, comment, label). |
+| Scope             | Unlocks                                                                                                                |
+| :---------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| `git.push`        | A closed-argv or closed-item-list definition whose fixed template pushes to a repo remote.                             |
+| `pr.merge`        | A closed-argv or closed-item-list definition whose fixed template merges or closes a pull request.                     |
+| `shell.remediate` | A closed-action-registry definition (`actionRegistry`/`hosts`/`exec`) — the OPS-208 shape, extended to granted packs.  |
+| `tracker.write`   | A closed-argv or closed-item-list definition whose fixed template writes to the issue tracker (state, comment, label). |
 
 A definition may combine shapes only within its own scopes; a pack agent
 requesting a capability the grant does not name fails registry admission with
@@ -970,7 +971,7 @@ refusal shape as an unmapped `model_tier` or malformed `repos` entry.
 - **Operator-only, never agent-writable.** `mutatingGrant` lives in
   `policy.yaml`, the same trust boundary as `extensions:`, `contributes.hooks`
   wiring, and `format: "secret"` resolution — an agent authoring pack content
-  (§Trust model) can propose a pack that *asks* for scopes, but only the
+  (§Trust model) can propose a pack that _asks_ for scopes, but only the
   operator's own edit to `policy.yaml` grants them.
 - **Approval is never widened.** A grant changes admission, not approval.
   Every mutating run from a granted pack still flows through the same
@@ -979,12 +980,14 @@ refusal shape as an unmapped `model_tier` or malformed `repos` entry.
   runtime guard — and `approval: auto` is still earned per-edge
   (`docs/event-runtime-dispatch.md` §7), never conferred by the grant itself.
 - **Permanent never-auto-apply list.** `git.push` and `pr.merge` scopes may
-  never reach `approval: auto`, full stop — the same permanent exclusion
-  `docs/event-runtime-dispatch.md` §7 already gives `merge-apply` and
-  `ship-apply` ("may never relax"). A policy entry that tries to mark a
-  `git.push`- or `pr.merge`-scoped edge `auto` is a configuration anomaly,
-  not a silent downgrade to watched — the operator's intent was clearly
-  wrong and should be visible as such.
+  never reach `approval: auto`, full stop — a new invariant this design
+  proposes, following the precedent of `ship-apply`, which
+  `event-runtime/lib/auto-approval.mjs`'s `NEVER_AUTO_APPROVE` set already
+  excludes structurally from any auto-approval path (`merge-apply` is
+  presently allowlistable via `config/policy.yaml`, unlike `ship-apply`). A
+  policy entry that tries to mark a `git.push`- or `pr.merge`-scoped edge
+  `auto` is a configuration anomaly, not a silent downgrade to watched — the
+  operator's intent was clearly wrong and should be visible as such.
 - **`approve.before` hook required.** A granted pack must have at least one
   `approve.before` hook active in the runtime (the built-in
   `factory:escalation-labels` hook counts) — a `mutatingGrant` with zero
