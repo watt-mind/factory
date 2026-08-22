@@ -11,8 +11,8 @@
     },
     "ticket": {
       "type": "string",
-      "pattern": "^[A-Z]+-[0-9]+$",
-      "description": "Linear issue identifier to implement; must be Todo + ai:agent-ready + unassigned at plan time (docs/event-runtime-dispatch.md §2)"
+      "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
+      "description": "Tracker issue identifier to implement — Linear TEAM-N or GitHub owner/repo#N / #N / N; must be Todo + ai:agent-ready + unassigned at plan time (docs/event-runtime-dispatch.md §2)"
     },
     "modelTier": {
       "type": "string",
@@ -49,7 +49,7 @@
           "properties": {
             "ticket": {
               "type": "string",
-              "pattern": "^[A-Z]+-[0-9]+$"
+              "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
             },
             "repo": {
               "type": "string",

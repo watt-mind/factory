@@ -169,8 +169,9 @@ describe("registry", () => {
     // Regenerated (WM-1039): dispatch runs only ticket + configured repo
     // verification in worktrees; full suites remain CI-only.
     // Regenerated (WM-1039 rebase over tracker-neutral sweep)
+    // Regenerated (WM-1006 cutover: ticket patterns accept GitHub owner/repo#N ids; schemas re-pinned)
     const expected =
-      "sha256:a4d70bef9089d1513b6697ca4f026563b86d8d4785bee68738a2359fbdd573a5";
+      "sha256:61ff5eda45e22a00505176a96c77c04abc777030447def09cbf3d785a64d309f";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -344,8 +345,9 @@ describe("registry", () => {
     // WM-1039 keeps dispatched worktree verification to the ticket and repo
     // commands, leaving full suites to CI, and re-pins dispatch.
     // Regenerated (WM-1039 rebase over tracker-neutral sweep)
+    // Regenerated (WM-1006 cutover: ticket patterns accept GitHub owner/repo#N ids; schemas re-pinned)
     expect(computeDefHash(def)).toBe(
-      "sha256:b82767b2413db396af047029261323df01a8255315135e91694fad4b960b851d",
+      "sha256:1e8c07fc1354070bfa88f82c0ef0537404d70f0c7e616d6359a23177ed6f3057",
     );
   });
 

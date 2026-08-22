@@ -23,6 +23,6 @@
   "pins": {
     "agents/sweep-scan.md": "sha256:3c2f35767d54f4b8407100e243247b095e2cf2d351d64e6d0dc6a84399f425af",
     "schemas/sweep-scan.input.json": "sha256:75669ff012e9cc5e2eb334545b041a694fd37335a4d6f9dd0715b5fb66c6c856",
-    "schemas/sweep-scan.output.json": "sha256:fd42580f1d96f318094eedb638aa8adc432ad9464f4d6ad8af23ba49ff1ea8ba"
+    "schemas/sweep-scan.output.json": "sha256:6bac174205189d26ee920da7a27bcb7d7e1ebc66c16dce4cc6809da7ead9887a"
   }
 }

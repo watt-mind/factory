@@ -57,7 +57,7 @@
   "mutating": true,
   "pins": {
     "agents/unblock-apply.md": "sha256:e97afe482eb0c95faa82fab3e560ea28bbb3cc07dfbd3d4f5fdc68e994e01897",
-    "schemas/unblock-apply.input.json": "sha256:a983e831d67dbb30352697e457a7197f18776e1de184731be7ed88b9ea1d8f41",
-    "schemas/unblock-applied.output.json": "sha256:4b1ed38f71ca16a56bc7bc2582c629580fe7b57614ea2b12b0c289c9e6bf611b"
+    "schemas/unblock-apply.input.json": "sha256:5b8cc4047352147f02b707c94b2c353f5c6c6e1ce9661c25d972c82c8dca1bcb",
+    "schemas/unblock-applied.output.json": "sha256:023c01ef5c7f1a4e5d30fe29f7ba7a65b7cc1030bcc30d8ac5719d6cc4f24cde"
   }
 }

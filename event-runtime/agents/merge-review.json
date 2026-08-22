@@ -32,7 +32,7 @@
   ],
   "pins": {
     "agents/merge-review.md": "sha256:77be28101f5e4645a37501bc4aa2dd80dd87519b528eb8b9db0c2ed55ea1d73f",
-    "schemas/merge-review.input.json": "sha256:94bbf3e051bbcb836822cf6038e008806a445473aec4f9f52eec39ba8f768326",
-    "schemas/merge-review.output.json": "sha256:987433ffbb39d935d42090eb62e63ece917a36b38fc849a6c5bfa27a26c898f8"
+    "schemas/merge-review.input.json": "sha256:d7051604031742a3b0e060f9fb1359aa5de3b3d42a80714f11492054e81a50f8",
+    "schemas/merge-review.output.json": "sha256:efad4e30c1fed1978794630397819d71d78391381a6375edab704eaf5458b282"
   }
 }

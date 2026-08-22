@@ -30,7 +30,10 @@
     "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-    "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+    "ticket": {
+      "type": "string",
+      "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+    },
     "plan": {
       "type": "array",
       "maxItems": 1,
@@ -59,7 +62,10 @@
           "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
           "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
           "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "ticket": {
+            "type": "string",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+          },
           "action": { "const": "merge_pr" },
           "reason": { "type": "string", "minLength": 1 },
           "checksGreen": { "const": true },
@@ -97,7 +103,10 @@
           "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
           "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
           "headRef": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
-          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "ticket": {
+            "type": "string",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+          },
           "finding": { "type": "string", "minLength": 1 },
           "findingHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "round": { "type": "integer", "minimum": 1 },
@@ -121,7 +130,10 @@
         "properties": {
           "pr": { "type": "integer", "minimum": 1 },
           "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-          "ticket": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "ticket": {
+            "type": "string",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+          },
           "reason": { "type": "string", "minLength": 1 }
         }
       }

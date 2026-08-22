@@ -13,7 +13,10 @@
         "required": ["issueId", "action", "reason"],
         "additionalProperties": false,
         "properties": {
-          "issueId": { "type": "string", "pattern": "^[A-Z]+-[0-9]+$" },
+          "issueId": {
+            "type": "string",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$"
+          },
           "action": {
             "enum": [
               "label-agent-ready",

@@ -65,7 +65,7 @@
           },
           "ticket": {
             "type": "string",
-            "pattern": "^[A-Z]+-[0-9]+$",
+            "pattern": "^([A-Z]+-[0-9]+|(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#?[0-9]+)$",
             "description": "Linear ticket pulled from the subject's (TICKET-ID), when present"
           }
         }

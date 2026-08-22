@@ -27,6 +27,6 @@
   "pins": {
     "agents/merge-plan.md": "sha256:389fd24bae2b9fee157a95fee7a85e47030033bb1f6f3a8f12246b65170423f0",
     "schemas/merge-plan.input.json": "sha256:cfc932e2e1e54247db5020943c53e3ff2cf419f9835bfb81ff93e738259a1850",
-    "schemas/merge-plan.output.json": "sha256:86eedd6b6089caaf62210df42b36b26f38fc7ddb01d8f52e6f1624b67bb1ffbb"
+    "schemas/merge-plan.output.json": "sha256:b00c380d95c6f4c894db0b0b56aa731a667d547fdd8cf751f27b47ef38eabaae"
   }
 }
