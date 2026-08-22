@@ -914,6 +914,17 @@ function fakeGithubApi(seed) {
       if (q.includes("ProjectItems")) {
         return { data: { node: { items: { nodes: seed.items } } } };
       }
+      // WM-879: getTicket always resolves the last-editor via this query.
+      // This minimal fake has no edit history — an empty connection means
+      // "no edits", i.e. the editor is the author, the same as a real issue
+      // nobody has ever edited. The trust-gate matrix itself lives in
+      // lib/control-plane/github.test.mjs; this fixture only needs to not
+      // 500 on the call.
+      if (q.includes("IssueLastEdit")) {
+        return {
+          data: { repository: { issue: { userContentEdits: { nodes: [] } } } },
+        };
+      }
       throw new ControlPlaneError("raw query not seeded");
     }
     const one = pathOnly.match(/^repos\/([^/]+\/[^/]+)\/issues\/(\d+)$/);
@@ -925,6 +936,13 @@ function fakeGithubApi(seed) {
     }
     const list = pathOnly.match(/^repos\/([^/]+\/[^/]+)\/issues$/);
     if (list && method === "GET") return [seed.issue];
+    // WM-879: getTicket also reads back the ai:agent-ready pin marker
+    // comment. No comments in this fixture — same "nothing pinned yet"
+    // path exercised deliberately in lib/control-plane/github.test.mjs.
+    const comments = pathOnly.match(
+      /^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/,
+    );
+    if (comments && method === "GET") return seed.issue.comments ?? [];
     // WM-1008: this minimal fake has no dependency data. Returning [] here
     // exercises the "no blockers" path; the 404-tolerance path is covered in
     // lib/control-plane/github.test.mjs.

@@ -159,6 +159,96 @@ Linear API; a follow-up re-pin of `dispatch@1` plus `verify.mjs`
 `linear_rate_limited` without a contract violation. The planner and
 auto-approval path above is what stops the inbox escalation.
 
+### GitHub-plane trust gates (WM-879, operator decision 2026-08-22)
+
+The factory control plane moved to GitHub Issues on a **public** repo
+(WM-1006). The label gate above (§4's Owned Paths closure, this section's
+Todo + unassigned + `ai:agent-ready`) keeps a stranger-created issue out only
+until someone with triage permission labels it, and says nothing about a body
+edit made **after** labeling. An issue body is executable instructions to the
+factory — the Verification Command runs on the runner, Owned Paths scopes
+what an agent may touch — so a plausible-looking outside issue labeled by a
+hurried maintainer, or an author editing the body after labeling, is
+untrusted command execution inside a dispatch worktree. Two gates close that
+window. Both are **no-ops on the Linear plane** (there is no equivalent
+public-authorship risk there) and apply to **every** admission — a resumed
+claim, a re-plan, and an operator-injected dispatch alike. There is no
+bypass: the threat model is bad-actor issue _content_, not a bad-actor
+operator.
+
+**Gate 1 — trusted authorship.** `lib/control-plane/github.mjs`'s
+`getTicket()` is the only read that computes trust evidence (every other
+read — `listTickets`, `listDispatchable`, `claim`, … — omits it, so the cost
+is paid once, at admission, not on every board scan). It returns:
+
+- `authorAssociation` — the issue author's GitHub `author_association`
+  (`OWNER`/`MEMBER`/`COLLABORATOR`/`CONTRIBUTOR`/`NONE`/…), read straight off
+  the REST issue payload.
+- `lastEditor: { login, association }` — who made the most recent body edit.
+  GitHub only exposes edit history (`userContentEdits`) over GraphQL, and an
+  edit's association is not itself part of that connection, so an edit by
+  someone other than the author costs one more REST call
+  (`GET /repos/{repo}/collaborators/{login}/permission`) to resolve their
+  association (`admin`→`OWNER`, `write`/`maintain`→`COLLABORATOR`,
+  `read`/`triage`→`CONTRIBUTOR`, `none`→`NONE`). No edits at all means the
+  editor **is** the author — the common case costs nothing extra.
+
+`event-runtime/lib/planner.mjs`'s dispatch admission
+(`worktreeDispatchAutoEligibility`) refuses `ticket_untrusted_author` unless
+**both** `authorAssociation` and `lastEditor.association` are one of
+`OWNER` / `MEMBER` / `COLLABORATOR` (`lib/control-plane/types.mjs`'s
+`TRUSTED_ASSOCIATIONS` — a closed allow-list, not an exclusion list, so a new
+GitHub association value must be added on purpose before it can grant
+trust). Any value the adapter could not resolve — a deleted account, an
+unreachable API, a 404 from the permission lookup — comes back as `null` and
+is **untrusted**, never defaulted to trusted: unknown fails closed. Refusal
+evidence includes the raw association values and the editor's login (never
+just a boolean), so the inbox item is actionable.
+
+The gate is keyed off **presence**, not truthiness: `authorAssociation` is
+only ever set (even to `null`) by a GitHub `getTicket` read, so a Linear
+ticket's evidence never carries the key at all and the gate is skipped
+entirely — "Linear-plane behavior unchanged" is a structural property of the
+check, not a branch that has to remember to skip it.
+
+**Gate 2 — body-hash pin at labeling.** Whenever `ai:agent-ready` is applied
+through `lib/control-plane/github.mjs` — `transition()`, `setLabels()`
+(what `tools/ticket.mjs state <id> ... --add ai:agent-ready` calls, which is
+also what `triage-apply`'s `label-agent-ready` action invokes), or `file()`
+creating a ticket straight into `Todo` + `ai:agent-ready` (an
+operator-injected dispatch) — the adapter posts an issue **comment**
+containing `<!-- factory:agent-ready-pin sha256:<hex> --><newline>Pinned
+description hash at 'ai:agent-ready' labeling …`, where the hash is
+`hashJson(description)` (`event-runtime/lib/canonical.mjs`) — the same
+sha256 description-hash convention `evidenceTicket()` already uses for
+`descriptionHash`, not a second format.
+
+A comment marker was chosen over a hidden body footer for two reasons: the
+adapter already reads comments back (`listComments`) so no new read path was
+needed, and a comment is immutable history a body edit cannot silently carry
+away or a markdown-reformatting tool cannot mangle — a footer living inside
+the very body it also rewrites is exactly the thing under suspicion. A
+re-label (add `ai:agent-ready` again, including after a remove+re-add) posts
+a **fresh** marker; `getTicket()` reads the **most recent** one back
+(`GET .../comments`, scanned newest-first) as `agentReadyPinHash`.
+
+Dispatch admission recomputes `descriptionHash` from the ticket's current
+body and refuses `ticket_body_changed_since_ready` when it does not match
+the pinned hash — including when there is **no** pin at all (a ticket
+labeled `ai:agent-ready` some other way, e.g. before this gate existed, or by
+hand outside the factory tooling): absence fails closed the same as a
+mismatch, it does not default to "trust it". Refusal evidence carries
+`pinned=<hash prefix>` / `current=<hash prefix>`, never the full body.
+Re-labeling (by triage, or a human) refreshes the pin and the next admission
+attempt succeeds.
+
+Both gates evaluate for **every** dispatch admission on a GitHub-plane
+ticket, not only a fresh claim — a resumed lease-loss retry and an
+operator-injected `factory.dispatch.requested` payload go through the
+identical check, using the identical evidence-fetch path, because the
+attack this defends against (content, not process) does not care which of
+those triggered the run.
+
 ---
 
 ## 3. Capacity: one budget, checked at plan and again at execute

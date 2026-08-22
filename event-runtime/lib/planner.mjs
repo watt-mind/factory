@@ -79,6 +79,11 @@ import {
   isLinearRateLimitMessage,
   isLinearRateLimited,
 } from "../../tools/linear.mjs";
+// WM-879: the trusted-author gate is plane-neutral policy that lives beside
+// the ControlPlane contract, not inside any one adapter. types.mjs has no
+// imports of its own, so this cannot cycle back through
+// lib/control-plane/index.mjs (which imports event-runtime/lib/repos.mjs).
+import { TRUSTED_ASSOCIATIONS } from "../../lib/control-plane/types.mjs";
 
 /** In-flight issues list is stable across one scan; 60s is the ticket cap. */
 export const IN_FLIGHT_CACHE_TTL_MS = 60_000;
@@ -753,6 +758,14 @@ function evidenceTicket(ticket, ticketId) {
     ownedPaths: effectiveOwnedPaths(description),
     ownedPathsParsed: parsed.length > 0,
     descriptionHash: hashJson(description),
+    // WM-879: present (string|null) only on a GitHub-plane getTicket read;
+    // absent (undefined, dropped by the JSON round-trip) on every other
+    // plane. Presence, not truthiness, is what tells the trust gate below
+    // "this is GitHub — evaluate me" vs. "Linear — this gate is a no-op".
+    authorAssociation: ticket?.authorAssociation,
+    lastEditorAssociation: ticket?.lastEditor?.association,
+    lastEditorLogin: ticket?.lastEditor?.login ?? null,
+    agentReadyPinHash: ticket?.agentReadyPinHash,
   };
 }
 
@@ -949,6 +962,48 @@ export function worktreeDispatchAutoEligibility(
   }
   if (evidence.ticket.labels.includes("ai:escalated")) {
     return refusal("ticket_escalated", evidence);
+  }
+
+  // WM-879 (operator decision 2026-08-22): the public-repo GitHub control
+  // plane's dispatch label gate keeps stranger-created issues out only until
+  // someone with triage permission labels one, and says nothing about a body
+  // edit made AFTER labeling. Issue bodies are executable instructions to the
+  // factory (the Verification Command runs on the runner; Owned Paths scope
+  // edits), so both checks apply to EVERY admission — including a resumed
+  // claim and an operator-injected dispatch. There is no bypass; the point is
+  // bad-actor content, not bad-actor operators. Both gates are no-ops on the
+  // Linear plane, keyed off `authorAssociation` being present at all
+  // (github.mjs only sets it on a GitHub-plane `getTicket` read).
+  if (evidence.ticket.authorAssociation !== undefined) {
+    const authorTrusted =
+      typeof evidence.ticket.authorAssociation === "string" &&
+      TRUSTED_ASSOCIATIONS.includes(evidence.ticket.authorAssociation);
+    const editorTrusted =
+      typeof evidence.ticket.lastEditorAssociation === "string" &&
+      TRUSTED_ASSOCIATIONS.includes(evidence.ticket.lastEditorAssociation);
+    evidence.checks.ticket_author_trusted = authorTrusted;
+    evidence.checks.ticket_last_editor_trusted = editorTrusted;
+    if (!authorTrusted || !editorTrusted) {
+      return refusal(
+        "ticket_untrusted_author",
+        evidence,
+        "human_needed",
+        `authorAssociation=${JSON.stringify(evidence.ticket.authorAssociation)} lastEditor=${evidence.ticket.lastEditorLogin ?? "null"} lastEditorAssociation=${JSON.stringify(evidence.ticket.lastEditorAssociation ?? null)}`,
+      );
+    }
+
+    const pinned = evidence.ticket.agentReadyPinHash ?? null;
+    const current = evidence.ticket.descriptionHash;
+    evidence.checks.ticket_body_hash_pinned = pinned !== null;
+    evidence.checks.ticket_body_hash_matches = pinned === current;
+    if (pinned === null || pinned !== current) {
+      return refusal(
+        "ticket_body_changed_since_ready",
+        evidence,
+        "human_needed",
+        `pinned=${pinned ? `${pinned.slice(0, 15)}…` : "none"} current=${current.slice(0, 15)}…`,
+      );
+    }
   }
 
   const blockers = openBlockers(ticket);

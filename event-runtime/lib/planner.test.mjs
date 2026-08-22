@@ -909,6 +909,177 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  describe("trusted-author gate + body-hash pin (WM-879)", () => {
+    const DESCRIPTION = "## Owned Paths\n- event-runtime/lib/planner.mjs\n";
+    const PIN = hashJson(DESCRIPTION);
+
+    // Mirrors tierTicket, but with the GitHub-plane trust fields
+    // github.mjs's getTicket() populates. `authorAssociation` present at
+    // all (even null) is what marks a ticket "GitHub plane" to the gate —
+    // a Linear ticket (tierTicket above) never carries this key.
+    const githubTicket = (overrides = {}) => ({
+      identifier: "acme/widget#42",
+      state: { name: "Todo" },
+      assignee: null,
+      labels: { nodes: [{ name: "ai:agent-ready" }] },
+      description: DESCRIPTION,
+      authorAssociation: "OWNER",
+      lastEditor: { login: "owner", association: "OWNER" },
+      agentReadyPinHash: PIN,
+      ...overrides,
+    });
+    const githubDispatch = (ticket) => ({
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      fetchTicket: () => ticket,
+      fetchInFlight: () => [],
+    });
+
+    test("untrusted author refuses ticket_untrusted_author", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(githubTicket({ authorAssociation: "NONE" })),
+        );
+        expect(result.refusal.reason).toBe("ticket_untrusted_author");
+        expect(result.refusal.decision).toBe("human_needed");
+        expect(result.evidence.checks.ticket_author_trusted).toBe(false);
+        expect(result.refusal.detail).toContain('authorAssociation="NONE"');
+      });
+    });
+
+    test("unknown/unfetchable author association fails closed", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(githubTicket({ authorAssociation: null })),
+        );
+        expect(result.refusal.reason).toBe("ticket_untrusted_author");
+        expect(result.evidence.checks.ticket_author_trusted).toBe(false);
+      });
+    });
+
+    test("trusted author + untrusted last editor refuses ticket_untrusted_author", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(
+            githubTicket({
+              lastEditor: { login: "outsider", association: "NONE" },
+            }),
+          ),
+        );
+        expect(result.refusal.reason).toBe("ticket_untrusted_author");
+        expect(result.evidence.checks.ticket_author_trusted).toBe(true);
+        expect(result.evidence.checks.ticket_last_editor_trusted).toBe(false);
+        expect(result.refusal.detail).toContain("lastEditor=outsider");
+      });
+    });
+
+    test("unresolvable last editor (association: null) fails closed", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(
+            githubTicket({ lastEditor: { login: "ghost", association: null } }),
+          ),
+        );
+        expect(result.refusal.reason).toBe("ticket_untrusted_author");
+        expect(result.evidence.checks.ticket_last_editor_trusted).toBe(false);
+      });
+    });
+
+    test("trusted author + trusted last editor + matching pin admits", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(githubTicket()),
+        );
+        expect(result.ok).toBe(true);
+        expect(result.evidence.checks.ticket_author_trusted).toBe(true);
+        expect(result.evidence.checks.ticket_last_editor_trusted).toBe(true);
+        expect(result.evidence.checks.ticket_body_hash_matches).toBe(true);
+      });
+    });
+
+    test("a body edit after labeling refuses ticket_body_changed_since_ready", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(
+            githubTicket({
+              description: `${DESCRIPTION}\ninjected instruction`,
+            }),
+          ),
+        );
+        expect(result.refusal.reason).toBe("ticket_body_changed_since_ready");
+        expect(result.refusal.decision).toBe("human_needed");
+        expect(result.evidence.checks.ticket_body_hash_matches).toBe(false);
+        expect(result.refusal.detail).toContain("pinned=");
+        expect(result.refusal.detail).toContain("current=");
+      });
+    });
+
+    test("no pin at all (never labeled through the factory path) fails closed", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(githubTicket({ agentReadyPinHash: null })),
+        );
+        expect(result.refusal.reason).toBe("ticket_body_changed_since_ready");
+        expect(result.evidence.checks.ticket_body_hash_pinned).toBe(false);
+      });
+    });
+
+    test("a re-label refreshes the pin and admits", () => {
+      withReposRoot(tierRepo, () => {
+        const newDescription = `${DESCRIPTION}\nclarified scope`;
+        const refreshedPin = hashJson(newDescription);
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42" },
+          githubDispatch(
+            githubTicket({
+              description: newDescription,
+              agentReadyPinHash: refreshedPin,
+            }),
+          ),
+        );
+        expect(result.ok).toBe(true);
+        expect(result.evidence.checks.ticket_body_hash_matches).toBe(true);
+      });
+    });
+
+    test("Linear-plane tickets are unaffected — no authorAssociation key, gate is a no-op", () => {
+      withReposRoot(tierRepo, () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "WM-694" },
+          tierDispatch(),
+        );
+        expect(result.ok).toBe(true);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            result.evidence.checks,
+            "ticket_author_trusted",
+          ),
+        ).toBe(false);
+        expect(result.evidence.ticket.authorAssociation).toBeUndefined();
+      });
+    });
+
+    test("no operator bypass: an operator-supplied payload goes through the same gates", () => {
+      withReposRoot(tierRepo, () => {
+        // Nothing distinguishes an "operator" dispatch from any other at
+        // this layer — the payload shape is identical. This asserts that
+        // fact: there is no flag, override, or field that skips the gate.
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "acme/widget#42", operator: true },
+          githubDispatch(githubTicket({ authorAssociation: "NONE" })),
+        );
+        expect(result.refusal.reason).toBe("ticket_untrusted_author");
+      });
+    });
+  });
+
   test("open Linear blockers refuse dispatch with blocker ids in evidence (WM-709)", () => {
     withReposRoot(tierRepo, () => {
       const openRelations = {
