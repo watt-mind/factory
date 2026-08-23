@@ -30,6 +30,7 @@ import {
   parsePositionalArgs,
   closureCheckMessages,
   resolveRepoName,
+  resolveRepoNameFromTicket,
   __resetLinearReposCache,
 } from "./ticket.mjs";
 
@@ -529,4 +530,27 @@ test("factory exposes `ticket`, and `linear` as a deprecated alias", () => {
   // The alias must survive until the prompt sweep lands, or dispatch breaks.
   expect(script).toContain("linear)");
   expect(script).toMatch(/factory linear is deprecated/);
+});
+
+const GH975_REPOS = new Map([
+  ["factory", { name: "factory", github: "watt-mind/factory" }],
+  ["legalease", { name: "legalease", github: "watt-mind/legalease" }],
+]);
+
+test("resolveRepoNameFromTicket: owner/repo#N resolves the matching registry entry (GH-975)", () => {
+  expect(resolveRepoNameFromTicket("watt-mind/factory#975", GH975_REPOS)).toBe(
+    "factory",
+  );
+});
+
+test("resolveRepoNameFromTicket: case-insensitive on the github slug", () => {
+  expect(resolveRepoNameFromTicket("Watt-Mind/Factory#1", GH975_REPOS)).toBe(
+    "factory",
+  );
+});
+
+test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () => {
+  expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
+  expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
+  expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
 });

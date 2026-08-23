@@ -302,7 +302,29 @@ export function resolveRepoName({
   return best?.name ?? null;
 }
 
-function controlPlane() {
+/**
+ * When cwd identifies no repo (dispatched agents run from ephemeral runtime
+ * workspaces under ~/.factory, matching neither `path` nor `worktree_root` —
+ * GH-975), the ticket identifier itself still can: `owner/repo#N` names the
+ * GitHub repo, and a registry entry whose `github:` matches decides the
+ * plane. Without this, a workspace-run claim silently falls back to the
+ * workspace-wide default plane and misreads or misses the ticket entirely.
+ */
+export function resolveRepoNameFromTicket(ticketArg, repos) {
+  const registry = repos ?? getRepos();
+  const m =
+    typeof ticketArg === "string" &&
+    ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#[0-9]+/);
+  if (!m) return null;
+  const github = m[1].toLowerCase();
+  for (const repo of registry.values()) {
+    if (typeof repo.github === "string" && repo.github.toLowerCase() === github)
+      return repo.name;
+  }
+  return null;
+}
+
+function controlPlane(ticketArg = positional[0]) {
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
   let repoName = null;
@@ -311,6 +333,13 @@ function controlPlane() {
   } catch (err) {
     // An explicit bad --repo is the operator's mistake; surface it.
     if (flag("repo")) throw err;
+  }
+  if (!repoName) {
+    try {
+      repoName = resolveRepoNameFromTicket(ticketArg);
+    } catch {
+      // registry unreadable — same fallback as before
+    }
   }
   return loadControlPlane(repoName ? { repoName } : {});
 }
