@@ -62,7 +62,9 @@ describe("outbox retention and drain index", () => {
 
     expect(sweepPublishedOutbox(db, { now, retentionDays: 14 })).toBe(1);
     expect(
-      db.query(`SELECT event_json, published_at FROM outbox ORDER BY seq`).all(),
+      db
+        .query(`SELECT event_json, published_at FROM outbox ORDER BY seq`)
+        .all(),
     ).toEqual([
       { event_json: '{"eventId":"recent"}', published_at: recent },
       { event_json: '{"eventId":"pending"}', published_at: null },
@@ -79,11 +81,7 @@ describe("outbox retention and drain index", () => {
       for (let i = 0; i < 200_000; i += 1) {
         insert.run("{}", publishedAt, publishedAt);
       }
-      insert.run(
-        JSON.stringify({ eventId: "pending" }),
-        publishedAt,
-        null,
-      );
+      insert.run(JSON.stringify({ eventId: "pending" }), publishedAt, null);
     })();
 
     const plan = db
