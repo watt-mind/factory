@@ -166,6 +166,20 @@ die() {
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 
+# Resolve a path without requiring its final component to exist. GNU `realpath
+# -m` offers this, but BSD/macOS realpath does not support `-m`. The parent
+# must exist here (as it does for the config paths below); `cd -P` both makes
+# the result absolute and normalizes its existing directory components.
+normalize_path() { # <path>
+  local path="$1" directory basename
+  directory=$(dirname "$path")
+  basename=$(basename "$path")
+  (
+    cd -P "$directory"
+    printf '%s/%s\n' "$PWD" "$basename"
+  )
+}
+
 # Local config is intentionally gitignored, but a delegated checkout needs
 # the active instance's routing, policy, and schedule rather than examples.
 # Skip a checkout without the ignore rule so an agent can never stage it.
@@ -177,7 +191,7 @@ provision_instance_local_configs() { # <checkout> [primary-checkout]
     [[ -f "$source" ]] || continue
     destination="$checkout/config/$name.yaml"
     rel="config/$name.yaml"
-    [[ "$(realpath -m "$source")" == "$(realpath -m "$destination")" ]] && continue
+    [[ "$(normalize_path "$source")" == "$(normalize_path "$destination")" ]] && continue
     if git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
       && ! git -C "$checkout" check-ignore -q -- "$rel"; then
       continue
