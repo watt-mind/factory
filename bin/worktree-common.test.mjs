@@ -211,6 +211,60 @@ test("provision_instance_local_configs silently skips a source without local fil
   }
 });
 
+test("normalize_path is portable and accepts a missing final component", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "gh-937-normalize-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
+  try {
+    mkdirSync(path.join(root, "existing"));
+    writeFileSync(
+      path.join(mockBin, "realpath"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' 'realpath: illegal option -- m' >&2\nexit 1\n",
+    );
+    chmodSync(path.join(mockBin, "realpath"), 0o755);
+    const missing = path.join(root, "existing", "missing-leaf");
+    const r = sh(`normalize_path "${root}/existing/../existing/missing-leaf"`, {
+      PATH: `${mockBin}:${process.env.PATH}`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe(missing);
+    expect(r.stderr).toBe("");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
+test("provision_instance_local_configs does not invoke GNU-only realpath", () => {
+  const source = mkdtempSync(path.join(tmpdir(), "gh-937-config-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "gh-937-config-checkout-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
+  try {
+    mkdirSync(path.join(source, "config"));
+    mkdirSync(path.join(checkout, "config"));
+    writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
+    writeFileSync(path.join(checkout, ".gitignore"), "config/repos.yaml\n");
+    writeFileSync(
+      path.join(mockBin, "realpath"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' 'realpath: illegal option -- m' >&2\nexit 1\n",
+    );
+    chmodSync(path.join(mockBin, "realpath"), 0o755);
+    const r = sh(
+      [
+        `git -C "${checkout}" init -q`,
+        `provision_instance_local_configs "${checkout}" "${source}"`,
+        `test "$(cat "${checkout}/config/repos.yaml")" = "repos: []"`,
+      ].join("\n"),
+      { PATH: `${mockBin}:${process.env.PATH}` },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
 test("listen_tcp_port rejects a dead pid even if lsof returns a listener", () => {
   const dir = mockLsofDir();
   const pidfile = path.join(dir, "dead.pid");

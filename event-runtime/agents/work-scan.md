@@ -27,9 +27,10 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
 ## Method
 
 1. **Enumerate and filter candidates** with a complete repo queue read
-   (`bun "$FACTORY_ROOT/tools/ticket.mjs"`; all pages, no sampling). Build the
-   candidate set yourself from the returned fields. A ticket is a candidate
-   only when **all three** predicates hold:
+   (`bun "$FACTORY_ROOT/tools/ticket.mjs" queue --repo "$REPO" --json`, where
+   `$REPO` is the `repo` value from `./input.json`; all pages, no sampling).
+   Build the candidate set yourself from the returned fields. A ticket is a
+   candidate only when **all three** predicates hold:
 
    - its state name is exactly `Todo`;
    - its labels include `ai:agent-ready`; and
@@ -84,7 +85,11 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    `reasonCode: "needs_human"` if your candidate construction or ordering does
    not produce that result.
 
-3. **Count the cap**: the repo's `max_in_flight` from
+3. **Count the cap**: read the complete in-flight set with
+   `bun "$FACTORY_ROOT/tools/ticket.mjs" inflight --repo "$REPO" --team "$TEAM" --project "$PROJECT" --json`,
+   again taking `$REPO` from `./input.json` and `$TEAM`/`$PROJECT` from the
+   matching `$FACTORY_ROOT/config/repos.yaml` entry. Then read the repo's
+   `max_in_flight` from
    `$FACTORY_ROOT/config/repos.yaml`, falling back to
    `concurrency.max_in_flight_per_repo` in `config/policy.yaml`, else 3. Record
    that value as `evidence.maxInFlight`. The in-flight count against it is the

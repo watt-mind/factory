@@ -1516,8 +1516,12 @@ describe("contributes.harness (WM-849)", () => {
 
     const loaded = await load(policyFor(extra));
     expect(loaded.anomalies).toEqual([]);
-    expect(loaded.harnessRoots).toHaveLength(1);
-    expect(loaded.harnessRoots[0].plugin).toBe("acme-tools");
+    expect(loaded.harnessRoots.map((root) => root.plugin)).toEqual([
+      CORE_HARNESS_PLUGIN,
+      "acme-tools",
+    ]);
+    expect(loaded.harnessRoots[0].builtin).toBe(true);
+    expect(loaded.harnessRoots[1].plugin).toBe("acme-tools");
     expect(loaded.extensions[0].harness).toEqual({
       plugin: "acme-tools",
       prefix: "acme-tools",
