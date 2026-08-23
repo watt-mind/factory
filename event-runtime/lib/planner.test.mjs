@@ -2926,9 +2926,9 @@ describe("GitHub dispatch candidate parsing (GH-974)", () => {
       expect(counts).toEqual({ planned: 2, failed: 0, deadLettered: 0 });
       expect(reads).toEqual([valid]);
       expect(
-        db.query(`SELECT status FROM events WHERE event_id = ?`).get(
-          "github-candidate-valid",
-        ).status,
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get("github-candidate-valid").status,
       ).toBe("planned");
       const dropped = db
         .query(`SELECT status, last_plan_error FROM events WHERE event_id = ?`)
