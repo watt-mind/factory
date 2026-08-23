@@ -1941,11 +1941,10 @@ export async function executeClaimed(
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
-        // The claim gate fails closed on tickets whose Owned Paths do not
-        // parse (owned_paths_unknown, WM-575); a stub ticket must carry a
-        // parseable section or the demo stub refuses every dispatch. `**`
-        // also lets the stubbed merge-fix gate (WM-582) accept any fix path.
-        description: "## Owned Paths\n- **\n",
+        // The claim gate fails closed on unknown or match-everything scopes
+        // (owned_paths_unknown, WM-575/#952), so the demo dispatch fixture
+        // must model a bounded, parseable scope.
+        description: "## Owned Paths\n- event-runtime/lib/**\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
