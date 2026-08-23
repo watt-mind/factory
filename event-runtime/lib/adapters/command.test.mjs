@@ -285,9 +285,11 @@ function sampleFromSchema(schema) {
 describe("command-adapter registry (OPS-404)", () => {
   // Other Fast-test files temporarily point FACTORY_REPOS_ROOT at fixture
   // configs. This registry is about the shipped command definitions, so read
-  // its model policy from the checked-out Factory root, never ambient state.
+  // its model policy from the checked-out Factory root and load no ambient
+  // configured packs.
   const registry = loadRegistry({
     modelTiers: loadModelTierMap({ root: FACTORY_ROOT }),
+    packRoots: [],
   });
   const commandDefs = [...registry.agents.values()].filter(
     (agent) => Array.isArray(agent.command) && agent.command.length > 0,
