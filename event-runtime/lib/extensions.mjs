@@ -1193,8 +1193,9 @@ function packRootFor(extensionRoot, rel) {
  *   extension pack in policy order — ready to hand to `loadRegistry`;
  *   `panelRoots` is every accepted extension's `contributes.panels`
  *   directories, in the same order, for `loadRegistry({ panelRoots })`.
- *   `harnessRoots` is every accepted extension's `contributes.harness`
- *   (WM-849), for `loadRegistry({ harnessRoots })` and `build/emit.mjs`.
+ *   `harnessRoots` starts with the built-in core harness root, followed by
+ *   every accepted extension's `contributes.harness` (WM-849), for
+ *   `loadRegistry({ harnessRoots })` and `build/emit.mjs`.
  *   `disabled` lists every extension an anomaly skipped, for `/config`.
  */
 export async function loadExtensions({
@@ -1217,13 +1218,28 @@ export async function loadExtensions({
   const { roots, anomalies } = loadExtensionRoots({ root, policy });
   const extensions = [];
   const panelRoots = [];
-  const harnessRoots = [];
+  const coreHarnessDir = path.join(path.dirname(RUNTIME_ROOT), "shared");
+  const core = validateExtensionManifest(coreHarnessDir);
+  if (!core.valid) {
+    throw new ExtensionError(
+      `built-in harness pack ${coreHarnessDir}: ${core.errors.join("; ")}`,
+    );
+  }
+  const coreHarness = harnessRootFor(coreHarnessDir, core.manifest, {
+    builtin: true,
+  });
+  if (!coreHarness) {
+    throw new ExtensionError(
+      `built-in harness pack ${coreHarnessDir}: ${EXTENSION_MANIFEST} declares no contributes.harness`,
+    );
+  }
+  const harnessRoots = [coreHarness];
   const accepted = [...basePackRoots];
   const acceptedPackNames = new Set(basePackRoots.map((p) => p.name));
   const acceptedAdapterNames = new Set();
   const acceptedNamespaces = new Map();
-  const acceptedHarnessPlugins = new Set();
-  const acceptedHarnessNames = new Set();
+  const acceptedHarnessPlugins = new Set([coreHarness.plugin]);
+  const acceptedHarnessNames = new Set([coreHarness.name]);
   const disabled = [];
   const loaded = [];
   const loadedConnectorModules = [];
