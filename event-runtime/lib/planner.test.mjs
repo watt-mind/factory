@@ -1218,7 +1218,7 @@ describe("planEvent worktree gate (WM-108)", () => {
     const dispatch = admit(dispatchDb, {
       type: "factory.dispatch.requested",
       eventId: "dispatch-gate-characterization",
-      payload: { repo: "factory", ticket: "WM-469" },
+      payload: { repo: "factory", ticket: "watt-mind/factory#469" },
     });
     const outcome = planEvent(dispatchDb, registry, dispatch, {
       now: NOW,
@@ -2827,6 +2827,119 @@ describe("Linear rate limit (WM-878)", () => {
       expect(counts.deadLettered).toBe(0);
       expect(cache.inFlightCalls).toBeLessThanOrEqual(3);
       expect(cache.inFlightCalls).toBeGreaterThan(0);
+    });
+  });
+});
+
+describe("GitHub dispatch candidate parsing (GH-974)", () => {
+  function withGithubRepo(fn) {
+    const root = tmpDir("evrt-plan-github-");
+    const checkout = path.join(root, "checkout");
+    mkdirSync(checkout, { recursive: true });
+    execFileSync("git", ["init", "-q", checkout]);
+    execFileSync("git", [
+      "-C",
+      checkout,
+      "config",
+      "user.email",
+      "test@example.com",
+    ]);
+    execFileSync("git", ["-C", checkout, "config", "user.name", "Test"]);
+    writeFileSync(path.join(checkout, "README.md"), "fixture\n");
+    execFileSync("git", ["-C", checkout, "add", "README.md"]);
+    execFileSync("git", ["-C", checkout, "commit", "-qm", "fixture"]);
+
+    const configRoot = path.join(root, "config-root");
+    mkdirSync(path.join(configRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(configRoot, "config", "repos.yaml"),
+      [
+        "repos:",
+        "  - name: github-candidates",
+        `    path: ${checkout}`,
+        "    github: watt-mind/factory",
+        "    control_plane: github",
+        "    base: develop",
+        "    team: WM",
+        "    project: Factory",
+        "    worktree_up: bin/up",
+        "    worktree_down: bin/down",
+        "    worktree_root: /tmp/worktrees",
+        "    escalate_paths: []",
+        "",
+      ].join("\n"),
+    );
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = configRoot;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("drops legacy Linear IDs from a GitHub candidate list before ticket reads", () => {
+    withGithubRepo(() => {
+      const db = openDb(":memory:");
+      const valid = "watt-mind/factory#534";
+      const legacy = "WM-621";
+      for (const [eventId, ticket] of [
+        ["github-candidate-valid", valid],
+        ["github-candidate-legacy", legacy],
+      ]) {
+        admit(db, {
+          type: "factory.dispatch.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "github-candidates", ticket },
+        });
+      }
+
+      const reads = [];
+      const logs = [];
+      const counts = planAdmittedEvents(db, registry, {
+        now: NOW,
+        policyVersion: "git:test",
+        log: (line) => logs.push(line),
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: (ticket) => {
+            reads.push(ticket);
+            return {
+              identifier: ticket,
+              state: { name: "Todo" },
+              assignee: null,
+              labels: [{ name: "ai:agent-ready" }],
+              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+              controlPlaneKind: "github",
+              authorAssociation: "MEMBER",
+              lastEditorAssociation: "MEMBER",
+            };
+          },
+          fetchInFlight: () => [],
+        },
+      });
+
+      expect(counts).toEqual({ planned: 2, failed: 0, deadLettered: 0 });
+      expect(reads).toEqual([valid]);
+      expect(
+        db.query(`SELECT status FROM events WHERE event_id = ?`).get(
+          "github-candidate-valid",
+        ).status,
+      ).toBe("planned");
+      const dropped = db
+        .query(`SELECT status, last_plan_error FROM events WHERE event_id = ?`)
+        .get("github-candidate-legacy");
+      expect(dropped.status).toBe("noop");
+      expect(dropped.last_plan_error).toMatch(
+        /^ticket_identifier_unresolvable: not a GitHub issue identifier: WM-621/,
+      );
+      expect(logs).toContain(
+        "planned noop (ticket_identifier_unresolvable: not a GitHub issue identifier: WM-621 (want owner/repo#N)) — operator-webhook:github-candidate-legacy",
+      );
     });
   });
 });

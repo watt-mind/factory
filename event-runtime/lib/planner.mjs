@@ -23,6 +23,7 @@ import {
   ownedPathsClosureGaps,
 } from "../../orchestrator/owned-paths.mjs";
 import { openBlockers } from "../../orchestrator/blockers.mjs";
+import { parseIssueIdentifier } from "../../lib/control-plane/github.mjs";
 import { loadForge } from "../../lib/forge/index.mjs";
 import { budgetExhausted } from "../../lib/spend.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
@@ -895,6 +896,28 @@ function evidenceTicket(ticket, ticketId) {
 }
 
 /**
+ * Reject malformed dispatch candidates before asking their tracker to look
+ * them up. A work-scan result is advisory input, and a legacy Linear ID on a
+ * GitHub-controlled repo would otherwise throw from the adapter, retry until
+ * the event is dead-lettered, and consume a chain slot each time.
+ *
+ * Linear's control plane deliberately accepts its opaque identifiers at
+ * lookup time. GitHub is the parser-bearing plane today, so use the same
+ * parser its adapter uses rather than duplicating a narrower regex here.
+ */
+function invalidTicketIdentifierReason(repo, ticket) {
+  const controlPlane =
+    repo.controlPlane ?? loadRuntimePolicy()?.controlPlane?.kind ?? "linear";
+  if (controlPlane !== "github") return null;
+  try {
+    parseIssueIdentifier(ticket, repo.github ?? undefined);
+    return null;
+  } catch (err) {
+    return `ticket_identifier_unresolvable: ${err.message}`;
+  }
+}
+
+/**
  * Parse the closed per-ticket model-tier label vocabulary. A ticket may carry
  * either no tier label or exactly one valid `tier:<MODEL_TIERS>` label. The
  * full matching label set is returned so refusal evidence explains malformed
@@ -1002,6 +1025,16 @@ export function worktreeDispatchAutoEligibility(
   if (!repo.worktreeUp || !repo.worktreeDown || !repo.worktreeRoot)
     return refusal("no_worktree_scripts", evidence, "human_needed");
   evidence.checks.worktree_scripts_configured = true;
+
+  const invalidTicketIdentifier = invalidTicketIdentifierReason(
+    repo,
+    payload?.ticket,
+  );
+  if (invalidTicketIdentifier) {
+    evidence.checks.ticket_identifier_parseable = false;
+    return refusal(invalidTicketIdentifier, evidence);
+  }
+  evidence.checks.ticket_identifier_parseable = true;
 
   let budgetReason;
   try {
