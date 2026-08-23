@@ -51,7 +51,7 @@
  * `loadControlPlane()` (WM-894); retries, backoff and key loading stay in
  * `orchestrator/reaper.mjs` as the Linear transport behind the adapter.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
@@ -260,6 +260,42 @@ export function installLinearBudgetCapture() {
 }
 
 /**
+ * Raised instead of falling through to the tracked example configuration.
+ *
+ * `config/repos.yaml` is instance-local routing state: examples name a
+ * different control plane by design. A runner checkout without that file must
+ * therefore not turn a GitHub ticket into a Linear lookup merely because the
+ * fallback is syntactically valid (GH-975).
+ */
+export class InstanceConfigMissingError extends Error {
+  constructor(root) {
+    super(
+      `instance_config_missing: ${path.join(root, "config", "repos.yaml")} is required for this checkout (${root})`,
+    );
+    this.code = "instance_config_missing";
+  }
+}
+
+/**
+ * Resolve the operator checkout which owns the instance-local control-plane
+ * configuration. `FACTORY_REPOS_ROOT` remains the explicit test/operator
+ * override; dispatched agents otherwise receive `FACTORY_ROOT` from their
+ * launching worker. Never use the executing agent's cwd for this decision.
+ */
+export function instanceConfigRoot({
+  env = process.env,
+  checkoutRoot = path.resolve(import.meta.dir, ".."),
+} = {}) {
+  const root = path.resolve(
+    env.FACTORY_REPOS_ROOT || env.FACTORY_ROOT || checkoutRoot,
+  );
+  if (!existsSync(path.join(root, "config", "repos.yaml"))) {
+    throw new InstanceConfigMissingError(root);
+  }
+  return root;
+}
+
+/**
  * Which `config/repos.yaml` entry this invocation is about (WM-1007), or null
  * when nothing identifies one.
  *
@@ -325,23 +361,28 @@ export function resolveRepoNameFromTicket(ticketArg, repos) {
 }
 
 function controlPlane(ticketArg = positional[0]) {
+  // All ticket verbs act on instance-local state. Resolve this before looking
+  // at cwd or the identifier so a missing runner config is an explicit refusal
+  // rather than a silent default-plane lookup.
+  const root = instanceConfigRoot();
+  const repos = getRepos(root);
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
   let repoName = null;
   try {
-    repoName = resolveRepoName();
+    repoName = resolveRepoName({ repos });
   } catch (err) {
     // An explicit bad --repo is the operator's mistake; surface it.
     if (flag("repo")) throw err;
   }
   if (!repoName) {
     try {
-      repoName = resolveRepoNameFromTicket(ticketArg);
+      repoName = resolveRepoNameFromTicket(ticketArg, repos);
     } catch {
       // registry unreadable — same fallback as before
     }
   }
-  return loadControlPlane(repoName ? { repoName } : {});
+  return loadControlPlane(repoName ? { root, repoName } : { root });
 }
 
 /** Compact ticket rendering — the fields the protocol actually acts on. */
@@ -379,8 +420,8 @@ export function formatComments(nodesOrIssue) {
 let REPOS;
 const PATH_REQUIREMENTS_CACHE = new Map();
 
-function getRepos() {
-  if (!REPOS) REPOS = loadRepos();
+function getRepos(root = instanceConfigRoot()) {
+  if (!REPOS) REPOS = loadRepos({ root });
   return REPOS;
 }
 

@@ -17,7 +17,9 @@ import {
   parseOwnedPaths,
   parseVerificationCommand,
   effectiveOwnedPaths,
+  globToRegExp,
   globsOverlap,
+  OwnedPathsPatternError,
   pathsCollide,
   nextDispatchable,
   readPinManifestRequirements,
@@ -65,6 +67,31 @@ test("disjoint directories do not overlap", () => {
   expectTrue(!globsOverlap("app/services/**", "docs/**"));
   expectTrue(!globsOverlap("bin/worktree-*.sh", "AGENTS.md"));
   expectTrue(!globsOverlap(".github/workflows/*", "app/src/main.ts"));
+});
+
+test("brace alternation compiles wildcard and nested branches (WM-951)", () => {
+  // Before WM-951, the first matcher threw `Nothing to repeat`: its `*.png`
+  // branch was escaped as a regex literal except for the leading `*`.
+  const assetMatcher = globToRegExp("assets/{*.png,*.jpg}");
+  expectTrue(assetMatcher.test("assets/x.png"));
+  expectTrue(assetMatcher.test("assets/x.jpg"));
+  expectTrue(!assetMatcher.test("assets/x.gif"));
+  expectTrue(globsOverlap("assets/{*.png,*.jpg}", "assets/x.png"));
+  expectTrue(!globsOverlap("assets/{*.png,*.jpg}", "assets/x.gif"));
+
+  const nestedMatcher = globToRegExp("src/{a*,b{c,d}}.ts");
+  expectTrue(nestedMatcher.test("src/anything.ts"));
+  expectTrue(nestedMatcher.test("src/bc.ts"));
+  expectTrue(nestedMatcher.test("src/bd.ts"));
+  expectTrue(!nestedMatcher.test("src/be.ts"));
+});
+
+test("malformed brace globs are typed and fail closed for collision checks", () => {
+  expect(() => globToRegExp("assets/{*.png")).toThrow(OwnedPathsPatternError);
+  expectTrue(
+    globsOverlap("assets/{*.png", "docs/unrelated.md"),
+    "an invalid Owned Paths entry must serialize instead of terminating dispatch",
+  );
 });
 
 test("extensionless concrete files (Dockerfile, Makefile) match themselves", () => {

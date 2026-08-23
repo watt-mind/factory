@@ -14,6 +14,10 @@
  *
  * Deliberately dependency-free: this runs from launchd with the system node and
  * must not require an install step to work.
+ *
+ * Glob expansion supports `**`, `*`, `?`, and recursive `{a,b}` brace
+ * alternation. Wildcards remain glob syntax inside each brace branch; malformed
+ * brace expressions are refused rather than being passed through to RegExp.
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -181,6 +185,76 @@ function escapeLiteral(s) {
   return s.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 }
 
+/** An Owned Paths glob is structurally invalid and must be refused. */
+export class OwnedPathsPatternError extends Error {
+  constructor(pattern, reason) {
+    super(`invalid Owned Paths glob ${JSON.stringify(pattern)}: ${reason}`);
+    this.name = "OwnedPathsPatternError";
+    this.code = "invalid_owned_paths_glob";
+    this.pattern = pattern;
+  }
+}
+
+function compileBraceAlternation(glob, start) {
+  const alternatives = [];
+  let index = start;
+
+  while (true) {
+    const branch = compileGlob(glob, index, new Set([",", "}"]));
+    alternatives.push(branch.source);
+    index = branch.index;
+
+    if (index === glob.length) {
+      throw new OwnedPathsPatternError(glob, "unclosed brace alternation");
+    }
+    if (glob[index] === "}") {
+      return { source: `(?:${alternatives.join("|")})`, index: index + 1 };
+    }
+    index += 1; // comma: begin the next alternative
+  }
+}
+
+/** Compile glob syntax until the end or one of the caller's delimiters. */
+function compileGlob(glob, start = 0, delimiters = new Set()) {
+  let source = "";
+  let index = start;
+
+  while (index < glob.length) {
+    const c = glob[index];
+    if (delimiters.has(c)) break;
+
+    if (c === "*") {
+      if (glob[index + 1] === "*") {
+        // `**/` should also match zero segments, so `a/**/b.ts` matches `a/b.ts`.
+        if (glob[index + 2] === "/") {
+          source += "(?:.*/)?";
+          index += 3;
+        } else {
+          source += ".*";
+          index += 2;
+        }
+      } else {
+        source += "[^/]*";
+        index += 1;
+      }
+    } else if (c === "?") {
+      source += "[^/]";
+      index += 1;
+    } else if (c === "{") {
+      const brace = compileBraceAlternation(glob, index + 1);
+      source += brace.source;
+      index = brace.index;
+    } else if (c === "}") {
+      throw new OwnedPathsPatternError(glob, "unmatched closing brace");
+    } else {
+      source += escapeLiteral(c);
+      index += 1;
+    }
+  }
+
+  return { source, index };
+}
+
 /**
  * Compile a glob to a RegExp.
  *
@@ -189,6 +263,9 @@ function escapeLiteral(s) {
  * `/` or a bare directory means "everything under it".
  */
 export function globToRegExp(glob) {
+  if (typeof glob !== "string") {
+    throw new OwnedPathsPatternError(glob, "pattern must be a string");
+  }
   let g = glob.trim().replace(/^\.\//, "");
   // A path with no glob metacharacters and no extension is treated as a prefix:
   // `app/services` owns everything beneath it. It also names a real, concrete
@@ -201,37 +278,7 @@ export function globToRegExp(glob) {
   if (g.endsWith("/")) g += "**";
   else if (matchSelf) g += "/**";
 
-  let re = "";
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i];
-    if (c === "*") {
-      if (g[i + 1] === "*") {
-        // `**/` should also match zero segments, so `a/**/b.ts` matches `a/b.ts`.
-        if (g[i + 2] === "/") {
-          re += "(?:.*/)?";
-          i += 2;
-        } else {
-          re += ".*";
-          i += 1;
-        }
-      } else {
-        re += "[^/]*";
-      }
-    } else if (c === "?") re += "[^/]";
-    else if (c === "{") {
-      const close = g.indexOf("}", i);
-      if (close === -1) {
-        re += "\\{";
-        continue;
-      }
-      const alts = g
-        .slice(i + 1, close)
-        .split(",")
-        .map((a) => escapeLiteral(a.trim()));
-      re += `(?:${alts.join("|")})`;
-      i = close;
-    } else re += escapeLiteral(c);
-  }
+  let re = compileGlob(g).source;
   // The "/**" appended above compiles to a trailing literal "/.*"; make the
   // "/" + anything optional so the bare path matches itself as well.
   if (matchSelf) re = re.replace(/\/\.\*$/, "(?:/.*)?");
@@ -250,28 +297,33 @@ export function globToRegExp(glob) {
  */
 export function globsOverlap(a, b) {
   if (a === b) return true;
+  try {
+    const ra = globToRegExp(a);
+    const rb = globToRegExp(b);
+    const isConcrete = (g) => !/[*?{]/.test(g);
 
-  const ra = globToRegExp(a);
-  const rb = globToRegExp(b);
-  const isConcrete = (g) => !/[*?{]/.test(g);
+    // At least one side names an actual path: decide by matching, which is exact.
+    if (isConcrete(a) && isConcrete(b)) return ra.test(b) || rb.test(a);
+    if (isConcrete(a)) return rb.test(a);
+    if (isConcrete(b)) return ra.test(b);
 
-  // At least one side names an actual path: decide by matching, which is exact.
-  if (isConcrete(a) && isConcrete(b)) return ra.test(b) || rb.test(a);
-  if (isConcrete(a)) return rb.test(a);
-  if (isConcrete(b)) return ra.test(b);
-
-  // Both wildcarded: compare literal directory prefixes. A prefix of "" means
-  // the glob starts with a wildcard and can reach anywhere, so it overlaps
-  // everything -- which is why this is computed only for wildcarded globs.
-  // (Reducing a concrete root-level file like `AGENTS.md` to "" here would make
-  // it collide with every ticket in the repo.)
-  const literalPrefix = (g) => {
-    const i = g.search(/[*?{]/);
-    return (i === -1 ? g : g.slice(0, i)).replace(/[^/]*$/, "");
-  };
-  const la = literalPrefix(a);
-  const lb = literalPrefix(b);
-  return la.startsWith(lb) || lb.startsWith(la);
+    // Both wildcarded: compare literal directory prefixes. A prefix of "" means
+    // the glob starts with a wildcard and can reach anywhere, so it overlaps
+    // everything -- which is why this is computed only for wildcarded globs.
+    // (Reducing a concrete root-level file like `AGENTS.md` to "" here would make
+    // it collide with every ticket in the repo.)
+    const literalPrefix = (g) => {
+      const i = g.search(/[*?{]/);
+      return (i === -1 ? g : g.slice(0, i)).replace(/[^/]*$/, "");
+    };
+    const la = literalPrefix(a);
+    const lb = literalPrefix(b);
+    return la.startsWith(lb) || lb.startsWith(la);
+  } catch (error) {
+    // A malformed Owned Paths glob must serialize work, never crash dispatch.
+    if (error instanceof OwnedPathsPatternError) return true;
+    throw error;
+  }
 }
 
 /** Do two tickets' Owned Paths sets intersect? */
