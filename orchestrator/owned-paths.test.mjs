@@ -87,9 +87,7 @@ test("brace alternation compiles wildcard and nested branches (WM-951)", () => {
 });
 
 test("malformed brace globs are typed and fail closed for collision checks", () => {
-  expect(() => globToRegExp("assets/{*.png")).toThrow(
-    OwnedPathsPatternError,
-  );
+  expect(() => globToRegExp("assets/{*.png")).toThrow(OwnedPathsPatternError);
   expectTrue(
     globsOverlap("assets/{*.png", "docs/unrelated.md"),
     "an invalid Owned Paths entry must serialize instead of terminating dispatch",
