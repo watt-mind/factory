@@ -2466,6 +2466,30 @@ function acceptMemo(document) {
   };
 }
 
+function withMemoConfig(fn) {
+  const root = tmpDir("evrt-plan-memos-");
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    "repos:\n  - name: factory\n    path: /tmp/factory\n    base: develop\n",
+  );
+  writeFileSync(path.join(root, "config", "policy.yaml"), "models: {}\n");
+
+  // Memo normalization reads the repository index through the process-wide
+  // FACTORY_REPOS_ROOT seam. Keep this synchronous scope as narrow as the
+  // code under test; no other test file can observe it while JavaScript is
+  // executing here, and restore the prior value rather than deleting it.
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  process.env.FACTORY_REPOS_ROOT = root;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function memoReaderRegistry() {
   const synthetic = {
     ...registry,
@@ -2629,126 +2653,136 @@ describe("validateMemosDeclaration (WM-810)", () => {
 
 describe("planEvent memoPin (WM-810)", () => {
   test("empty fold is empty entries, never human_needed", () => {
-    const db = openDb(":memory:");
-    const memoRegistry = memoReaderRegistry();
-    const ref = admitMemo(db, memoRegistry);
-    const outcome = planEvent(db, memoRegistry, ref, {
-      now: NOW,
-      policyVersion: "git:test",
-    });
-    expect(outcome.decision).toBe("run");
-    const spec = JSON.parse(outcome.proposal.spec_json);
-    expect(spec.input.memoPin).toEqual({
-      foldedAt: new Date(NOW).toISOString(),
-      entries: [],
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const memoRegistry = memoReaderRegistry();
+      const ref = admitMemo(db, memoRegistry);
+      const outcome = planEvent(db, memoRegistry, ref, {
+        now: NOW,
+        policyVersion: "git:test",
+      });
+      expect(outcome.decision).toBe("run");
+      const spec = JSON.parse(outcome.proposal.spec_json);
+      expect(spec.input.memoPin).toEqual({
+        foldedAt: new Date(NOW).toISOString(),
+        entries: [],
+      });
     });
   });
 
   test("folds live memos into memoPin with hashes and provenance headers", () => {
-    const db = openDb(":memory:");
-    const document = memoDoc();
-    const { sha256, result } = acceptMemo(document);
-    registerMemos(db, "run_producer", result, {
-      now: Date.parse(document.provenance.createdAt),
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const document = memoDoc();
+      const { sha256, result } = acceptMemo(document);
+      registerMemos(db, "run_producer", result, {
+        now: Date.parse(document.provenance.createdAt),
+      });
+      const memoRegistry = memoReaderRegistry();
+      const ref = admitMemo(db, memoRegistry);
+      const outcome = planEvent(db, memoRegistry, ref, {
+        now: NOW,
+        policyVersion: "git:test",
+      });
+      expect(outcome.decision).toBe("run");
+      const spec = JSON.parse(outcome.proposal.spec_json);
+      expect(spec.input.memoPin.entries).toEqual([
+        {
+          sha256,
+          subject: { type: "ticket", id: "WM-810" },
+          kind: "postmortem",
+          runId: "run_producer",
+          createdAt: document.provenance.createdAt,
+        },
+      ]);
     });
-    const memoRegistry = memoReaderRegistry();
-    const ref = admitMemo(db, memoRegistry);
-    const outcome = planEvent(db, memoRegistry, ref, {
-      now: NOW,
-      policyVersion: "git:test",
-    });
-    expect(outcome.decision).toBe("run");
-    const spec = JSON.parse(outcome.proposal.spec_json);
-    expect(spec.input.memoPin.entries).toEqual([
-      {
-        sha256,
-        subject: { type: "ticket", id: "WM-810" },
-        kind: "postmortem",
-        runId: "run_producer",
-        createdAt: document.provenance.createdAt,
-      },
-    ]);
   });
 
   test("kinds filter and max cap the fold; a new memo re-admits work", () => {
-    const db = openDb(":memory:");
-    const note = memoDoc({
-      subject: { type: "repo", id: "factory" },
-      kind: "repo-note",
-      claim: { kind: "howto", text: "Use the scoped lib suite." },
-      evidence: "Root suite 6m40s; scoped 41s clean.",
-      body: "Use the scoped lib suite.",
-    });
-    registerMemos(db, "run_note", acceptMemo(note).result, {
-      now: Date.parse(note.provenance.createdAt),
-    });
-    const def = memoReaderRegistry().agents.get("memo-reader@1");
-    const payload = { ticket: "WM-810", repo: "factory" };
-    const first = pinMemos(db, def, payload, { now: NOW });
-    expect(first.memoPin.entries.map((e) => e.kind)).toEqual(["repo-note"]);
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const note = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "repo-note",
+        claim: { kind: "howto", text: "Use the scoped lib suite." },
+        evidence: "Root suite 6m40s; scoped 41s clean.",
+        body: "Use the scoped lib suite.",
+      });
+      registerMemos(db, "run_note", acceptMemo(note).result, {
+        now: Date.parse(note.provenance.createdAt),
+      });
+      const def = memoReaderRegistry().agents.get("memo-reader@1");
+      const payload = { ticket: "WM-810", repo: "factory" };
+      const first = pinMemos(db, def, payload, { now: NOW });
+      expect(first.memoPin.entries.map((e) => e.kind)).toEqual(["repo-note"]);
 
-    const later = memoDoc({
-      body: "attempt 2 — do not rerun the full suite",
-      provenance: {
-        runId: "run_producer_2",
-        agent: "run-postmortem@2",
-        createdAt: "2026-08-18T15:00:00.000Z",
-      },
+      const later = memoDoc({
+        body: "attempt 2 — do not rerun the full suite",
+        provenance: {
+          runId: "run_producer_2",
+          agent: "run-postmortem@2",
+          createdAt: "2026-08-18T15:00:00.000Z",
+        },
+      });
+      registerMemos(db, "run_producer_2", acceptMemo(later).result, {
+        now: Date.parse(later.provenance.createdAt),
+      });
+      const second = pinMemos(db, def, first, { now: NOW + 1000 });
+      expect(second.memoPin.entries.map((e) => e.kind).sort()).toEqual([
+        "postmortem",
+        "repo-note",
+      ]);
+      expect(second.memoPin.foldedAt).not.toBe(first.memoPin.foldedAt);
+      expect(hashJson(second)).not.toBe(hashJson(first));
     });
-    registerMemos(db, "run_producer_2", acceptMemo(later).result, {
-      now: Date.parse(later.provenance.createdAt),
-    });
-    const second = pinMemos(db, def, first, { now: NOW + 1000 });
-    expect(second.memoPin.entries.map((e) => e.kind).sort()).toEqual([
-      "postmortem",
-      "repo-note",
-    ]);
-    expect(second.memoPin.foldedAt).not.toBe(first.memoPin.foldedAt);
-    expect(hashJson(second)).not.toBe(hashJson(first));
   });
 
   test("TTL re-plan preserves foldedAt when the live fold is unchanged", () => {
-    const db = openDb(":memory:");
-    const document = memoDoc();
-    registerMemos(db, "run_producer", acceptMemo(document).result, {
-      now: Date.parse(document.provenance.createdAt),
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const document = memoDoc();
+      registerMemos(db, "run_producer", acceptMemo(document).result, {
+        now: Date.parse(document.provenance.createdAt),
+      });
+      const def = memoReaderRegistry().agents.get("memo-reader@1");
+      const first = pinMemos(
+        db,
+        def,
+        { ticket: "WM-810", repo: "factory" },
+        { now: NOW },
+      );
+      const again = pinMemos(db, def, first, { now: NOW + 3600 * 1000 });
+      expect(again.memoPin).toEqual(first.memoPin);
     });
-    const def = memoReaderRegistry().agents.get("memo-reader@1");
-    const first = pinMemos(
-      db,
-      def,
-      { ticket: "WM-810", repo: "factory" },
-      { now: NOW },
-    );
-    const again = pinMemos(db, def, first, { now: NOW + 3600 * 1000 });
-    expect(again.memoPin).toEqual(first.memoPin);
   });
 
   test("a new memo on a later event is a new run by inputHash", () => {
-    const db = openDb(":memory:");
-    const memoRegistry = memoReaderRegistry();
-    const firstRef = admitMemo(db, memoRegistry, { eventId: "memo-a" });
-    const first = planEvent(db, memoRegistry, firstRef, {
-      now: NOW,
-      policyVersion: "git:test",
-    });
-    expect(first.decision).toBe("run");
-    const firstHash = JSON.parse(first.proposal.spec_json).inputHash;
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const memoRegistry = memoReaderRegistry();
+      const firstRef = admitMemo(db, memoRegistry, { eventId: "memo-a" });
+      const first = planEvent(db, memoRegistry, firstRef, {
+        now: NOW,
+        policyVersion: "git:test",
+      });
+      expect(first.decision).toBe("run");
+      const firstHash = JSON.parse(first.proposal.spec_json).inputHash;
 
-    const document = memoDoc();
-    registerMemos(db, "run_producer", acceptMemo(document).result, {
-      now: Date.parse(document.provenance.createdAt),
+      const document = memoDoc();
+      registerMemos(db, "run_producer", acceptMemo(document).result, {
+        now: Date.parse(document.provenance.createdAt),
+      });
+      const secondRef = admitMemo(db, memoRegistry, { eventId: "memo-b" });
+      const second = planEvent(db, memoRegistry, secondRef, {
+        now: NOW + 1000,
+        policyVersion: "git:test",
+      });
+      expect(second.decision).toBe("run");
+      expect(second.runId).not.toBe(first.runId);
+      const secondSpec = JSON.parse(second.proposal.spec_json);
+      expect(secondSpec.inputHash).not.toBe(firstHash);
+      expect(secondSpec.input.memoPin.entries).toHaveLength(1);
     });
-    const secondRef = admitMemo(db, memoRegistry, { eventId: "memo-b" });
-    const second = planEvent(db, memoRegistry, secondRef, {
-      now: NOW + 1000,
-      policyVersion: "git:test",
-    });
-    expect(second.decision).toBe("run");
-    expect(second.runId).not.toBe(first.runId);
-    const secondSpec = JSON.parse(second.proposal.spec_json);
-    expect(secondSpec.inputHash).not.toBe(firstHash);
-    expect(secondSpec.input.memoPin.entries).toHaveLength(1);
   });
 });
 

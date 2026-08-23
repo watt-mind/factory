@@ -5,7 +5,7 @@ import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
 import { openDb } from "../db.mjs";
 import { planAdmittedEvents } from "../planner.mjs";
-import { loadRegistry } from "../registry.mjs";
+import { loadModelTierMap, loadRegistry } from "../registry.mjs";
 import { validate } from "../schema.mjs";
 import { emitDueTicks } from "../schedules.mjs";
 import { preflight } from "../sandbox/gondolin.mjs";
@@ -283,7 +283,12 @@ function sampleFromSchema(schema) {
 }
 
 describe("command-adapter registry (OPS-404)", () => {
-  const registry = loadRegistry();
+  // Other Fast-test files temporarily point FACTORY_REPOS_ROOT at fixture
+  // configs. This registry is about the shipped command definitions, so read
+  // its model policy from the checked-out Factory root, never ambient state.
+  const registry = loadRegistry({
+    modelTiers: loadModelTierMap({ root: FACTORY_ROOT }),
+  });
   const commandDefs = [...registry.agents.values()].filter(
     (agent) => Array.isArray(agent.command) && agent.command.length > 0,
   );
