@@ -1333,7 +1333,7 @@ function hasPlanTimeDispatchEvidence(spec) {
  * ledger that this new attempt belongs to the same run and immediately follows
  * a lease-expired claim before relaxing the Todo/unassigned dispatch gate.
  */
-function claimedRetryFor(db, runId, attempt) {
+export function claimedRetryFor(db, runId, attempt) {
   if (!Number.isInteger(attempt) || attempt <= 1) return null;
   const priorAttempt = attempt - 1;
   const prior = db
@@ -3503,36 +3503,35 @@ export function releaseStalledWorkerLease(
       `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
     ).run(iso(currentNow - 1), heldRunId, run.attempts);
     if (run.attempts < spec.maxAttempts) {
+      const failureReason = typedFailureReason("lease_expired");
       if (run.state === "VERIFYING") {
         transition(db, {
           runId: heldRunId,
           to: "FAILED",
           actor,
-          reason,
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-        transition(db, {
-          runId: heldRunId,
-          to: "QUEUED",
-          actor,
-          reason: "retry_after_stalled_worker_release",
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      } else {
-        transition(db, {
-          runId: heldRunId,
-          to: "QUEUED",
-          actor,
-          reason,
+          reason: failureReason,
           attempt: run.attempts,
           policyVersion,
           now: currentNow,
         });
       }
+      finishAttempt(
+        db,
+        heldRunId,
+        run.attempts,
+        "FAILED",
+        "lease_expired",
+        currentNow,
+      );
+      transition(db, {
+        runId: heldRunId,
+        to: "QUEUED",
+        actor,
+        reason: "retry:environment",
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
     } else {
       if (run.state === "LEASED") {
         transition(db, {
