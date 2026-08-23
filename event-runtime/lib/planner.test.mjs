@@ -893,6 +893,60 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  test("only operator-sourced dispatches bypass escalated and security gates (GH-999)", () => {
+    withReposRoot(tierRepo, () => {
+      const escalatedDispatch = tierDispatch(["ai:escalated"]);
+      const securityDispatch = tierDispatch(["type:security"]);
+
+      const direct = worktreeDispatchAutoEligibility(
+        { repo: "tiered", ticket: "WM-694" },
+        escalatedDispatch,
+      );
+      expect(direct.refusal.reason).toBe("ticket_escalated");
+      expect(direct.evidence.checks.operator_authorized).toBe(false);
+
+      const authorized = worktreeDispatchAutoEligibility(
+        { repo: "tiered", ticket: "WM-694" },
+        { ...securityDispatch, operatorAuthorized: true },
+      );
+      expect(authorized.ok).toBe(true);
+      expect(authorized.evidence.checks.operator_authorized).toBe(true);
+
+      const operatorDb = openDb(":memory:");
+      const operatorRef = admit(operatorDb, {
+        type: "factory.dispatch.requested",
+        source: "operator",
+        eventId: "operator-security-dispatch",
+        correlationId: "operator-security-dispatch",
+        payload: { repo: "tiered", ticket: "WM-694" },
+      });
+      expect(
+        planEvent(operatorDb, registry, operatorRef, {
+          now: NOW,
+          policyVersion: "git:test",
+          dispatch: securityDispatch,
+        }).decision,
+      ).toBe("run");
+
+      const chainDb = openDb(":memory:");
+      const chainRef = admit(chainDb, {
+        type: "factory.dispatch.requested",
+        source: "chain",
+        eventId: "chain-security-dispatch",
+        correlationId: "chain-security-dispatch",
+        causationId: "run-parent",
+        payload: { repo: "tiered", ticket: "WM-694" },
+      });
+      expect(
+        planEvent(chainDb, registry, chainRef, {
+          now: NOW,
+          policyVersion: "git:test",
+          dispatch: securityDispatch,
+        }),
+      ).toMatchObject({ decision: "noop", reason: "ticket_security" });
+    });
+  });
+
   test("duplicate or unknown ticket tier labels refuse with typed evidence (WM-694)", () => {
     withReposRoot(tierRepo, () => {
       for (const labels of [["tier:light", "tier:standard"], ["tier:turbo"]]) {

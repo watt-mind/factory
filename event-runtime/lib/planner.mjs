@@ -992,6 +992,7 @@ export function worktreeDispatchAutoEligibility(
     maxInFlightFallback,
     budgetRefusal = defaultBudgetRefusal,
     claimedRetry = null,
+    operatorAuthorized = false,
     now = Date.now(),
   } = {},
 ) {
@@ -1003,6 +1004,11 @@ export function worktreeDispatchAutoEligibility(
     inFlight: [],
     escalatePathIntersections: [],
   };
+  // This is deliberately an explicit caller-supplied fact rather than a
+  // ticket label: only the planner may derive it from an operator envelope.
+  // Keep it in the proof so bypasses are auditable alongside every other
+  // dispatch admission fact.
+  evidence.checks.operator_authorized = operatorAuthorized === true;
   let repo;
   try {
     repo = getRepo(loadRepos(), payload?.repo);
@@ -1123,7 +1129,10 @@ export function worktreeDispatchAutoEligibility(
   } else {
     evidence.checks.ticket_agent_ready = true;
   }
-  if (evidence.ticket.labels.includes("ai:escalated")) {
+  if (
+    evidence.ticket.labels.includes("ai:escalated") &&
+    !evidence.checks.operator_authorized
+  ) {
     return refusal("ticket_escalated", evidence);
   }
 
@@ -1186,8 +1195,9 @@ export function worktreeDispatchAutoEligibility(
 
   evidence.checks.ticket_not_escalated = true;
   if (
-    evidence.ticket.labels.includes("type:security") ||
-    evidence.ticket.labels.some((label) => /security/i.test(label))
+    (evidence.ticket.labels.includes("type:security") ||
+      evidence.ticket.labels.some((label) => /security/i.test(label))) &&
+    !evidence.checks.operator_authorized
   ) {
     return refusal("ticket_security", evidence);
   }
@@ -1615,7 +1625,10 @@ export function planEvent(
         try {
           worktreeEligibility = worktreeDispatchAutoEligibility(
             preEnvelope.payload,
-            dispatch,
+            {
+              ...dispatch,
+              operatorAuthorized: preEnvelope.source === "operator",
+            },
           );
         } catch (err) {
           if (!isLinearRateLimited(err)) throw err;
@@ -2044,7 +2057,10 @@ export function planEvent(
       ) {
         const result = worktreeEligibility?.ok
           ? worktreeEligibility
-          : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, dispatch);
+          : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, {
+              ...dispatch,
+              operatorAuthorized: envelope.source === "operator",
+            });
         if (!result?.ok) {
           return humanNeeded(
             db,
