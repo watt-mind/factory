@@ -73,6 +73,7 @@ import {
   classifyFailureCause,
   expireRunDeadline,
   extendRunDeadline,
+  forceFailRun,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
   materializeRunHarness,
@@ -2211,6 +2212,25 @@ describe("worker", () => {
     );
   });
 
+  test("forceFailRun preserves the LEASED → RUNNING → FAILED journal path", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    claimNext(db, opts());
+
+    const result = forceFailRun(db, spec.runId, {
+      actor: "operator",
+      reason: "operator_force_fail",
+      policyVersion: "test",
+      now: T0,
+    });
+
+    expect(result.to).toBe("FAILED");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(
+      lifecycleOf(db, spec.runId).slice(-2).map((entry) => entry.to_state),
+    ).toEqual(["RUNNING", "FAILED"]);
+  });
+
   test("runOnce returns null when nothing is QUEUED", async () => {
     const db = openDb(":memory:");
     expect(await runOnce(db, registry, adapters, opts())).toBeNull();
@@ -4053,6 +4073,89 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       .get(spec.runId);
     const result = JSON.parse(resRow.result_json);
     expect(result.verification.checks).toContain("repo_verify_passed");
+  });
+
+  test("forceFailRun aborts a RUNNING adapter and releases its ticket claim promptly", async () => {
+    const db = openDb(":memory:");
+    const lockDir = tmpDir("evrt-force-fail-locks-");
+    const leaseDir = tmpDir("evrt-force-fail-leases-");
+    const unclaimCalls = [];
+    let adapterFinishedNaturally = false;
+    let adapterAborted = false;
+    let signalAdapterStarted;
+    const adapterStarted = new Promise((resolve) => {
+      signalAdapterStarted = resolve;
+    });
+    const sleepingAdapter = {
+      execute: ({ abortSignal }) =>
+        new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            adapterFinishedNaturally = true;
+            resolve({ exitCode: 0, timedOut: false });
+          }, 1_000);
+          abortSignal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            adapterAborted = true;
+            resolve({ exitCode: null, timedOut: false });
+          });
+          signalAdapterStarted();
+        }),
+    };
+    const spec = queueRun(
+      db,
+      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-954" } }),
+    );
+    const o = opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => readyDispatchTicket("WM-954"),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+        unclaimTicket: (payload) => (unclaimCalls.push(payload), true),
+      },
+    });
+    const claim = claimNext(db, o);
+    const execution = executeClaimed(
+      db,
+      registry,
+      { fake: sleepingAdapter },
+      claim,
+      o,
+    );
+
+    await adapterStarted;
+    forceFailRun(db, spec.runId, {
+      actor: "operator",
+      reason: "operator_force_fail",
+      policyVersion: "test",
+      now: T0,
+    });
+    const summary = await execution;
+
+    expect(adapterAborted).toBe(true);
+    expect(adapterFinishedNaturally).toBe(false);
+    expect(summary).toEqual({ cancelled: true });
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toBe(
+      "operator_force_fail",
+    );
+    expect(
+      db
+        .query(`SELECT terminal_state, reason_code FROM attempts WHERE run_id = ?`)
+        .get(spec.runId),
+    ).toEqual({
+      terminal_state: "FAILED",
+      reason_code: "operator_force_fail",
+    });
+    expect(unclaimCalls).toEqual([
+      expect.objectContaining({
+        repo: "wt-worker",
+        ticket: "WM-954",
+        why: "force_failed",
+      }),
+    ]);
   });
 
   // WM-718: at handoff (PR_OPEN) a red repo verify is the handoff gate

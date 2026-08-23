@@ -2664,12 +2664,15 @@ export async function executeClaimed(
     if (deadlineExpired) outcome = { ...(outcome ?? {}), timedOut: true };
 
     if (abortController.signal.aborted && !deadlineExpired) {
+      const terminalState = db
+        .query(`SELECT state FROM runs WHERE run_id = ?`)
+        .get(runId)?.state;
       if (mayMutateClaimedTicket()) {
         try {
           unclaimTicketFn({
             repo: repoName,
             ticket: ticketId,
-            why: "cancelled",
+            why: terminalState === "FAILED" ? "force_failed" : "cancelled",
             log: null,
           });
         } catch {
@@ -2689,18 +2692,23 @@ export async function executeClaimed(
           });
           return { fenced: true };
         }
-        try {
-          finishAttempt(
-            db,
-            runId,
-            attempt,
-            "CANCELLED",
-            "cancelled",
-            currentNow,
-            attemptUsage,
-          );
-        } catch {
-          // ignore
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get(runId)?.state;
+        if (state === "CANCELLED") {
+          try {
+            finishAttempt(
+              db,
+              runId,
+              attempt,
+              "CANCELLED",
+              "cancelled",
+              currentNow,
+              attemptUsage,
+            );
+          } catch {
+            // ignore
+          }
         }
         return { ok: true };
       });
@@ -3692,6 +3700,10 @@ export function forceFailRun(
       throw new Error(`cannot force-fail run in terminal state ${run.state}`);
     }
     closeOpenProposalForRun(db, runId, { actor, now: currentNow });
+    if (run.state === "RUNNING" || run.state === "VERIFYING") {
+      const active = ACTIVE_EXECUTIONS.get(runId);
+      if (active) active.abort(reason);
+    }
     return result;
   });
 }
