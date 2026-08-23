@@ -3087,7 +3087,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }
   });
 
-  test("FACTORY_DISPATCH_STUB explicitly enables the demo dispatch stub", async () => {
+  test("FACTORY_DISPATCH_STUB enables the demo stub with a bounded owned-paths fixture", async () => {
     const previousStub = process.env.FACTORY_DISPATCH_STUB;
     process.env.FACTORY_DISPATCH_STUB = "1";
     try {
