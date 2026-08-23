@@ -11,8 +11,10 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -40,11 +42,12 @@ function worktreeScriptTimeoutMs() {
 }
 
 export class PathViolation extends Error {
-  constructor(workspaceDir, relPath) {
-    super(`path "${relPath}" escapes workspace ${workspaceDir}`);
+  constructor(workspaceDir, relPath, detail = "escapes workspace") {
+    super(`path "${relPath}" ${detail} ${workspaceDir}`);
     this.name = "PathViolation";
     this.workspaceDir = workspaceDir;
     this.relPath = relPath;
+    this.detail = detail;
   }
 }
 
@@ -114,6 +117,67 @@ export function safeJoin(workspaceDir, relPath) {
   if (!resolved.startsWith(root + path.sep))
     throw new PathViolation(workspaceDir, relPath);
   return resolved;
+}
+
+/**
+ * Resolve one existing workspace-relative artifact source without following
+ * symlinks. Lexical confinement alone is insufficient here: the host later
+ * interprets symlinks preserved from a sandboxed guest in the host namespace.
+ * Every component beneath the workspace root is therefore checked with lstat,
+ * then both endpoints are canonicalized and the final source must be a regular
+ * file.
+ *
+ * This deliberately centralizes the preflight used by result verification and
+ * durable artifact storage. A check/open TOCTOU window remains between this
+ * path-based preflight and callers' subsequent read/hash/copy operations. Fully
+ * closing it requires descriptor-relative openat-style traversal with no-follow
+ * semantics, which node:fs does not expose; callers re-run this helper at each
+ * trust boundary and verify the copied bytes by hash in the meantime.
+ */
+export function confinedRegularFile(workspaceDir, relPath) {
+  const root = path.resolve(workspaceDir);
+  const source = safeJoin(root, relPath);
+  const canonicalRoot = realpathSync(root);
+  const relative = path.relative(root, source);
+  const components = relative.split(path.sep).filter(Boolean);
+  let cursor = root;
+
+  for (const [index, component] of components.entries()) {
+    cursor = path.join(cursor, component);
+    const stat = lstatSync(cursor);
+    if (stat.isSymbolicLink()) {
+      throw new PathViolation(
+        workspaceDir,
+        relPath,
+        `contains symlink component "${components.slice(0, index + 1).join(path.sep)}" beneath workspace`,
+      );
+    }
+    const final = index === components.length - 1;
+    if (!final && !stat.isDirectory()) {
+      throw new PathViolation(
+        workspaceDir,
+        relPath,
+        `contains non-directory component "${components.slice(0, index + 1).join(path.sep)}" beneath workspace`,
+      );
+    }
+    if (final && !stat.isFile()) {
+      throw new PathViolation(
+        workspaceDir,
+        relPath,
+        "does not name a regular file beneath workspace",
+      );
+    }
+  }
+
+  const canonicalSource = realpathSync(source);
+  if (!canonicalSource.startsWith(canonicalRoot + path.sep)) {
+    throw new PathViolation(
+      workspaceDir,
+      relPath,
+      "canonically escapes workspace",
+    );
+  }
+  return canonicalSource;
 }
 
 /**

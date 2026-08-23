@@ -25,9 +25,15 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import { confinedRegularFile } from "./workspace.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA256 = /^sha256:([0-9a-f]{64})$/;
+const TRUSTED_ROOTLESS_SOURCES = new Map([
+  ["memo", null],
+  ["transcript", ".transcript.json"],
+  ["sandbox-console", ".sandbox-console.log"],
+]);
 
 function resultDigest(artifactHash) {
   return SHA256.exec(artifactHash ?? "")?.[1] ?? null;
@@ -82,18 +88,46 @@ export function artifactPath(storeRoot, sha256hex) {
  * rename, and source/destination hashes are verified to prevent corrupted or
  * truncated artifacts from landing in the store (OPS-439).
  */
-export function storeCollected({ entries, storeRoot }) {
+export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
   if (!entries?.length) return entries ?? [];
   mkdirSync(storeRoot, { recursive: true });
   return entries.map((entry) => {
     const dest = artifactPath(storeRoot, entry.sha256);
-    const src = fileURLToPath(entry.uri);
+    const declaredSrc = fileURLToPath(entry.uri);
+    const sourceRoot = entry.workspaceRoot ?? workspaceDir;
+    let src;
+    try {
+      // Verified entries carry their workspace root as non-enumerable internal
+      // provenance. Other workspace producers must pass workspaceDir. The only
+      // rootless sources are host-authored memos and the runtime's fixed,
+      // top-level transcript files; for those, dirname is the complete set of
+      // possible components beneath the source root.
+      const trustedBasename = TRUSTED_ROOTLESS_SOURCES.get(entry.kind);
+      const trustedRootless =
+        TRUSTED_ROOTLESS_SOURCES.has(entry.kind) &&
+        (trustedBasename === null ||
+          path.basename(declaredSrc) === trustedBasename);
+      if (!sourceRoot && !trustedRootless) {
+        throw new Error(
+          `artifact source lacks workspace provenance: ${declaredSrc}`,
+        );
+      }
+      const root = sourceRoot ?? path.dirname(declaredSrc);
+      src = confinedRegularFile(root, path.relative(root, declaredSrc));
+    } catch (err) {
+      if (err?.code === "ENOENT") {
+        throw new Error(`artifact source does not exist: ${declaredSrc}`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
     if (!existsSync(src)) {
       throw new Error(`artifact source does not exist: ${src}`);
     }
     const stat = lstatSync(src);
-    if (stat.isSymbolicLink()) {
-      throw new Error(`cannot store symlinked artifact: ${src}`);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`artifact source is not a regular file: ${src}`);
     }
     const srcHash = hashFile(src);
     if (srcHash !== entry.sha256) {

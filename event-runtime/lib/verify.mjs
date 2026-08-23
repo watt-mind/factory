@@ -13,6 +13,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { globToRegExp } from "../../orchestrator/owned-paths.mjs";
 import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
@@ -20,7 +21,7 @@ import { validateDecisionRequest } from "./decision.mjs";
 import { processResultMemos } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
-import { PathViolation, safeJoin } from "./workspace.mjs";
+import { confinedRegularFile, PathViolation } from "./workspace.mjs";
 
 /**
  * Declared evidence is retained inline in the accepted result (OPS-206): a
@@ -1075,21 +1076,32 @@ function verifyCompleted({
   for (const entry of [...declared, ...injected]) {
     let abs;
     try {
-      abs = safeJoin(workspaceDir, entry.path);
+      abs = confinedRegularFile(workspaceDir, entry.path);
     } catch (err) {
+      if (err?.code === "ENOENT") {
+        violations.push(`artifact_missing: ${entry.path}`);
+        continue;
+      }
       if (!(err instanceof PathViolation)) throw err;
       violations.push(`artifact_path_escape: ${entry.path}`);
       continue;
     }
-    if (!existsSync(abs)) {
+    try {
+      const collectedEntry = {
+        kind: entry.kind,
+        uri: pathToFileURL(abs).href,
+        sha256: sha256Hex(readFileSync(abs)),
+      };
+      // Internal, non-serializable provenance lets durable storage repeat the
+      // same confinement preflight at its own trust boundary.
+      Object.defineProperty(collectedEntry, "workspaceRoot", {
+        value: workspaceDir,
+      });
+      collected.push(collectedEntry);
+    } catch (err) {
+      if (err?.code !== "ENOENT") throw err;
       violations.push(`artifact_missing: ${entry.path}`);
-      continue;
     }
-    collected.push({
-      kind: entry.kind,
-      uri: `file://${abs}`,
-      sha256: sha256Hex(readFileSync(abs)),
-    });
   }
   if (violations.length > 0) throw new ContractViolation(violations);
 

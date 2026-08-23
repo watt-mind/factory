@@ -1,6 +1,6 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-verify-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { hashJson, sha256Hex } from "./canonical.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
@@ -622,6 +622,53 @@ describe("verifyResult", () => {
       expect(err).toBeInstanceOf(ContractViolation);
       expect(err.violations).toEqual(["artifact_path_escape: ../outside.txt"]);
     }
+  });
+
+  for (const linkType of ["absolute", "relative"]) {
+    test(`artifact path through ${linkType} intermediate symlink → ContractViolation`, () => {
+      const dir = makeWorkspace({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+        artifacts: [{ kind: "log", path: "hop/secret.txt" }],
+      });
+      const outside = tmpDir("evrt-verify-outside-");
+      writeFileSync(path.join(outside, "secret.txt"), "host secret\n", "utf8");
+      const target =
+        linkType === "absolute" ? outside : path.relative(dir, outside);
+      symlinkSync(target, path.join(dir, "hop"), "dir");
+
+      expect(() =>
+        verifyResult({
+          spec: makeSpec(),
+          def,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+        }),
+      ).toThrow(ContractViolation);
+    });
+  }
+
+  test("final symlink artifact → ContractViolation", () => {
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+      artifacts: [{ kind: "log", path: "linked.log" }],
+    });
+    writeFileSync(path.join(dir, "real.log"), "ordinary bytes\n", "utf8");
+    symlinkSync("real.log", path.join(dir, "linked.log"));
+
+    expect(() =>
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+      }),
+    ).toThrow(ContractViolation);
   });
 
   test("declared artifact that does not exist → ContractViolation", () => {

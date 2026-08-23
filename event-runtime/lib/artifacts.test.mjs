@@ -75,7 +75,7 @@ describe("storeCollected (OPS-406)", () => {
     const hash = sha256Hex(Buffer.from("hello world"));
 
     const entries = [{ kind: "log", uri: `file://${file}`, sha256: hash }];
-    const stored = storeCollected({ entries, storeRoot });
+    const stored = storeCollected({ entries, storeRoot, workspaceDir });
     expect(stored[0].uri).toBe(`file://${path.join(storeRoot, hash)}`);
     expect(stored[0].sizeBytes).toBe(11);
     expect(readFileSync(path.join(storeRoot, hash), "utf8")).toBe(
@@ -98,10 +98,36 @@ describe("storeCollected (OPS-406)", () => {
       { kind: "key", uri: `file://${symlinkFile}`, sha256: hash },
     ];
 
-    expect(() => storeCollected({ entries, storeRoot })).toThrow(
-      /cannot store symlinked artifact/,
+    expect(() => storeCollected({ entries, storeRoot, workspaceDir })).toThrow(
+      /symlink component/,
     );
   });
+
+  for (const linkType of ["absolute", "relative"]) {
+    test(`rejects ${linkType} intermediate symlink beneath the workspace`, () => {
+      const storeRoot = tmp("evrt-store-");
+      const outsideDir = tmp("evrt-outside-");
+      writeFileSync(path.join(outsideDir, "secret.key"), "secret-data");
+      const workspaceDir = tmp("evrt-ws-");
+      const target =
+        linkType === "absolute"
+          ? outsideDir
+          : path.relative(workspaceDir, outsideDir);
+      symlinkSync(target, path.join(workspaceDir, "hop"), "dir");
+      const entries = [
+        {
+          kind: "key",
+          uri: `file://${path.join(workspaceDir, "hop", "secret.key")}`,
+          sha256: sha256Hex(Buffer.from("secret-data")),
+        },
+      ];
+
+      expect(() =>
+        storeCollected({ entries, storeRoot, workspaceDir }),
+      ).toThrow(/symlink component/);
+      expect(readdirSync(storeRoot)).toEqual([]);
+    });
+  }
 
   test("rejects non-existent source file", () => {
     const storeRoot = tmp("evrt-store-");
@@ -111,7 +137,7 @@ describe("storeCollected (OPS-406)", () => {
     const entries = [
       { kind: "log", uri: `file://${missingFile}`, sha256: hash },
     ];
-    expect(() => storeCollected({ entries, storeRoot })).toThrow(
+    expect(() => storeCollected({ entries, storeRoot, workspaceDir })).toThrow(
       /does not exist/,
     );
   });
@@ -124,7 +150,7 @@ describe("storeCollected (OPS-406)", () => {
     const wrongHash = sha256Hex(Buffer.from("expected different content"));
 
     const entries = [{ kind: "log", uri: `file://${file}`, sha256: wrongHash }];
-    expect(() => storeCollected({ entries, storeRoot })).toThrow(
+    expect(() => storeCollected({ entries, storeRoot, workspaceDir })).toThrow(
       /hash mismatch/,
     );
     expect(existsSync(path.join(storeRoot, wrongHash))).toBe(false);
@@ -143,7 +169,7 @@ describe("storeCollected (OPS-406)", () => {
     writeFileSync(dest, "truncated");
 
     const entries = [{ kind: "log", uri: `file://${file}`, sha256: hash }];
-    const stored = storeCollected({ entries, storeRoot });
+    const stored = storeCollected({ entries, storeRoot, workspaceDir });
     expect(stored[0].uri).toBe(`file://${dest}`);
     expect(stored[0].sizeBytes).toBe(
       Buffer.byteLength("complete valid content"),
@@ -163,7 +189,7 @@ describe("storeCollected (OPS-406)", () => {
     writeFileSync(dest, "identical content");
 
     const entries = [{ kind: "log", uri: `file://${file}`, sha256: hash }];
-    const stored = storeCollected({ entries, storeRoot });
+    const stored = storeCollected({ entries, storeRoot, workspaceDir });
     expect(stored[0].uri).toBe(`file://${dest}`);
     expect(stored[0].sizeBytes).toBe(Buffer.byteLength("identical content"));
   });
@@ -179,12 +205,32 @@ describe("storeCollected (OPS-406)", () => {
     const entries = [
       { kind: "bin", uri: `file://${file}`, sha256: "0".repeat(64) },
     ];
-    expect(() => storeCollected({ entries, storeRoot })).toThrow();
+    expect(() =>
+      storeCollected({ entries, storeRoot, workspaceDir }),
+    ).toThrow();
 
     // Verify store directory has neither destination nor tmp files
     const remainingFiles = readdirSync(storeRoot);
     expect(remainingFiles).toEqual([]);
     expect(existsSync(path.join(storeRoot, hash))).toBe(false);
+  });
+
+  test("fails closed when a collected source has no workspace provenance", () => {
+    const storeRoot = tmp("evrt-store-");
+    const workspaceDir = tmp("evrt-ws-");
+    const file = path.join(workspaceDir, "out.log");
+    writeFileSync(file, "ordinary bytes");
+    const entries = [
+      {
+        kind: "log",
+        uri: `file://${file}`,
+        sha256: sha256Hex(Buffer.from("ordinary bytes")),
+      },
+    ];
+
+    expect(() => storeCollected({ entries, storeRoot })).toThrow(
+      /lacks workspace provenance/,
+    );
   });
 });
 
