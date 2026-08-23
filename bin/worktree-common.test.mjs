@@ -236,18 +236,13 @@ test("normalize_path is portable and accepts a missing final component", () => {
 
 test("provision_instance_local_configs does not invoke GNU-only realpath", () => {
   const source = mkdtempSync(path.join(tmpdir(), "gh-937-config-source-"));
-  const checkout = mkdtempSync(
-    path.join(tmpdir(), "gh-937-config-checkout-"),
-  );
+  const checkout = mkdtempSync(path.join(tmpdir(), "gh-937-config-checkout-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
   try {
     mkdirSync(path.join(source, "config"));
     mkdirSync(path.join(checkout, "config"));
     writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
-    writeFileSync(
-      path.join(checkout, ".gitignore"),
-      "config/repos.yaml\n",
-    );
+    writeFileSync(path.join(checkout, ".gitignore"), "config/repos.yaml\n");
     writeFileSync(
       path.join(mockBin, "realpath"),
       "#!/usr/bin/env bash\nprintf '%s\\n' 'realpath: illegal option -- m' >&2\nexit 1\n",
