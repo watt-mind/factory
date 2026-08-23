@@ -332,6 +332,28 @@ export function pathsCollide(setA = [], setB = []) {
 }
 
 /**
+ * Whether an Owned Paths glob is equivalent to the fail-closed whole-repo
+ * sentinel. A trailing single-segment wildcard and repeated `/**` segments
+ * reach every path just like `**`; treating only the literal spelling as
+ * unknown scope opens a dispatch collision bypass.
+ */
+export function isMatchEverythingGlob(value) {
+  const glob = String(value ?? "")
+    .trim()
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "");
+  if (!glob) return false;
+
+  const segments = glob.split("/");
+  return (
+    segments[0] === "**" &&
+    segments.slice(1).every((segment, index) =>
+      segment === "**" || (segment === "*" && index === segments.length - 2),
+    )
+  );
+}
+
+/**
  * Every overlapping pair between two Owned Paths sets, for advisory evidence.
  * Same predicate as pathsCollide, but returns the pairs instead of a boolean so
  * a proposal can name what it overlaps with rather than just refusing.
@@ -345,25 +367,20 @@ export function pathOverlaps(setA = [], setB = []) {
 
 /**
  * The set of overlaps that still refuse dispatch under advisory mode (WM-677):
- * a `**` claim on either side, and nothing else. `**` is the fail-closed
- * sentinel for "this ticket's scope is unknown, it must run alone" — the one
- * claim a rebase cannot reason about. Everything else, including two tickets
- * naming the SAME concrete file, is textual overlap: same file is not same
- * lines (tickets qualify claims like `App.tsx (interval constants only)` for
- * exactly this), and rebase/merge-fix resolve it far more often than not. So
- * it is recorded on the proposal and dispatch proceeds. The identical-file
- * rule was tried first and refused App.tsx/hooks.ts/api.mjs across four
- * tickets in one batch on 2026-08-18 — precisely the starvation advisory mode
- * exists to end.
+ * a whole-repo claim on either side, and nothing else. `**` and equivalent
+ * globs are the fail-closed sentinel for "this ticket's scope is unknown, it
+ * must run alone" — the one claim a rebase cannot reason about. Everything
+ * else, including two tickets naming the SAME concrete file, is textual
+ * overlap: same file is not same lines (tickets qualify claims like `App.tsx
+ * (interval constants only)` for exactly this), and rebase/merge-fix resolve
+ * it far more often than not. So it is recorded on the proposal and dispatch
+ * proceeds. The identical-file rule was tried first and refused
+ * App.tsx/hooks.ts/api.mjs across four tickets in one batch on 2026-08-18 —
+ * precisely the starvation advisory mode exists to end.
  */
 export function hardPathConflicts(setA = [], setB = []) {
-  const norm = (g) =>
-    String(g ?? "")
-      .trim()
-      .replace(/^\.\//, "")
-      .replace(/\/$/, "");
   return pathOverlaps(setA, setB).filter(
-    ({ a, b }) => norm(a) === "**" || norm(b) === "**",
+    ({ a, b }) => isMatchEverythingGlob(a) || isMatchEverythingGlob(b),
   );
 }
 

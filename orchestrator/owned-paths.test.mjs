@@ -19,6 +19,7 @@ import {
   effectiveOwnedPaths,
   globToRegExp,
   globsOverlap,
+  isMatchEverythingGlob,
   OwnedPathsPatternError,
   pathsCollide,
   nextDispatchable,
@@ -344,7 +345,16 @@ test("pathOverlaps returns every overlapping pair, in order", () => {
   expectEqual(pathOverlaps(["a.md"], ["b.md"]), []);
 });
 
-test("hardPathConflicts: ** on either side — nothing else", () => {
+test("match-everything globs recognize the fail-closed sentinel", () => {
+  for (const glob of ["**", "**/*", "**/**", "**/**/*", "./**/**/"]) {
+    expectTrue(isMatchEverythingGlob(glob), `${glob} matches every path`);
+  }
+  for (const glob of ["*", "*/**", "src/**", "**/*/*"]) {
+    expectTrue(!isMatchEverythingGlob(glob), `${glob} is not whole-repo`);
+  }
+});
+
+test("hardPathConflicts: whole-repo claim on either side — nothing else", () => {
   // Containment, shared-prefix, same-glob, and even the SAME concrete file are
   // NOT hard: same file is not same lines, and a rebase resolves it.
   expectEqual(hardPathConflicts(["src/api/**"], ["src/api/routes.ts"]), []);
@@ -354,9 +364,11 @@ test("hardPathConflicts: ** on either side — nothing else", () => {
   );
   expectEqual(hardPathConflicts(["views/*.tsx"], ["views/*.tsx"]), []);
   expectEqual(hardPathConflicts(["docs/a.md"], ["docs/a.md"]), []);
-  // `**` on either side is hard against anything it reaches.
-  expectTrue(hardPathConflicts(["**"], ["docs/a.md"]).length === 1);
-  expectTrue(hardPathConflicts(["docs/a.md"], ["**"]).length === 1);
+  // Every spelling equivalent to `**` is hard against anything it reaches.
+  for (const glob of ["**", "**/*", "**/**", "**/**/*"]) {
+    expectTrue(hardPathConflicts([glob], ["docs/a.md"]).length === 1);
+    expectTrue(hardPathConflicts(["docs/a.md"], [glob]).length === 1);
+  }
 });
 
 // WM-718: the worker runs the ticket's own Verification Command at handoff, so

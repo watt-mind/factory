@@ -786,14 +786,15 @@ describe("planEvent worktree gate (WM-108)", () => {
     return synthetic;
   }
 
-  function withReposRoot(yaml, fn) {
+  function withReposRoot(yaml, fn, policy = null) {
     const root = tmpDir("evrt-plan-wt-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
+    if (policy) writeFileSync(path.join(root, "config", "policy.yaml"), policy);
     const previous = process.env.FACTORY_REPOS_ROOT;
     process.env.FACTORY_REPOS_ROOT = root;
     try {
-      return fn();
+      return fn(root);
     } finally {
       if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
       else process.env.FACTORY_REPOS_ROOT = previous;
@@ -1334,42 +1335,73 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
-  test("unknown Owned Paths refuses distinctly before wildcard escalation", () => {
+  test("whole-repo Owned Paths refuses distinctly before wildcard escalation", () => {
     withReposRoot(
       `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +
         `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
         `    worktree_root: /tmp/worktrees\n    escalate_paths:\n      - '**'\n`,
       () => {
-        let fetchedInFlight = false;
-        const result = worktreeDispatchAutoEligibility(
-          { repo: "gated", ticket: "WM-2" },
-          {
-            countLeases: () => 0,
-            budgetRefusal: () => null,
-            fetchTicket: () => ({
-              identifier: "WM-2",
-              state: { name: "Todo" },
-              assignee: null,
-              labels: { nodes: [{ name: "ai:agent-ready" }] },
-              description: "",
-            }),
-            fetchInFlight: () => {
-              fetchedInFlight = true;
-              return [];
+        for (const description of [
+          "",
+          "## Owned Paths\n- **\n",
+          "## Owned Paths\n- **/*\n",
+          "## Owned Paths\n- **/**\n",
+        ]) {
+          let fetchedInFlight = false;
+          const result = worktreeDispatchAutoEligibility(
+            { repo: "gated", ticket: "WM-2" },
+            {
+              countLeases: () => 0,
+              budgetRefusal: () => null,
+              fetchTicket: () => ({
+                identifier: "WM-2",
+                state: { name: "Todo" },
+                assignee: null,
+                labels: { nodes: [{ name: "ai:agent-ready" }] },
+                description,
+              }),
+              fetchInFlight: () => {
+                fetchedInFlight = true;
+                return [];
+              },
             },
+          );
+          expect(result.refusal).toMatchObject({
+            decision: "noop",
+            reason: "owned_paths_unknown",
+          });
+          expect(result.evidence.ticket.ownedPathsParsed).toBe(false);
+          expect(result.evidence.escalatePathIntersections).toEqual([]);
+          expect(fetchedInFlight).toBe(false);
+        }
+      },
+    );
+  });
+
+  test("advisory mode hard-refuses an in-flight **/* claim", () => {
+    withReposRoot(
+      tierRepo,
+      () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "WM-952" },
+          {
+            ...tierDispatch(),
+            fetchTicket: () => ({
+              ...tierTicket(),
+              identifier: "WM-952",
+              description: "## Owned Paths\n- src/a.ts\n",
+            }),
+            fetchInFlight: () => [
+              {
+                identifier: "WM-953",
+                description: "## Owned Paths\n- **/*\n",
+              },
+            ],
           },
         );
-        expect(result.refusal).toMatchObject({
-          decision: "noop",
-          reason: "owned_paths_unknown",
-        });
-        expect(result.evidence.ticket).toMatchObject({
-          ownedPaths: ["**"],
-          ownedPathsParsed: false,
-        });
-        expect(result.evidence.escalatePathIntersections).toEqual([]);
-        expect(fetchedInFlight).toBe(false);
+        expect(result.refusal?.reason).toBe("owned_paths_conflict_hard");
       },
+      "dispatch:\n  owned_paths_collision: advisory\n",
     );
   });
 

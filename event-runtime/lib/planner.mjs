@@ -16,6 +16,7 @@ import {
   effectiveOwnedPaths,
   globToRegExp,
   hardPathConflicts,
+  isMatchEverythingGlob,
   pathOverlaps,
   pathsCollide,
   parseOwnedPaths,
@@ -706,9 +707,9 @@ function policyMaxInFlight(root = reposRoot()) {
  * with an in-flight ticket — the historical behavior, and the fail-closed
  * default when the key is absent or malformed. `advisory` records the overlap
  * on the proposal as evidence and dispatches anyway, refusing only the narrow
- * hard-conflict set (identical concrete file, or `**`): textual overlap is what
- * rebase and merge-fix already resolve, and refusing it at dispatch was
- * starving the pool for conflicts that mostly never materialized.
+ * hard-conflict set (a whole-repo claim): textual overlap is what rebase and
+ * merge-fix already resolve, and refusing it at dispatch was starving the pool
+ * for conflicts that mostly never materialized.
  */
 export const DEFAULT_OWNED_PATHS_COLLISION = "strict";
 export function policyOwnedPathsCollision(root = reposRoot()) {
@@ -883,7 +884,10 @@ function evidenceTicket(ticket, ticketId) {
         .filter(Boolean),
     ),
     ownedPaths: effectiveOwnedPaths(description),
-    ownedPathsParsed: parsed.length > 0,
+    // A parsed `**/*` is no more bounded than the synthetic `**` used for a
+    // missing section. Both must refuse before collision checks.
+    ownedPathsParsed:
+      parsed.length > 0 && !parsed.some((glob) => isMatchEverythingGlob(glob)),
     descriptionHash: hashJson(description),
     // WM-879: github-plane trust facts. `controlPlaneKind` is undefined for
     // every other plane (Linear, memory), which is what keeps the gates
@@ -957,7 +961,8 @@ function evidenceInFlight(issue) {
     id: issue.identifier,
     descriptionHash: hashJson(description),
     ownedPaths: effectiveOwnedPaths(description),
-    ownedPathsParsed: parsed.length > 0,
+    ownedPathsParsed:
+      parsed.length > 0 && !parsed.some((glob) => isMatchEverythingGlob(glob)),
   };
 }
 
@@ -1156,9 +1161,10 @@ export function worktreeDispatchAutoEligibility(
   }
   evidence.checks.ticket_unblocked = true;
 
-  // Never let effectiveOwnedPaths' fail-closed `**` sentinel masquerade as a
-  // real path during a sensitive-path check. Unknown ticket scope is its own
-  // refusal, before overlap or escalate_paths can assign a misleading cause.
+  // Never let effectiveOwnedPaths' fail-closed whole-repo sentinel masquerade
+  // as a real path during a sensitive-path check. Unknown ticket scope is its
+  // own refusal, before overlap or escalate_paths can assign a misleading
+  // cause.
   if (!evidence.ticket.ownedPathsParsed) {
     evidence.checks.owned_paths_parsed = false;
     return refusal("owned_paths_unknown", evidence);
@@ -1290,7 +1296,7 @@ function ownedPathContains(ownerValue, candidateValue) {
   const owner = normalizedOwnedPath(ownerValue);
   const candidate = normalizedOwnedPath(candidateValue);
   if (!owner || !candidate) return false;
-  if (owner === "**" || owner === candidate) return true;
+  if (isMatchEverythingGlob(owner) || owner === candidate) return true;
 
   const candidateHasGlob = /[*?{]/.test(candidate);
   if (!candidateHasGlob) return globToRegExp(owner).test(candidate);
