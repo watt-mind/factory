@@ -168,19 +168,27 @@ else
       [[ "$OPEN_PR_COUNT" == "1" ]] && RESUMING=1
     fi
 
-    # WM-680: a branch whose tip is already on origin is preserved work, not
-    # litter — an orphaned or blocked run's WIP that the orchestrator (or the
-    # worker's own preservation) pushed so nothing is lost. Refusing to build
-    # on it forces a human to run --resume by hand for every re-dispatch, and
-    # an unattended loop just loses the slot. Resume it. A branch with unique
-    # commits that exist ONLY locally still refuses below: that is the case
-    # where nobody has vouched for the work by pushing it.
+    # A matching ticket branch is the only branch this invocation may resume
+    # or publish. It can be local-only when a prior worker committed but died
+    # before pushing. Publish it with Git's normal non-force semantics, then
+    # resume it in this invocation. A remote tip that differs is deliberately
+    # not overwritten: plain `git push` rejects a diverged remote branch.
     if [[ "$RESUMING" -eq 0 && "$UNIQUE_COMMITS" -gt 0 ]]; then
       if [[ "${FACTORY_WORKTREE_RESUME:-0}" == "1" ]]; then
         RESUMING=1
-      elif REMOTE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH") \
-           && [[ "$REMOTE_SHA" == "$BRANCH_SHA" ]]; then
-        RESUMING=1
+      else
+        REMOTE_BRANCH_SHA=$(git -C "$REPO" ls-remote --heads origin "refs/heads/$BRANCH" | awk 'NR == 1 { print $1 }') \
+          || die "worktree_branch_inspection_failed: could not inspect origin branch '$BRANCH'"
+        if [[ "$REMOTE_BRANCH_SHA" == "$BRANCH_SHA" ]]; then
+          RESUMING=1
+        elif git -C "$REPO" push origin "$BRANCH" >/dev/null 2>&1; then
+          info "auto-pushed matching ticket branch $BRANCH at $BRANCH_SHA"
+          RESUMING=1
+        elif [[ -n "$REMOTE_BRANCH_SHA" ]]; then
+          die "worktree_branch_has_commits: branch '$BRANCH' has $UNIQUE_COMMITS unique commit(s) beyond $BASE_REF; local tip $BRANCH_SHA differs from origin tip $REMOTE_BRANCH_SHA — refusing to overwrite origin without force"
+        else
+          die "worktree_branch_has_commits: branch '$BRANCH' has $UNIQUE_COMMITS unique commit(s) beyond $BASE_REF that are not on origin — auto-push failed; re-run with --resume or push branch '$BRANCH' explicitly before re-dispatch"
+        fi
       fi
     fi
 

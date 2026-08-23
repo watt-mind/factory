@@ -887,11 +887,23 @@ test("re-dispatch auto-resumes a branch whose unique commits are already on orig
     ).toBe(0);
     expect(existsSync(expectedPath)).toBe(false);
 
+    const realGit = Bun.which("git");
     writeFileSync(
       path.join(mockBin, "gh"),
       "#!/usr/bin/env bash\nprintf '0\\n'\n",
       { mode: 0o755 },
     ); // no open PR
+    writeFileSync(
+      path.join(mockBin, "git"),
+      `#!/usr/bin/env bash
+if [[ "$*" == *"ls-remote --heads origin refs/heads/${branch}"* ]]; then
+  printf "%s\\trefs/heads/${branch}\\n" "${tip}"
+  exit 0
+fi
+exec "${realGit}" "$@"
+`,
+      { mode: 0o755 },
+    );
     const secondUp = Bun.spawnSync({
       cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
       stdout: "pipe",
@@ -977,9 +989,21 @@ test("re-dispatch keeps unique-commit refusal ahead of dirty-worktree preservati
       "uncommitted after unique commit\n",
     );
 
+    const realGit = Bun.which("git");
     writeFileSync(
       path.join(mockBin, "gh"),
       "#!/usr/bin/env bash\nprintf '0\\n'\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(mockBin, "git"),
+      `#!/usr/bin/env bash
+if [[ "$*" == *"push origin "* ]]; then
+  echo "simulated push failure" >&2
+  exit 1
+fi
+exec "${realGit}" "$@"
+`,
       { mode: 0o755 },
     );
     const secondUp = Bun.spawnSync({

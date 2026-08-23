@@ -1,5 +1,7 @@
 import {
   chmodSync,
+  cpSync,
+  existsSync,
   mkdtempSync,
   rmSync,
   mkdirSync,
@@ -11,6 +13,8 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
+const WORKTREE_UP = path.resolve(import.meta.dir, "worktree-up.sh");
+const WORKTREE_DAEMONS = path.resolve(import.meta.dir, "worktree-daemons.sh");
 
 // Private port band for this test run (WM-113). Fixed in-band ports (7752,
 // 7772, …) collide with real runtimes, leftover servers, and concurrent CI
@@ -76,6 +80,66 @@ function sh(body, extraEnv = {}) {
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
   };
+}
+
+function command(cmd, cwd, extraEnv = {}) {
+  const result = Bun.spawnSync({
+    cmd,
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, ...extraEnv },
+  });
+  return {
+    status: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
+}
+
+function git(cwd, ...args) {
+  const result = command(["git", ...args], cwd);
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
+  return result.stdout.trim();
+}
+
+function worktreeUpFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "wm-934-worktree-up-"));
+  const remote = path.join(root, "origin.git");
+  const worktrees = mkdtempSync(path.join(tmpdir(), "wm-934-worktrees-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "wm-934-gh-"));
+  mkdirSync(path.join(root, "bin"));
+  cpSync(COMMON, path.join(root, "bin", "worktree-common.sh"));
+  cpSync(WORKTREE_DAEMONS, path.join(root, "bin", "worktree-daemons.sh"));
+  cpSync(WORKTREE_UP, path.join(root, "bin", "worktree-up.sh"));
+  chmodSync(path.join(root, "bin", "worktree-up.sh"), 0o755);
+  writeFileSync(
+    path.join(mockBin, "gh"),
+    "#!/usr/bin/env bash\nprintf '0\\n'\n",
+  );
+  chmodSync(path.join(mockBin, "gh"), 0o755);
+  git(root, "init", "-q", "-b", "develop");
+  git(root, "config", "user.name", "Worktree test");
+  git(root, "config", "user.email", "worktree-test@example.test");
+  git(root, "add", "bin");
+  git(root, "commit", "-qm", "base");
+  git(root, "init", "-q", "--bare", remote);
+  git(root, "remote", "add", "origin", remote);
+  git(root, "push", "-qu", "origin", "develop");
+  return { root, remote, worktrees, mockBin };
+}
+
+function runWorktreeUp(fixture, ticket) {
+  return command(
+    ["bash", "bin/worktree-up.sh", ticket, "--checkout-only"],
+    fixture.root,
+    {
+      FACTORY_WT_ROOT: fixture.worktrees,
+      PATH: `${fixture.mockBin}:${process.env.PATH}`,
+    },
+  );
 }
 
 async function shAsync(body, extraEnv = {}) {
@@ -782,6 +846,76 @@ test("port_listening detects active and closed ports", async () => {
     listener.stop(true);
   }
   expect(sh(`port_listening ${P(396)}`).status).not.toBe(0);
+});
+
+test("worktree-up pushes a matching local-only ticket branch and resumes it", () => {
+  const fixture = worktreeUpFixture();
+  const ticket = "WM-934";
+  const branch = `feat/${ticket}`;
+  try {
+    git(fixture.root, "switch", "-qc", branch);
+    writeFileSync(path.join(fixture.root, "local-only.txt"), "local work\n");
+    git(fixture.root, "add", "local-only.txt");
+    git(fixture.root, "commit", "-qm", "local-only work");
+    const tip = git(fixture.root, "rev-parse", branch);
+    git(fixture.root, "switch", "-q", "develop");
+
+    const result = runWorktreeUp(fixture, ticket);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      `auto-pushed matching ticket branch ${branch} at ${tip}`,
+    );
+    expect(git(fixture.remote, "rev-parse", `refs/heads/${branch}`)).toBe(tip);
+    expect(
+      git(path.join(fixture.worktrees, ticket), "branch", "--show-current"),
+    ).toBe(branch);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up fails closed when a matching remote branch diverged after a stale fetch", () => {
+  const fixture = worktreeUpFixture();
+  const ticket = "WM-935";
+  const branch = `feat/${ticket}`;
+  const remoteClone = mkdtempSync(path.join(tmpdir(), "wm-935-origin-work-"));
+  try {
+    git(fixture.root, "switch", "-qc", branch);
+    writeFileSync(path.join(fixture.root, "local.txt"), "local work\n");
+    git(fixture.root, "add", "local.txt");
+    git(fixture.root, "commit", "-qm", "local work");
+    const localTip = git(fixture.root, "rev-parse", branch);
+    git(fixture.root, "update-ref", `refs/remotes/origin/${branch}`, localTip);
+
+    git(remoteClone, "clone", "-q", fixture.remote, ".");
+    git(remoteClone, "config", "user.name", "Remote test");
+    git(remoteClone, "config", "user.email", "remote-test@example.test");
+    git(remoteClone, "switch", "-qc", branch, "origin/develop");
+    writeFileSync(path.join(remoteClone, "remote.txt"), "remote work\n");
+    git(remoteClone, "add", "remote.txt");
+    git(remoteClone, "commit", "-qm", "remote work");
+    git(remoteClone, "push", "-q", "origin", branch);
+    const remoteTip = git(remoteClone, "rev-parse", branch);
+
+    const result = runWorktreeUp(fixture, ticket);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("worktree_branch_has_commits");
+    expect(result.stderr).toContain(localTip);
+    expect(result.stderr).toContain(remoteTip);
+    expect(git(fixture.remote, "rev-parse", `refs/heads/${branch}`)).toBe(
+      remoteTip,
+    );
+    expect(existsSync(path.join(fixture.worktrees, ticket))).toBe(false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+    rmSync(remoteClone, { recursive: true, force: true });
+  }
 });
 
 test("ticket_number extracts numeric ID from valid ticket strings", () => {
