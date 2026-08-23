@@ -2227,7 +2227,9 @@ describe("worker", () => {
     expect(result.to).toBe("FAILED");
     expect(runState(db, spec.runId)).toBe("FAILED");
     expect(
-      lifecycleOf(db, spec.runId).slice(-2).map((entry) => entry.to_state),
+      lifecycleOf(db, spec.runId)
+        .slice(-2)
+        .map((entry) => entry.to_state),
     ).toEqual(["RUNNING", "FAILED"]);
   });
 
@@ -4143,7 +4145,9 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     );
     expect(
       db
-        .query(`SELECT terminal_state, reason_code FROM attempts WHERE run_id = ?`)
+        .query(
+          `SELECT terminal_state, reason_code FROM attempts WHERE run_id = ?`,
+        )
         .get(spec.runId),
     ).toEqual({
       terminal_state: "FAILED",
