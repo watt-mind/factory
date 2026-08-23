@@ -26,7 +26,11 @@ You never modify it, never run its build, never install anything. Write
 
 1. Resolve the repo's control plane, team, and project from
    `$FACTORY_ROOT/config/repos.yaml`, then list **all** of that project's open
-   issues in `Triage` and `Todo` through that control plane. Do not issue
+   issues in `Triage` and `Todo` through that control plane. Every
+   `tools/ticket.mjs` read must pass `--repo "$REPO"`, where `$REPO` is the
+   `repo` value from `./input.json`; for example,
+   `bun "$FACTORY_ROOT/tools/ticket.mjs" raw '<query>' --repo "$REPO" --json`.
+   Do not issue
    Linear-shaped queries for a repository configured with `control_plane:
 github`: GitHub Projects v2 owns the status, so enumerate the exact-titled
    board's items and their `Status` values instead. The exact-title lookup must

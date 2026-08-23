@@ -123,6 +123,19 @@ describe("registry", () => {
     expect(getEventType(registry, "unknown.event")).toBeNull();
   });
 
+  test("work-scan scopes every queue and inflight ticket read to its input repo", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "work-scan.md"),
+      "utf8",
+    );
+    const ticketReads = [
+      ...prompt.matchAll(/ticket\.mjs"?\s+(?:queue|inflight)\b([^\n]*)/g),
+    ];
+    expect(ticketReads).toHaveLength(2);
+    for (const [, args] of ticketReads)
+      expect(args).toContain('--repo "$REPO"');
+  });
+
   test("zero-pack merged-view digest matches the develop baseline", () => {
     // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
     // The serializer omits only WM-470's new pack provenance and normalizes
@@ -184,8 +197,10 @@ describe("registry", () => {
     // registry inputs).
     // Regenerated (#924): triage-scan selects its configured control plane and
     // fails closed when a GitHub Project title does not match.
+    // Regenerated (#985): list-reading scan prompts pass their input repo to
+    // ticket.mjs, so ephemeral workspaces do not fall back to another plane.
     const expected =
-      "sha256:221bd1d7193e177898470c60c0e7c11e91574886e4c4b3671f99462ce8a95f24";
+      "sha256:7a172fc8a2ffa21bd95cfd1b22d786b85741be8b64a7577436e25d7d856ba02d";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
