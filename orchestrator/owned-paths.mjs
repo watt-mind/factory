@@ -30,10 +30,15 @@ import path from "node:path";
  * everything" rather than "not dispatchable".
  */
 export function parseOwnedPaths(description = "") {
-  const section = description.split(/^#{2,4}\s+/m).find((s) => {
-    const heading = s.split("\n")[0];
-    return /\bOwned Paths\b/i.test(heading);
-  });
+  // `split` retains the pre-heading prose as index 0. It cannot be a section,
+  // even when it mentions "Owned Paths", so only inspect heading-led chunks.
+  const section = description
+    .split(/^#{2,4}\s+/m)
+    .slice(1)
+    .find((s) => {
+      const heading = s.split("\n")[0];
+      return /\bOwned Paths\b/i.test(heading);
+    });
   if (!section) return [];
 
   // Real tickets write this section three different ways — bullet lists, fenced
