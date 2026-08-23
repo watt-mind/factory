@@ -415,6 +415,16 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 13,
+    name: "outbox_publish_drain_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_outbox_published_seq
+          ON outbox (published_at, seq);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
