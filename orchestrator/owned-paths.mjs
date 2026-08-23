@@ -347,9 +347,13 @@ export function isMatchEverythingGlob(value) {
   const segments = glob.split("/");
   return (
     segments[0] === "**" &&
-    segments.slice(1).every((segment, index) =>
-      segment === "**" || (segment === "*" && index === segments.length - 2),
-    )
+    segments
+      .slice(1)
+      .every(
+        (segment, index) =>
+          segment === "**" ||
+          (segment === "*" && index === segments.length - 2),
+      )
   );
 }
 
