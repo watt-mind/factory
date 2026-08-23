@@ -2365,7 +2365,8 @@ export async function executeClaimed(
             // Match the planner's operator-only bypass from the immutable
             // proposal that admitted this run. Never trust caller options here:
             // chain and schedule runs must keep the security/escalation gate.
-            operatorAuthorized: originatingEvent(db, runId)?.source === "operator",
+            operatorAuthorized:
+              originatingEvent(db, runId)?.source === "operator",
           });
         }
       } catch (err) {
