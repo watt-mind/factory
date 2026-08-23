@@ -46,6 +46,27 @@ Something is broken.
   ]);
 });
 
+test("ignores intro prose that mentions Owned Paths before its heading", () => {
+  const desc = `The Owned Paths section below identifies the safe files to change.
+
+## Problem & Context
+
+Something is broken.
+
+## Owned Paths
+
+- \`orchestrator/owned-paths.mjs\`
+- \`orchestrator/owned-paths.test.mjs\`
+
+## Verification Command
+
+    bun test`;
+  expectEqual(parseOwnedPaths(desc), [
+    "orchestrator/owned-paths.mjs",
+    "orchestrator/owned-paths.test.mjs",
+  ]);
+});
+
 test("missing section yields no paths (caller decides what that means)", () => {
   expectEqual(parseOwnedPaths("## Problem\n\nno paths here"), []);
 });
