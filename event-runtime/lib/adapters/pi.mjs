@@ -317,7 +317,11 @@ export const BASE_INHERITED_ENV = [
  * other non-`undefined` value as mutating. Identical for every real agent
  * definition — `mutating` is a JSON boolean — but this direction fails closed.
  */
-export function safeChildEnvironment(env = {}, defOrOpts = {}) {
+export function safeChildEnvironment(
+  env = {},
+  defOrOpts = {},
+  { factoryRoot = FACTORY_ROOT } = {},
+) {
   const isMutating =
     typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
   const inherited = isMutating
@@ -333,7 +337,7 @@ export function safeChildEnvironment(env = {}, defOrOpts = {}) {
   // Factory's runtime support code. Expose the running Factory checkout through
   // one adapter-owned, non-overridable path so pinned agent procedures can call
   // shared helpers without assuming the target repo is Factory (WM-433).
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
+  childEnv.FACTORY_ROOT = factoryRoot;
   // Subscription auth (Codex/ChatGPT OAuth) is the point of routing through
   // pi at all — an inherited key would silently switch a run to per-token
   // billing (same rationale as run-agent.sh's UNSET_KEYS, all providers pi
@@ -728,7 +732,13 @@ export async function execute({
   }
 
   const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
-  const childEnv = safeChildEnvironment(env, def);
+  // A remote worker can execute this checked-out adapter from a persistent
+  // runner checkout, whose ignored config/ is intentionally absent. Preserve
+  // the launching operator's root for the ticket CLI instead of replacing it
+  // with this module's checkout-derived fallback (GH-975).
+  const childEnv = safeChildEnvironment(env, def, {
+    factoryRoot: process.env.FACTORY_ROOT || FACTORY_ROOT,
+  });
 
   const resolved = resolvePiCommand({
     which: (name) => Bun.which(name, { PATH: childEnv.PATH ?? "" }),
