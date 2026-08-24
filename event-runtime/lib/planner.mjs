@@ -473,12 +473,15 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
 
   return {
     ...dispatch,
-    fetchTicket: (id) => {
+    fetchTicket: (id, repo) => {
       throwIfLimited();
-      if (cache.tickets.has(id)) return cache.tickets.get(id);
+      // Cache per (id, repo): the same identifier read against different
+      // control planes is a different lookup.
+      const key = repo ? `${repo}::${id}` : id;
+      if (cache.tickets.has(key)) return cache.tickets.get(key);
       try {
-        const value = fetchTicket(id);
-        cache.tickets.set(id, value);
+        const value = fetchTicket(id, repo);
+        cache.tickets.set(key, value);
         return value;
       } catch (err) {
         remember(err);
@@ -516,10 +519,17 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
   };
 }
 
-function fetchTicketDefault(ticketId) {
+function fetchTicketDefault(ticketId, repo) {
   try {
+    // Pass --repo so tools/ticket.mjs resolves the ticket's OWN control plane
+    // (linear for CLNT repos, github for factory) instead of falling back to
+    // the serve process's cwd repo. Without it, a Linear id like CLNT-1504
+    // is read against the GitHub plane and dead-letters as "not a GitHub
+    // issue identifier" — blocking all Linear-repo dispatch.
+    const args = [linearCli(), "get", ticketId, "--json"];
+    if (repo) args.push("--repo", repo);
     return JSON.parse(
-      execFileSync("bun", [linearCli(), "get", ticketId, "--json"], {
+      execFileSync("bun", args, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }),
@@ -1059,7 +1069,7 @@ export function worktreeDispatchAutoEligibility(
   if (live >= cap) return refusal("capacity_full", evidence);
   evidence.checks.cap_available = true;
 
-  const ticket = fetchTicket(payload?.ticket);
+  const ticket = fetchTicket(payload?.ticket, payload?.repo);
   evidence.ticket = evidenceTicket(ticket, payload?.ticket);
   if (!ticket) return refusal("ticket_not_found", evidence, "human_needed");
   evidence.checks.ticket_found = true;
@@ -1350,7 +1360,7 @@ export function worktreeMergeFixEligibility(
 
   let ticket;
   try {
-    ticket = fetchTicket(payload?.ticket);
+    ticket = fetchTicket(payload?.ticket, payload?.repo);
   } catch (err) {
     return refusal(
       "merge_fix_ticket_read_failed",
