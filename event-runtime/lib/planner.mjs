@@ -1278,7 +1278,7 @@ export function worktreeDispatchAutoEligibility(
     configured: evidence.repo.escalatePaths.length > 0,
     intersect: evidence.escalatePathIntersections,
   };
-  if (evidence.escalatePathIntersections.length > 0) {
+  if (evidence.escalatePathIntersections.length > 0 && !operatorAuthorized) {
     return refusal(
       "escalate_paths_intersect",
       evidence,
