@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STARTER = path.join(ROOT, "templates", "starter");
+const EXACT_SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const REQUIRED_FILES = [
   "package.json",
   "AGENTS.md",
@@ -45,12 +47,9 @@ export function validateStarter(dir = STARTER) {
     readFileSync(path.join(dir, "package.json"), "utf8"),
   );
   const kernel = manifest.dependencies?.["@watt-mind/factory"];
-  if (
-    typeof kernel !== "string" ||
-    !/^github:watt-mind\/factory#[0-9a-f]{40}$/.test(kernel)
-  ) {
+  if (typeof kernel !== "string" || !EXACT_SEMVER_RE.test(kernel)) {
     throw new Error(
-      "starter package.json must pin @watt-mind/factory to an exact Git commit",
+      "starter package.json must pin @watt-mind/factory to an exact SemVer version (no ranges)",
     );
   }
   return { dir, manifest, kernel, requiredFiles: REQUIRED_FILES };

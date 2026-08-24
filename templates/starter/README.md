@@ -14,8 +14,8 @@ separate from the Factory kernel.
    bun run check
    ```
 
-3. Review the exact kernel commit in `package.json`, then install it when your
-   environment can read the kernel's GitHub repository:
+3. Review the exact published kernel version in `package.json`, then install
+   it from npm:
 
    ```sh
    bun install
@@ -24,10 +24,10 @@ separate from the Factory kernel.
 4. Keep every schedule disabled while you verify repository credentials,
    worktree scripts, and the proposed workflow.
 
-The committed kernel reference is deliberately an exact Git commit. Upgrades
-are an explicit dependency change: review the Factory release or commit,
-update `package.json`, run `bun install`, then run this instance's checks
-before merging.
+The committed kernel reference is deliberately an exact npm version, without
+a `^` or `~` range. Upgrades are an explicit dependency change: review the
+Factory release, update `package.json`, run `bun install`, then run this
+instance's checks before merging.
 
 ## What belongs here
 

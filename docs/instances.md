@@ -9,8 +9,8 @@ contains one organization's operational choices.
 
 Use the [`templates/starter/`](../templates/starter/) scaffold to create an
 instance repository. Its `package.json` intentionally pins the kernel to an
-exact commit, while the instance owns the files that should differ between
-organizations:
+exact published npm version, while the instance owns the files that should
+differ between organizations:
 
 | Kernel                                 | Instance                                                 |
 | -------------------------------------- | -------------------------------------------------------- |
@@ -50,9 +50,9 @@ rules that protect the kernel namespace.
 
 `@watt-mind/factory` publishes to npm as a public, Apache-2.0 package
 (WM-949). An instance should pin an exact version (`"@watt-mind/factory":
-"0.1.0"`, not a `^`/`~` range), the same exact-pin discipline
-[`templates/starter/`](../templates/starter/) already applies with its Git
-commit pin, so a kernel upgrade is always a reviewed, explicit change:
+"0.1.0"`, not a `^`/`~` range), as
+[`templates/starter/`](../templates/starter/) does, so a kernel upgrade is
+always a reviewed, explicit change:
 
 1. Read the kernel release notes for the target version — each published
    version has a corresponding tag and GitHub Release on
@@ -111,5 +111,5 @@ bun tools/publish-starter.mjs --dry-run
 ```
 
 The command confirms the required scaffold files, checks that the kernel
-dependency is an exact commit pin, and runs `npm pack --dry-run --json` to
-show the package contents. It never publishes or writes files.
+dependency is an exact SemVer pin, and runs `npm pack --dry-run --json` to show
+the package contents. It never publishes or writes files.

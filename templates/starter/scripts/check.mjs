@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const EXACT_SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const REQUIRED = [
   "AGENTS.md",
   "README.md",
@@ -22,11 +24,10 @@ const manifest = JSON.parse(
   readFileSync(path.join(ROOT, "package.json"), "utf8"),
 );
 const kernel = manifest.dependencies?.["@watt-mind/factory"];
-if (
-  typeof kernel !== "string" ||
-  !/^github:watt-mind\/factory#[0-9a-f]{40}$/.test(kernel)
-) {
-  throw new Error("@watt-mind/factory must be pinned to an exact Git commit");
+if (typeof kernel !== "string" || !EXACT_SEMVER_RE.test(kernel)) {
+  throw new Error(
+    "@watt-mind/factory must be pinned to an exact SemVer version (no ranges)",
+  );
 }
 
 console.log(`factory-starter: valid (${REQUIRED.length} required files)`);
