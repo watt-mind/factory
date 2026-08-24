@@ -220,7 +220,13 @@ describe("registry", () => {
       packRoots: [],
       scheduleConfigPath: config,
     });
-    const withoutOverlay = loadRegistry({ packRoots: [] });
+    const withoutOverlay = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: path.join(
+        tmpDir("event-schedule-overlay-auto-absent-"),
+        "schedule.yaml",
+      ),
+    });
 
     expect(overlaid.schedules["work-bj29"]).toMatchObject({
       every: "9h",
@@ -231,6 +237,65 @@ describe("registry", () => {
     expect(overlaid.scheduleSources["work-bj29"]).toBe("overlay");
     expect(overlaid.scheduleSources.reaper).toBe("kernel");
     expect(registryDigest(overlaid)).toBe(registryDigest(withoutOverlay));
+  });
+
+  test("an explicitly allowlisted overlay loop may use auto approval and reports its authorization", () => {
+    const config = path.join(
+      tmpDir("event-schedule-overlay-auto-"),
+      "schedule.yaml",
+    );
+    writeFileSync(
+      config,
+      `overlay_auto_approve:\n  - work-bj29\nschedules:\n  work-bj29:\n    enabled: true\n    approval: auto\n`,
+    );
+    const authorized = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: config,
+    });
+    const withoutOverlay = loadRegistry({
+      packRoots: [],
+      scheduleConfigPath: path.join(
+        tmpDir("event-schedule-overlay-auto-absent-"),
+        "schedule.yaml",
+      ),
+    });
+
+    expect(authorized.schedules["work-bj29"]).toMatchObject({
+      enabled: true,
+      approval: "auto",
+    });
+    expect(authorized.scheduleSources["work-bj29"]).toBe(
+      "operator-authorized-auto",
+    );
+    expect(withoutOverlay.schedules["work-bj29"].approval).toBe("watched");
+    expect(withoutOverlay.scheduleSources["work-bj29"]).toBe("kernel");
+    expect(registryDigest(authorized)).toBe(registryDigest(withoutOverlay));
+  });
+
+  test("an unallowlisted overlay auto request is forced to watched and explains why", () => {
+    const config = path.join(
+      tmpDir("event-schedule-overlay-unlisted-auto-"),
+      "schedule.yaml",
+    );
+    writeFileSync(
+      config,
+      `schedules:\n  work-bj29:\n    enabled: true\n    approval: auto\n`,
+    );
+    const originalWarn = console.warn;
+    const warnings = [];
+    console.warn = (message) => warnings.push(message);
+    let registry;
+    try {
+      registry = loadRegistry({ packRoots: [], scheduleConfigPath: config });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(registry.schedules["work-bj29"].approval).toBe("watched");
+    expect(registry.scheduleSources["work-bj29"]).toBe("overlay");
+    expect(warnings).toEqual([
+      expect.stringContaining("not named in overlay_auto_approve"),
+    ]);
   });
 
   test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
