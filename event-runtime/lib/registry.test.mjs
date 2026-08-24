@@ -213,8 +213,10 @@ describe("registry", () => {
     // argv[0] (tools/ticket.mjs:526), so a leading --repo was parsed as the
     // verb and every action exited non-zero; --repo is in VALUE_FLAGS so it
     // parses correctly anywhere after the verb (matches `queue --repo bj29`).
+    // Regenerated (#910): label-agent-ready also passes its schema-constrained
+    // tierReason as a separate state --comment argv element (before --repo).
     const expected =
-      "sha256:0a3dc3e55fce8c033bd6c95db09a01a161bb3b89f11f07b11d67cc480e38ba2c";
+      "sha256:0000000000000000000000000000000000000000000000000000000000000";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

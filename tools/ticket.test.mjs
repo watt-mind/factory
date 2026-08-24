@@ -28,6 +28,7 @@ import {
   formatComment,
   formatComments,
   parsePositionalArgs,
+  transitionThenComment,
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
@@ -253,6 +254,84 @@ test("state and label updates preserve the explicit state positional argument", 
       "ai:needs-review",
     ]),
   ).toEqual(["WM-250", "In Review"]);
+});
+
+// ------------------------------------------------------- state comments ---
+test("state posts its optional comment only after the transition succeeds", async () => {
+  const calls = [];
+  const cp = {
+    async transition(...args) {
+      calls.push(["transition", ...args]);
+    },
+    async comment(...args) {
+      calls.push(["comment", ...args]);
+    },
+  };
+
+  await transitionThenComment(
+    cp,
+    "WM-910",
+    "Todo",
+    { add: ["ai:agent-ready"], remove: [], unassign: false },
+    "standard scope with focused verification",
+  );
+
+  expect(calls).toEqual([
+    [
+      "transition",
+      "WM-910",
+      "Todo",
+      { add: ["ai:agent-ready"], remove: [], unassign: false },
+    ],
+    ["comment", "WM-910", "standard scope with focused verification"],
+  ]);
+});
+
+test("state without a comment preserves transition-only behavior", async () => {
+  const calls = [];
+  const cp = {
+    async transition(...args) {
+      calls.push(["transition", ...args]);
+    },
+    async comment(...args) {
+      calls.push(["comment", ...args]);
+    },
+  };
+
+  await transitionThenComment(
+    cp,
+    "WM-910",
+    "Todo",
+    { add: [], remove: [], unassign: false },
+    undefined,
+  );
+
+  expect(calls).toEqual([
+    [
+      "transition",
+      "WM-910",
+      "Todo",
+      { add: [], remove: [], unassign: false },
+    ],
+  ]);
+});
+
+test("state does not post a comment when the transition fails", async () => {
+  const calls = [];
+  const cp = {
+    async transition() {
+      calls.push("transition");
+      throw new Error("transition rejected");
+    },
+    async comment() {
+      calls.push("comment");
+    },
+  };
+
+  await expect(
+    transitionThenComment(cp, "WM-910", "Todo", {}, "do not post"),
+  ).rejects.toThrow("transition rejected");
+  expect(calls).toEqual(["transition"]);
 });
 
 test("values for other flags are not treated as positional arguments", () => {
