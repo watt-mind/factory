@@ -736,6 +736,7 @@ const VERBS = {
 
   async queue() {
     let team = flag("team") ?? teamOf(positional[0] ?? "");
+    let project = flag("project") ?? null;
     if (!team) {
       // Repo-scoped read (work-scan calls `queue --repo <name>`): derive the
       // team from the repo's config. GitHub-plane repos have no meaningful
@@ -743,12 +744,22 @@ const VERBS = {
       // the verb still needs *a* team, and requiring the caller to pass it for
       // a --repo read is exactly the mismatch that made work-scan refuse.
       const repoName = flag("repo");
-      if (repoName) team = getRepos().get(repoName)?.team ?? null;
+      if (repoName) {
+        const cfg = getRepos().get(repoName);
+        team = cfg?.team ?? null;
+        // ...and its project. Several repos share one Linear team (CLNT covers
+        // BJ29 Coaching, CashMap, RiccoMoto, ...); without the project filter
+        // `queue --repo bj29` returns every CLNT ticket and dispatch runs a
+        // CashMap ticket in the bj29 worktree.
+        if (project === null) project = cfg?.project ?? null;
+      }
     }
     if (!team) throw new Error(`usage: queue --team CLNT (or --repo <name>)`);
     // Dispatchable == Todo + ai:agent-ready + unassigned. The same predicate
     // the dispatcher uses; agents must not invent their own.
-    const ready = await controlPlane().listDispatchable({ team });
+    const ready = await controlPlane().listDispatchable(
+      project ? { team, project } : { team },
+    );
     out(
       ready,
       ready.length
