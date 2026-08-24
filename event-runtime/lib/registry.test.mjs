@@ -208,8 +208,13 @@ describe("registry", () => {
     // cwd (github) plane — the apply-side sibling of #985's scan-side fix.
     // Without it, applying a triage plan to any Linear repo fails closed with
     // "not a GitHub issue identifier". triage-apply.json is a registry input.
+    // Regenerated (triage-apply repo-flag position): --repo {repo} moved from
+    // before the verb to the END of each argv. ticket.mjs takes the verb from
+    // argv[0] (tools/ticket.mjs:526), so a leading --repo was parsed as the
+    // verb and every action exited non-zero; --repo is in VALUE_FLAGS so it
+    // parses correctly anywhere after the verb (matches `queue --repo bj29`).
     const expected =
-      "sha256:1b069c19a536663dab214898ac137184839aa1edb29b4d382ebc510c1c468d7c";
+      "sha256:0a3dc3e55fce8c033bd6c95db09a01a161bb3b89f11f07b11d67cc480e38ba2c";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
