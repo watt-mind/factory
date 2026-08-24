@@ -13,7 +13,7 @@
  *   bun tools/ticket.mjs comment CLNT-616 "verified: 42 tests pass"
  *   bun tools/ticket.mjs triage CLNT-616 --comment "Owned Paths need revision"
  *   bun tools/ticket.mjs answer CLNT-616 "Use the existing token cache"
- *   bun tools/ticket.mjs detail CLNT-616 "## Acceptance criteria\n- [ ] ..."
+ *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
  *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug
@@ -482,12 +482,38 @@ const VALUE_FLAGS = new Set([
   "var",
 ]);
 
-/** Return command arguments that are not flags or values consumed by flags. */
+const BODY_VERBS = new Set(["answer", "comment", "detail"]);
+
+/**
+ * Return command arguments that are not flags or values consumed by flags.
+ *
+ * `--` is the conventional end-of-options marker. A leading markdown rule is
+ * also accepted directly for the verbs whose second positional argument is
+ * markdown; arbitrary leading `--` text must use the marker so unknown flags
+ * remain flags rather than silently becoming bodies.
+ */
 export function parsePositionalArgs(argv) {
   const positional = [];
+  let optionsEnded = false;
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (optionsEnded) {
+      positional.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      optionsEnded = true;
+      continue;
+    }
     if (arg.startsWith("--")) {
+      if (
+        BODY_VERBS.has(argv[0]) &&
+        positional.length === 1 &&
+        arg.startsWith("---")
+      ) {
+        positional.push(arg);
+        continue;
+      }
       if (VALUE_FLAGS.has(arg.slice(2))) i += 1;
       continue;
     }
@@ -543,7 +569,8 @@ const VERBS = {
   async comment() {
     const key = positional[0];
     const body = positional[1];
-    if (!body) throw new Error(`usage: comment <ISSUE-ID> "<text>"`);
+    if (!body)
+      throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
     await controlPlane().comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
@@ -562,7 +589,8 @@ const VERBS = {
   async answer() {
     const key = positional[0];
     const text = positional[1];
-    if (!key || !text) throw new Error(`usage: answer <ISSUE-ID> "<text>"`);
+    if (!key || !text)
+      throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
     const cp = controlPlane();
     const issue = await cp.getTicket(key);
     if (issue.state?.name?.toLowerCase() === "blocked")
@@ -575,7 +603,7 @@ const VERBS = {
     const key = positional[0];
     const rawDetail = positional[1];
     if (!key || !rawDetail)
-      throw new Error(`usage: detail <ISSUE-ID> "<markdown>"`);
+      throw new Error(`usage: detail <ISSUE-ID> [--] "<markdown>"`);
     const { appended } = await controlPlane().appendDetail(key, rawDetail);
     if (!appended) {
       out(

@@ -282,6 +282,27 @@ test("values for other flags are not treated as positional arguments", () => {
   ).toEqual(["WM-313", "Use the existing seam"]);
 });
 
+test("markdown bodies beginning with a horizontal rule stay positional", () => {
+  expect(
+    parsePositionalArgs(["detail", "WM-314", "---\n\n## Heading"]),
+  ).toEqual(["WM-314", "---\n\n## Heading"]);
+});
+
+test("the end-of-options sentinel preserves arbitrary leading dashes", () => {
+  expect(
+    parsePositionalArgs(["answer", "WM-315", "--", "--word\nbody"]),
+  ).toEqual(["WM-315", "--word\nbody"]);
+  expect(
+    parsePositionalArgs(["comment", "WM-316", "--", "---\n\n## Heading"]),
+  ).toEqual(["WM-316", "---\n\n## Heading"]);
+});
+
+test("unknown flags remain flags instead of becoming positional bodies", () => {
+  expect(
+    parsePositionalArgs(["detail", "WM-317", "--add-label"]),
+  ).toEqual(["WM-317"]);
+});
+
 // -------------------------------------------------------- label mutations ---
 test("label edits support both addition and removal without touching other labels", () => {
   const current = ["type:bug", "area:api", "ai:in-progress"];
