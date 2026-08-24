@@ -307,12 +307,7 @@ test("state without a comment preserves transition-only behavior", async () => {
   );
 
   expect(calls).toEqual([
-    [
-      "transition",
-      "WM-910",
-      "Todo",
-      { add: [], remove: [], unassign: false },
-    ],
+    ["transition", "WM-910", "Todo", { add: [], remove: [], unassign: false }],
   ]);
 });
 
