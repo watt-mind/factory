@@ -708,8 +708,17 @@ const VERBS = {
   },
 
   async queue() {
-    const team = flag("team") ?? teamOf(positional[0] ?? "");
-    if (!team) throw new Error(`usage: queue --team CLNT`);
+    let team = flag("team") ?? teamOf(positional[0] ?? "");
+    if (!team) {
+      // Repo-scoped read (work-scan calls `queue --repo <name>`): derive the
+      // team from the repo's config. GitHub-plane repos have no meaningful
+      // team of their own — listDispatchable maps it back to the repo — but
+      // the verb still needs *a* team, and requiring the caller to pass it for
+      // a --repo read is exactly the mismatch that made work-scan refuse.
+      const repoName = flag("repo");
+      if (repoName) team = getRepos().get(repoName)?.team ?? null;
+    }
+    if (!team) throw new Error(`usage: queue --team CLNT (or --repo <name>)`);
     // Dispatchable == Todo + ai:agent-ready + unassigned. The same predicate
     // the dispatcher uses; agents must not invent their own.
     const ready = await controlPlane().listDispatchable({ team });
