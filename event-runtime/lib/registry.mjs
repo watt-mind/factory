@@ -1233,10 +1233,9 @@ export function loadRegistry({
   // cadence or an unregistered event type must be a startup error, not a
   // surprise at 03:00 when nothing fires.
   for (const [loop, schedule] of Object.entries(effectiveSchedules)) {
-    const scheduleFile =
-      isOverlayScheduleSource(effectiveScheduleSources[loop])
-        ? scheduleConfigPath
-        : "schedules.json";
+    const scheduleFile = isOverlayScheduleSource(effectiveScheduleSources[loop])
+      ? scheduleConfigPath
+      : "schedules.json";
     if (!/^[a-z][a-z0-9-]*$/.test(loop))
       throw new RegistryError(`${scheduleFile}: bad loop name "${loop}"`);
     if (
