@@ -670,22 +670,23 @@ function ownedPathsClosureDetails(repoName, repo, ticketDescription) {
 
 function fetchInFlightDefault(repoConfig) {
   try {
-    const out = execFileSync(
-      "bun",
-      [
-        linearCli(),
-        "inflight",
-        "--team",
-        String(repoConfig.team),
-        "--project",
-        String(repoConfig.project),
-        "--json",
-      ],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    // --repo so ticket.mjs resolves this repo's own control plane (a Linear
+    // team/project query against the GitHub plane fails as a project-title
+    // mismatch, blocking the cap check for control_plane: linear repos).
+    const args = [
+      linearCli(),
+      "inflight",
+      "--team",
+      String(repoConfig.team),
+      "--project",
+      String(repoConfig.project),
+      "--json",
+    ];
+    if (repoConfig.name) args.push("--repo", repoConfig.name);
+    const out = execFileSync("bun", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const rows = JSON.parse(out);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
