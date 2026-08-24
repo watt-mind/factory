@@ -279,13 +279,13 @@ is added there in the future, it must carry explicit terms; placement under
 
 Complete guides, concepts, and API references are hosted at **[watt-mind.github.io/factory](https://watt-mind.github.io/factory/)**.
 
-| Guide | What it covers |
-| :---- | :------------- |
-| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo |
-| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/) | The loop, owned paths, verification model, and control planes |
-| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/) | Claude Code, Codex, Gemini, Cursor, Pi, and specialist agents |
-| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/) | Running the event-runtime sidecar, multi-repo fleets, web console |
-| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/) | The non-negotiable agent operating contract and CLI reference |
+| Guide                                                                              | What it covers                                                    |
+| :--------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
+| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo     |
+| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/)            | The loop, owned paths, verification model, and control planes     |
+| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/)      | Claude Code, Codex, Gemini, Cursor, Pi, and specialist agents     |
+| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/)      | Running the event-runtime sidecar, multi-repo fleets, web console |
+| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/)    | The non-negotiable agent operating contract and CLI reference     |
 
 ## Contributing
 
