@@ -1506,9 +1506,16 @@ export function resolveLinearApiKey({
 /** Execute one bounded Linear CLI operation; exported for timeout regression tests. */
 export function runLinearCli(
   args,
-  { command = "bun", timeoutMs = workerSubprocessTimeoutMs() } = {},
+  { command = "bun", timeoutMs = workerSubprocessTimeoutMs(), repo } = {},
 ) {
-  return execFileSync(command, [linearCli(), ...args], {
+  // --repo so ticket.mjs resolves the ticket's OWN control plane. Without it a
+  // Linear-repo claim/read runs against the worker cwd's plane (github) and
+  // silently no-ops — the claim read-back then reports ticket_claim_lost,
+  // blocking all dispatch for control_plane: linear repos (bj29, cashsaas).
+  const full = repo
+    ? [linearCli(), ...args, "--repo", repo]
+    : [linearCli(), ...args];
+  return execFileSync(command, full, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
@@ -1517,7 +1524,7 @@ export function runLinearCli(
 
 function defaultClaimTicket({ repo, ticket, harness = "claude" }) {
   try {
-    runLinearCli(["claim", ticket, "--agent", harness]);
+    runLinearCli(["claim", ticket, "--agent", harness], { repo });
     return { ok: true };
   } catch (err) {
     const stderr = String(err?.stderr ?? "");
@@ -1541,7 +1548,7 @@ export function defaultUnclaimTicket({
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = runCli(["get", ticket, "--json"]);
+      const out = runCli(["get", ticket, "--json"], { repo });
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
@@ -1570,15 +1577,15 @@ export function defaultUnclaimTicket({
       ...remove.flatMap((n) => ["--remove", n]),
     ]);
     const body = `Dispatch run failed, claim released back to Todo + ai:agent-ready.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
-    runCli(["comment", ticket, body]);
+    runCli(["comment", ticket, body], { repo });
     return true;
   } catch {
     return false;
   }
 }
 
-function defaultFetchTicket(ticket) {
-  return JSON.parse(runLinearCli(["get", ticket, "--json"]));
+function defaultFetchTicket(ticket, repo) {
+  return JSON.parse(runLinearCli(["get", ticket, "--json"], { repo }));
 }
 
 /**
@@ -1588,9 +1595,9 @@ function defaultFetchTicket(ticket) {
  * agent was told to run. A read failure degrades to "no ticket command" (the
  * repo `verify:` still gates) rather than killing a run before it started.
  */
-function ticketHandoffContext(ticket, fetchTicket) {
+function ticketHandoffContext(ticket, fetchTicket, repo) {
   try {
-    const cur = fetchTicket(ticket);
+    const cur = fetchTicket(ticket, repo);
     const description = cur?.description ?? "";
     const parsed = parseOwnedPaths(description);
     return {
@@ -1609,8 +1616,8 @@ function ticketHandoffContext(ticket, fetchTicket) {
   }
 }
 
-function defaultCommentTicket({ ticket, body }) {
-  runLinearCli(["comment", ticket, body]);
+function defaultCommentTicket({ ticket, body, repo }) {
+  runLinearCli(["comment", ticket, body], { repo });
   return true;
 }
 
@@ -1627,6 +1634,7 @@ function defaultCommentTicket({ ticket, body }) {
 export function defaultReturnHandoffTicket({
   ticket,
   body,
+  repo,
   fetchTicket,
   runCli = runLinearCli,
 }) {
@@ -1664,7 +1672,7 @@ export function defaultReturnHandoffTicket({
         args.filter((a, i) => !(a === "--add" || args[i - 1] === "--add")),
       );
       try {
-        runCli(["labels", ticket, "--add", "ai:agent-ready"]);
+        runCli(["labels", ticket, "--add", "ai:agent-ready"], { repo });
       } catch (err) {
         agentReadyRestored = false;
         labelWarning = String(err?.stderr ?? err?.message ?? err)
@@ -1687,7 +1695,7 @@ export function defaultReturnHandoffTicket({
         ]
           .filter(Boolean)
           .join("\n\n");
-    if (finalBody) runCli(["comment", ticket, finalBody]);
+    if (finalBody) runCli(["comment", ticket, finalBody], { repo });
     return { ok: true, agentReadyRestored, warning: labelWarning };
   } catch {
     return false;
@@ -1799,10 +1807,10 @@ function baselineFailureSignature({ why, log = null, baseline = null }) {
     .digest("hex");
 }
 
-function hasRecordedBaselineFailureComment(ticket, signature) {
+function hasRecordedBaselineFailureComment(ticket, signature, repo) {
   const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
   try {
-    const out = runLinearCli(["comments", ticket, "--json"]);
+    const out = runLinearCli(["comments", ticket, "--json"], { repo });
     const comments = JSON.parse(out);
     return (comments ?? []).some((row) =>
       String(row.body ?? "").includes(marker),
@@ -1825,7 +1833,7 @@ function defaultBlockBaselineTicket({
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = runLinearCli(["get", ticket, "--json"]);
+      const out = runLinearCli(["get", ticket, "--json"], { repo });
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
@@ -1847,11 +1855,11 @@ function defaultBlockBaselineTicket({
       "ai:in-progress",
     ]);
 
-    if (!hasRecordedBaselineFailureComment(ticket, signature)) {
+    if (!hasRecordedBaselineFailureComment(ticket, signature, repo)) {
       const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
       const body = `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}\n\n
 <!-- ${marker} -->`;
-      runLinearCli(["comment", ticket, body]);
+      runLinearCli(["comment", ticket, body], { repo });
     }
     return true;
   } catch {
@@ -2445,7 +2453,11 @@ export async function executeClaimed(
         }
 
         ticketClaimed = true;
-        handoffContext = ticketHandoffContext(ticketId, fetchTicketFn);
+        handoffContext = ticketHandoffContext(
+          ticketId,
+          fetchTicketFn,
+          repoName,
+        );
         writeWorkerLease({
           repo: repoName,
           ticket: ticketId,
