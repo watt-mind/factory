@@ -216,7 +216,7 @@ describe("registry", () => {
     // Regenerated (#910): label-agent-ready also passes its schema-constrained
     // tierReason as a separate state --comment argv element (before --repo).
     const expected =
-      "sha256:0000000000000000000000000000000000000000000000000000000000000";
+      "sha256:19d3890b35bb760fac2f0343f59fb94c35be7f42aaafd15313e20a32f42895c2";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
