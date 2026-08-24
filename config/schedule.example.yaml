@@ -15,12 +15,18 @@ jobs: []
 # Runtime schedule overlay (optional). `event-runtime/schedules.json` defines
 # tracked kernel defaults; these ignored, instance-specific values are merged
 # at runtime and do not change the registry digest. Existing loop names may
-# override only enabled, every, and payload fields. A new name must provide a
-# complete schedule entry (including eventType) and is visible as source:
-# overlay in `factory schedules` / GET /schedules.
+# override enabled, every, and payload fields. They can request `approval: auto`
+# only when this top-level, explicit operator allowlist names the same loop;
+# otherwise the request is forced to watched. An authorized loop is visible as
+# source: operator-authorized-auto in `factory schedules` / GET /schedules.
+# A new name must provide a complete schedule entry (including eventType) and
+# remains watched even if it appears in the allowlist.
 #
 # Replace client-repo with a real local repo name. These commented examples
 # mirror the current instance migration without publishing a client name:
+# This acknowledgement must name every existing loop that requests auto.
+# overlay_auto_approve:
+#   - merge-client-repo
 # schedules:
 #   merge-factory:
 #     enabled: true
@@ -29,3 +35,4 @@ jobs: []
 #     enabled: true
 #   merge-client-repo:
 #     enabled: true
+#     approval: auto

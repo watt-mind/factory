@@ -52,6 +52,7 @@ function nullDict() {
 }
 
 const SCHEDULE_OVERLAY_FIELDS = new Set(["enabled", "every", "payload"]);
+const OPERATOR_AUTHORIZED_AUTO_SOURCE = "operator-authorized-auto";
 
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -60,10 +61,14 @@ function isPlainObject(value) {
 /**
  * Instance schedule settings intentionally sit outside the pinned registry.
  * They may turn a kernel loop on, change its cadence, or add static payload
- * keys, but cannot change its event routing or approval policy.
+ * keys, but cannot change its event routing. Unattended approval is the one
+ * exception: it requires both `approval: auto` on the loop and the same loop
+ * named in the top-level `overlay_auto_approve` allowlist.
  */
 function loadScheduleOverlay(file) {
-  if (!existsSync(file)) return nullDict();
+  if (!existsSync(file)) {
+    return { schedules: nullDict(), autoApprove: new Set() };
+  }
   let parsed;
   try {
     parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
@@ -75,12 +80,28 @@ function loadScheduleOverlay(file) {
   if (parsed !== null && parsed !== undefined && !isPlainObject(parsed)) {
     throw new RegistryError(`${file}: schedule.yaml must be an object`);
   }
-  if (parsed?.schedules === undefined || parsed.schedules === null)
-    return nullDict();
-  if (!isPlainObject(parsed.schedules)) {
+  const allowedLoops = parsed?.overlay_auto_approve;
+  if (
+    allowedLoops !== undefined &&
+    (!Array.isArray(allowedLoops) ||
+      allowedLoops.some((loop) => typeof loop !== "string" || !loop) ||
+      new Set(allowedLoops).size !== allowedLoops.length)
+  ) {
+    throw new RegistryError(
+      `${file}: "overlay_auto_approve" must be an array of unique, non-empty loop names`,
+    );
+  }
+  if (
+    parsed?.schedules !== undefined &&
+    parsed.schedules !== null &&
+    !isPlainObject(parsed.schedules)
+  ) {
     throw new RegistryError(`${file}: "schedules" must be an object`);
   }
-  return parsed.schedules;
+  return {
+    schedules: parsed?.schedules ?? nullDict(),
+    autoApprove: new Set(allowedLoops ?? []),
+  };
 }
 
 function cloneSchedules(schedules) {
@@ -98,7 +119,12 @@ function cloneSchedules(schedules) {
   return clone;
 }
 
-function applyScheduleOverlay(kernelSchedules, overlay, file) {
+function isOverlayScheduleSource(source) {
+  return source === "overlay" || source === OPERATOR_AUTHORIZED_AUTO_SOURCE;
+}
+
+function applyScheduleOverlay(kernelSchedules, overlayConfig, file) {
+  const { schedules: overlay, autoApprove } = overlayConfig;
   const schedules = cloneSchedules(kernelSchedules);
   const sources = nullDict();
   for (const loop of Object.keys(schedules)) sources[loop] = "kernel";
@@ -115,15 +141,25 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
     }
     if (Object.hasOwn(schedules, loop)) {
       for (const field of Object.keys(override)) {
-        if (!SCHEDULE_OVERLAY_FIELDS.has(field)) {
+        if (
+          !SCHEDULE_OVERLAY_FIELDS.has(field) &&
+          !(field === "approval" && override.approval === "auto")
+        ) {
           throw new RegistryError(
-            `${file}: schedules.${loop}.${field} cannot override a kernel schedule (allowed: enabled, every, payload)`,
+            `${file}: schedules.${loop}.${field} cannot override a kernel schedule (allowed: enabled, every, payload, and approval: auto with overlay_auto_approve)`,
           );
         }
       }
       if (override.payload !== undefined && !isPlainObject(override.payload)) {
         throw new RegistryError(
           `${file}: schedules.${loop}.payload must be a plain object`,
+        );
+      }
+      const requestedAuto = override.approval === "auto";
+      const authorizedAuto = requestedAuto && autoApprove.has(loop);
+      if (requestedAuto && !authorizedAuto) {
+        console.warn(
+          `${file}: schedules.${loop}.approval "auto" ignored — ${loop} is not named in overlay_auto_approve, so the loop remains "watched"`,
         );
       }
       schedules[loop] = {
@@ -137,8 +173,14 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
               },
             }
           : {}),
+        ...(requestedAuto
+          ? { approval: authorizedAuto ? "auto" : "watched" }
+          : {}),
       };
       overlayFields[loop] = new Set(Object.keys(override));
+      sources[loop] = authorizedAuto
+        ? OPERATOR_AUTHORIZED_AUTO_SOURCE
+        : "overlay";
     } else {
       // A brand-new loop the overlay is introducing has no kernel-reviewed
       // approval policy behind it. It always queues for human approval: an
@@ -161,7 +203,7 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
       };
       overlayFields[loop] = new Set(Object.keys(override));
     }
-    sources[loop] = "overlay";
+    if (!Object.hasOwn(sources, loop)) sources[loop] = "overlay";
   }
   return { schedules, sources, overlayFields };
 }
@@ -1191,10 +1233,9 @@ export function loadRegistry({
   // cadence or an unregistered event type must be a startup error, not a
   // surprise at 03:00 when nothing fires.
   for (const [loop, schedule] of Object.entries(effectiveSchedules)) {
-    const scheduleFile =
-      effectiveScheduleSources[loop] === "overlay"
-        ? scheduleConfigPath
-        : "schedules.json";
+    const scheduleFile = isOverlayScheduleSource(effectiveScheduleSources[loop])
+      ? scheduleConfigPath
+      : "schedules.json";
     if (!/^[a-z][a-z0-9-]*$/.test(loop))
       throw new RegistryError(`${scheduleFile}: bad loop name "${loop}"`);
     if (
@@ -1238,7 +1279,7 @@ export function loadRegistry({
     // of an already-disabled kernel loop does not touch the approval
     // boundary and must still fail closed (WM-998 review).
     const overlayDisabledThisLoop =
-      effectiveScheduleSources[loop] === "overlay" &&
+      isOverlayScheduleSource(effectiveScheduleSources[loop]) &&
       Boolean(effectiveScheduleOverlayFields[loop]?.has("enabled"));
     if (approval === "auto" && !schedule.enabled && !overlayDisabledThisLoop) {
       throw new RegistryError(

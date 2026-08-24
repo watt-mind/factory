@@ -1309,6 +1309,59 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
+  test("journal and outbox bound malformed limits and normalize journal cursors", async () => {
+    const s = await makeServer();
+    try {
+      const insertJournal = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, ?)`,
+      );
+      const insertOutbox = s.db.query(
+        `INSERT INTO outbox (event_json, created_at) VALUES (?, ?)`,
+      );
+      const createdAt = new Date().toISOString();
+      s.db.transaction(() => {
+        for (let i = 0; i < 501; i += 1) {
+          insertJournal.run(`journal-limit-${i}`, createdAt, `hash-${i}`);
+          insertOutbox.run(
+            JSON.stringify({ eventId: `outbox-limit-${i}` }),
+            createdAt,
+          );
+        }
+      })();
+
+      for (const path of ["/journal?limit=-1", "/outbox?limit=-1"]) {
+        const response = await fetch(s.url(path));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.entries ?? body.outbox).toHaveLength(1);
+      }
+
+      for (const path of ["/journal?limit=999", "/outbox?limit=999"]) {
+        const response = await fetch(s.url(path));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.entries ?? body.outbox).toHaveLength(500);
+      }
+
+      const journalFallback = await fetch(s.url("/journal?limit=abc"));
+      expect(journalFallback.status).toBe(200);
+      expect((await journalFallback.json()).entries).toHaveLength(100);
+
+      const outboxFallback = await fetch(s.url("/outbox?limit=abc"));
+      expect(outboxFallback.status).toBe(200);
+      expect((await outboxFallback.json()).outbox).toHaveLength(50);
+
+      const normalizedSince = await fetch(
+        s.url("/journal?since=not-a-cursor&limit=500"),
+      );
+      expect(normalizedSince.status).toBe(200);
+      expect((await normalizedSince.json()).entries).toHaveLength(500);
+    } finally {
+      s.close();
+    }
+  });
+
   test("requeue recovers a dead-lettered event and refuses everything else", async () => {
     const { db, server, port, onEvents } = await makeServer();
     const client = apiClient({ port });
