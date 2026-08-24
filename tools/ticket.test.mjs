@@ -298,9 +298,9 @@ test("the end-of-options sentinel preserves arbitrary leading dashes", () => {
 });
 
 test("unknown flags remain flags instead of becoming positional bodies", () => {
-  expect(
-    parsePositionalArgs(["detail", "WM-317", "--add-label"]),
-  ).toEqual(["WM-317"]);
+  expect(parsePositionalArgs(["detail", "WM-317", "--add-label"])).toEqual([
+    "WM-317",
+  ]);
 });
 
 // -------------------------------------------------------- label mutations ---

@@ -569,8 +569,7 @@ const VERBS = {
   async comment() {
     const key = positional[0];
     const body = positional[1];
-    if (!body)
-      throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
+    if (!body) throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
     await controlPlane().comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
