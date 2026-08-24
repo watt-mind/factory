@@ -346,8 +346,8 @@ page URL or screenshot path.
 
 **Use `factory linear` — not a tracker MCP, and not a standalone tracker
 CLI.** The factory tool is in git, has this protocol's guardrails built in,
-and its `claim` verb performs the read-back that _is_ the concurrency
-control.
+and its `claim` verb performs the advisory read-back. The authoritative
+concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
 factory linear get CLNT-616
