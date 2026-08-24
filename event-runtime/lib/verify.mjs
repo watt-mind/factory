@@ -19,6 +19,7 @@ import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
 import { validateDecisionRequest } from "./decision.mjs";
 import { processResultMemos } from "./memos.mjs";
+import { validatePresentation } from "./presentation.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 import { confinedRegularFile, PathViolation } from "./workspace.mjs";
@@ -535,6 +536,13 @@ function verifyRefused({ spec, def, candidate, attempt }) {
     checks.push("hash_recomputed");
   }
 
+  Object.assign(
+    context,
+    retainedPresentation(candidate, candidate.artifact ?? {}),
+  );
+  if (candidate.presentation !== undefined)
+    checks.push("presentation_validated");
+
   const { evidence, evidenceSetHash } = retainedEvidence(candidate);
   if (evidence !== undefined) {
     context.evidence = evidence;
@@ -554,6 +562,21 @@ function verifyRefused({ spec, def, candidate, attempt }) {
     artifacts: [],
   };
   return { kind: "refused", reasonCode: candidate.reasonCode, result };
+}
+
+/**
+ * Presentation validation is deliberately tolerant (§3.3): accepted artifact
+ * data must never be rejected because its human-readable view is malformed.
+ */
+function retainedPresentation(candidate, acceptedArtifact) {
+  if (candidate.presentation === undefined) return {};
+  const presentationCheck = validatePresentation(
+    candidate.presentation,
+    acceptedArtifact,
+  );
+  return presentationCheck.valid
+    ? { presentation: candidate.presentation }
+    : { presentationErrors: presentationCheck.errors };
 }
 
 function retainedEvidence(candidate) {
@@ -1119,6 +1142,10 @@ function verifyCompleted({
   const artifactHash = hashJson(candidate.artifact);
 
   const { evidence, evidenceSetHash } = retainedEvidence(candidate);
+  const presentationContext = retainedPresentation(
+    candidate,
+    candidate.artifact,
+  );
 
   const result = {
     schemaVersion: "factory.run-result/v1",
@@ -1129,6 +1156,7 @@ function verifyCompleted({
     outputContract: spec.outputContract,
     artifact: candidate.artifact,
     artifactHash,
+    ...presentationContext,
     ...(evidence !== undefined ? { evidence } : {}),
     evidenceSetHash,
     verification: {
@@ -1139,6 +1167,9 @@ function verifyCompleted({
         "paths_confined",
         "artifacts_exist",
         ...(evidence !== undefined ? ["evidence_retained"] : []),
+        ...(candidate.presentation !== undefined
+          ? ["presentation_validated"]
+          : []),
         ...(SEMANTIC_CHECKS[spec.outputContract]
           ? ["evidence_recomputed"]
           : []),

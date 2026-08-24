@@ -77,6 +77,23 @@ const VALID_DECISION = {
   ],
 };
 
+const VALID_PRESENTATION = {
+  schemaVersion: "factory.presentation/v1",
+  blocks: [
+    { type: "heading", text: "Status report" },
+    {
+      type: "keyvalue",
+      items: [
+        {
+          label: "Recommendation",
+          value: { $ref: "/recommendedAction" },
+          format: "state",
+        },
+      ],
+    },
+  ],
+};
+
 describe("verifyResult", () => {
   test("valid completed result → result + receipt with recomputed hashes", () => {
     const evidence = { queries: ["q1"] };
@@ -137,6 +154,119 @@ describe("verifyResult", () => {
     });
     expect(out.result.evidenceSetHash).toBeNull();
     expect(out.receipt.journalHead).toBeNull();
+  });
+
+  test("completed with a valid presentation → presentation retained outside hashes and receipt", () => {
+    const evidence = { queries: ["q1"] };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+      evidence,
+      presentation: VALID_PRESENTATION,
+    });
+    const spec = makeSpec();
+    const out = verifyResult({
+      spec,
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(out.result.presentation).toEqual(VALID_PRESENTATION);
+    expect(out.result.presentationErrors).toBeUndefined();
+    expect(out.result.artifactHash).toBe(hashJson(VALID_ARTIFACT));
+    expect(out.result.evidenceSetHash).toBe(hashJson(evidence));
+    expect(out.receipt).toEqual({
+      runId: spec.runId,
+      runSpecHash: hashJson(spec),
+      artifactHash: hashJson(VALID_ARTIFACT),
+      evidenceSetHash: hashJson(evidence),
+      journalHead: null,
+      verificationStatus: "passed",
+    });
+  });
+
+  test("completed with an invalid presentation → completion retained, errors kept, hashes unchanged", () => {
+    const candidate = {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+    };
+    const withoutPresentation = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: makeWorkspace(candidate),
+      attempt: 1,
+    });
+    const withInvalidPresentation = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: makeWorkspace({
+        ...candidate,
+        presentation: {
+          schemaVersion: "factory.presentation/v1",
+          blocks: [
+            {
+              type: "keyvalue",
+              items: [{ label: "Missing", value: { $ref: "/not-there" } }],
+            },
+          ],
+        },
+      }),
+      attempt: 1,
+    });
+
+    expect(withInvalidPresentation.kind).toBe("completed");
+    expect(withInvalidPresentation.result.presentation).toBeUndefined();
+    expect(withInvalidPresentation.result.presentationErrors).toBeArray();
+    expect(
+      withInvalidPresentation.result.presentationErrors.join("\n"),
+    ).toContain("/not-there");
+    expect(withInvalidPresentation.result.artifactHash).toBe(
+      withoutPresentation.result.artifactHash,
+    );
+    expect(withInvalidPresentation.result.evidenceSetHash).toBe(
+      withoutPresentation.result.evidenceSetHash,
+    );
+    expect(withInvalidPresentation.receipt).toEqual(
+      withoutPresentation.receipt,
+    );
+  });
+
+  test("deep schema-invalid presentation is tolerantly dropped instead of overflowing verification", () => {
+    const dir = makeWorkspace();
+    const depth = 10_000;
+    const rawPresentation =
+      `{"schemaVersion":"factory.presentation/v1","blocks":[` +
+      `{"type":"heading","text":"x","unknown":` +
+      "[".repeat(depth) +
+      "null" +
+      "]".repeat(depth) +
+      "}]}";
+    writeFileSync(
+      path.join(dir, "result.json"),
+      `{"schemaVersion":"factory.agent-result/v1","terminalState":"completed","artifact":${JSON.stringify(VALID_ARTIFACT)},"presentation":${rawPresentation}}`,
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+    expect(out.kind).toBe("completed");
+    expect(out.result.presentation).toBeUndefined();
+    expect(out.result.presentationErrors).toBeArray();
+    expect(out.result.presentationErrors.join("\n")).toContain(
+      'unknown property "unknown"',
+    );
   });
 
   const candidate = (ticket, disposition) => ({ ticket, disposition });
@@ -463,6 +593,31 @@ describe("verifyResult", () => {
     expect(out.kind).toBe("refused");
     expect(out.result.decision).toEqual(VALID_DECISION);
     expect(out.result.decisionErrors).toBeUndefined();
+  });
+
+  test("refused with a valid presentation and no artifact → presentation retained against empty artifact", () => {
+    const presentation = {
+      schemaVersion: "factory.presentation/v1",
+      blocks: [{ type: "markdown", text: "A human decision is required." }],
+    };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      presentation,
+    });
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+
+    expect(out.kind).toBe("refused");
+    expect(out.result.presentation).toEqual(presentation);
+    expect(out.result.presentationErrors).toBeUndefined();
+    expect(out.result.artifactHash).toBeUndefined();
   });
 
   test("refused with an invalid decision → refusal retained with decision errors", () => {

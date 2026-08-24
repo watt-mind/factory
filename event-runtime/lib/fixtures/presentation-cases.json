@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "name": "referenced-summary",
+      "valid": true,
+      "artifact": {
+        "outcome": "PR_OPEN",
+        "summary": "Presentation contract implemented",
+        "ticket": "watt-mind/factory#832",
+        "counts": { "tests": 42 }
+      },
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          { "type": "heading", "text": "Implementation complete" },
+          {
+            "type": "keyvalue",
+            "items": [
+              {
+                "label": "Outcome",
+                "value": { "$ref": "/outcome" },
+                "format": "state",
+                "tone": "ok"
+              },
+              {
+                "label": "Tests",
+                "value": { "$ref": "/counts/tests" },
+                "format": "count"
+              }
+            ]
+          },
+          {
+            "type": "links",
+            "items": [
+              {
+                "label": "Ticket",
+                "issue": { "$ref": "/ticket" }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unresolved-reference",
+      "valid": false,
+      "artifact": { "outcome": "PR_OPEN" },
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "keyvalue",
+            "items": [{ "label": "Missing", "value": { "$ref": "/missing" } }]
+          }
+        ]
+      },
+      "errors": ["blocks[0]", "/missing"]
+    },
+    {
+      "name": "link-with-two-targets",
+      "valid": false,
+      "artifact": {},
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "links",
+            "items": [
+              {
+                "label": "Ambiguous",
+                "issue": "WM-456",
+                "url": "https://example.test"
+              }
+            ]
+          }
+        ]
+      },
+      "errors": ["exactly one target"]
+    }
+  ]
+}
