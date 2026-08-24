@@ -337,11 +337,16 @@ const loopEntry = (
 });
 
 describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
-  test("Factory alone has autonomous merge discovery while every other loop remains watched and disabled", () => {
+  test("Factory has autonomous discovery; bj29 has an autonomous work clock; every other client loop remains watched and disabled", () => {
     for (const repo of DISPATCHABLE) {
-      expect(registry.schedules[`work-${repo}`]).toEqual(
-        loopEntry("factory.work.requested", repo, "30m"),
-      );
+      // bj29's work clock is enabled autonomous (operator decision) so its
+      // BJ29 Coaching queue self-dispatches; the escalate_paths gate still
+      // blocks the schedule source from sensitive-path tickets.
+      if (repo !== "bj29") {
+        expect(registry.schedules[`work-${repo}`]).toEqual(
+          loopEntry("factory.work.requested", repo, "30m"),
+        );
+      }
       expect(registry.schedules[`merge-${repo}`]).toEqual(
         loopEntry("factory.merge.requested", repo, "30m"),
       );
@@ -349,6 +354,12 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
         loopEntry("factory.ship.requested", repo, "7d"),
       );
     }
+    expect(registry.schedules["work-bj29"]).toEqual(
+      loopEntry("factory.work.requested", "bj29", "30m", {
+        approval: "auto",
+        enabled: true,
+      }),
+    );
     // WM-576: the Factory full-set merge sweep runs every 4h as the fallback behind per-PR scoped scans.
     expect(registry.schedules["merge-factory"]).toEqual(
       loopEntry("factory.merge.requested", "factory", "4h", {
@@ -368,7 +379,7 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     );
   });
 
-  test("the exact enabled autonomous set is work-factory, merge-factory and triage-factory", () => {
+  test("the exact enabled autonomous set is work-factory, work-bj29, merge-factory and triage-factory", () => {
     for (const repo of [
       "coach-wattz",
       "watts-mobile",
@@ -384,7 +395,12 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
 
     // work-factory (#996) joins merge/triage as an enabled autonomous loop so
     // agent-ready supply self-dispatches without a manual work.requested seed.
-    const AUTONOMOUS = ["work-factory", "merge-factory", "triage-factory"];
+    const AUTONOMOUS = [
+      "work-factory",
+      "work-bj29",
+      "merge-factory",
+      "triage-factory",
+    ];
     const enabledAutonomous = Object.entries(registry.schedules)
       .filter(
         ([, schedule]) => schedule.enabled && schedule.approval === "auto",
@@ -434,16 +450,16 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     // below proves each tick now plans a real run.
   });
 
-  test("the shipped clock fires Factory work, merge, and triage discovery", () => {
+  test("the shipped clock fires Factory work/merge/triage and bj29 work discovery", () => {
     // work-factory's 30m, merge-factory's 4h, and triage-factory's 8h cadences
     // all have a due slot at their first tick (no prior admitted slot yet), so
     // a clock started fresh fires all three once.
     const db = openDb(":memory:");
     const emitted = emitDueTicks(db, registry, { now: Date.now() }).emitted;
     expect(emitted.map((row) => row.loop).sort()).toEqual(
-      ["merge-factory", "triage-factory", "work-factory"].sort(),
+      ["merge-factory", "triage-factory", "work-bj29", "work-factory"].sort(),
     );
-    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(3);
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(4);
     db.close();
   });
 });

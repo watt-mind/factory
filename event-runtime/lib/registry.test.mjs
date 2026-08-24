@@ -202,8 +202,10 @@ describe("registry", () => {
     // Regenerated (#996): added the work-factory clock (30m,
     // factory.work.requested, auto) so agent-ready supply self-dispatches
     // without a manual work.requested seed.
+    // Regenerated (enable work-bj29): bj29 work clock joins the enabled
+    // autonomous set so BJ29 Coaching self-dispatches.
     const expected =
-      "sha256:0b81a3dcf88337f3de27f0815b6c60a2676a073e1b10f2302a13d88c641ee31e";
+      "sha256:f0c7936fbc0df2961083f3bd277b8c50a1115180e1ecf91dd0032ad59b50198e";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

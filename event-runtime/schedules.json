@@ -49,8 +49,8 @@
     "payload": { "repo": "bj29" },
     "catchUp": "none",
     "singleton": true,
-    "approval": "watched",
-    "enabled": false
+    "approval": "auto",
+    "enabled": true
   },
   "merge-bj29": {
     "every": "30m",
