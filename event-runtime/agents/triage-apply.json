@@ -12,6 +12,8 @@
       "argv": [
         "bun",
         "{factoryRoot}/tools/ticket.mjs",
+        "--repo",
+        "{repo}",
         "state",
         "{issueId}",
         "Todo",
@@ -31,6 +33,8 @@
       "argv": [
         "bun",
         "{factoryRoot}/tools/ticket.mjs",
+        "--repo",
+        "{repo}",
         "state",
         "{issueId}",
         "Todo"
@@ -40,6 +44,8 @@
       "argv": [
         "bun",
         "{factoryRoot}/tools/ticket.mjs",
+        "--repo",
+        "{repo}",
         "detail",
         "{issueId}",
         "{detail}"
@@ -49,6 +55,8 @@
       "argv": [
         "bun",
         "{factoryRoot}/tools/ticket.mjs",
+        "--repo",
+        "{repo}",
         "comment",
         "{issueId}",
         "triage: {reason}"
@@ -58,6 +66,8 @@
       "argv": [
         "bun",
         "{factoryRoot}/tools/ticket.mjs",
+        "--repo",
+        "{repo}",
         "comment",
         "{issueId}",
         "triage: possible duplicate — {reason}"
@@ -67,6 +77,8 @@
       "argv": [
         "bun",
         "{factoryRoot}/tools/ticket.mjs",
+        "--repo",
+        "{repo}",
         "comment",
         "{issueId}",
         "triage: needs a human decision — {reason}"

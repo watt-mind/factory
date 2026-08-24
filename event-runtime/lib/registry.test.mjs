@@ -202,8 +202,14 @@ describe("registry", () => {
     // Regenerated (#996): added the work-factory clock (30m,
     // factory.work.requested, auto) so agent-ready supply self-dispatches
     // without a manual work.requested seed.
+    // Regenerated (triage-apply repo plane): the label/detail/comment action
+    // argv templates now pass `--repo {repo}` to ticket.mjs, so triage-apply
+    // resolves the issue's own control plane instead of defaulting to the
+    // cwd (github) plane — the apply-side sibling of #985's scan-side fix.
+    // Without it, applying a triage plan to any Linear repo fails closed with
+    // "not a GitHub issue identifier". triage-apply.json is a registry input.
     const expected =
-      "sha256:0b81a3dcf88337f3de27f0815b6c60a2676a073e1b10f2302a13d88c641ee31e";
+      "sha256:1b069c19a536663dab214898ac137184839aa1edb29b4d382ebc510c1c468d7c";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
