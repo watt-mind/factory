@@ -1512,6 +1512,21 @@ function outboxView(db, limit) {
     }));
 }
 
+function journalLimit(url, defaultLimit) {
+  const rawLimit = url.searchParams.get("limit");
+  if (rawLimit === null || rawLimit.trim() === "") return defaultLimit;
+  const limit = Number(rawLimit);
+  if (!Number.isInteger(limit)) return defaultLimit;
+  return Math.max(1, Math.min(limit, 500));
+}
+
+function journalSince(url) {
+  const since = Number(url.searchParams.get("since") ?? 0);
+  if (!Number.isFinite(since)) return 0;
+  const normalized = Math.floor(since);
+  return Number.isSafeInteger(normalized) ? Math.max(0, normalized) : 0;
+}
+
 export function observedModelFromTranscript(head) {
   if (typeof head !== "string" || head === "") return null;
   const lines = head.split("\n");
@@ -1681,16 +1696,13 @@ export async function handleRunApiRoute({
   }
 
   if (route === "GET /journal") {
-    const since = Number(url.searchParams.get("since") ?? 0);
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
-    return send(
-      200,
-      journalView(db, Number.isFinite(since) ? since : 0, limit),
-    );
+    const since = journalSince(url);
+    const limit = journalLimit(url, 100);
+    return send(200, journalView(db, since, limit));
   }
 
   if (route === "GET /outbox") {
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 500);
+    const limit = journalLimit(url, 50);
     return send(200, { outbox: outboxView(db, limit) });
   }
 
