@@ -252,13 +252,16 @@ export function loadPackRoots({ root = reposRoot() } = {}) {
     if (typeof entry.path !== "string" || entry.path.trim() === "") {
       throw new RegistryError(`${at}.path must be a non-empty string`);
     }
+    if (!path.isAbsolute(entry.path)) {
+      throw new RegistryError(`${at}.path must be an absolute path`);
+    }
     if (entry.namespace !== undefined && typeof entry.namespace !== "string") {
       throw new RegistryError(`${at}.namespace must be a string when present`);
     }
     return {
       kind: "fs",
       name: entry.name,
-      path: path.resolve(root, entry.path),
+      path: path.resolve(entry.path),
       ...(entry.namespace !== undefined ? { namespace: entry.namespace } : {}),
     };
   });

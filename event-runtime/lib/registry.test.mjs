@@ -682,17 +682,26 @@ describe("registry", () => {
     const root = tmpDir("event-policy-packs-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     const policy = path.join(root, "config", "policy.yaml");
+    const packRoot = path.join(root, "vendor", "sample");
     expect(loadPackRoots({ root })).toEqual([]);
 
     writeFileSync(
       policy,
       "packs:\n  - name: sample\n    path: vendor/sample\n    namespace: sample\n",
     );
+    expect(() => loadPackRoots({ root })).toThrow(
+      /packs\[0\]\.path must be an absolute path/,
+    );
+
+    writeFileSync(
+      policy,
+      `packs:\n  - name: sample\n    path: ${JSON.stringify(packRoot)}\n    namespace: sample\n`,
+    );
     expect(loadPackRoots({ root })).toEqual([
       {
         kind: "fs",
         name: "sample",
-        path: path.join(root, "vendor", "sample"),
+        path: packRoot,
         namespace: "sample",
       },
     ]);
@@ -700,7 +709,7 @@ describe("registry", () => {
     expect(() => loadPackRoots({ root })).toThrow(/packs.*array/);
     writeFileSync(
       policy,
-      "packs:\n  - name: sample\n    path: one\n  - name: sample\n    path: two\n",
+      `packs:\n  - name: sample\n    path: ${JSON.stringify(path.join(root, "one"))}\n  - name: sample\n    path: ${JSON.stringify(path.join(root, "two"))}\n`,
     );
     expect(() => loadPackRoots({ root })).toThrow(/duplicate pack name/);
   });

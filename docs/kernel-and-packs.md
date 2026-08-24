@@ -13,14 +13,15 @@ never scans a directory for packs.
 ```yaml
 packs:
   - name: dreaming
-    path: packs/dreaming # relative to the factory checkout; absolute is allowed
+    path: /opt/factory-packs/dreaming
     namespace: dreaming # optional here when pack.json declares it
 ```
 
 An absent block and `packs: []` both load only the built-in root. Entries are
 loaded after the built-in root and in policy order. Each entry accepts only
-`name`, `path`, and optional `namespace`; malformed entries, duplicate names,
-or unreadable pack content fail registry startup closed.
+`name`, an absolute `path`, and optional `namespace`; relative paths are
+rejected rather than resolved against the factory checkout. Malformed entries,
+duplicate names, or unreadable pack content fail registry startup closed.
 
 A pack can also arrive inside an **extension** — one directory whose
 `factory-extension.json` lists its packs (and adapters) and is enabled with a
