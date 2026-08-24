@@ -12,6 +12,14 @@ import {
   sendNotification,
 } from "./notify.mjs";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
+import { fileURLToPath } from "node:url";
+
+// Repo root: this file is event-runtime/lib/notify.test.mjs, so two dirs up.
+const FACTORY_ROOT_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
 
 const tmp = (p) => tmpDir(p);
 
@@ -113,7 +121,28 @@ describe("notify (WM-65)", () => {
     expect(
       DEFAULT_NOTIFY_CMD === null || typeof DEFAULT_NOTIFY_CMD === "string",
     ).toBe(true);
-    expect(String(DEFAULT_NOTIFY_CMD)).not.toContain("hdkiller");
+    // The "no hardcoded private path" guarantee is about the TRACKED tree, not
+    // the operator's gitignored instance config. DEFAULT_NOTIFY_CMD resolves
+    // from config/policy.yaml, which on the operator's own machine (and the
+    // self-hosted CI runner, same box, user `hdkiller`) legitimately points at
+    // a personal notify script — asserting on that resolved value tests the
+    // instance, not the tree, and fails wherever an instance config is present.
+    // Assert the guarantee where it belongs: the committed example config and
+    // this module's source carry no personal path.
+    const trackedSources = [
+      readFileSync(
+        path.join(FACTORY_ROOT_DIR, "config/policy.example.yaml"),
+        "utf8",
+      ),
+      readFileSync(
+        path.join(FACTORY_ROOT_DIR, "event-runtime/lib/notify.mjs"),
+        "utf8",
+      ),
+    ].join("\n");
+    // No personal home path (e.g. ~/Develop/hdkiller/… or /home/hdkiller/…) may
+    // ship in the tracked tree. A doc comment naming "notify.py" as a concept
+    // is fine; a hardcoded operator directory is not.
+    expect(trackedSources).not.toMatch(/[/~]hdkiller[/"']|\/home\/[a-z]+\//i);
     expect(notifyCommand({ FACTORY_EVENT_NOTIFY_CMD: "/x/stub" })).toBe(
       "/x/stub",
     );
