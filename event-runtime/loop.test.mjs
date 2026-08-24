@@ -368,7 +368,7 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     );
   });
 
-  test("the exact enabled autonomous set is merge-factory and triage-factory", () => {
+  test("the exact enabled autonomous set is work-factory, merge-factory and triage-factory", () => {
     for (const repo of [
       "coach-wattz",
       "watts-mobile",
@@ -380,20 +380,20 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
       expect(registry.schedules[`merge-${repo}`]).toBeUndefined();
       expect(registry.schedules[`ship-${repo}`]).toBeUndefined();
     }
-    expect(registry.schedules["work-factory"]).toBeUndefined();
     expect(registry.schedules["ship-factory"]).toBeUndefined();
 
+    // work-factory (#996) joins merge/triage as an enabled autonomous loop so
+    // agent-ready supply self-dispatches without a manual work.requested seed.
+    const AUTONOMOUS = ["work-factory", "merge-factory", "triage-factory"];
     const enabledAutonomous = Object.entries(registry.schedules)
       .filter(
         ([, schedule]) => schedule.enabled && schedule.approval === "auto",
       )
       .map(([loop]) => loop);
-    expect(enabledAutonomous.sort()).toEqual(
-      ["merge-factory", "triage-factory"].sort(),
-    );
+    expect(enabledAutonomous.sort()).toEqual([...AUTONOMOUS].sort());
 
     for (const [loop, schedule] of Object.entries(registry.schedules)) {
-      if (loop !== "merge-factory" && loop !== "triage-factory") {
+      if (!AUTONOMOUS.includes(loop)) {
         expect({
           approval: schedule.approval,
           enabled: schedule.enabled,
@@ -434,16 +434,16 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     // below proves each tick now plans a real run.
   });
 
-  test("the shipped clock fires only Factory merge discovery and triage discovery", () => {
-    // triage-factory's 8h cadence and merge-factory's 4h cadence both have
-    // a due slot at their first tick (no prior admitted slot yet), so a
-    // clock started fresh fires both once.
+  test("the shipped clock fires Factory work, merge, and triage discovery", () => {
+    // work-factory's 30m, merge-factory's 4h, and triage-factory's 8h cadences
+    // all have a due slot at their first tick (no prior admitted slot yet), so
+    // a clock started fresh fires all three once.
     const db = openDb(":memory:");
     const emitted = emitDueTicks(db, registry, { now: Date.now() }).emitted;
     expect(emitted.map((row) => row.loop).sort()).toEqual(
-      ["merge-factory", "triage-factory"].sort(),
+      ["merge-factory", "triage-factory", "work-factory"].sort(),
     );
-    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(2);
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(3);
     db.close();
   });
 });
