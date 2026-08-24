@@ -1,7 +1,21 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { SCHEMA_FORMATS, validate } from "./schema.mjs";
 
+const sharedCases = JSON.parse(
+  readFileSync(
+    new URL("../test-fixtures/schema-validation.json", import.meta.url),
+    "utf8",
+  ),
+).cases;
+
 describe("validate", () => {
+  test("matches the shared schema validation matrix", () => {
+    for (const { name, schema, value, valid } of sharedCases) {
+      expect(validate(schema, value).valid, name).toBe(valid);
+    }
+  });
+
   test("accepts a conforming object", () => {
     const schema = {
       type: "object",
@@ -48,6 +62,13 @@ describe("validate", () => {
       false,
     );
     expect(validate({ type: "array", minItems: 1 }, []).valid).toBe(false);
+  });
+
+  test("invalid patterns fail validation without throwing", () => {
+    expect(validate({ type: "string", pattern: "[" }, "value")).toEqual({
+      valid: false,
+      errors: ["$: invalid pattern"],
+    });
   });
 
   test("empty schema accepts anything", () => {

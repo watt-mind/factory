@@ -135,10 +135,18 @@ function check(schema, value, path, errors) {
     }
     if (
       hasOwn(schema, "pattern") &&
-      typeof schema.pattern === "string" &&
-      !new RegExp(schema.pattern).test(value)
+      typeof schema.pattern === "string"
     ) {
-      errors.push(`${path}: does not match pattern ${schema.pattern}`);
+      let pattern;
+      try {
+        pattern = new RegExp(schema.pattern);
+      } catch {
+        errors.push(`${path}: invalid pattern`);
+        return;
+      }
+      if (!pattern.test(value)) {
+        errors.push(`${path}: does not match pattern ${schema.pattern}`);
+      }
     }
     if (schema.format === "uri" && !URL.canParse(value)) {
       errors.push(`${path}: format "uri" value is not a valid URI`);

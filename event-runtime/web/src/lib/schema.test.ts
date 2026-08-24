@@ -1,9 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { validate } from "./schema";
+import { readFileSync } from "node:fs";
+import { SCHEMA_FORMATS, validate } from "./schema";
+
+const sharedCases = JSON.parse(
+  readFileSync(
+    new URL("../../../test-fixtures/schema-validation.json", import.meta.url),
+    "utf8",
+  ),
+).cases as Array<{
+  name: string;
+  schema: unknown;
+  value: unknown;
+  valid: boolean;
+}>;
 
 // Representative cases ported from event-runtime/lib/schema.test.mjs (WM-76)
 // so the browser port provably matches the runtime validator's behavior.
 describe("validate (web port of lib/schema.mjs)", () => {
+  test("matches the shared schema validation matrix", () => {
+    for (const { name, schema, value, valid } of sharedCases) {
+      expect(validate(schema, value).valid, name).toBe(valid);
+    }
+  });
+
   test("accepts a conforming object", () => {
     const schema = {
       type: "object",
@@ -100,5 +119,30 @@ describe("validate (web port of lib/schema.mjs)", () => {
     expect(valid).toBe(false);
     expect(errors[0]).toBe("$: does not match pattern");
     expect(errors[0]).not.toContain("^[0-9a-f]{40}$");
+  });
+
+  test("invalid patterns fail validation without throwing", () => {
+    expect(validate({ type: "string", pattern: "[" }, "value")).toEqual({
+      valid: false,
+      errors: ["$: invalid pattern"],
+    });
+  });
+
+  test("matches the runtime format behavior", () => {
+    expect(SCHEMA_FORMATS).toEqual([
+      "secret",
+      "uri",
+      "channel-id",
+      "ticket",
+      "duration",
+      "multiline",
+      "email",
+    ]);
+    expect(
+      validate({ type: "string", format: "uri" }, "not a url").valid,
+    ).toBe(false);
+    expect(
+      validate({ type: "string", format: "duration" }, "30s").valid,
+    ).toBe(true);
   });
 });
