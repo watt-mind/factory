@@ -142,6 +142,15 @@
     "approval": "watched",
     "enabled": false
   },
+  "work-factory": {
+    "every": "30m",
+    "eventType": "factory.work.requested",
+    "payload": { "repo": "factory" },
+    "catchUp": "none",
+    "singleton": true,
+    "approval": "auto",
+    "enabled": true
+  },
   "merge-factory": {
     "every": "4h",
     "eventType": "factory.merge.requested",

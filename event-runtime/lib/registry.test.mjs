@@ -199,8 +199,11 @@ describe("registry", () => {
     // fails closed when a GitHub Project title does not match.
     // Regenerated (#985): list-reading scan prompts pass their input repo to
     // ticket.mjs, so ephemeral workspaces do not fall back to another plane.
+    // Regenerated (#996): added the work-factory clock (30m,
+    // factory.work.requested, auto) so agent-ready supply self-dispatches
+    // without a manual work.requested seed.
     const expected =
-      "sha256:7a172fc8a2ffa21bd95cfd1b22d786b85741be8b64a7577436e25d7d856ba02d";
+      "sha256:0b81a3dcf88337f3de27f0815b6c60a2676a073e1b10f2302a13d88c641ee31e";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
