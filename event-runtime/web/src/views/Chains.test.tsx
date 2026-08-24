@@ -244,6 +244,12 @@ describe("Chains list (WM-537)", () => {
         expect(
           view.container.querySelector('col[data-col="runs"]')?.className,
         ).toContain("w-12");
+        expect(view.container.querySelector('col[data-col="root"]')).toBeNull();
+        expect(
+          view.getByTitle("Longest path from the root, measured in hops."),
+        ).toBeTruthy();
+        expect(view.getByTitle("Number of events in the chain.")).toBeTruthy();
+        expect(view.getByTitle("Number of runs in the chain.")).toBeTruthy();
       },
     );
   });
@@ -265,7 +271,7 @@ describe("Chains list (WM-537)", () => {
       expect(originCell.querySelector("svg")).toBeTruthy();
 
       // Repos cell should contain GitHub icon
-      const reposCell = activeRow.querySelectorAll("td")[7];
+      const reposCell = activeRow.querySelectorAll("td")[6];
       expect(reposCell.className).toContain("whitespace-nowrap");
       expect(reposCell.querySelector("svg")).toBeTruthy();
       expect(reposCell.textContent).toContain("factory");

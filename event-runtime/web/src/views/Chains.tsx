@@ -80,6 +80,16 @@ const STATUS_HUES: Record<ChainStatus, string> = {
 const STATE_ORDER = Object.keys(STATE_HUES);
 
 const NARROW_COLS = new Set(["depth", "events", "runs"]);
+const NARROW_HEADER_LABELS: Record<string, string> = {
+  depth: "D",
+  events: "Ev",
+  runs: "R",
+};
+const NARROW_HEADER_TITLES: Record<string, string> = {
+  depth: "Longest path from the root, measured in hops.",
+  events: "Number of events in the chain.",
+  runs: "Number of runs in the chain.",
+};
 
 function chainStateSegments(
   states: ChainListItem["states"],
@@ -239,7 +249,7 @@ const CHAINS_DISPLAY: DisplayConfig<ChainListItem> = {
   ],
   columns: [
     { key: "origin", label: "Origin", always: true },
-    { key: "root", label: "Root event" },
+    { key: "root", label: "Root event", defaultHidden: true },
     { key: "depth", label: "Depth" },
     { key: "events", label: "Events" },
     { key: "runs", label: "Runs" },
@@ -407,7 +417,10 @@ export function Chains({
                 return (
                   <Th
                     key={column.key}
-                    label={column.label}
+                    label={NARROW_HEADER_LABELS[column.key] ?? column.label}
+                    title={
+                      NARROW_HEADER_TITLES[column.key] ?? column.label
+                    }
                     dir={current ? display.sortDir : null}
                     naturalDir={sort?.defaultDir ?? "asc"}
                     onSort={
