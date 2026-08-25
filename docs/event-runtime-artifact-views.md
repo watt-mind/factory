@@ -397,7 +397,6 @@ An optional `presentation` in `result.json`, beside `artifact`, exactly as
       "items": [
         {
           "label": "Repo",
-          "issue": null,
           "url": "https://github.com/watt-mind/factory"
         }
       ]
