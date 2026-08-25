@@ -215,8 +215,13 @@ describe("registry", () => {
     // parses correctly anywhere after the verb (matches `queue --repo bj29`).
     // Regenerated (#910): label-agent-ready also passes its schema-constrained
     // tierReason as a separate state --comment argv element (before --repo).
+    // Regenerated (command-result captured property): the command adapter
+    // emits artifact.captured for any def with captureStdout, but the schema
+    // rejected it (additionalProperties:false) — failing reaper/label-guard/
+    // reconcile/warm/unblock-digest every run. Added captured to the schema;
+    // 11 command defs re-pinned. Registry inputs changed.
     const expected =
-      "sha256:19d3890b35bb760fac2f0343f59fb94c35be7f42aaafd15313e20a32f42895c2";
+      "sha256:0014d85678ba3ab1fd7b66f2f3fec6eb313447280e313e6ace7c6baf44fa032e";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

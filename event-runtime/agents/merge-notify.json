@@ -22,6 +22,6 @@
   "pins": {
     "agents/merge-notify.md": "sha256:08c6b9c75db11728b3959b7f75e15d88f5d38d4dc39009b4c5ff77211011df17",
     "schemas/merge-notify.input.json": "sha256:cf759d06e47abd5e60335da8881358e82670b09f81e95a7df69e0d9216b30f26",
-    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+    "schemas/command-result.output.json": "sha256:f158c1c76dd848407237c45a12c521b5d8e103cefd6fafdfdd51070a2b7e2585"
   }
 }

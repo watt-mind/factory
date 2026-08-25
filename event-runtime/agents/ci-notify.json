@@ -22,6 +22,6 @@
   "pins": {
     "agents/ci-notify.md": "sha256:c12a7d0613ed8fc030f29447f495fd0d70c55ec099f42ac9c08e07629283510d",
     "schemas/ci-notify.input.json": "sha256:ad1596d31e703c7af6233f752a7bedcf6f97509d4a295b07a9c630f5284110bd",
-    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+    "schemas/command-result.output.json": "sha256:f158c1c76dd848407237c45a12c521b5d8e103cefd6fafdfdd51070a2b7e2585"
   }
 }
