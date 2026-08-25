@@ -327,7 +327,12 @@ describe("worker", () => {
     }
   });
 
-  test("does not provision instance config into a checkout that could stage it", () => {
+  test("provisions instance config into a client checkout but makes it un-stageable", () => {
+    // A client repo (bj29, cashsaas, …) does not gitignore config/repos.yaml,
+    // so the old guard skipped the copy and left the review with no config —
+    // failing it closed. Now the path is added to the checkout's local exclude
+    // and the config IS copied, so merge-review can resolve the repo's control
+    // plane and merge_ci gate, while an agent still cannot `git add` it.
     const factoryRoot = tmpDir("evrt-instance-config-protected-source-");
     const checkout = tmpDir("evrt-instance-config-protected-checkout-");
     try {
@@ -342,10 +347,19 @@ describe("worker", () => {
 
       expect(
         provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
-      ).toEqual([]);
+      ).toEqual(["config/repos.yaml"]);
+      // Copied in, so the run can read it.
       expect(existsSync(path.join(checkout, "config", "repos.yaml"))).toBe(
-        false,
+        true,
       );
+      // But un-stageable: git now ignores it (via .git/info/exclude).
+      expect(
+        spawnSync(
+          "git",
+          ["-C", checkout, "check-ignore", "-q", "--", "config/repos.yaml"],
+          { encoding: "utf8" },
+        ).status,
+      ).toBe(0);
     } finally {
       rmSync(factoryRoot, { recursive: true, force: true });
       rmSync(checkout, { recursive: true, force: true });

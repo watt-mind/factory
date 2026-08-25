@@ -85,6 +85,42 @@ const INSTANCE_LOCAL_CONFIG_FILES = Object.freeze([
 ]);
 
 /**
+ * Ensure `rel` is git-ignored in `checkoutPath`, adding it to the checkout's
+ * local `info/exclude` if the repo does not already ignore it. Returns true
+ * when the path is (or becomes) ignored. A client repo does not gitignore the
+ * factory's instance config, so this is how that config can be copied in for a
+ * run while staying un-stageable — a copied-but-committable instance config
+ * would leak the operator's routing/policy into the repo.
+ */
+function ensureLocallyIgnored(checkoutPath, rel) {
+  const isIgnored = () =>
+    spawnSync("git", ["-C", checkoutPath, "check-ignore", "-q", "--", rel], {
+      encoding: "utf8",
+    }).status === 0;
+  if (isIgnored()) return true;
+  const resolved = spawnSync(
+    "git",
+    ["-C", checkoutPath, "rev-parse", "--git-path", "info/exclude"],
+    { encoding: "utf8" },
+  );
+  if (resolved.status !== 0) return false;
+  const excludeFile = path.resolve(checkoutPath, resolved.stdout.trim());
+  try {
+    mkdirSync(path.dirname(excludeFile), { recursive: true });
+    const existing = existsSync(excludeFile)
+      ? readFileSync(excludeFile, "utf8")
+      : "";
+    if (!existing.split(/\r?\n/).includes(`/${rel}`)) {
+      const sep = existing === "" || existing.endsWith("\n") ? "" : "\n";
+      writeFileSync(excludeFile, `${existing}${sep}/${rel}\n`);
+    }
+  } catch {
+    return false;
+  }
+  return isIgnored();
+}
+
+/**
  * Bring the operator-owned config files into a delegated checkout. These
  * files are intentionally untracked, so a fresh worktree otherwise falls
  * back to examples and cannot use this factory instance's routing or policy.
@@ -113,15 +149,18 @@ export function provisionInstanceLocalConfigs({
     const destination = path.join(destinationConfig, filename);
     if (path.resolve(source) === path.resolve(destination)) continue;
 
-    // Never introduce an instance config into a checkout where an agent could
-    // stage it. Non-factory repository fixtures and repositories without this
-    // local-config contract continue using their tracked examples.
-    if (
-      isGitCheckout &&
-      spawnSync("git", ["-C", checkoutPath, "check-ignore", "-q", "--", rel], {
-        encoding: "utf8",
-      }).status !== 0
-    ) {
+    // The instance config must never be stageable in the checkout — an agent
+    // could otherwise commit the operator's routing/policy (with client names)
+    // into a repo. The factory repo already gitignores these paths; a client
+    // repo (bj29, cashsaas, …) has no such entry, so make the path locally
+    // ignored (`.git/info/exclude`) first. Either way the copied config is
+    // present for the run — merge-review resolves the repo's control plane and
+    // merge_ci gate from it — but can never be `git add`-ed. Before this,
+    // client-repo merge-review failed closed on the missing config (the guard
+    // silently skipped the copy, leaving only the tracked example, which the
+    // client repo does not ship). Only fall back to the example if the path
+    // cannot be made ignore-protected.
+    if (isGitCheckout && !ensureLocallyIgnored(checkoutPath, rel)) {
       continue;
     }
     mkdirSync(destinationConfig, { recursive: true });
