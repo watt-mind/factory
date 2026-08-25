@@ -658,7 +658,15 @@ export function expireRunDeadline(
 export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
 
 /** Claim-lock contention is deferred independently from execution attempts. */
-export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = 8;
+// Requeue budget for the per-repo dispatch lock. Contended runs re-queue with
+// exponential backoff and only give up (claim_lock_starvation → REFUSED) after
+// this many attempts. The lock is held briefly (claim + gate control-plane
+// reads, not the agent run), so a contended run reliably wins once the runs
+// ahead of it release — the ceiling only needs to exceed the worker pool's
+// concurrent same-repo contenders. At 8 a surge (a freshly-unblocked backlog,
+// a reaper mass-reclaim, or a merge-lane fan-out) starved legitimate dispatch
+// and merge-fix work; 24 clears a full worker pool of contenders with headroom.
+export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = 24;
 export const DEFAULT_MAX_TRANSIENT_GATE_REQUEUES = 3;
 export const CLAIM_LOCK_BACKOFF_BASE_MS = 25;
 export const CLAIM_LOCK_BACKOFF_MAX_MS = 1_000;
