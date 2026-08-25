@@ -14,6 +14,9 @@ Modern-minimal, dark-first, technical, and restrained.
 - Use an asymmetric typographic marquee on the homepage: a large factual
   statement, compact supporting copy and actions, then one bounded execution
   rail. Do not repeat the brand mark as a floating hero illustration.
+- Give the homepage the Watt Mind marketing canvas: 16px mobile margins, 64px
+  desktop margins, and a 1440px maximum shell. Keep documentation prose at its
+  narrower readable measure.
 - Use a long-document rhythm: readable prose measure, quiet dividers, and dense
   reference surfaces.
 - Keep prose and diagram surfaces clean. Do not use background grids: they
@@ -37,11 +40,21 @@ Exact OKLCH conversions live in `src/styles/tokens.css`.
 - Body: Inter, 400–600.
 - Metadata and code: JetBrains Mono, 400–600.
 
-## Spacing and components
+## Brand shell and components
 
+- Use an 80px navigation shell with the Watt Mind mark, `WATT_MIND` display
+  lockup, and a compact mono `[ FACTORY ]` product label.
+- Active documentation navigation is transparent, phosphor teal, uppercase
+  mono text wrapped in brackets. Do not use a filled teal active chip.
+- Primary actions use the darker primary-container fill, dark ink, 8px radius,
+  and uppercase JetBrains Mono labels. Avoid pill-shaped product CTAs.
+- Close pages with a compact Watt Mind colophon while preserving Starlight's
+  edit, last-updated, and pagination controls.
+- Dark is the initial brand presentation. Keep the light and auto options as an
+  explicit accessibility preference rather than removing the theme selector.
 - 4px base scale, 24px content gutters.
 - Cards use translucent `surface-container`, a 12px blur, and a one-pixel
-  `outline-variant` border.
+  `outline-variant` border. Static cards do not animate on hover.
 - Interactive emphasis uses phosphor teal. Avoid decorative gradients outside
   restrained hero focus and diagram grid treatments.
 - Motion is limited to transform and opacity, with reduced-motion support.

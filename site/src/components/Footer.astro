@@ -1,0 +1,141 @@
+---
+import EditLink from "virtual:starlight/components/EditLink";
+import LastUpdated from "virtual:starlight/components/LastUpdated";
+import Pagination from "virtual:starlight/components/Pagination";
+import wattMindLogo from "../assets/watt-mind-logo.svg";
+
+const { siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<footer class="wm-footer">
+  <div class="wm-footer__meta">
+    <EditLink />
+    <LastUpdated />
+  </div>
+
+  <Pagination />
+
+  <div class="wm-footer__close">
+    <a
+      class="wm-footer__lockup"
+      href="https://watt-mind.com"
+      aria-label="Visit Watt Mind"
+    >
+      <img
+        src={wattMindLogo.src}
+        width={wattMindLogo.width}
+        height={wattMindLogo.height}
+        alt=""
+      />
+      <span>WATT_MIND</span>
+    </a>
+
+    <p>Factory is built and maintained by Watt Mind.</p>
+
+    <nav class="wm-footer__links" aria-label="Factory and Watt Mind links">
+      <a href={siteTitleHref}>Factory docs</a>
+      <a href="https://github.com/watt-mind/factory">GitHub</a>
+      <a href="https://watt-mind.com">Watt Mind</a>
+    </nav>
+  </div>
+</footer>
+
+<style>
+  @layer starlight.core {
+    .wm-footer {
+      display: flex;
+      flex-direction: column;
+      gap: var(--wm-space-md);
+    }
+
+    .wm-footer__meta {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: var(--wm-space-xs) var(--wm-space-xl);
+      margin-block-start: var(--wm-space-xl);
+      color: var(--sl-color-gray-3);
+      font-size: var(--sl-text-sm);
+    }
+
+    .wm-footer__meta > :global(p:only-child) {
+      margin-inline-start: auto;
+    }
+
+    .wm-footer__close {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: var(--wm-space-sm) var(--wm-space-md);
+      align-items: center;
+      margin-block-start: var(--wm-space-md);
+      padding-block: var(--wm-space-lg);
+      border-block: var(--wm-rule);
+    }
+
+    .wm-footer__lockup {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--wm-space-2xs);
+      color: var(--sl-color-white);
+      font-family: var(--wm-font-display);
+      font-size: var(--sl-text-sm);
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .wm-footer__lockup img {
+      width: 2rem;
+      height: 2rem;
+      object-fit: contain;
+    }
+
+    .wm-footer__close p {
+      margin: 0;
+      color: var(--sl-color-gray-2);
+      font-size: var(--sl-text-sm);
+      line-height: 1.5;
+    }
+
+    .wm-footer__links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--wm-space-xs) var(--wm-space-md);
+      align-items: center;
+      justify-content: flex-end;
+      font-family: var(--wm-font-mono);
+      font-size: var(--sl-text-xs);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .wm-footer__links a {
+      color: var(--sl-color-gray-2);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .wm-footer__lockup:hover,
+    .wm-footer__links a:hover {
+      color: var(--wm-color-primary);
+    }
+
+    .wm-footer__lockup:active,
+    .wm-footer__links a:active {
+      color: var(--sl-color-white);
+    }
+
+    @media (max-width: 50rem) {
+      .wm-footer__close {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .wm-footer__links {
+        justify-content: flex-start;
+      }
+    }
+  }
+</style>
