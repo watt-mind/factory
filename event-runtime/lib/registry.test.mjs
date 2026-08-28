@@ -220,8 +220,11 @@ describe("registry", () => {
     // rejected it (additionalProperties:false) — failing reaper/label-guard/
     // reconcile/warm/unblock-digest every run. Added captured to the schema;
     // 11 command defs re-pinned. Registry inputs changed.
+    // Regenerated (advisory whole-repo claims): work-scan.md no longer defers
+    // a candidate on an in-flight `**`/no-parseable-Owned-Paths overlap — a
+    // scope-unknown ticket must not freeze the queue. work-scan.md re-pinned.
     const expected =
-      "sha256:0014d85678ba3ab1fd7b66f2f3fec6eb313447280e313e6ace7c6baf44fa032e";
+      "sha256:ea488a081ef38922cf242b06a2749805fd1090d75dd1599fa9523045c5e48bd5";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

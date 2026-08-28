@@ -110,17 +110,22 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    in-flight ticket or an already-selected ticket does NOT disqualify — select
    the ticket while a free slot remains and record the overlap in its `reason`
    (`overlaps WM-123 on event-runtime/web/src/App.tsx`); rebase and merge-fix
-   resolve real conflicts later. Only two collisions are hard and defer a
-   candidate as `owned_paths_overlap`: (a) an in-flight or selected ticket
-   claims `**` (including a ticket with no parseable Owned Paths section — see
-   step 4), or (b) the candidate and an in-flight/selected ticket claim the
-   _identical_ concrete file (no globs on either side). Selected in order, each
-   item pins `{ticket, ownedPaths, reason}`. Every candidate not selected goes
-   in `deferred` as `{ticket, reason}`, where `reason` is the typed value
-   `owned_paths_overlap` for a hard collision or `cap_full` when no slot
-   remains. When a hard collision comes from an in-flight ticket with no
-   parseable Owned Paths, name that ticket in the `summary` so the operator can
-   fix its description (WM-868).
+   resolve real conflicts later. A whole-repo (`**`) claim is advisory too: an
+   in-flight or selected ticket that claims `**` — including one with no
+   parseable Owned Paths section (see step 4) — must NOT freeze the queue. A
+   single scope-unknown in-flight ticket (an epic or auto-filed issue parked
+   "In Progress") would otherwise claim the entire repository and stall every
+   ready candidate while the factory sits idle; select the candidate anyway and
+   record `overlaps WM-123 (whole-repo/unknown scope)` in its `reason`. Only one
+   collision is hard and defers a candidate as `owned_paths_overlap`: the
+   candidate and an in-flight/selected ticket claim the _identical_ concrete
+   file (no globs on either side) — a guaranteed conflict worth serializing.
+   Selected in order, each item pins `{ticket, ownedPaths, reason}`. Every
+   candidate not selected goes in `deferred` as `{ticket, reason}`, where
+   `reason` is the typed value `owned_paths_overlap` for a hard collision or
+   `cap_full` when no slot remains. When a candidate rode a whole-repo overlap
+   with an in-flight ticket that has no parseable Owned Paths, name that ticket
+   in the `summary` so the operator can still fix its description (WM-868).
    Do not stop accounting when the slots fill: mark every remaining candidate
    `cap_full`.
 

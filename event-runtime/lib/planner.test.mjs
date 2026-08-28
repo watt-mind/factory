@@ -1432,7 +1432,7 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
-  test("advisory mode hard-refuses an in-flight **/* claim", () => {
+  test("advisory mode records but does not block an in-flight **/* claim", () => {
     withReposRoot(
       tierRepo,
       () => {
@@ -1453,7 +1453,14 @@ describe("planEvent worktree gate (WM-108)", () => {
             ],
           },
         );
-        expect(result.refusal?.reason).toBe("owned_paths_conflict_hard");
+        // A whole-repo (`**`) claim from an in-flight ticket no longer hard-
+        // refuses in advisory mode — it is recorded for visibility and the
+        // candidate stays dispatchable (a scope-unknown in-flight ticket must
+        // not freeze the queue).
+        expect(result.refusal?.reason).not.toBe("owned_paths_conflict_hard");
+        expect(result.evidence.ownedPathsHardConflicts).toEqual([
+          { ticket: "WM-953", path: "src/a.ts", inFlightPath: "**/*" },
+        ]);
       },
       "dispatch:\n  owned_paths_collision: advisory\n",
     );

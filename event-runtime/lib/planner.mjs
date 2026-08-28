@@ -1253,10 +1253,16 @@ export function worktreeDispatchAutoEligibility(
         }),
       ),
     );
-    if (hard.length) {
-      evidence.ownedPathsHardConflicts = hard;
-      return refusal("owned_paths_conflict_hard", evidence);
-    }
+    // Advisory means advisory: a whole-repo (`**`) overlap — which is what a
+    // missing/unparseable Owned Paths section on an in-flight ticket resolves
+    // to (ownedPathsForCollision → ["**"]) — is recorded for visibility but
+    // must NOT block. A single scope-unknown in-flight ticket (e.g. an epic or
+    // an auto-filed issue parked "In Progress" without an Owned Paths section)
+    // would otherwise claim the entire repository and freeze the whole queue,
+    // stalling the factory while ready work waits. Overlaps are reconciled
+    // downstream by rebase + merge-fix and the cold merge review. Strict mode
+    // (owned_paths_collision != "advisory") still refuses on any overlap above.
+    if (hard.length) evidence.ownedPathsHardConflicts = hard;
   } else {
     evidence.checks.owned_paths_disjoint = true;
   }
