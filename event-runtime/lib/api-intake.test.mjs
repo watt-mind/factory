@@ -67,6 +67,29 @@ describe("webhook intake (§14)", () => {
     expect(typeof body.env.name).toBe("string"); // environment identity, always present
     expect(body.webhookSecret).toBe("set");
     expect(body.githubWebhookSecret).toBe("set");
+    expect(body.registry).toMatchObject({
+      loadedAt: expect.any(String),
+      stamp: null,
+      lastReloadError: null,
+    });
+  });
+
+  test("GET /health exposes the live registry ref state", async () => {
+    const state = {
+      loadedAt: "2026-08-28T10:00:00.000Z",
+      stamp: "files:abc123",
+      lastReloadError: { at: "2026-08-28T10:01:00.000Z", message: "bad edges" },
+    };
+    const current = loadRegistry();
+    const live = await makeServer({
+      registryRef: { current, state: () => state },
+    });
+    try {
+      const body = await (await fetch(live.url("/health"))).json();
+      expect(body.registry).toEqual(state);
+    } finally {
+      live.close();
+    }
   });
 
   test("unknown route → 404 with an error body", async () => {

@@ -107,6 +107,7 @@ export async function handleIntakeApiRoute({
   send,
   readBody,
   parseJson,
+  registryHealth,
 }) {
   if (route === "GET /health") {
     return send(200, {
@@ -115,6 +116,7 @@ export async function handleIntakeApiRoute({
       env,
       webhookSecret: secret ? "set" : "absent",
       githubWebhookSecret: githubSecret ? "set" : "absent",
+      registry: registryHealth ?? null,
     });
   }
 

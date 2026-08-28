@@ -7,7 +7,7 @@ import type {
   ChainView,
   ApproveOutcome,
   CancelOutcome,
-  EnvIdentity,
+  HealthView,
   DecisionEffect,
   DecisionResponseInput,
   InboxItem,
@@ -311,11 +311,7 @@ export function fetchTickets(
 }
 
 export const api = {
-  health: () =>
-    call<{ ok: boolean; policyVersion: string; env: EnvIdentity }>(
-      "GET",
-      "/health",
-    ),
+  health: () => call<HealthView>("GET", "/health"),
   status: () => call<StatusView>("GET", "/status"),
   events: (status?: string, page: { limit?: number; before?: string } = {}) =>
     call<CursorPage<AdmittedEvent, "events">>(

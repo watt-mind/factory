@@ -31,11 +31,112 @@ import { reconcileInbox } from "../lib/inbox.mjs";
 import { loadRegistry } from "../lib/registry.mjs";
 import { approveProposal } from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
-import { runOnce } from "../lib/worker.mjs";
+import {
+  codeStamp,
+  REGISTRY_STAMP_PATHS,
+  runOnce,
+} from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Mutable ownership seam for the validated registry.  Loading and validation
+ * happen before `validateAndSwap`; assigning `current` is the only mutation,
+ * so readers see either the complete old registry or the complete new one.
+ * The same method is intentionally callable without the file poller so a
+ * future definition API can use the exact fail-closed path.
+ */
+export function createRegistryRef({
+  initial,
+  load,
+  sourceStamp,
+  now = () => Date.now(),
+  log: logLine = log,
+  decorate = () => {},
+} = {}) {
+  if (!initial || typeof load !== "function" || typeof sourceStamp !== "function")
+    throw new Error("createRegistryRef requires initial, load, and sourceStamp");
+
+  let current = initial;
+  let loadedAt = new Date(now()).toISOString();
+  let loadedStamp = sourceStamp();
+  let observedStamp = loadedStamp;
+  let lastReloadError = null;
+  const loggedErrors = new Set();
+
+  const reject = (err) => {
+    const message = err?.message ?? String(err);
+    lastReloadError = { at: new Date(now()).toISOString(), message };
+    if (!loggedErrors.has(message)) {
+      loggedErrors.add(message);
+      logLine(
+        `registry reload rejected — running last-good configuration: ${message}`,
+      );
+    }
+    return { swapped: false, ...ref.state() };
+  };
+
+  const ref = {
+    get current() {
+      return current;
+    },
+    state() {
+      return { loadedAt, stamp: loadedStamp, lastReloadError };
+    },
+    validateAndSwap(candidateOrLoader = load, { stamp = sourceStamp() } = {}) {
+      try {
+        // `loadRegistry` performs all schema, pin, edge, schedule and policy
+        // validation before returning. Accepting a candidate is useful to a
+        // future API which already built it off-thread; accepting a loader is
+        // the standalone fail-closed operation used by the poller.
+        const candidate =
+          typeof candidateOrLoader === "function"
+            ? candidateOrLoader()
+            : candidateOrLoader;
+        if (!candidate || typeof candidate !== "object")
+          throw new Error("registry candidate must be an object");
+        decorate(candidate);
+        current = candidate;
+        loadedAt = new Date(now()).toISOString();
+        loadedStamp = stamp;
+        observedStamp = stamp;
+        lastReloadError = null;
+        return { swapped: true, ...ref.state() };
+      } catch (err) {
+        return reject(err);
+      }
+    },
+    poll() {
+      const stamp = sourceStamp();
+      if (stamp === observedStamp) return { changed: false, ...ref.state() };
+      observedStamp = stamp;
+      const result = ref.validateAndSwap(load, { stamp });
+      if (result.swapped) {
+        logLine(`registry reloaded (${result.stamp})`);
+        return { changed: true, ...result };
+      }
+      return { changed: true, ...result };
+    },
+  };
+
+  // Long-lived connector clients receive this facade.  Every property read is
+  // forwarded to the current registry instead of retaining the startup map.
+  ref.proxy = new Proxy(
+    {},
+    {
+      get: (_target, property) => current[property],
+      has: (_target, property) => property in current,
+      ownKeys: () => Reflect.ownKeys(current),
+      getOwnPropertyDescriptor: (_target, property) => {
+        const descriptor = Object.getOwnPropertyDescriptor(current, property);
+        return descriptor ? { ...descriptor, configurable: true } : undefined;
+      },
+    },
+  );
+  return ref;
+}
 
 export const TICK_SUBSYSTEMS = [
   "tick emit",
@@ -328,13 +429,29 @@ export default async function serve(args) {
   }
 
   const db = openDb();
-  const registry = loadRegistry({
+  const registryOptions = {
     packRoots: extensions.packRoots,
     panelRoots: extensions.panelRoots,
     harnessRoots: extensions.harnessRoots,
-  });
+  };
+  const loadCurrentRegistry = () => loadRegistry(registryOptions);
+  const registry = loadCurrentRegistry();
   registry.anomalies.push(...extensions.anomalies);
-  const startedConnectors = await startConnectors({ db, registry, log });
+  let connectorAnomalies = [];
+  const registryRef = createRegistryRef({
+    initial: registry,
+    load: loadCurrentRegistry,
+    sourceStamp: () => codeStamp(undefined, REGISTRY_STAMP_PATHS),
+    decorate: (candidate) =>
+      candidate.anomalies.push(...extensions.anomalies, ...connectorAnomalies),
+    log,
+  });
+  const startedConnectors = await startConnectors({
+    db,
+    registry: registryRef.proxy,
+    log,
+  });
+  connectorAnomalies = startedConnectors.anomalies;
   registry.anomalies.push(...startedConnectors.anomalies);
   const pv = policyVersion();
   const owner = newWorkerId();
@@ -399,9 +516,10 @@ export default async function serve(args) {
     if (busy) return; // never overlap: planning and (optional) execution share this tick
     busy = true;
     try {
+      registryRef.poll();
       const result = await tick({
         db,
-        registry,
+        registry: registryRef.current,
         policyVersion: pv,
         adapterOverride,
         withWorker,
@@ -427,7 +545,7 @@ export default async function serve(args) {
   };
   const server = startApi({
     db,
-    registry,
+    registryRef,
     policyVersion: pv,
     port,
     env,
