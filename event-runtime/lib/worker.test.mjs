@@ -702,12 +702,29 @@ describe("worker", () => {
   test("refuse: REFUSED, results row stored, no outbox row, workspace destroyed", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+    db.query(
+      `INSERT INTO proposals
+         (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+          idempotency_key, status, created_at, ttl_seconds)
+       VALUES ('prop-stale-open', 'chain', 'evt-stale-open', ?, 'run', ?,
+               'sha256:test', ?, 'open', ?, 1800)`,
+    ).run(
+      spec.runId,
+      JSON.stringify(spec),
+      spec.idempotencyKey,
+      new Date(T0).toISOString(),
+    );
     const o = opts();
 
     const summary = await runOnce(db, registry, adapters, o);
     expect(summary.terminalState).toBe("REFUSED");
     expect(summary.reasonCode).toBe("needs_human");
     expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(
+      db
+        .query(`SELECT status, reason FROM proposals WHERE id = 'prop-stale-open'`)
+        .get(),
+    ).toEqual({ status: "rejected", reason: "run_refused" });
 
     const result = db
       .query(`SELECT * FROM results WHERE run_id = ?`)

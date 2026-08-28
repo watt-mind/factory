@@ -217,7 +217,7 @@ export function approveProposal(
 }
 
 /**
- * Close the unique open proposal for a cancelled run (reason `run_cancelled`).
+ * Close the unique open proposal for a run that can no longer consume it.
  *
  * Keyed on `run_id` + `status = 'open'`. Zero matches is a no-op — cancelling
  * a QUEUED/LEASED/RUNNING run whose proposal is already decided must still
@@ -233,7 +233,7 @@ export function approveProposal(
 export function closeOpenProposalForRun(
   db,
   runId,
-  { actor, now = Date.now() } = {},
+  { actor, reason = "run_cancelled", now = Date.now() } = {},
 ) {
   const open = db
     .query(`SELECT id FROM proposals WHERE run_id = ? AND status = 'open'`)
@@ -244,7 +244,7 @@ export function closeOpenProposalForRun(
   const at = new Date(now).toISOString();
   db.query(
     `UPDATE proposals SET status = 'rejected', decided_at = ?, decided_by = ?, reason = ? WHERE id = ?`,
-  ).run(at, actor, "run_cancelled", open[0].id);
+  ).run(at, actor, reason, open[0].id);
   return { closed: true, id: open[0].id };
 }
 
