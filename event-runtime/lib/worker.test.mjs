@@ -3772,7 +3772,9 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       expect(sumB.terminalState).not.toBe("REFUSED");
       expect(sumB.reasonCode).not.toBe("owned_paths_conflict_hard");
 
-      // A `**` claim on the in-flight side: still a hard conflict.
+      // A `**` claim on the in-flight side is now advisory: a scope-unknown
+      // in-flight ticket (missing Owned Paths → whole-repo claim) must not
+      // freeze the queue, so the candidate dispatches rather than hard-refusing.
       queueRun(
         db,
         makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-709" } }),
@@ -3795,8 +3797,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           },
         }),
       );
-      expect(sumC.terminalState).toBe("REFUSED");
-      expect(sumC.reasonCode).toBe("owned_paths_conflict_hard");
+      expect(sumC.terminalState).not.toBe("REFUSED");
+      expect(sumC.reasonCode).not.toBe("owned_paths_conflict_hard");
     } finally {
       writeFileSync(policyPath, priorPolicy);
     }
