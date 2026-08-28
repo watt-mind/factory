@@ -574,11 +574,9 @@ export async function runReaper(
         continue;
       }
 
-      totals.considered += 1;
-      log(formatTicket("STALE", issue, seen, now));
-
       // Defence in depth for --any-assignee: humans are visible, never reaped.
       if (!isAgentClaim(issue)) {
+        log(formatTicket("skip ", issue, seen, now));
         log(`        (no agent claim label — a human's work, not touching it)`);
         continue;
       }
@@ -587,16 +585,21 @@ export async function runReaper(
         // This lookup runs in dry-run too: a protected ticket must not be
         // advertised as reclaimable. Any adapter error fails closed.
         if (await plane.hasOpenPullRequest(issue.identifier)) {
+          log(formatTicket("skip ", issue, seen, now));
           log(`        (open pull request — not touching it)`);
           continue;
         }
       } catch (err) {
         totals.failed += 1;
+        log(formatTicket("skip ", issue, seen, now));
         log(
           `        ! pull-request lookup failed closed: ${err.message || err}`,
         );
         continue;
       }
+
+      totals.considered += 1;
+      log(formatTicket("STALE", issue, seen, now));
 
       const returnsToTodo =
         (issue.state?.name || "").toLowerCase() === IN_PROGRESS;
@@ -612,10 +615,14 @@ export async function runReaper(
           } else {
             await plane.setLabels(issue.identifier, { remove });
           }
-          await plane.comment(
-            issue.identifier,
-            auditComment(issue, args.minutes, returnsToTodo),
-          );
+          // Preserve the existing Linear lifecycle: finished/triage marker
+          // cleanup is deliberately quiet. The implementation reclaim is the
+          // state-changing recovery that receives the audit trail.
+          if (returnsToTodo)
+            await plane.comment(
+              issue.identifier,
+              auditComment(issue, args.minutes, returnsToTodo),
+            );
         }
       } catch (err) {
         totals.failed += 1;

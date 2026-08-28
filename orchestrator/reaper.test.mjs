@@ -369,6 +369,7 @@ describe("plane-aware reaper (GH-1044)", () => {
     expect(ticket.state.name).toBe("Triage");
     expect(ticket.assignee).toEqual({ id: "agent", name: "Agent" });
     expect(ticket.labels.map((l) => l.name)).toEqual(["type:bug"]);
+    expect(ticket.comments ?? []).toEqual([]);
   });
 
   test("Linear marker cleanup still sees canceled/custom states", async () => {
@@ -380,6 +381,7 @@ describe("plane-aware reaper (GH-1044)", () => {
     const ticket = cp.seed.tickets[0];
     expect(ticket.state.name).toBe("Canceled");
     expect(ticket.labels.map((l) => l.name)).toEqual(["type:bug"]);
+    expect(ticket.comments ?? []).toEqual([]);
   });
 
   test("an open PR protects the claim and lookup failure also fails closed", async () => {
@@ -401,6 +403,8 @@ describe("plane-aware reaper (GH-1044)", () => {
     expect(logs.join("\n")).toContain("open pull request");
     expect(logs.join("\n")).toContain("failed closed: forge unavailable");
     expect(totals.failed).toBe(1);
+    expect(totals.considered).toBe(0);
+    expect(logs.filter((line) => line.includes("STALE"))).toEqual([]);
     for (const cp of [protectedCp, failingCp]) {
       expect(
         cp.calls.some((c) =>
