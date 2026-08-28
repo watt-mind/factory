@@ -162,6 +162,8 @@ import {
   DISPATCH_FAILURE_THRESHOLD,
 } from "./tick.mjs";
 import { spawnSync } from "node:child_process";
+import { memoryControlPlane } from "../lib/control-plane/memory.mjs";
+import { runReaper } from "./reaper.mjs";
 
 describe("reclaim label computation (WM-14)", () => {
   test("restores ai:agent-ready when returning In Progress ticket to Todo", () => {
@@ -233,6 +235,179 @@ describe("reclaim label computation (WM-14)", () => {
     expect(res.labelIds).toContain("lbl-ready");
     expect(res.labelIds).toContain("lbl-bug");
     expect(res.labelIds).not.toContain("lbl-prog");
+  });
+});
+
+const REAPER_NOW = new Date("2026-08-28T12:00:00Z");
+const staleAt = "2026-08-28T10:00:00Z";
+
+function reaperPlane(ticket, kind = "memory") {
+  const cp = memoryControlPlane({
+    team: { id: "team-wm", key: "WM" },
+    labels: [
+      { id: "ready", name: "ai:agent-ready" },
+      { id: "progress", name: "ai:in-progress" },
+      { id: "agent", name: "agent:claude-code" },
+      { id: "bug", name: "type:bug" },
+    ],
+    tickets: [ticket],
+  });
+  cp.kind = kind;
+  return cp;
+}
+
+function staleClaim(overrides = {}) {
+  return {
+    id: "ticket-1",
+    identifier: "WM-1",
+    title: "abandoned work",
+    state: { id: "s-progress", name: "In Progress" },
+    assignee: { id: "agent", name: "Agent" },
+    team: { key: "WM" },
+    project: { name: "Factory" },
+    labels: [
+      { id: "progress", name: "ai:in-progress" },
+      { id: "agent", name: "agent:claude-code" },
+      { id: "bug", name: "type:bug" },
+    ],
+    updatedAt: staleAt,
+    ...overrides,
+  };
+}
+
+function reaperArgs(...argv) {
+  return parseArgs(["--minutes", "45", ...argv]);
+}
+
+async function runWithPlanes(args, planes) {
+  const selected = [];
+  const logs = [];
+  const repos = new Map(
+    Object.keys(planes).map((name) => [
+      name,
+      { name, team: "WM", project: "Factory" },
+    ]),
+  );
+  const totals = await runReaper(args, {
+    repos,
+    loadPlane({ repoName }) {
+      selected.push(repoName);
+      return planes[repoName];
+    },
+    now: REAPER_NOW,
+    emit: async () => {},
+    log: (...parts) => logs.push(parts.join(" ")),
+  });
+  return { selected, logs, totals };
+}
+
+describe("plane-aware reaper (GH-1044)", () => {
+  test("selects an adapter for every configured GitHub and Linear repository", async () => {
+    const github = reaperPlane(
+      staleClaim({ identifier: "acme/widget#1" }),
+      "github",
+    );
+    const linear = reaperPlane(staleClaim({ identifier: "WM-2" }), "linear");
+    const { selected } = await runWithPlanes(reaperArgs(), { github, linear });
+    expect(selected).toEqual(["github", "linear"]);
+    expect(github.calls.some((c) => c.op === "listTickets")).toBe(true);
+    expect(linear.calls.some((c) => c.op === "listTickets")).toBe(true);
+  });
+
+  test("dry-run reports a stale GitHub claim without mutating it", async () => {
+    const cp = reaperPlane(
+      staleClaim({ identifier: "acme/widget#1" }),
+      "github",
+    );
+    const { logs } = await runWithPlanes(reaperArgs(), { github: cp });
+    expect(logs.join("\n")).toContain("STALE acme/widget#1");
+    expect(
+      cp.calls.some((c) =>
+        ["transition", "setLabels", "comment"].includes(c.op),
+      ),
+    ).toBe(false);
+  });
+
+  test("apply returns a stale GitHub implementation claim to ready Todo", async () => {
+    const cp = reaperPlane(
+      staleClaim({ identifier: "acme/widget#1" }),
+      "github",
+    );
+    await runWithPlanes(reaperArgs("--apply"), { github: cp });
+    const ticket = cp.seed.tickets[0];
+    expect(ticket.state.name).toBe("Todo");
+    expect(ticket.assignee).toBeNull();
+    expect(ticket.labels.map((l) => l.name)).toContain("ai:agent-ready");
+    expect(ticket.labels.map((l) => l.name)).not.toContain("ai:in-progress");
+    expect(ticket.comments[0].body).toContain(
+      "Reclaimed by the stale-claim reaper",
+    );
+  });
+
+  test("a human In Progress ticket without claim markers is never mutated", async () => {
+    const cp = reaperPlane(
+      staleClaim({ labels: [{ id: "bug", name: "type:bug" }] }),
+      "github",
+    );
+    await runWithPlanes(reaperArgs("--apply", "--any-assignee"), {
+      github: cp,
+    });
+    expect(
+      cp.calls.some((c) =>
+        ["transition", "setLabels", "comment"].includes(c.op),
+      ),
+    ).toBe(false);
+  });
+
+  test("a stale marker outside In Progress only loses claim labels", async () => {
+    const cp = reaperPlane(
+      staleClaim({ state: { id: "s-triage", name: "Triage" } }),
+      "github",
+    );
+    await runWithPlanes(reaperArgs("--apply"), { github: cp });
+    const ticket = cp.seed.tickets[0];
+    expect(ticket.state.name).toBe("Triage");
+    expect(ticket.assignee).toEqual({ id: "agent", name: "Agent" });
+    expect(ticket.labels.map((l) => l.name)).toEqual(["type:bug"]);
+  });
+
+  test("Linear marker cleanup still sees canceled/custom states", async () => {
+    const cp = reaperPlane(
+      staleClaim({ state: { id: "s-canceled", name: "Canceled" } }),
+      "linear",
+    );
+    await runWithPlanes(reaperArgs("--apply"), { linear: cp });
+    const ticket = cp.seed.tickets[0];
+    expect(ticket.state.name).toBe("Canceled");
+    expect(ticket.labels.map((l) => l.name)).toEqual(["type:bug"]);
+  });
+
+  test("an open PR protects the claim and lookup failure also fails closed", async () => {
+    const protectedCp = reaperPlane(
+      staleClaim({ openPullRequest: true }),
+      "github",
+    );
+    const failingCp = reaperPlane(
+      staleClaim({ identifier: "acme/widget#2" }),
+      "github",
+    );
+    failingCp.hasOpenPullRequest = async () => {
+      throw new Error("forge unavailable");
+    };
+    const { logs, totals } = await runWithPlanes(reaperArgs("--apply"), {
+      protected: protectedCp,
+      failing: failingCp,
+    });
+    expect(logs.join("\n")).toContain("open pull request");
+    expect(logs.join("\n")).toContain("failed closed: forge unavailable");
+    expect(totals.failed).toBe(1);
+    for (const cp of [protectedCp, failingCp]) {
+      expect(
+        cp.calls.some((c) =>
+          ["transition", "setLabels", "comment"].includes(c.op),
+        ),
+      ).toBe(false);
+    }
   });
 });
 

@@ -36,6 +36,8 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
+import { loadControlPlane } from "../lib/control-plane/index.mjs";
+import { loadRepos } from "../event-runtime/lib/repos.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -283,7 +285,9 @@ export async function fetchInProgress(teamKey = null, anyAssignee = false) {
 }
 
 export function isAgentClaim(issue) {
-  const labels = issue.labels?.nodes || [];
+  const labels = Array.isArray(issue.labels)
+    ? issue.labels
+    : issue.labels?.nodes || [];
   const names = labels.map((l) => (l.name || "").toLowerCase());
   return names.some(
     (n) => n === HEARTBEAT_LABEL || n.startsWith(AGENT_LABEL_PREFIX),
@@ -300,6 +304,9 @@ export function lastActivity(issue) {
     const lastCommentTs = parseTs(comments[comments.length - 1].createdAt);
     if (lastCommentTs) stamps.push(lastCommentTs);
   }
+
+  const lastComment = parseTs(issue.lastCommentAt);
+  if (lastComment) stamps.push(lastComment);
 
   if (stamps.length > 0) {
     return new Date(Math.max(...stamps.map((d) => d.getTime())));
@@ -455,11 +462,200 @@ export function parseArgs(argv = process.argv.slice(2)) {
   return { apply, minutes, team, anyAssignee, markersOnly, help };
 }
 
+function claimLabelsFor(issue) {
+  const labels = Array.isArray(issue.labels)
+    ? issue.labels
+    : issue.labels?.nodes || [];
+  return labels
+    .map((label) => label.name)
+    .filter((name) => {
+      const lower = String(name).toLowerCase();
+      return lower === HEARTBEAT_LABEL || lower.startsWith(AGENT_LABEL_PREFIX);
+    });
+}
+
+function auditComment(issue, minutes, returnsToTodo) {
+  const who = issue.assignee?.name || "an agent";
+  return (
+    `**Reclaimed by the stale-claim reaper.**\n\n` +
+    `This ticket was claimed by ${who} with no heartbeat for over ${minutes} ` +
+    `minutes, so the claim was presumed abandoned. ` +
+    (returnsToTodo
+      ? `It has been unassigned and returned to \`Todo\`.`
+      : `Its \`ai:in-progress\` marker was cleared; state and assignee are unchanged.`) +
+    `\n\n` +
+    `If the agent is still working, it must re-claim the ticket before ` +
+    `continuing — see the claim protocol in \`docs/protocol.md\`.`
+  );
+}
+
+function formatTicket(prefix, issue, seen, now) {
+  const age = seen
+    ? Math.floor((now.getTime() - seen.getTime()) / 60000).toString()
+    : "?";
+  const who = issue.assignee?.name || "unassigned";
+  const id = (issue.identifier || "").padEnd(10);
+  return `  ${prefix} ${id} ${age.padStart(4)}m  ${who.padEnd(16)} ${(issue.title || "").slice(0, 44)}`;
+}
+
+/**
+ * Plane-neutral reaper engine. Dependencies are injectable so selection,
+ * failure and mutation behaviour can be tested without live trackers.
+ */
+export async function runReaper(
+  args,
+  {
+    repos = loadRepos(),
+    loadPlane = ({ repoName }) => loadControlPlane({ repoName }),
+    now = new Date(),
+    emit = emitFactoryEvent,
+    log = (...values) => console.log(...values),
+  } = {},
+) {
+  const cutoff = new Date(now.getTime() - args.minutes * 60 * 1000);
+  const configured = [...repos.values()].filter(
+    (repo) => repo.team && (!args.team || repo.team === args.team),
+  );
+  const seenIdentifiers = new Set();
+  const totals = { considered: 0, healthy: 0, reclaimed: 0, failed: 0 };
+
+  for (const repo of configured) {
+    let plane;
+    let listed;
+    try {
+      plane = loadPlane({ repoName: repo.name });
+      listed = await plane.listTickets({
+        team: repo.team,
+        project: repo.project ?? undefined,
+        states: args.anyAssignee ? ["In Progress"] : undefined,
+        includeFinished: !args.anyAssignee,
+      });
+    } catch (err) {
+      totals.failed += 1;
+      log(`  ! ${repo.name}: control plane failed: ${err.message || err}`);
+      continue;
+    }
+
+    // The old Linear query was a union: In Progress OR a claim marker. Keep
+    // that exact candidate set after the adapter's tracker-neutral read.
+    let issues = listed.filter(
+      (issue) =>
+        (issue.state?.name || "").toLowerCase() === IN_PROGRESS ||
+        isAgentClaim(issue),
+    );
+    issues = issues.filter((issue) => {
+      if (seenIdentifiers.has(issue.identifier)) return false;
+      seenIdentifiers.add(issue.identifier);
+      return true;
+    });
+
+    if (!args.anyAssignee) {
+      const claims = issues.filter(isAgentClaim);
+      const skipped = issues.length - claims.length;
+      if (skipped > 0)
+        log(
+          `  (${repo.name}: skipping ${skipped} In Progress ticket(s) with no agent claim labels -- not agent work)\n`,
+        );
+      issues = claims;
+    }
+
+    for (const issue of issues) {
+      const seen = lastActivity(issue);
+      if (!seen || seen >= cutoff) {
+        totals.healthy += 1;
+        log(formatTicket("ok   ", issue, seen, now));
+        continue;
+      }
+      if (
+        args.markersOnly &&
+        (issue.state?.name || "").toLowerCase() === IN_PROGRESS
+      ) {
+        log(`  (markers-only: leaving ${issue.identifier} alone)`);
+        continue;
+      }
+
+      totals.considered += 1;
+      log(formatTicket("STALE", issue, seen, now));
+
+      // Defence in depth for --any-assignee: humans are visible, never reaped.
+      if (!isAgentClaim(issue)) {
+        log(`        (no agent claim label — a human's work, not touching it)`);
+        continue;
+      }
+
+      try {
+        // This lookup runs in dry-run too: a protected ticket must not be
+        // advertised as reclaimable. Any adapter error fails closed.
+        if (await plane.hasOpenPullRequest(issue.identifier)) {
+          log(`        (open pull request — not touching it)`);
+          continue;
+        }
+      } catch (err) {
+        totals.failed += 1;
+        log(
+          `        ! pull-request lookup failed closed: ${err.message || err}`,
+        );
+        continue;
+      }
+
+      const returnsToTodo =
+        (issue.state?.name || "").toLowerCase() === IN_PROGRESS;
+      const remove = claimLabelsFor(issue);
+      try {
+        if (args.apply) {
+          if (returnsToTodo) {
+            await plane.transition(issue.identifier, "Todo", {
+              add: [AGENT_READY_LABEL],
+              remove,
+              unassign: true,
+            });
+          } else {
+            await plane.setLabels(issue.identifier, { remove });
+          }
+          await plane.comment(
+            issue.identifier,
+            auditComment(issue, args.minutes, returnsToTodo),
+          );
+        }
+      } catch (err) {
+        totals.failed += 1;
+        log(`        ! failed: ${err.message || err}`);
+        continue;
+      }
+
+      if (args.apply) {
+        totals.reclaimed += 1;
+        log(
+          returnsToTodo
+            ? `        -> unassigned, returned to Todo`
+            : `        -> claim marker cleared; state and assignee preserved`,
+        );
+        await emit(
+          "factory.ticket.reaped",
+          {
+            ticket: issue.identifier,
+            reason: returnsToTodo ? "returned_to_todo" : "marker_cleared",
+          },
+          {
+            eventId: `reap:${issue.identifier}:${seen?.getTime() ?? "unknown"}`,
+            subject: issue.identifier,
+          },
+        );
+      }
+    }
+  }
+
+  log(
+    `\n=== ${args.apply ? "Reclaimed" : "Would reclaim"}: ${args.apply ? totals.reclaimed : totals.considered} | Healthy: ${totals.healthy} | Failures: ${totals.failed} ===`,
+  );
+  if (!args.apply) log("Run again with --apply to reclaim these.");
+  return totals;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
-
   if (args.help) {
-    console.log(`Reclaim stale agent claims in Linear.
+    console.log(`Reclaim stale agent claims through each repository's control plane.
 
 Usage:
   bun orchestrator/reaper.mjs [options]
@@ -467,175 +663,24 @@ Usage:
 Options:
   --apply          Actually reclaim tickets (default is dry-run)
   --minutes <N>    Silence threshold before a claim is stale (default: 45)
-  --team <KEY>     Limit reaping to a single team key (e.g. CW)
+  --team <KEY>     Limit reaping to repositories for one team key (e.g. CW)
   --any-assignee   Audit all In Progress tickets regardless of agent claim labels
-  --markers-only   Only clear stale ai:in-progress markers from tickets that are
-                   NOT In Progress (finished or unstarted work whose claim label
-                   was never removed). Never touches running work — pure
-                   cleanup, so "Agents In Flight" means what it says.
+  --markers-only   Only clear stale claim markers outside In Progress
   -h, --help       Show this help message
 `);
-    process.exit(0);
+    return;
   }
-
   teeToLogFile();
-
   const mode = args.apply ? "APPLY" : "DRY RUN";
   console.log(
     `=== Stale-claim reaper [${mode}] threshold=${args.minutes}min${args.team ? ` team=${args.team}` : ""} ===\n`,
   );
-
-  const teams = await fetchTeams();
-  let agentReadyLabelId = null;
-  if (args.apply) {
-    try {
-      agentReadyLabelId = await fetchAgentReadyLabelId();
-    } catch {
-      /* intentionally ignored */
-    }
-  }
-  let issues = await fetchInProgress(args.team, args.anyAssignee);
-  const now = new Date();
-  const cutoff = new Date(now.getTime() - args.minutes * 60 * 1000);
-
-  if (!args.anyAssignee) {
-    const claims = issues.filter(isAgentClaim);
-    const skipped = issues.length - claims.length;
-    if (skipped > 0) {
-      console.log(
-        `  (skipping ${skipped} In Progress ticket(s) with no agent claim labels -- not agent work)\n`,
-      );
-    }
-    issues = claims;
-  }
-
-  const stale = [];
-  const live = [];
-
-  for (const issue of issues) {
-    const seen = lastActivity(issue);
-    if (seen && seen < cutoff) {
-      stale.push({ issue, seen });
-    } else {
-      live.push({ issue, seen });
-    }
-  }
-
-  for (const { issue, seen } of live) {
-    const age = seen
-      ? Math.floor((now.getTime() - seen.getTime()) / 60000).toString()
-      : "?";
-    const who = issue.assignee?.name || "unassigned";
-    const id = (issue.identifier || "").padEnd(10);
-    const ageStr = age.padStart(4);
-    const whoStr = who.padEnd(16);
-    const titleStr = (issue.title || "").slice(0, 44);
-    console.log(`  ok    ${id} ${ageStr}m  ${whoStr} ${titleStr}`);
-  }
-
-  if (stale.length === 0) {
-    console.log(
-      `\n=== No stale claims among ${issues.length} in progress. ===`,
-    );
-    return;
-  }
-
-  console.log();
-  const considered = args.markersOnly
-    ? stale.filter(
-        ({ issue }) => (issue.state?.name || "").toLowerCase() !== IN_PROGRESS,
-      )
-    : stale;
-  if (args.markersOnly && considered.length !== stale.length) {
-    console.log(
-      `  (markers-only: leaving ${stale.length - considered.length} In Progress claim(s) alone)\n`,
-    );
-  }
-
-  for (const { issue, seen } of considered) {
-    const age = seen
-      ? Math.floor((now.getTime() - seen.getTime()) / 60000).toString()
-      : "?";
-    const who = issue.assignee?.name || "unassigned";
-    const id = (issue.identifier || "").padEnd(10);
-    const ageStr = age.padStart(4);
-    const whoStr = who.padEnd(16);
-    const titleStr = (issue.title || "").slice(0, 44);
-    console.log(`  STALE ${id} ${ageStr}m  ${whoStr} ${titleStr}`);
-
-    // Enforced here, not just by the upstream fetch: --any-assignee queries by
-    // state so it can show human work for audit purposes, which means a stale
-    // ticket in `considered` may not be an agent claim at all. Unassigning a
-    // human's ticket because they didn't comment in 45 minutes would be far
-    // worse than the crashed agent this reaper exists to clean up after.
-    if (!isAgentClaim(issue)) {
-      console.log(
-        `        (no agent claim label — a human's work, not touching it)`,
-      );
-      continue;
-    }
-
-    const teamKey = issue.team?.key;
-    const team = teams[teamKey];
-    const stateName = (issue.state?.name || "").toLowerCase();
-
-    // An implementation claim goes back to Todo so it can be picked up again.
-    // A triage claim (any other state) only loses its markers — moving a ticket
-    // that was mid-specification into Todo would assert it is ready when it is
-    // not.
-    const todoId =
-      stateName === IN_PROGRESS ? team?.states?.[RECLAIM_TO] : null;
-    if (stateName === IN_PROGRESS && !todoId) {
-      console.log(
-        `        ! no '${RECLAIM_TO}' state on team ${teamKey}, skipping`,
-      );
-      continue;
-    }
-
-    try {
-      await reclaim(
-        issue,
-        todoId,
-        args.minutes,
-        args.apply,
-        !todoId,
-        agentReadyLabelId,
-      );
-    } catch (err) {
-      console.log(`        ! failed: ${err.message || err}`);
-      continue;
-    }
-
-    if (args.apply) {
-      console.log(`        -> unassigned, returned to Todo`);
-      // Lifecycle observation (WM-75): fire-and-forget; the last-activity
-      // timestamp keys the id, so retrying the same stale claim re-admits
-      // nothing while the next genuine reap is a new event.
-      await emitFactoryEvent(
-        "factory.ticket.reaped",
-        {
-          ticket: issue.identifier,
-          reason: todoId ? "returned_to_todo" : "marker_cleared",
-        },
-        {
-          eventId: `reap:${issue.identifier}:${seen?.getTime() ?? "unknown"}`,
-          subject: issue.identifier,
-        },
-      );
-    }
-  }
-
-  console.log(
-    `\n=== ${args.apply ? "Reclaimed" : "Would reclaim"}: ${considered.length} | Healthy: ${live.length} ===`,
-  );
-  if (!args.apply) {
-    console.log("Run again with --apply to reclaim these.");
-  }
+  return runReaper(args);
 }
 
 if (import.meta.main || process.argv[1]?.endsWith("reaper.mjs")) {
   main().catch((err) => {
-    console.error(`Linear API error: ${err.message || err}`);
+    console.error(`Control-plane error: ${err.message || err}`);
     process.exit(1);
   });
 }
