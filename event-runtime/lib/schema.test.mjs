@@ -37,6 +37,9 @@ describe("shared fixture schema-validation-cases.json", () => {
       expect(Object.hasOwn(c, "schema"), c.name).toBe(true);
       expect(Object.hasOwn(c, "value"), c.name).toBe(true);
       expect(Array.isArray(c.errors), c.name).toBe(true);
+      // #1282: errors is the exact contract; the old errorContains hint is
+      // dead and must not creep back in.
+      expect(Object.hasOwn(c, "errorContains"), c.name).toBe(false);
       if (c.valid) {
         expect(c.errors, c.name).toEqual([]);
       } else {

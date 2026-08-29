@@ -67,10 +67,6 @@
         ]
       },
       "valid": false,
-      "errorContains": [
-        "$.runs[1]: missing required property \"id\"",
-        "$.runs[1].attempts: below minimum 1"
-      ],
       "errors": [
         "$.runs[1]: missing required property \"id\"",
         "$.runs[1].attempts: below minimum 1"
@@ -89,7 +85,6 @@
       },
       "value": {},
       "valid": false,
-      "errorContains": ["$: missing required property \"name\""],
       "errors": ["$: missing required property \"name\""]
     },
     {
@@ -108,7 +103,6 @@
         "extra": true
       },
       "valid": false,
-      "errorContains": ["$: unknown property \"extra\""],
       "errors": ["$: unknown property \"extra\""]
     },
     {
@@ -129,7 +123,6 @@
         "retries": "three"
       },
       "valid": false,
-      "errorContains": ["$.retries: expected type integer, got string"],
       "errors": ["$.retries: expected type integer, got string"]
     },
     {
@@ -157,7 +150,6 @@
       },
       "value": 1.5,
       "valid": false,
-      "errorContains": ["$: expected type integer, got number"],
       "errors": ["$: expected type integer, got number"]
     },
     {
@@ -185,7 +177,6 @@
       },
       "value": 7,
       "valid": false,
-      "errorContains": ["$: expected type string|null, got integer"],
       "errors": ["$: expected type string|null, got integer"]
     },
     {
@@ -214,7 +205,6 @@
       },
       "value": "factory.event/v2",
       "valid": false,
-      "errorContains": ["$: expected const \"factory.event/v1\""],
       "errors": ["$: expected const \"factory.event/v1\""]
     },
     {
@@ -233,7 +223,6 @@
       },
       "value": "c",
       "valid": false,
-      "errorContains": ["$: value not in enum [\"a\",\"b\"]"],
       "errors": ["$: value not in enum [\"a\",\"b\"]"]
     },
     {
@@ -255,7 +244,6 @@
       },
       "value": "a",
       "valid": false,
-      "errorContains": ["$: shorter than minLength 2"],
       "errors": ["$: shorter than minLength 2"]
     },
     {
@@ -266,7 +254,6 @@
       },
       "value": "abc",
       "valid": false,
-      "errorContains": ["$: longer than maxLength 2"],
       "errors": ["$: longer than maxLength 2"]
     },
     {
@@ -287,8 +274,7 @@
       },
       "value": "prop_1",
       "valid": false,
-      "errorContains": ["does not match pattern"],
-      "errors": ["$: does not match pattern"]
+      "errors": ["$: does not match pattern ^run_"]
     },
     {
       "name": "unanchored pattern matches a substring",
@@ -308,7 +294,6 @@
       },
       "value": "anything",
       "valid": false,
-      "errorContains": ["$: invalid pattern"],
       "errors": ["$: invalid pattern"]
     },
     {
@@ -319,7 +304,6 @@
       },
       "value": "unclosed",
       "valid": false,
-      "errorContains": ["$: invalid pattern"],
       "errors": ["$: invalid pattern"]
     },
     {
@@ -337,7 +321,6 @@
         "sha": "deadbeef"
       },
       "valid": false,
-      "errorContains": ["$.sha: invalid pattern"],
       "errors": ["$.sha: invalid pattern"]
     },
     {
@@ -357,7 +340,6 @@
       },
       "value": [],
       "valid": false,
-      "errorContains": ["$: fewer than minItems 1"],
       "errors": ["$: fewer than minItems 1"]
     },
     {
@@ -368,7 +350,6 @@
       },
       "value": ["a", "b"],
       "valid": false,
-      "errorContains": ["$: more than maxItems 1"],
       "errors": ["$: more than maxItems 1"]
     },
     {
@@ -381,7 +362,6 @@
       },
       "value": ["a", 2],
       "valid": false,
-      "errorContains": ["$[1]: expected type string, got integer"],
       "errors": ["$[1]: expected type string, got integer"]
     },
     {
@@ -404,7 +384,6 @@
       },
       "value": 150,
       "valid": false,
-      "errorContains": ["$: above maximum 100"],
       "errors": ["$: above maximum 100"]
     },
     {
@@ -415,7 +394,6 @@
       },
       "value": -1,
       "valid": false,
-      "errorContains": ["$: below minimum 0"],
       "errors": ["$: below minimum 0"]
     },
     {
@@ -436,7 +414,6 @@
       },
       "value": "not a url",
       "valid": false,
-      "errorContains": ["$: format \"uri\" value is not a valid URI"],
       "errors": ["$: format \"uri\" value is not a valid URI"]
     },
     {
@@ -457,7 +434,6 @@
       },
       "value": "quarter past",
       "valid": false,
-      "errorContains": ["$: format \"duration\" must match"],
       "errors": ["$: format \"duration\" must match /^\\d+(ms|s|m|h|d)$/"]
     },
     {
@@ -478,9 +454,6 @@
       },
       "value": "123",
       "valid": false,
-      "errorContains": [
-        "$: unsupported format \"uuid\" — contracts fail closed"
-      ],
       "errors": ["$: unsupported format \"uuid\" — contracts fail closed"]
     },
     {
@@ -491,7 +464,6 @@
       },
       "value": "x",
       "valid": false,
-      "errorContains": ["$: unsupported format 7 — contracts fail closed"],
       "errors": ["$: unsupported format 7 — contracts fail closed"]
     },
     {
@@ -505,9 +477,6 @@
       },
       "value": "x",
       "valid": false,
-      "errorContains": [
-        "$: unsupported schema keyword \"anyOf\" — contracts fail closed"
-      ],
       "errors": [
         "$: unsupported schema keyword \"anyOf\" — contracts fail closed"
       ]
@@ -527,9 +496,6 @@
         "n": 3
       },
       "valid": false,
-      "errorContains": [
-        "$.n: unsupported schema keyword \"multipleOf\" — contracts fail closed"
-      ],
       "errors": [
         "$.n: unsupported schema keyword \"multipleOf\" — contracts fail closed"
       ]
@@ -542,7 +508,6 @@
       },
       "value": ["a"],
       "valid": false,
-      "errorContains": ["$[0]: schema is missing"],
       "errors": ["$[0]: schema is missing"]
     },
     {
@@ -557,7 +522,6 @@
         "a": 1
       },
       "valid": false,
-      "errorContains": ["$.a: schema must be an object"],
       "errors": ["$.a: schema must be an object"]
     },
     {
@@ -569,9 +533,6 @@
       },
       "value": "x",
       "valid": false,
-      "errorContains": [
-        "$: unsupported schema keyword \"__proto__\" — contracts fail closed"
-      ],
       "errors": [
         "$: unsupported schema keyword \"__proto__\" — contracts fail closed"
       ]
@@ -590,7 +551,6 @@
         "__proto__": 1
       },
       "valid": false,
-      "errorContains": ["$.__proto__: expected type string, got integer"],
       "errors": ["$.__proto__: expected type string, got integer"]
     },
     {
@@ -609,7 +569,6 @@
         "constructor": 1
       },
       "valid": false,
-      "errorContains": ["$: unknown property \"constructor\""],
       "errors": ["$: unknown property \"constructor\""]
     },
     {
@@ -630,7 +589,6 @@
         "toString": "nope"
       },
       "valid": false,
-      "errorContains": ["$.toString: expected type integer, got string"],
       "errors": ["$.toString: expected type integer, got string"]
     },
     {
@@ -646,7 +604,6 @@
       },
       "value": {},
       "valid": false,
-      "errorContains": ["$: missing required property \"hasOwnProperty\""],
       "errors": ["$: missing required property \"hasOwnProperty\""]
     }
   ]
