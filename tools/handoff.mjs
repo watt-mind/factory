@@ -162,9 +162,7 @@ async function runtimeState(fetchImpl, eventUrl, eventId, controlApiToken) {
   const seenCursors = new Set();
   let event;
   while (true) {
-    const suffix = before
-      ? `&before=${encodeURIComponent(before)}`
-      : "";
+    const suffix = before ? `&before=${encodeURIComponent(before)}` : "";
     const list = await responseJson(
       await fetchImpl(`${eventUrl}/events?limit=100${suffix}`, auth),
       "runtime_status_failed",
@@ -206,14 +204,14 @@ async function runtimeState(fetchImpl, eventUrl, eventId, controlApiToken) {
 function sameHandoffEnvelope(stored, expected) {
   return Boolean(
     stored &&
-      stored.schemaVersion === expected.schemaVersion &&
-      stored.eventId === expected.eventId &&
-      stored.type === expected.type &&
-      stored.source === expected.source &&
-      stored.subject === expected.subject &&
-      stored.correlationId === expected.correlationId &&
-      (stored.causationId ?? null) === (expected.causationId ?? null) &&
-      hashJson(stored.payload) === hashJson(expected.payload),
+    stored.schemaVersion === expected.schemaVersion &&
+    stored.eventId === expected.eventId &&
+    stored.type === expected.type &&
+    stored.source === expected.source &&
+    stored.subject === expected.subject &&
+    stored.correlationId === expected.correlationId &&
+    (stored.causationId ?? null) === (expected.causationId ?? null) &&
+    hashJson(stored.payload) === hashJson(expected.payload),
   );
 }
 
@@ -424,7 +422,10 @@ from stdin.
 `;
 
 export function assertForcedCommandEnvironment(env = process.env) {
-  if (typeof env.SSH_ORIGINAL_COMMAND === "string" && env.SSH_ORIGINAL_COMMAND) {
+  if (
+    typeof env.SSH_ORIGINAL_COMMAND === "string" &&
+    env.SSH_ORIGINAL_COMMAND
+  ) {
     fail(
       "ssh_original_command_forbidden",
       "ssh_original_command_forbidden: the handoff client must not supply a remote command",
