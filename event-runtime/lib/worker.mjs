@@ -802,22 +802,42 @@ function failureCount(db, runId, cause) {
 }
 
 /** Called after the current attempt is finalized, so counts include this failure. */
-function retryDecision(db, runId, spec, reasonCode) {
+function retryDecision(
+  db,
+  runId,
+  spec,
+  reasonCode,
+  { includeCurrentFailure = false } = {},
+) {
   const cause = classifyFailureCause(reasonCode);
   if (cause === "environment") {
+    const failures =
+      failureCount(db, runId, cause) + (includeCurrentFailure ? 1 : 0);
     return {
       cause,
-      retry: failureCount(db, runId, cause) <= maxEnvironmentRetries(spec),
+      retry: failures <= maxEnvironmentRetries(spec),
     };
   }
   if (cause === "agent_error") {
-    return { cause, retry: failureCount(db, runId, cause) < spec.maxAttempts };
+    const failures =
+      failureCount(db, runId, cause) + (includeCurrentFailure ? 1 : 0);
+    return { cause, retry: failures < spec.maxAttempts };
   }
   return { cause, retry: false };
 }
 
 function typedFailureReason(reasonCode, detail = reasonCode) {
   return `failure:${classifyFailureCause(reasonCode)}:${detail}`;
+}
+
+function terminalFailureReason(decision, reasonCode, detail = reasonCode) {
+  if (decision.cause === "environment" && !decision.retry) {
+    return typedFailureReason(
+      reasonCode,
+      `${detail}; environment_retry_budget_exhausted`,
+    );
+  }
+  return typedFailureReason(reasonCode, detail);
 }
 
 function resolveNow(now) {
@@ -2125,12 +2145,15 @@ export async function executeClaimed(
       const expectFrom = db
         .query(`SELECT state FROM runs WHERE run_id = ?`)
         .get(runId)?.state;
+      const decision = retryDecision(db, runId, spec, reasonCode, {
+        includeCurrentFailure: true,
+      });
       transition(db, {
         runId,
         to,
         expectFrom,
         actor: owner,
-        reason: typedFailureReason(reasonCode, journalReason),
+        reason: terminalFailureReason(decision, reasonCode, journalReason),
         attempt,
         policyVersion,
         now: currentNow,
@@ -2144,7 +2167,6 @@ export async function executeClaimed(
         currentNow,
         attemptUsage,
       );
-      const decision = retryDecision(db, runId, spec, reasonCode);
       if (decision.retry) {
         transition(db, {
           runId,
@@ -2622,17 +2644,29 @@ export async function executeClaimed(
       }
     }
 
-    const created = createWorkspace({
-      root: workspacesRoot,
-      runId,
-      attempt,
-      input: spec.input,
-      workspace: spec.workspace,
-      artifactStore,
-      adapter: adapterKey,
-      ticketLeaseOwner,
-      workerLeasesDir: leasesDir,
-    });
+    let created;
+    try {
+      created = createWorkspace({
+        root: workspacesRoot,
+        runId,
+        attempt,
+        input: spec.input,
+        workspace: spec.workspace,
+        artifactStore,
+        adapter: adapterKey,
+        ticketLeaseOwner,
+        workerLeasesDir: leasesDir,
+      });
+    } catch (err) {
+      // Missing declared inputs are permanent: re-queuing cannot repopulate an
+      // artifact store entry that the run has already pinned by hash. This
+      // boundary is deliberately narrow so a similarly worded later error is
+      // not mistaken for an input-materialization failure.
+      if (/^artifact [a-f0-9]{64} is not in the store$/.test(err?.message)) {
+        err.code = "input_artifact_missing";
+      }
+      throw err;
+    }
     workspaceDir = created.dir;
     assertSandboxWorkspaceSupported(workspaceDir, def);
     checkoutPath = created.checkout?.path ?? null;
@@ -3098,12 +3132,15 @@ export async function executeClaimed(
           });
           return { fenced: true };
         }
+        const decision = retryDecision(db, runId, spec, reasonCode, {
+          includeCurrentFailure: true,
+        });
         transition(db, {
           runId,
           to: "FAILED",
           expectFrom: "VERIFYING",
           actor: owner,
-          reason: typedFailureReason(reasonCode, failureReason),
+          reason: terminalFailureReason(decision, reasonCode, failureReason),
           attempt,
           policyVersion,
           now: currentNow,
@@ -3117,7 +3154,6 @@ export async function executeClaimed(
           currentNow,
           attemptUsage,
         );
-        const decision = retryDecision(db, runId, spec, reasonCode);
         if (decision.retry) {
           transition(db, {
             runId,
@@ -3465,6 +3501,7 @@ export async function executeClaimed(
       err?.code === "worktree_sandbox_unsupported";
     const isWorkspaceProvisioning =
       err?.code === "workspace_provisioning_error";
+    const isInputArtifactMissing = err?.code === "input_artifact_missing";
     const reasonCode = isCliNotFound
       ? "cli_not_found"
       : isSandboxUnsupported
@@ -3473,7 +3510,9 @@ export async function executeClaimed(
           ? "worktree_sandbox_unsupported"
           : isWorkspaceProvisioning
             ? "workspace_provisioning_error"
-            : "adapter_error";
+            : isInputArtifactMissing
+              ? "input_artifact_missing"
+              : "adapter_error";
     const journalReason = `${reasonCode}: ${err?.message ?? String(err)}`;
     let res;
     try {
@@ -3657,7 +3696,10 @@ export function reapExpiredLeases(
       .all(iso(currentNow));
     for (const row of rows) {
       const spec = JSON.parse(row.spec_json);
-      const failureReason = typedFailureReason("lease_expired");
+      const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
+        includeCurrentFailure: true,
+      });
+      const failureReason = terminalFailureReason(decision, "lease_expired");
 
       // VERIFYING cannot transition directly to QUEUED; record its failure first.
       if (row.state === "VERIFYING") {
@@ -3679,8 +3721,6 @@ export function reapExpiredLeases(
         "lease_expired",
         currentNow,
       );
-      const decision = retryDecision(db, row.run_id, spec, "lease_expired");
-
       if (decision.retry) {
         transition(db, {
           runId: row.run_id,

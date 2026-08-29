@@ -2168,6 +2168,7 @@ describe("worker", () => {
       "cli_not_found",
       "sandbox_unsupported",
       "worktree_sandbox_unsupported",
+      "input_artifact_missing",
       "unknown_adapter",
       "agent_definition_mismatch",
       "policy_denied:Bash",
@@ -2254,7 +2255,7 @@ describe("worker", () => {
     ).toBe(false);
   });
 
-  test("repeated environment failures dead-letter after the dedicated retry ceiling", async () => {
+  test("repeated environment failures stop at the dedicated retry ceiling", async () => {
     const db = openDb(":memory:");
     const throwingAdapter = {
       execute: async () => {
@@ -2297,6 +2298,53 @@ describe("worker", () => {
         (event) => event.reason === "retry:environment",
       ),
     ).toHaveLength(2);
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "environment_retry_budget_exhausted",
+    );
+  });
+
+  test("a missing declared input artifact is fatal and never reaches the adapter", async () => {
+    const db = openDb(":memory:");
+    const missingSha = "a".repeat(64);
+    let executed = false;
+    const observingAdapter = {
+      async execute() {
+        executed = true;
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const spec = queueRun(
+      db,
+      makeSpec({
+        workspace: {
+          type: "artifacts",
+          inputs: [{ from: missingSha, as: "input.json" }],
+        },
+        maxEnvironmentRetries: 5,
+      }),
+    );
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake: observingAdapter },
+      opts({ artifactStore: freshRoot() }),
+    );
+
+    expect(executed).toBe(false);
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "input_artifact_missing",
+    });
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(
+      db
+        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
+        .get(spec.runId).reason_code,
+    ).toBe("input_artifact_missing");
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "failure:fatal:input_artifact_missing",
+    );
   });
 
   test("environment failures do not consume agent_exit retry attempts", async () => {
