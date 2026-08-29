@@ -123,10 +123,15 @@ async function fetchOpenIssues(gql, { team, project }) {
   return nodes;
 }
 
-function readBudget() {
+function readBudget({ allowDisk = true, budgetLoader = loadLinearBudget } = {}) {
   if (injectedBudget !== undefined) return injectedBudget;
+  // A caller-supplied GraphQL seam is already an explicit test boundary. It
+  // must not inherit the operator's persisted budget cache from the host
+  // running the tests (#1185); production uses the default gql and still reads
+  // the real fail-closed budget.
+  if (!allowDisk) return null;
   try {
-    return loadLinearBudget();
+    return budgetLoader();
   } catch {
     return null;
   }
@@ -143,7 +148,12 @@ function budgetPayload(budget) {
 async function fetchLinearSupply(repos, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
   const asOf = new Date(nowMs).toISOString();
-  const budget = readBudget();
+  const suppliedGql = options.gql ?? injectedGql;
+  const budgetOptions = {
+    allowDisk: !suppliedGql,
+    budgetLoader: options.budgetLoader ?? loadLinearBudget,
+  };
+  const budget = readBudget(budgetOptions);
   if (budget?.remaining === 0) {
     return {
       ok: false,
@@ -154,7 +164,7 @@ async function fetchLinearSupply(repos, options = {}) {
     };
   }
 
-  const gql = options.gql ?? injectedGql ?? defaultGql;
+  const gql = suppliedGql ?? defaultGql;
   if (!options.gql && !injectedGql) {
     try {
       installLinearBudgetCapture();
@@ -188,7 +198,7 @@ async function fetchLinearSupply(repos, options = {}) {
       ok: true,
       asOf,
       byRepo,
-      budget: budgetPayload(readBudget()),
+      budget: budgetPayload(readBudget(budgetOptions)),
       error: null,
     };
   } catch (err) {
@@ -196,7 +206,7 @@ async function fetchLinearSupply(repos, options = {}) {
       ok: false,
       asOf: null,
       byRepo: {},
-      budget: budgetPayload(readBudget()),
+      budget: budgetPayload(readBudget(budgetOptions)),
       error: err?.message ? String(err.message) : "linear_unavailable",
     };
   }

@@ -139,6 +139,59 @@ describe("loadLinearSupply (WM-824)", () => {
     expect(right.ok).toBe(true);
   });
 
+  test("an injected GraphQL seam never reads the host budget cache", async () => {
+    let budgetReads = 0;
+    let gqlCalls = 0;
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_000,
+      budgetLoader: () => {
+        budgetReads += 1;
+        return { remaining: 0, limit: 2500 };
+      },
+      gql: async () => {
+        gqlCalls += 1;
+        return { issues: { nodes: [], pageInfo: { hasNextPage: false } } };
+      },
+    });
+    expect(snap.ok).toBe(true);
+    expect(budgetReads).toBe(0);
+    expect(gqlCalls).toBe(2);
+  });
+
+  test("the setLinearSupplyGql seam also bypasses the host budget loader", async () => {
+    let budgetReads = 0;
+    let gqlCalls = 0;
+    setLinearSupplyGql(async () => {
+      gqlCalls += 1;
+      return { issues: { nodes: [], pageInfo: { hasNextPage: false } } };
+    });
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_000,
+      budgetLoader: () => {
+        budgetReads += 1;
+        return { remaining: 0, limit: 2500 };
+      },
+    });
+    expect(snap.ok).toBe(true);
+    expect(budgetReads).toBe(0);
+    expect(gqlCalls).toBe(2);
+  });
+
+  test("production default GraphQL still honors an exhausted budget loader", async () => {
+    let budgetReads = 0;
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_000,
+      budgetLoader: () => {
+        budgetReads += 1;
+        return { remaining: 0, limit: 2500 };
+      },
+    });
+    expect(snap.ok).toBe(false);
+    expect(snap.error).toBe("linear_budget_exhausted");
+    expect(snap.budget).toEqual({ remaining: 0, limit: 2500 });
+    expect(budgetReads).toBe(1);
+  });
+
   test("skips Linear when remaining budget is 0", async () => {
     let calls = 0;
     setLinearSupplyBudget({ remaining: 0, limit: 2500 });
