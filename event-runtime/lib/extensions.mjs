@@ -746,22 +746,74 @@ export function extensionSecretEnvVar(namespace, keyPath) {
 }
 
 /**
- * Every `format: "secret"` property in a config schema, depth-first, with
- * the path used for env names and published `{ set, source }` overlays.
+ * Every supported `format: "secret"` property in a config schema,
+ * depth-first, with the path used for env names and published
+ * `{ set, source }` overlays.
+ *
+ * Array items and `additionalProperties` are valid schema locations, but
+ * their runtime keys are dynamic: one schema path cannot map their potentially
+ * many values to one unambiguous `FACTORY_EXT_*` variable. Fail those schemas
+ * closed at load rather than letting policy rejection, resolution, connector
+ * splitting and `/config` masking disagree about which values are secret.
  */
 export function collectSecretFields(schema, path = []) {
   assertSafeConfigSchemaPaths(schema, path);
   return collectSecretFieldsUnchecked(schema, path);
 }
 
-function collectSecretFieldsUnchecked(schema, path = []) {
-  if (!isPlainObject(schema) || !isPlainObject(schema.properties)) return [];
+function collectSecretFieldsUnchecked(
+  schema,
+  path = [],
+  schemaPath = "$",
+  dynamicLocation = null,
+) {
+  if (!isPlainObject(schema)) return [];
+  if (schema.format === "secret") {
+    if (dynamicLocation) {
+      throw new ExtensionError(
+        `config schema ${schemaPath} declares format "secret" beneath ${dynamicLocation}; dynamic secret locations are unsupported — declare a fixed object property`,
+      );
+    }
+    if (path.length === 0) {
+      throw new ExtensionError(
+        'config schema $ declares format "secret" at the config root; secrets must be fixed object properties',
+      );
+    }
+    return [{ path, key: path[path.length - 1] }];
+  }
+
   const out = [];
-  for (const [key, sub] of Object.entries(schema.properties)) {
-    const next = [...path, key];
-    if (isPlainObject(sub) && sub.format === "secret")
-      out.push({ path: next, key });
-    else out.push(...collectSecretFieldsUnchecked(sub, next));
+  if (isPlainObject(schema.properties)) {
+    for (const [key, sub] of Object.entries(schema.properties)) {
+      out.push(
+        ...collectSecretFieldsUnchecked(
+          sub,
+          [...path, key],
+          `${schemaPath}.${key}`,
+          dynamicLocation,
+        ),
+      );
+    }
+  }
+  if (isPlainObject(schema.items)) {
+    out.push(
+      ...collectSecretFieldsUnchecked(
+        schema.items,
+        path,
+        `${schemaPath}[]`,
+        dynamicLocation ?? `schema.items at ${schemaPath}`,
+      ),
+    );
+  }
+  if (isPlainObject(schema.additionalProperties)) {
+    out.push(
+      ...collectSecretFieldsUnchecked(
+        schema.additionalProperties,
+        path,
+        `${schemaPath}.*`,
+        dynamicLocation ?? `schema.additionalProperties at ${schemaPath}`,
+      ),
+    );
   }
   return out;
 }
