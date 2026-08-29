@@ -380,10 +380,7 @@ export async function inspectWithPresentation(args) {
         // presentation is optional garnish, so it must not make inspect pay
         // for a second GET /runs/:id.
         detail = await client.run(args[0]);
-        await inspectCommand(
-          { ...client, run: async () => detail },
-          args[0],
-        );
+        await inspectCommand({ ...client, run: async () => detail }, args[0]);
       });
     }
   } finally {
