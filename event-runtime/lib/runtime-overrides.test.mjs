@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { openDb } from "./db.mjs";
 import { loadRegistry } from "./registry.mjs";
-import { reposRoot } from "./repos.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import {
   KIND_AGENT,
   KIND_EVENT_TYPE,
@@ -22,7 +22,10 @@ import {
 } from "./runtime-overrides.mjs";
 
 const registry = loadRegistry();
-const REPO_ROOT = reposRoot();
+// The checkout under test, not reposRoot(): a factory worker exports
+// FACTORY_REPOS_ROOT for the checkout it serves, and promotion resolves its
+// targets relative to that root — which is outside the registry loaded here.
+const REPO_ROOT = FACTORY_ROOT;
 
 /** The event type + agent this repo ships that we can diverge in a preview. */
 const PROMO_TYPE = "factory.status-report.requested";
@@ -197,6 +200,16 @@ describe("runtime-overrides (WM-887)", () => {
 });
 
 describe("overlay promotion (gh-860)", () => {
+  let previousReposRoot;
+  beforeAll(() => {
+    previousReposRoot = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = REPO_ROOT;
+  });
+  afterAll(() => {
+    if (previousReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
+  });
+
   test("preview snapshots divergent rows with stable keys, targets, and digest", () => {
     const db = openDb(":memory:");
     seedDivergentOverrides(db);
