@@ -465,6 +465,52 @@ describe("workspace-only model admission (#962)", () => {
     expect(child.exitCode).toBe(0);
   });
 
+  test("mount guard refuses instead of throwing when FACTORY_EVENT_HOME is unset under NODE_ENV=test", () => {
+    const operatorHome = ws();
+    const program = String.raw`
+      import { mkdirSync } from "node:fs";
+      import path from "node:path";
+      import { filesystemConfinementRefusal, HOME_MOUNT_ALLOWLIST } from "./sandboxed.mjs";
+
+      const mountRefusal = (hostPath) =>
+        filesystemConfinementRefusal("pi", {
+          ref: "confined@1",
+          mutating: false,
+          capabilities: { filesystem: "workspace-only", services: [] },
+          sandbox: {
+            provider: "gondolin",
+            mounts: { "/opt/tools": { path: hostPath, readonly: true } },
+          },
+        });
+      const home = process.env.HOME;
+      const allow = HOME_MOUNT_ALLOWLIST(home);
+      if (allow.length !== 1 || allow[0] !== path.join(".factory", "event-runtime", "workspaces")) {
+        throw new Error("allowlist did not fall back to the default subtree: " + JSON.stringify(allow));
+      }
+      const configPath = path.join(home, ".config", "sometool");
+      mkdirSync(configPath, { recursive: true });
+      const refusal = mountRefusal(configPath);
+      if (!refusal?.detail.includes("lies inside the operator home")) {
+        throw new Error("home-data mount was not refused: " + JSON.stringify(refusal));
+      }
+      const defaultWorkspace = path.join(home, ".factory", "event-runtime", "workspaces", "run-x");
+      mkdirSync(defaultWorkspace, { recursive: true });
+      if (mountRefusal(defaultWorkspace) !== null) {
+        throw new Error("default workspace subtree was refused");
+      }
+    `;
+    const env = { ...process.env, HOME: operatorHome, NODE_ENV: "test" };
+    delete env.FACTORY_EVENT_HOME;
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "--eval", program],
+      cwd: import.meta.dir,
+      env,
+      stderr: "pipe",
+    });
+    expect(child.stderr.toString()).toBe("");
+    expect(child.exitCode).toBe(0);
+  });
+
   test("non-model adapters and mutating definitions retain their existing semantics", () => {
     expect(filesystemConfinementRefusal("fake", confinedDef())).toBeNull();
     expect(

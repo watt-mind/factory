@@ -806,6 +806,10 @@ export async function execute({
       cancelPendingPermissions();
       rpc.rejectAll(new Error("ACP child closed"));
       rpc.close();
+      // end() before destroy() is intentional: it lets an already-flushed
+      // stream emit "finish" (resolving transcriptClosed through the normal
+      // path) rather than only "close"; destroy() then guarantees the fd is
+      // released even when buffered bytes are abandoned.
       closeTranscript();
       transcript.destroy();
       resolveTranscriptClosed?.();

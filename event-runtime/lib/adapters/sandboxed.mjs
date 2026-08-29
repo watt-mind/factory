@@ -61,9 +61,29 @@ const MODEL_BACKED_ADAPTER_SET = new Set(MODEL_BACKED_ADAPTERS);
 const RAW_CREDENTIAL_PATH =
   /(?:^|\/)\.(?:aws|azure|claude|config\/gcloud|config\/gh|cursor|gnupg|kube|ssh)(?:\/|$)|(?:^|\/)(?:credentials|hosts\.yml|secrets\.env)(?:\/|$)|(?:^|\/)\.worktrees(?:\/|$)/;
 
-/** The only runtime-owned subtree that a sandboxed adapter may mount from HOME. */
+/** Default workspaces subtree under the operator home when no runtime home is configured. */
+const DEFAULT_HOME_WORKSPACES = path.join(
+  ".factory",
+  "event-runtime",
+  "workspaces",
+);
+
+/**
+ * The only runtime-owned subtree that a sandboxed adapter may mount from HOME.
+ *
+ * Derived from the configured runtime home so a relocated FACTORY_EVENT_HOME
+ * keeps its workspaces mountable. `workspacesRoot()` throws under test/CI when
+ * FACTORY_EVENT_HOME is unset (config.mjs `runtimeHome`); this guard must
+ * never raise from inside an admission decision, so that case falls back to
+ * the literal default subtree relative to `home`, which keeps the check
+ * fail-closed: an undeclared runtime home admits nothing outside it.
+ */
 export function HOME_MOUNT_ALLOWLIST(home = homedir()) {
-  return [path.relative(home, workspacesRoot())];
+  try {
+    return [path.relative(home, workspacesRoot())];
+  } catch {
+    return [DEFAULT_HOME_WORKSPACES];
+  }
 }
 
 function pathContains(parent, child) {
