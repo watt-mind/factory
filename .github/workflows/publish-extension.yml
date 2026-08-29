@@ -42,24 +42,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -x "$HOME/.bun/bin/bun" ] && ! command -v bun >/dev/null 2>&1; then
-            version="1.3.14"
-            archive="$RUNNER_TEMP/bun-linux-x64.zip"
-            extract_dir="$RUNNER_TEMP/bun-linux-x64"
-            rm -rf "$extract_dir"
-            curl -fsSL -o "$archive" \
-              "https://github.com/oven-sh/bun/releases/download/bun-v${version}/bun-linux-x64.zip"
-            echo "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f  $archive" | sha256sum -c -
-            unzip -q "$archive" -d "$RUNNER_TEMP"
-            install -Dm755 "$extract_dir/bun" "$HOME/.bun/bin/bun"
-          fi
+          .github/scripts/install-pinned-tools.sh bun
           if [ -x "$HOME/.bun/bin/bun" ]; then
             echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
             "$HOME/.bun/bin/bun" --version
           else
             bun --version
           fi
-
       - name: Require NPM_TOKEN
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
