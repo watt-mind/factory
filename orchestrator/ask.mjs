@@ -80,6 +80,14 @@ const DEFAULT_WINDOW_HOURS = 24;
  * is to stop paying N round trips in series, not to burst a tracker's rate
  * limiter — which, when it trips, is exactly the failure this command is
  * supposed to survive.
+ *
+ * MEASURED CAVEAT: this buys real wall-clock only on the Linear adapter, whose
+ * transport is `await fetch`. `lib/control-plane/github.mjs` shells out through
+ * `spawnSync`, which blocks the event loop, so its reads serialize no matter
+ * what is awaited around them — measured on the factory repo at 13.0s
+ * concurrent vs 12.5s serial for five held tickets. The fan-out is correct and
+ * bounded here; making it *pay* on GitHub is an adapter-level fix, filed
+ * separately. Do not "fix" this by raising the limit.
  */
 const HELD_COMMENT_CONCURRENCY = 5;
 
