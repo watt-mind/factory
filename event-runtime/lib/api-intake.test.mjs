@@ -775,6 +775,33 @@ describe("GitHub full event-set mapping (WM-1150)", () => {
     }
   });
 
+  test("the /webhooks/github alias stays bearer-exempt when a control token is set (WM-1152)", async () => {
+    const s = await makeServer({ controlApiToken: "secret-token" });
+    try {
+      const payload = {
+        action: "reopened",
+        pull_request: { number: 701, base: { ref: "develop" }, draft: false },
+        repository: { full_name: "watt-mind/factory" },
+      };
+      const body = JSON.stringify(payload);
+      // No Authorization header — GitHub authenticates by HMAC, not a bearer.
+      const res = await fetch(s.url("/webhooks/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "pull_request",
+          "x-github-delivery": "d-tunnel-token",
+          "x-hub-signature-256": ghSign(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).admitted).toBe(true);
+    } finally {
+      s.close();
+    }
+  });
+
   test("an unconfigured repo is a benign 2xx ignore, never a 4xx", async () => {
     const s = await makeServer();
     try {
