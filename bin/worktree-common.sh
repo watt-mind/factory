@@ -208,6 +208,16 @@ provision_instance_local_configs() { # <checkout> [primary-checkout]
     mkdir -p "$checkout/config"
     cp -f "$source" "$destination"
   done
+
+  # Provision graphify knowledge graph from primary checkout if present and ignored
+  if [[ -d "$primary/graphify-out" && ! -d "$checkout/graphify-out" ]]; then
+    if [[ "$(normalize_path "$primary/graphify-out")" != "$(normalize_path "$checkout/graphify-out")" ]]; then
+      if ! git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || git -C "$checkout" check-ignore -q -- "graphify-out/"; then
+        cp -R "$primary/graphify-out" "$checkout/graphify-out"
+      fi
+    fi
+  fi
 }
 
 [[ "$PORT_BASE" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_BASE must be numeric (got '$PORT_BASE')"

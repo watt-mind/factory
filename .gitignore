@@ -18,6 +18,7 @@ config/policy.yaml
 config/schedule.yaml
 
 .DS_Store
+.gemini/
 graphify-out/
 
 # FACTORY:HARNES:BEGIN

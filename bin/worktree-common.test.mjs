@@ -7,6 +7,7 @@ import {
   mkdirSync,
   writeFileSync,
   renameSync,
+  realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -258,6 +259,32 @@ test("provision_instance_local_configs copies ignored local config and skips abs
   }
 });
 
+test("provision_instance_local_configs copies graphify-out when ignored", () => {
+  const source = mkdtempSync(path.join(tmpdir(), "graphify-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "graphify-checkout-"));
+  try {
+    mkdirSync(path.join(source, "graphify-out"), { recursive: true });
+    mkdirSync(path.join(checkout, "config"), { recursive: true });
+    writeFileSync(
+      path.join(checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\ngraphify-out/\n",
+    );
+    writeFileSync(path.join(source, "graphify-out", "graph.json"), '{"nodes": []}\n');
+    const r = sh(
+      [
+        `git -C "${checkout}" init -q`,
+        `provision_instance_local_configs "${checkout}" "${source}"`,
+        `test "$(cat "${checkout}/graphify-out/graph.json")" = '{"nodes": []}'`,
+        `git -C "${checkout}" check-ignore -q "graphify-out/"`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
 test("provision_instance_local_configs never materializes the operator schedule overlay (#1051)", () => {
   const source = mkdtempSync(path.join(tmpdir(), "gh-1051-config-source-"));
   const checkout = mkdtempSync(path.join(tmpdir(), "gh-1051-config-checkout-"));
@@ -306,7 +333,9 @@ test("provision_instance_local_configs silently skips a source without local fil
 });
 
 test("normalize_path is portable and accepts a missing final component", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "gh-937-normalize-"));
+  const root = realpathSync(
+    mkdtempSync(path.join(tmpdir(), "gh-937-normalize-")),
+  );
   const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
   try {
     mkdirSync(path.join(root, "existing"));
