@@ -208,17 +208,43 @@ jobs:
 
   codeql:
     name: CodeQL
-    # Gated: this repo is private with no GitHub Advanced Security, so
-    # `gh api repos/watt-mind/factory/code-scanning/default-setup` returns 403
-    # "Advanced Security must be enabled" (project-conventions.md §3D). Real
-    # CodeQL steps need `github/codeql-action/init` + `.../analyze`, which are
-    # `uses:` marketplace steps — acceptable here specifically because they
-    # only run once GHAS unlocks the codeload path for this repo. Flip the
-    # `CODEQL_ENABLED` repo variable to `true` and replace this placeholder
-    # with the real init/analyze steps at that point.
-    if: ${{ vars.CODEQL_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Keep CodeQL on the labeled self-hosted runner used by the previous
+    # GitHub-managed default setup. Its explicit resource cap prevents a scan
+    # from consuming every CPU and nearly all RAM on the shared host.
+    runs-on: shadow
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
     steps:
-      - name: CodeQL gated placeholder
-        run: echo "CodeQL is gated behind vars.CODEQL_ENABLED; this repo has no GHAS yet (project-conventions.md §3D)."
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          # GitHub's default setup used all 32 host threads and 60 GiB RAM.
+          # This repository is about 146K LOC, for which GitHub recommends
+          # 16 GiB and 4–8 cores on a self-hosted runner.
+          threads: 8
+          ram: 16384
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@v4
