@@ -160,12 +160,15 @@ export function waitForStreamFlush(stream) {
     stream.once("close", onClose);
     stream.once("error", onError);
 
-    if (stream.destroyed) {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    }
+    // `destroyed === true` is NOT proof the stream has fully settled. An
+    // fs.WriteStream can still be completing its asynchronous open/close after
+    // `destroyed` flips true but while `closed` is still false, and it may emit a
+    // late `error` (e.g. ENOENT if its directory was removed in the meantime).
+    // Resolving here would strip the `error`/`close` listeners and let that late
+    // rejection escape as a process-level unhandled error (Bun reports it as
+    // `1 error` / `0 fail`). The early return above already handles the truly
+    // terminal `writableFinished`/`closed` cases, so here we stay attached and
+    // let `close`/`finish` resolve or a late `error` reject through this promise.
   });
 }
 
