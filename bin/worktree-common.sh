@@ -180,13 +180,22 @@ normalize_path() { # <path>
   )
 }
 
-# Local config is intentionally gitignored, but a delegated checkout needs
-# the active instance's routing, policy, and schedule rather than examples.
-# Skip a checkout without the ignore rule so an agent can never stage it.
+# Local config is intentionally gitignored, but a delegated checkout needs the
+# active instance's routing and policy rather than examples. Skip a checkout
+# without the ignore rule so an agent can never stage it.
+#
+# schedule.yaml is deliberately NOT provisioned. Unlike repos/policy — pure
+# instance state — the schedule overlay layers on top of the branch's tracked
+# kernel schedules (event-runtime/schedules.json). A worktree branch may have
+# trimmed a loop out of the kernel (e.g. #1028) while the live operator overlay
+# still carries a stale, partial entry for it (`enabled: true`, no cadence);
+# copied in, it loads as a new overlay loop with no `every` and the repo verify
+# gate dies with `unparseable cadence "undefined"` (#1051). Omitting it lets the
+# checkout fall back to the tracked schedule.example.yaml, which always verifies.
 provision_instance_local_configs() { # <checkout> [primary-checkout]
   local checkout="$1" primary="${2:-${FACTORY_ROOT:-$(repo_root)}}"
   local name source destination rel
-  for name in repos policy schedule; do
+  for name in repos policy; do
     source="$primary/config/$name.yaml"
     [[ -f "$source" ]] || continue
     destination="$checkout/config/$name.yaml"

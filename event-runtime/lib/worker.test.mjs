@@ -314,6 +314,64 @@ describe("worker", () => {
     }
   });
 
+  test("does not materialize a stale operator schedule overlay, so a worktree stays verifiable after client schedules leave the kernel (#1051)", () => {
+    const factoryRoot = tmpDir("evrt-schedule-overlay-source-");
+    const checkout = tmpDir("evrt-schedule-overlay-checkout-");
+    try {
+      mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+      mkdirSync(path.join(checkout, "config"), { recursive: true });
+      writeFileSync(
+        path.join(checkout, ".gitignore"),
+        "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
+      );
+      expect(spawnSync("git", ["init", "-q"], { cwd: checkout }).status).toBe(
+        0,
+      );
+      writeFileSync(
+        path.join(factoryRoot, "config", "repos.yaml"),
+        "repos: []\n",
+      );
+      // A checkout tracks only the example overlay; the branch has trimmed the
+      // client loop out of the kernel, so the tracked example carries no
+      // `work-bj29`.
+      writeFileSync(
+        path.join(checkout, "config", "schedule.example.yaml"),
+        "jobs: []\n",
+      );
+      // The live operator overlay still carries a stale, partial entry for the
+      // now-kernel-less loop: `enabled: true` with no cadence. Copied into the
+      // checkout it would load as a brand-new overlay loop with no `every` and
+      // detonate the repo verify gate with `unparseable cadence "undefined"`.
+      writeFileSync(
+        path.join(factoryRoot, "config", "schedule.yaml"),
+        "schedules:\n  work-bj29:\n    enabled: true\n",
+      );
+
+      expect(
+        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+      ).toEqual(["config/repos.yaml"]);
+
+      // The stale overlay never lands in the checkout ...
+      expect(existsSync(path.join(checkout, "config", "schedule.yaml"))).toBe(
+        false,
+      );
+      // ... so schedule resolution falls back to the tracked example, which
+      // parses cleanly and has no cadence-less loop to break verify.
+      const resolved = resolveConfigPath("schedule", {
+        root: checkout,
+        warn: false,
+      });
+      expect(resolved).toBe(
+        path.join(checkout, "config", "schedule.example.yaml"),
+      );
+      const parsed = Bun.YAML.parse(readFileSync(resolved, "utf8"));
+      expect(parsed?.schedules?.["work-bj29"]).toBeUndefined();
+    } finally {
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
   test("silently skips instance config provisioning when no local files exist", () => {
     const factoryRoot = tmpDir("evrt-instance-config-empty-source-");
     const checkout = tmpDir("evrt-instance-config-empty-checkout-");

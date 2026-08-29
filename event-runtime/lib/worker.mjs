@@ -78,16 +78,25 @@ const HARNESS_UNKNOWN_CODES = Object.freeze({
   subagents: "harness_unknown_subagent",
 });
 
+// schedule.yaml is deliberately absent. Unlike repos/policy — pure instance
+// state a delegated checkout needs verbatim — the schedule overlay layers on
+// top of the branch's tracked kernel schedules (event-runtime/schedules.json).
+// A worktree's branch may have trimmed a loop out of the kernel (e.g. #1028),
+// yet the live operator overlay can still carry a stale, partial entry for it
+// (`enabled: true` with no cadence). Copied in, that entry loads as a brand-new
+// overlay loop with no `every`, and the repo verify gate dies with
+// `unparseable cadence "undefined"` (#1051). Omitting it lets the checkout fall
+// back to the tracked schedule.example.yaml, which always verifies.
 const INSTANCE_LOCAL_CONFIG_FILES = Object.freeze([
   "repos.yaml",
   "policy.yaml",
-  "schedule.yaml",
 ]);
 
 /**
  * Bring the operator-owned config files into a delegated checkout. These
  * files are intentionally untracked, so a fresh worktree otherwise falls
  * back to examples and cannot use this factory instance's routing or policy.
+ * The schedule overlay is excluded on purpose (see INSTANCE_LOCAL_CONFIG_FILES).
  */
 export function provisionInstanceLocalConfigs({
   checkoutPath,
