@@ -911,6 +911,16 @@ function terminalFailureReason(decision, reasonCode, detail = reasonCode) {
   return typedFailureReason(reasonCode, detail);
 }
 
+function leaseExpiryOutcome(db, runId, spec) {
+  const decision = retryDecision(db, runId, spec, "lease_expired", {
+    includeCurrentFailure: true,
+  });
+  return {
+    decision,
+    failureReason: terminalFailureReason(decision, "lease_expired"),
+  };
+}
+
 function resolveNow(now) {
   return typeof now === "function" ? now() : (now ?? Date.now());
 }
@@ -4198,7 +4208,11 @@ export function releaseStalledWorkerLease(
     }
 
     const spec = JSON.parse(run.spec_json);
-    const failureReason = typedFailureReason("lease_expired");
+    const { decision, failureReason } = leaseExpiryOutcome(
+      db,
+      heldRunId,
+      spec,
+    );
     db.query(
       `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
     ).run(iso(currentNow - 1), heldRunId, run.attempts);
@@ -4221,7 +4235,6 @@ export function releaseStalledWorkerLease(
       "lease_expired",
       currentNow,
     );
-    const decision = retryDecision(db, heldRunId, spec, "lease_expired");
     if (decision.retry) {
       transition(db, {
         runId: heldRunId,
@@ -4283,10 +4296,11 @@ export function reapExpiredLeases(
       .all(iso(currentNow));
     for (const row of rows) {
       const spec = JSON.parse(row.spec_json);
-      const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
-        includeCurrentFailure: true,
-      });
-      const failureReason = terminalFailureReason(decision, "lease_expired");
+      const { decision, failureReason } = leaseExpiryOutcome(
+        db,
+        row.run_id,
+        spec,
+      );
 
       // VERIFYING cannot transition directly to QUEUED; record its failure first.
       if (row.state === "VERIFYING") {
