@@ -1,11 +1,10 @@
 import { pad, withClient } from "./shared.mjs";
 
 export async function events(client, statusFilter) {
-  const { events: rows } = await client.events(statusFilter);
+  const status = statusFilter?.toUpperCase();
+  const { events: rows } = await client.events(status);
   if (rows.length === 0) {
-    console.log(
-      statusFilter ? `no events with status ${statusFilter}` : "no events",
-    );
+    console.log(status ? `no events with status ${status}` : "no events");
     return;
   }
   console.log(

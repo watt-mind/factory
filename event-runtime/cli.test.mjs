@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { COMMAND_NAMES } from "./cli/commands.mjs";
+import { events } from "./cli/events.mjs";
 import { renderInspect } from "./cli/inspect.mjs";
+import { ps } from "./cli/ps.mjs";
+import { runs } from "./cli/runs.mjs";
 import { CLI, freePort, runCli, throwawayRunDir } from "./cli/test-helpers.mjs";
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
 
@@ -75,10 +78,66 @@ describe("cli routing", () => {
     expect(parsed.adapters[0]).toHaveProperty("sandboxSupport");
   });
 
-  test("unknown command → usage text, non-zero exit", () => {
+  test("unknown command names the verb without dumping usage", () => {
     const r = runCli(["frobnicate"]);
-    expect(r.status).not.toBe(0);
-    expect(r.all).toContain("usage:");
+    expect(r.status).toBe(1);
+    expect(r.stderr.trim()).toBe(
+      "unknown command: frobnicate (try: cli.mjs help)",
+    );
+    expect(r.stdout).toBe("");
+    expect(r.stderr).not.toContain("usage:");
+  });
+
+  test("help, -h, and --help print usage to stdout and exit zero", () => {
+    for (const args of [["help"], ["-h"], ["--help"]]) {
+      const r = runCli(args);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("usage:");
+      expect(r.stderr).toBe("");
+    }
+  });
+
+  test("state and status filters are uppercased before client calls", async () => {
+    const calls = [];
+    const client = {
+      runs: async (state) => {
+        calls.push(["runs", state]);
+        return {
+          runs: [
+            {
+              runId: "run-1",
+              state: "RUNNING",
+              agent: "worker",
+              adapter: "fake",
+              attempts: 1,
+              maxAttempts: 1,
+              eventId: null,
+              updated_at: "now",
+            },
+          ],
+        };
+      },
+      events: async (status) => {
+        calls.push(["events", status]);
+        return { events: [] };
+      },
+    };
+    const lines = [];
+    const log = console.log;
+    console.log = (...values) => lines.push(values.join(" "));
+    try {
+      await runs(client, "running");
+      await ps(client, "running");
+      await events(client, "queued");
+    } finally {
+      console.log = log;
+    }
+    expect(calls).toEqual([
+      ["runs", "RUNNING"],
+      ["runs", "RUNNING"],
+      ["events", "QUEUED"],
+    ]);
+    expect(lines.join("\n")).toContain("RUNNING");
   });
 
   test("registered command set is unchanged", () => {
