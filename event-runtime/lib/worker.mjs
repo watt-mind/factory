@@ -40,10 +40,15 @@ import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
 import {
+  definitionAgentName,
   filesystemConfinementRefusal,
   MODEL_BACKED_ADAPTERS,
+  normalizeWorkspaceOnlyFallback,
+  sandboxUnavailableCapability,
+  workspaceOnlyHostFallback,
 } from "./adapters/sandboxed.mjs";
 import { isSandboxGuarded } from "./adapters/index.mjs";
+import { preflight as sandboxPreflight } from "./sandbox/gondolin.mjs";
 import { createRun, IllegalTransition, transition } from "./lifecycle.mjs";
 import {
   buildEscalatedContinuationSpec,
@@ -409,6 +414,43 @@ export function policyMaxRunMinutes(root = FACTORY_ROOT) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Explicit operator opt-out for workspace-only model confinement, normalized
+ * to `{ mode: "host", agents: string[]|null }` or `null`. Unknown, malformed,
+ * and absent values all fail closed.
+ */
+export function policyWorkspaceOnlyFallback(root = FACTORY_ROOT) {
+  try {
+    const policy = Bun.YAML.parse(
+      readFileSync(resolveConfigPath("policy", { root }), "utf8"),
+    );
+    return normalizeWorkspaceOnlyFallback(
+      policy?.sandbox?.workspace_only_fallback,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Gondolin's preflight shells out to QEMU and Node, so it must not run per
+ * claim: a host's virtualization capability does not change inside a worker
+ * process. Memoized here (rather than in the sandbox module) because this is
+ * the hot caller.
+ */
+let SANDBOX_PREFLIGHT_CACHE;
+export function cachedSandboxPreflight() {
+  if (SANDBOX_PREFLIGHT_CACHE === undefined) {
+    SANDBOX_PREFLIGHT_CACHE = sandboxPreflight();
+  }
+  return SANDBOX_PREFLIGHT_CACHE;
+}
+
+/** Test seam: forget the memoized host capability report. */
+export function resetSandboxPreflightCache() {
+  SANDBOX_PREFLIGHT_CACHE = undefined;
 }
 
 /**
@@ -2341,6 +2383,7 @@ export async function executeClaimed(
     dispatch,
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
+    sandboxAvailability,
   } = {},
 ) {
   const { runId, attempt, fencingToken, spec } = claim;
@@ -2595,6 +2638,13 @@ export async function executeClaimed(
     /* intentionally ignored */
   }
 
+  // The `unconfined` attestation, once admission has decided. Declared here so
+  // that EVERY terminal receipt this execution writes carries it — a refusal
+  // or a failure after an unconfined admission is exactly the record an
+  // auditor needs, so it must not be attached to the success path alone.
+  // Null until admission runs, and null for every confined run.
+  let filesystemConfinementReceipt = null;
+
   const refuseTerminal = (
     reasonCode,
     checks = ["dispatch_gate"],
@@ -2648,6 +2698,7 @@ export async function executeClaimed(
         evidenceSetHash: null,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
+        extraReceipt: filesystemConfinementReceipt,
         harnessPins: materializedHarnessPins,
       });
       const result = {
@@ -2755,9 +2806,21 @@ export async function executeClaimed(
               filesystem: filesystemIntent,
             },
           };
+    const workspaceOnlyFallback = policyWorkspaceOnlyFallback(policyRoot);
+    const hostSandbox = modelRuntimeSelected
+      ? (sandboxAvailability ?? cachedSandboxPreflight())
+      : null;
+    // The fallback is a *host-capability* escape hatch, never a way to opt an
+    // agent out of a sandbox this machine can actually provide.
+    const unconfinedWorkspaceOnly =
+      modelRuntimeSelected &&
+      hostSandbox?.available === false &&
+      workspaceOnlyHostFallback(confinementDef, { workspaceOnlyFallback });
     const confinementRefusal = modelRuntimeSelected
       ? filesystemConfinementRefusal(adapterKey, confinementDef, {
           sandboxSupport: selectedAdapter?.SANDBOX_SUPPORT ?? null,
+          sandboxAvailability: hostSandbox,
+          workspaceOnlyFallback,
         })
       : null;
     if (confinementRefusal) {
@@ -2776,6 +2839,18 @@ export async function executeClaimed(
         receipt: res?.receipt,
       };
     }
+    filesystemConfinementReceipt = unconfinedWorkspaceOnly
+      ? {
+          filesystemConfinement: {
+            status: "unconfined",
+            declared: "workspace-only",
+            fallback: "host",
+            source: "policy:sandbox.workspace_only_fallback",
+            agent: definitionAgentName(confinementDef),
+            hostCapability: sandboxUnavailableCapability(hostSandbox),
+          },
+        }
+      : null;
 
     if (isWorktree && repoName && ticketId) {
       if (!linearConfigured) {
@@ -3214,6 +3289,14 @@ export async function executeClaimed(
         // swallow: trace is observability, not correctness
       }
     };
+
+    // FAILED / TIMED_OUT / CANCELLED write no results receipt, so the
+    // unconfined attestation would otherwise exist only for runs that reached
+    // COMPLETED or REFUSED. Recording it on the attempt trace makes the
+    // audit line survive every terminal path.
+    if (filesystemConfinementReceipt) {
+      onTrace("lifecycle", filesystemConfinementReceipt);
+    }
 
     const onUsage = (usage) => {
       attemptUsage = { adapter: adapterKey, ...(usage ?? {}) };
@@ -3776,6 +3859,7 @@ export async function executeClaimed(
           evidenceSetHash: null,
           journalHead: latestJournalHash(db, runId),
           verificationStatus: "passed",
+          extraReceipt: filesystemConfinementReceipt,
           harnessPins: materializedHarnessPins,
         });
         db.query(
@@ -3875,7 +3959,12 @@ export async function executeClaimed(
         evidenceSetHash: verified.result.evidenceSetHash,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
-        extraReceipt: verified.receipt,
+        extraReceipt: filesystemConfinementReceipt
+          ? {
+              ...(verified.receipt ?? {}),
+              ...filesystemConfinementReceipt,
+            }
+          : verified.receipt,
         harnessPins: materializedHarnessPins,
       });
       const { result } = verified;

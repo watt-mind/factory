@@ -32,8 +32,11 @@ import {
   refuseSandbox,
   runSandboxed,
   SANDBOX_CONSOLE_FILE,
+  normalizeWorkspaceOnlyFallback,
+  sandboxUnavailableDetail,
   sandboxRequested,
   SandboxUnsupportedError,
+  workspaceOnlyHostFallback,
   withStdinFile,
 } from "./sandboxed.mjs";
 
@@ -85,6 +88,154 @@ describe("sandboxRequested / refuseSandbox", () => {
 });
 
 describe("workspace-only model admission (#962)", () => {
+  const NO_QEMU = {
+    available: false,
+    qemu: null,
+    node: "/usr/bin/node",
+    nodeVersion: "v22.6.0",
+    sdk: true,
+    reason: "qemu-system-x86_64 is not on PATH",
+  };
+  const allowList = (...agents) => ({
+    workspaceOnlyFallback: { mode: "host", agents },
+    sandboxAvailability: NO_QEMU,
+  });
+
+  test("the host fallback admits only agents the policy names (#1250)", () => {
+    const listed = confinedDef({ id: "work-scan", ref: "work-scan@1" });
+    const runtime = allowList("work-scan", "triage-scan");
+
+    expect(workspaceOnlyHostFallback(listed, runtime)).toBe(true);
+    for (const adapter of ["agy", "claude", "cursor", "hermes", "pi"]) {
+      expect(filesystemConfinementRefusal(adapter, listed, runtime)).toBeNull();
+    }
+
+    // An agent the operator did not name is refused exactly as before, and the
+    // reason names the missing HOST capability rather than the policy shape.
+    const unlisted = confinedDef({ id: "ci-doctor", ref: "ci-doctor@2" });
+    expect(workspaceOnlyHostFallback(unlisted, runtime)).toBe(false);
+    for (const adapter of ["agy", "claude", "cursor", "hermes", "pi"]) {
+      expect(
+        filesystemConfinementRefusal(adapter, unlisted, runtime),
+      ).toMatchObject({
+        code: FILESYSTEM_CONFINEMENT_REASON,
+        detail: expect.stringContaining("sandbox_unavailable:qemu"),
+      });
+    }
+  });
+
+  test("mutating agents never reach the confinement gate (#1250)", () => {
+    const mutating = confinedDef({
+      id: "label-guard",
+      ref: "label-guard@1",
+      mutating: true,
+    });
+    const runtime = allowList("label-guard");
+    expect(workspaceOnlyHostFallback(mutating, runtime)).toBe(false);
+    for (const adapter of ["agy", "claude", "pi"]) {
+      expect(
+        filesystemConfinementRefusal(adapter, mutating, runtime),
+      ).toBeNull();
+    }
+  });
+
+  test("a definition-authored sandbox policy always outranks the allow-list (#1250)", () => {
+    const explicitlySandboxed = confinedDef({
+      id: "work-scan",
+      ref: "work-scan@1",
+      sandbox: { provider: "gondolin" },
+    });
+    const runtime = allowList("work-scan");
+    expect(workspaceOnlyHostFallback(explicitlySandboxed, runtime)).toBe(false);
+    expect(
+      filesystemConfinementRefusal("pi", explicitlySandboxed, runtime),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("sandbox_unavailable:qemu"),
+    });
+  });
+
+  test("a host that can sandbox never falls back (#1250)", () => {
+    const listed = confinedDef({ id: "work-scan", ref: "work-scan@1" });
+    const runtime = {
+      workspaceOnlyFallback: { mode: "host", agents: ["work-scan"] },
+      sandboxAvailability: { available: true, reason: null },
+    };
+    expect(
+      filesystemConfinementRefusal("claude", listed, runtime),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("no enforced workspace-only guest path"),
+    });
+  });
+
+  test("normalizeWorkspaceOnlyFallback fails closed on everything but an explicit grant (#1250)", () => {
+    const warn = () => {};
+    for (const value of [
+      undefined,
+      null,
+      "",
+      "HOST",
+      "yes",
+      true,
+      ["work-scan"],
+      { mode: "guest", agents: ["work-scan"] },
+      { mode: "host" },
+      { mode: "host", agents: [] },
+      { mode: "host", agents: [null, ""] },
+    ]) {
+      expect(normalizeWorkspaceOnlyFallback(value, { warn })).toBeNull();
+    }
+    expect(
+      normalizeWorkspaceOnlyFallback(
+        { mode: "host", agents: ["work-scan", 7] },
+        { warn },
+      ),
+    ).toEqual({ mode: "host", agents: ["work-scan"] });
+  });
+
+  test("the legacy blanket string still works but warns loudly (#1250)", () => {
+    const warnings = [];
+    const blanket = normalizeWorkspaceOnlyFallback("host", {
+      warn: (message) => warnings.push(message),
+    });
+    expect(blanket).toEqual({ mode: "host", agents: null });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("EVERY");
+
+    const runtime = {
+      workspaceOnlyFallback: blanket,
+      sandboxAvailability: NO_QEMU,
+    };
+    for (const id of ["work-scan", "some-other-scan"]) {
+      expect(
+        workspaceOnlyHostFallback(confinedDef({ id, ref: `${id}@1` }), runtime),
+      ).toBe(true);
+    }
+  });
+
+  test("host preflight failures name the missing capability before policy shape (#1250)", () => {
+    const runtime = {
+      sandboxAvailability: {
+        available: false,
+        qemu: null,
+        node: null,
+        nodeVersion: null,
+        sdk: false,
+        reason: "qemu-system-x86_64 is not on PATH",
+      },
+    };
+    expect(sandboxUnavailableDetail(runtime.sandboxAvailability)).toBe(
+      "sandbox_unavailable:qemu — qemu-system-x86_64 is not on PATH",
+    );
+    expect(
+      filesystemConfinementRefusal("pi", confinedDef(), runtime),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("sandbox_unavailable:qemu"),
+    });
+  });
+
   test("unsupported model adapters fail closed with one typed reason", () => {
     for (const adapter of ["agy", "claude", "cursor", "hermes"]) {
       expect(filesystemConfinementRefusal(adapter, confinedDef())).toEqual({

@@ -5,6 +5,44 @@
 packs: []
 extensions: []
 
+# Workspace-only model runs fail closed when this host cannot provide the
+# Gondolin guest boundary. An operator may temporarily accept host execution
+# by naming, one by one, the agents they accept running unconfined. Nothing is
+# enabled by default: absent, malformed, and unknown values all keep the
+# refusal. An agent missing from `agents` is refused exactly as before, with a
+# reason naming the missing host capability (`sandbox_unavailable:qemu`).
+#
+# The grant applies ONLY on a host whose sandbox preflight fails, and only to
+# definitions that carry no `sandbox:` block of their own — an authored
+# definition policy always wins. Mutating agents never reach this gate.
+# Every admitted run records `filesystemConfinement.status: unconfined` in its
+# receipt. Prefer installing QEMU/Gondolin and leaving this absent; see
+# docs/event-runtime-adapters.md.
+# sandbox:
+#   workspace_only_fallback:
+#     mode: host
+#     agents:
+#       - work-scan
+#       - triage-scan
+#       - ci-doctor
+#       - ci-log-capture
+#       - janitor-scan
+#       - merge-scan
+#       - merge-review
+#       - merge-plan
+#       - sweep-scan
+#       - ship-scan
+#       - unblock-scan
+#       - unblock-digest
+#       - run-postmortem
+#       - factory-status-report
+#       - disk-diagnose
+#
+# The bare string form `workspace_only_fallback: host` is still accepted for
+# instances configured before the allow-list landed. It means "every
+# workspace-only agent", logs a loud warning on every claim, and should be
+# replaced by the explicit form above.
+
 chain_auto_approval:
   # New installations may opt into this closed set after reviewing their
   # tracker, credentials, and merge policy.

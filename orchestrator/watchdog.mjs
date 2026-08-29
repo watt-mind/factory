@@ -42,6 +42,139 @@ const c = {
   red: (s) => `\x1b[31m${s}\x1b[0m`,
 };
 
+export const SANDBOX_REFUSAL_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Every non-mutating `capabilities.filesystem: "workspace-only"` agent in
+ * event-runtime/agents — i.e. exactly the set the #962 confinement gate can
+ * refuse for a missing host sandbox. Mutating agents (dispatch, label-guard,
+ * ci-notify …) never reach that gate and are deliberately absent.
+ *
+ * Kept as a literal rather than derived from the registry so the watchdog
+ * stays a dependency-light health probe that runs without loading packs;
+ * watchdog.test.mjs re-derives it from event-runtime/agents to keep it honest.
+ */
+export const SCAN_LOOP_AGENTS = Object.freeze([
+  "agy-smoke",
+  "ci-doctor",
+  "ci-log-capture",
+  "cursor-smoke",
+  "disk-diagnose",
+  "factory-status-report",
+  "janitor-scan",
+  "merge-plan",
+  "merge-review",
+  "merge-scan",
+  "pi-smoke",
+  "run-postmortem",
+  "ship-scan",
+  "sweep-scan",
+  "triage-scan",
+  "unblock-digest",
+  "unblock-scan",
+  "work-scan",
+]);
+const SCAN_LOOP_AGENT_SET = new Set(SCAN_LOOP_AGENTS);
+
+/** Match on the bare agent name, ignoring pack namespace and `@version`. */
+export function isScanLoopAgent(agent) {
+  if (typeof agent !== "string" || agent === "") return false;
+  return SCAN_LOOP_AGENT_SET.has(agent.split("@")[0].split("/").pop());
+}
+
+// A health probe must never become the slow thing it is watching. The refusal
+// scan is therefore bounded three ways — pages, runs, and wall clock — so a
+// backlog of thousands of refused runs costs a bounded amount of work on
+// every watchdog tick and every `factory pulse`.
+export const SANDBOX_REFUSAL_MAX_PAGES = 2;
+export const SANDBOX_REFUSAL_MAX_RUNS = 50;
+export const SANDBOX_REFUSAL_DETAIL_CONCURRENCY = 4;
+export const SANDBOX_REFUSAL_BUDGET_MS = 5_000;
+
+/**
+ * Read recent scan refusals caused by a missing host sandbox capability.
+ *
+ * Bounded by construction: at most `SANDBOX_REFUSAL_MAX_PAGES` listing pages,
+ * at most `SANDBOX_REFUSAL_MAX_RUNS` detail fetches, at most
+ * `SANDBOX_REFUSAL_DETAIL_CONCURRENCY` of those in flight, and the whole
+ * thing abandons what it has not read once `budgetMs` elapses. The result is
+ * an alert signal, not an inventory: seeing *some* refusals is enough to
+ * raise it, so truncation cannot produce a false "all clear".
+ */
+export async function fetchRecentSandboxRefusals({
+  host = "127.0.0.1",
+  port = 7381,
+  fetchFn = fetch,
+  now = Date.now(),
+  windowMs = SANDBOX_REFUSAL_WINDOW_MS,
+  maxPages = SANDBOX_REFUSAL_MAX_PAGES,
+  maxRuns = SANDBOX_REFUSAL_MAX_RUNS,
+  concurrency = SANDBOX_REFUSAL_DETAIL_CONCURRENCY,
+  budgetMs = SANDBOX_REFUSAL_BUDGET_MS,
+  clock = () => Date.now(),
+} = {}) {
+  const deadline = clock() + budgetMs;
+  const outOfBudget = () => clock() >= deadline;
+  const runs = [];
+  const seenCursors = new Set();
+  let before = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    if (runs.length >= maxRuns || outOfBudget()) break;
+    const url = new URL(`http://${host}:${port}/runs`);
+    url.searchParams.set("state", "REFUSED");
+    url.searchParams.set("population", "terminal");
+    url.searchParams.set("from", new Date(now - windowMs).toISOString());
+    url.searchParams.set("to", new Date(now + 1_000).toISOString());
+    url.searchParams.set("limit", String(maxRuns));
+    if (before) url.searchParams.set("before", before);
+    const body = await fetchFn(url, {
+      signal: AbortSignal.timeout(3000),
+    }).then((response) => response.json());
+    for (const run of body?.runs ?? []) {
+      if (!isScanLoopAgent(run.agent)) continue;
+      runs.push(run);
+      if (runs.length >= maxRuns) break;
+    }
+    before = body?.nextBefore ?? null;
+    if (!before || seenCursors.has(before)) break;
+    seenCursors.add(before);
+  }
+
+  const refusals = [];
+  let next = 0;
+  const readOne = async (run) => {
+    const detail = await fetchFn(
+      `http://${host}:${port}/runs/${encodeURIComponent(run.runId)}`,
+      { signal: AbortSignal.timeout(3000) },
+    ).then((response) => response.json());
+    const refusal = [...(detail?.lifecycle ?? [])]
+      .reverse()
+      .find(
+        (entry) =>
+          entry?.to_state === "REFUSED" &&
+          typeof entry.reason === "string" &&
+          entry.reason.includes("sandbox_unavailable:"),
+      );
+    if (refusal) {
+      refusals.push({
+        runId: run.runId,
+        agent: run.agent,
+        reason: refusal.reason,
+        at: refusal.at,
+      });
+    }
+  };
+  const worker = async () => {
+    while (next < runs.length && !outOfBudget()) {
+      await readOne(runs[next++]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, runs.length) }, worker),
+  );
+  return refusals;
+}
+
 export async function runWatchdogCheck({
   host = "127.0.0.1",
   port = 7381,
@@ -57,6 +190,7 @@ export async function runWatchdogCheck({
     runningRuns: 0,
     wedgedRuns: 0,
     queuedRuns: 0,
+    sandboxRefusals: [],
     anomalies: [],
   };
 
@@ -103,17 +237,19 @@ export async function runWatchdogCheck({
 
   // 3. Workers & Runs Status from API
   try {
-    const [statusRes, workersRes, runningRes] = await Promise.all([
-      fetch(`http://${host}:${port}/status`, {
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => r.json()),
-      fetch(`http://${host}:${port}/workers`, {
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => r.json()),
-      fetch(`http://${host}:${port}/runs?state=RUNNING`, {
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => r.json()),
-    ]);
+    const [statusRes, workersRes, runningRes, sandboxRefusals] =
+      await Promise.all([
+        fetch(`http://${host}:${port}/status`, {
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => r.json()),
+        fetch(`http://${host}:${port}/workers`, {
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => r.json()),
+        fetch(`http://${host}:${port}/runs?state=RUNNING`, {
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => r.json()),
+        fetchRecentSandboxRefusals({ host, port }),
+      ]);
 
     const workers = workersRes?.workers ?? [];
     metrics.workersCount = workers.length;
@@ -149,6 +285,17 @@ export async function runWatchdogCheck({
     }
 
     metrics.queuedRuns = statusRes?.runs?.byState?.QUEUED ?? 0;
+    metrics.sandboxRefusals = sandboxRefusals;
+    if (metrics.sandboxRefusals.length > 0) {
+      const agents = [
+        ...new Set(metrics.sandboxRefusals.map((entry) => entry.agent)),
+      ].sort();
+      issues.push({
+        severity: "CRITICAL",
+        code: "SCAN_SANDBOX_UNAVAILABLE",
+        message: `Scan loops refused: sandbox unavailable (${agents.join(", ")})`,
+      });
+    }
     const idleWorkers = workers.filter((w) => w.state === "idle").length;
     if (
       metrics.queuedRuns > 0 &&

@@ -147,6 +147,95 @@ export function sandboxRequested(def) {
 }
 
 /**
+ * The bare agent name behind a definition, with any pack namespace and
+ * `@version` suffix stripped — the identity an operator writes in the
+ * `sandbox.workspace_only_fallback.agents` allow-list.
+ */
+export function definitionAgentName(def) {
+  const raw =
+    typeof def?.id === "string" && def.id !== ""
+      ? def.id
+      : typeof def?.ref === "string"
+        ? def.ref
+        : null;
+  if (!raw) return null;
+  const name = raw.split("@")[0].split("/").pop();
+  return name === "" ? null : name;
+}
+
+/**
+ * Normalize `sandbox.workspace_only_fallback` into `{ mode, agents }` or
+ * `null`. Everything unknown, malformed, or empty normalizes to `null`, so
+ * the gate keeps failing closed on a typo.
+ *
+ * The object form is the supported shape: it names exactly which agents may
+ * run unconfined. The bare string `host` is still accepted for the operator
+ * who wrote it before this narrowing landed — it means "every workspace-only
+ * agent" and is deliberately loud, because it is a blanket grant.
+ */
+export function normalizeWorkspaceOnlyFallback(
+  value,
+  { warn = console.warn } = {},
+) {
+  if (value === "host") {
+    warn(
+      'sandbox.workspace_only_fallback: "host" is the legacy blanket form — it admits EVERY ' +
+        "non-mutating workspace-only agent unconfined on this host. Replace it with the explicit " +
+        'allow-list form { mode: "host", agents: [...] } naming only the scans you accept.',
+    );
+    return { mode: "host", agents: null };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.mode !== "host") return null;
+  const agents = Array.isArray(value.agents)
+    ? value.agents.filter((a) => typeof a === "string" && a !== "")
+    : [];
+  // An object form that names nobody grants nobody: fail closed rather than
+  // silently widening to the blanket meaning.
+  return agents.length > 0 ? { mode: "host", agents } : null;
+}
+
+/**
+ * Whether the operator explicitly accepted host execution for this otherwise
+ * workspace-only run. Three things must all hold:
+ *
+ *   1. the definition is non-mutating and only ever promised workspace-only;
+ *   2. it carries no `sandbox:` block of its own — an explicit definition
+ *      policy always wins, the instance fallback may relax an *implicit*
+ *      workspace boundary but never erase an authored one;
+ *   3. the policy allow-list names this agent (or is the loud blanket form).
+ *
+ * The caller is responsible for only consulting this when the host actually
+ * has no sandbox; `filesystemConfinementRefusal` enforces that ordering.
+ */
+export function workspaceOnlyHostFallback(def, runtime = {}) {
+  if (def?.mutating !== false) return false;
+  if (def?.capabilities?.filesystem !== "workspace-only") return false;
+  if (sandboxRequested(def)) return false;
+  const fallback = runtime.workspaceOnlyFallback;
+  if (!fallback || fallback.mode !== "host") return false;
+  if (fallback.agents === null) return true;
+  const name = definitionAgentName(def);
+  return name !== null && fallback.agents.includes(name);
+}
+
+/** Which host capability Gondolin's preflight found missing. */
+export function sandboxUnavailableCapability(report) {
+  if (!report || report.available !== false) return null;
+  if (!report.qemu) return "qemu";
+  if (!report.node || !report.nodeVersion) return "node";
+  if (!report.sdk) return "sdk";
+  return "host";
+}
+
+/** Turn Gondolin's detailed preflight report into a stable audit token. */
+export function sandboxUnavailableDetail(report) {
+  const capability = sandboxUnavailableCapability(report);
+  if (!capability) return null;
+  return `sandbox_unavailable:${capability}${report.reason ? ` — ${report.reason}` : ""}`;
+}
+
+/**
  * Return a typed admission refusal when a non-mutating model run promises a
  * workspace-only filesystem but the selected adapter cannot enforce it.
  *
@@ -161,8 +250,9 @@ export function sandboxRequested(def) {
  * Non-model adapters and mutating definitions are outside this ticket's
  * boundary and retain their existing admission semantics.
  *
- * @param {{ sandboxSupport?: string|null }} [runtime] - worker-side attestation
- *   from the actual selected adapter module; omitted by the deterministic
+ * @param {{ sandboxSupport?: string|null, sandboxAvailability?: object,
+ *   workspaceOnlyFallback?: string|null }} [runtime] - worker-side
+ *   attestations and explicit instance fallback; omitted by the deterministic
  *   planner, which admits the built-in pi route by name.
  * @returns {{ code: string, detail: string } | null}
  */
@@ -179,6 +269,16 @@ export function filesystemConfinementRefusal(adapter, def, runtime = {}) {
     code: FILESYSTEM_CONFINEMENT_REASON,
     detail: `${def?.ref ?? "definition"}: ${detail}`,
   });
+
+  // Host capability comes first: when this machine cannot virtualize, the
+  // refusal must name the missing capability rather than the policy shape.
+  // The operator opt-out is consulted only on that branch — a host that CAN
+  // sandbox never falls back, whatever the allow-list says.
+  const unavailable = sandboxUnavailableDetail(runtime.sandboxAvailability);
+  if (unavailable) {
+    if (workspaceOnlyHostFallback(def, runtime)) return null;
+    return refuse(unavailable);
+  }
 
   if (adapter !== "pi") {
     return refuse(
