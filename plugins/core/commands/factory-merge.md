@@ -27,7 +27,7 @@ CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent 
 - **Correctness**: logic errors, edge cases, race conditions, broken assumptions about existing code it touches.
 - **Bugs the tests don't catch**: error handling, null/undefined paths, off-by-ones, state that survives navigation, platform differences (iOS/Android/web).
 - **Security**: injection, authz gaps, secrets in the diff, unsafe input handling.
-- **Protocol compliance**: does the diff stay inside the ticket's `Owned Paths`? Is the Handoff comment posted on the Linear ticket, and does its verification line reflect a real pass? Does the PR body have `Fixes <ISSUE-ID>` (and `run:<id>` on factory-produced PRs)?
+- **Protocol compliance**: does the diff stay inside the ticket's `Owned Paths`? Is the Handoff comment posted on the Linear ticket, and does its verification line reflect a real pass? Does the PR body have `Fixes <ISSUE-ID>`? Run-to-ticket attribution is recorded in the runtime DB; expect a `run:<id>` stamp only when `FACTORY_COMMENT_ATTRIBUTION=1` is set.
 - **Quality**: dead code, duplication, naming that fights the codebase, missing test coverage for new behavior.
 
 For user-facing PRs, open the Linear ticket's attached screenshots and judge the visual result too — layout, truncation, spacing, before/after coherence. A user-facing PR with no screenshots on its ticket is a (minor) protocol finding: note it, and if you fix the branch anyway, capture and attach them yourself.
