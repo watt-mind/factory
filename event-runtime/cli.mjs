@@ -404,7 +404,7 @@ export async function inspectWithPresentation(args) {
   }
 
   if (extra.length > 0) {
-    const artifactAt = lines.findIndex((line) => /^  artifact /.test(line));
+    const artifactAt = lines.findIndex((line) => /^ {2}artifact /.test(line));
     const resultAt = lines.findIndex((line) => line.trim() === "result");
     const at =
       artifactAt >= 0
