@@ -28,7 +28,8 @@ import {
 import { resolveChains } from "../lib/chain.mjs";
 import { notifyPending } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
-import { loadRegistry } from "../lib/registry.mjs";
+import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
+import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
 import { approveProposal } from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
 import { runOnce } from "../lib/worker.mjs";
@@ -328,10 +329,17 @@ export default async function serve(args) {
   }
 
   const db = openDb();
+  // Policy models are a startup snapshot. Persisted cells compose over the
+  // tracked map before registry validation; PUT/DELETE never mutate this
+  // process, so operators get the promised explicit restart boundary.
+  const trackedModelTiers = loadModelTierMap();
+  const modelTiers = applyModelTierCellOverrides(db, trackedModelTiers);
   const registry = loadRegistry({
     packRoots: extensions.packRoots,
     panelRoots: extensions.panelRoots,
     harnessRoots: extensions.harnessRoots,
+    modelTiers,
+    trackedModelTiers,
   });
   registry.anomalies.push(...extensions.anomalies);
   const startedConnectors = await startConnectors({ db, registry, log });

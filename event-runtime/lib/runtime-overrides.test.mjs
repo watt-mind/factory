@@ -1,24 +1,30 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-runtime-overrides-test-mjs";
 import { openDb } from "./db.mjs";
 import { loadRegistry } from "./registry.mjs";
 import { FACTORY_ROOT } from "./config.mjs";
 import {
   KIND_AGENT,
   KIND_EVENT_TYPE,
+  KIND_MODEL_TIER_CELL,
   OverlayError,
   applyPromotion,
   buildPromotionPreview,
+  applyModelTierCellOverrides,
   deleteOverride,
   knownAdapters,
   listOverrideJournal,
   listOverrides,
   mergeAgentPatch,
+  modelTierCellKey,
+  modelTierConfigView,
   plannedDef,
   putOverride,
   validateAgentPatch,
   validateEventTypePatch,
+  validateModelTierCellPatch,
 } from "./runtime-overrides.mjs";
 
 const registry = loadRegistry();
@@ -196,6 +202,200 @@ describe("runtime-overrides (WM-887)", () => {
     );
     expect(planned.model).toBeUndefined();
     expect(planned.model_tier).toBe("standard");
+  });
+});
+
+describe("policy model-tier cell overrides (gh-859)", () => {
+  const tracked = {
+    pi: { strong: "tracked-strong", standard: "tracked-standard" },
+    claude: { light: "tracked-light" },
+  };
+
+  test("stores different adapter+tier cells independently and journals each cell", () => {
+    const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: modelTierCellKey("pi", "standard"),
+      patch: { model: "runtime-standard" },
+      actor: "alice",
+      now: 1,
+    });
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: modelTierCellKey("claude", "light"),
+      patch: { model: "runtime-light" },
+      actor: "bob",
+      now: 2,
+    });
+
+    const view = modelTierConfigView(db, tracked);
+    expect(view.runtime.pi.standard).toBe("runtime-standard");
+    expect(view.runtime.claude.light).toBe("runtime-light");
+    expect(view.effective.pi.strong).toBe("tracked-strong");
+    expect(view.effective.pi.standard).toBe("runtime-standard");
+    const journal = listOverrideJournal(db);
+    expect(journal.map((row) => row.key)).toEqual([
+      "claude:light",
+      "pi:standard",
+    ]);
+    expect(journal.map((row) => row.actor)).toEqual(["bob", "alice"]);
+    expect(journal[0]).toMatchObject({
+      before: null,
+      after: { model: "runtime-light" },
+    });
+    db.close();
+  });
+
+  test("concurrent processes update different cells without overwriting", async () => {
+    const file = path.join(tmpDir("event-model-tier-cells-"), "runtime.db");
+    openDb(file).close();
+    const cells = [
+      ["pi", "standard", "runtime-standard", "alice"],
+      ["claude", "light", "runtime-light", "bob"],
+    ];
+    const processes = cells.map(([adapter, tier, model, actor]) =>
+      Bun.spawn(
+        [
+          "bun",
+          "-e",
+          `
+            import { openDb } from "./event-runtime/lib/db.mjs";
+            import { KIND_MODEL_TIER_CELL, modelTierCellKey, putOverride } from "./event-runtime/lib/runtime-overrides.mjs";
+            const db = openDb(process.argv[1]);
+            putOverride(db, {
+              kind: KIND_MODEL_TIER_CELL,
+              key: modelTierCellKey(process.argv[2], process.argv[3]),
+              patch: { model: process.argv[4] },
+              actor: process.argv[5],
+            });
+            db.close();
+          `,
+          file,
+          adapter,
+          tier,
+          model,
+          actor,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      ),
+    );
+    const results = await Promise.all(
+      processes.map(async (process) => ({
+        code: await process.exited,
+        stderr: await new Response(process.stderr).text(),
+      })),
+    );
+    expect(results).toEqual([
+      { code: 0, stderr: "" },
+      { code: 0, stderr: "" },
+    ]);
+
+    const db = openDb(file);
+    const view = modelTierConfigView(db, tracked);
+    expect(view.runtime.pi.standard).toBe("runtime-standard");
+    expect(view.runtime.claude.light).toBe("runtime-light");
+    expect(
+      listOverrideJournal(db)
+        .filter((row) => row.kind === KIND_MODEL_TIER_CELL)
+        .map((row) => row.actor)
+        .sort(),
+    ).toEqual(["alice", "bob"]);
+    db.close();
+  });
+
+  test("delete restores tracked composition and absent delete is idempotent", () => {
+    const db = openDb(":memory:");
+    const key = modelTierCellKey("pi", "standard");
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key,
+      patch: { model: "runtime-standard" },
+    });
+    expect(
+      deleteOverride(db, { kind: KIND_MODEL_TIER_CELL, key }).deleted,
+    ).toBe(true);
+    expect(modelTierConfigView(db, tracked).effective.pi.standard).toBe(
+      "tracked-standard",
+    );
+    expect(
+      deleteOverride(db, { kind: KIND_MODEL_TIER_CELL, key }).deleted,
+    ).toBe(false);
+    // An absent delete is not a mutation and therefore adds no journal row.
+    expect(listOverrideJournal(db)).toHaveLength(2);
+    db.close();
+  });
+
+  test("validates the closed adapter/tier vocabulary and exact model patch", () => {
+    expect(() =>
+      validateModelTierCellPatch("unknown", "standard", { model: "x" }),
+    ).toThrow(/unknown model adapter/);
+    expect(() =>
+      validateModelTierCellPatch("pi", "turbo", { model: "x" }),
+    ).toThrow(/unknown model tier/);
+    for (const patch of [
+      {},
+      { model: "" },
+      { model: "   " },
+      { model: null },
+      { model: "x", extra: true },
+    ]) {
+      expect(() => validateModelTierCellPatch("pi", "standard", patch)).toThrow(
+        OverlayError,
+      );
+    }
+    expect(
+      validateModelTierCellPatch("pi", "standard", { model: "x" }),
+    ).toEqual({ model: "x" });
+  });
+
+  test("startup composition reloads persisted cells and invalid rows fail closed actionably", () => {
+    const file = path.join(tmpDir("event-model-tier-restart-"), "runtime.db");
+    let db = openDb(file);
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:standard",
+      patch: { model: "first" },
+    });
+    db.close();
+
+    db = openDb(file);
+    const started = applyModelTierCellOverrides(db, tracked);
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:standard",
+      patch: { model: "second" },
+    });
+    expect(started.pi.standard).toBe("first");
+    db.close();
+
+    db = openDb(file);
+    expect(applyModelTierCellOverrides(db, tracked).pi.standard).toBe("second");
+    deleteOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:standard",
+    });
+    expect(started.pi.standard).toBe("first");
+    db.close();
+
+    db = openDb(file);
+    expect(applyModelTierCellOverrides(db, tracked).pi.standard).toBe(
+      "tracked-standard",
+    );
+
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      KIND_MODEL_TIER_CELL,
+      "unknown:standard",
+      JSON.stringify({ model: "x" }),
+      new Date(0).toISOString(),
+      "test",
+    );
+    expect(() => applyModelTierCellOverrides(db, tracked)).toThrow(
+      /invalid stored modelTierCell row.*unknown model adapter.*delete or correct/,
+    );
+    db.close();
   });
 });
 

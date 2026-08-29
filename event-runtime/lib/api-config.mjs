@@ -5,6 +5,8 @@ import { FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { loadedExtensions, maskExtensionSecrets } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
 import { loadNodesConfig, nodesConfigPath } from "./workers-remote.mjs";
+import { loadModelTierMap } from "./registry.mjs";
+import { modelTierConfigView } from "./runtime-overrides.mjs";
 
 const POLICY_KEYS = [
   "packs",
@@ -15,7 +17,6 @@ const POLICY_KEYS = [
   "workers",
   "actions_cache",
   "budget",
-  "models",
   "limits",
   "circuit_breaker",
   "escalation",
@@ -271,6 +272,7 @@ function entriesForRegistry(registry) {
 
 /** Build the wire view independently so allow-lists and redaction are unit-testable. */
 export function configView({
+  db,
   registry,
   repos,
   policyVersion,
@@ -281,6 +283,7 @@ export function configView({
   extensions = loadedExtensions(),
 } = {}) {
   const policy = readYaml(resolveConfigPath("policy", { root }));
+  const policyModels = modelTierConfigView(db, loadModelTierMap({ root }));
   const schedule = readYaml(resolveConfigPath("schedule", { root }));
   const nodesFile = nodesConfigPath(root);
   const loadedAt = registryLoadedAt ?? new Date(now).toISOString();
@@ -310,6 +313,20 @@ export function configView({
         source: source("config/policy.yaml", "yaml"),
         reload: "hot",
         entries: entriesForPolicy(policy),
+      },
+      {
+        id: "policy-models",
+        title: "Policy Models",
+        source: source("config/policy.yaml", "yaml"),
+        reload: "restart",
+        entries: policyModels.adapters.flatMap((adapter) =>
+          policyModels.tiers.map((tier) => ({
+            key: `${adapter}.${tier}`,
+            value: policyModels.effective[adapter]?.[tier] ?? null,
+            reload: "restart",
+          })),
+        ),
+        modelTierConfig: policyModels,
       },
       {
         id: "nodes",
