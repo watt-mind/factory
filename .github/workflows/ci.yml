@@ -131,8 +131,15 @@ jobs:
 
   fast-unit-tests:
     name: Fast unit tests
+    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
+    # this job is still evaluated when `shadow-runner-health` is intentionally
+    # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
+    # workflow or a failed `route` skips it, and on the self-hosted lane it
+    # still requires a healthy shadow fleet.
     if: >-
       ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
         (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
       }}
@@ -247,8 +254,14 @@ jobs:
     # shared-host contention. Not a required check — required Verify and Fast
     # unit tests exclude this group. A red result here is a flake signal, not
     # a merge blocker.
+    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
+    # this job still reaches a hosted runner when `shadow-runner-health` is
+    # intentionally skipped on the cloud lane (WM-1122). Same fail-closed guards
+    # as Fast unit tests.
     if: >-
       ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
         (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
       }}
@@ -356,8 +369,16 @@ jobs:
 
   verify:
     name: Full verification
+    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
+    # this job is still evaluated when `shadow-runner-health` is intentionally
+    # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
+    # workflow or a failed `route` skips it, on the self-hosted lane it still
+    # requires a healthy shadow fleet, and it always still requires successful
+    # fast unit tests.
     if: >-
       ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
         (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success') &&
         needs.fast-unit-tests.result == 'success'
