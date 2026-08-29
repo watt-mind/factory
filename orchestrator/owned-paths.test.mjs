@@ -26,6 +26,7 @@ import {
   readPinManifestRequirements,
   ownedPathsClosureGaps,
   formatOwnedPathClosureGaps,
+  REGISTRY_INPUT_GLOBS,
   REGISTRY_DIGEST_BASELINE_PATH,
 } from "./owned-paths.mjs";
 
@@ -266,7 +267,14 @@ test("owned path closure passes when required paths are also owned", () => {
   );
 });
 
-test("registry inputs require owning the zero-pack digest baseline", () => {
+const registryDigestPolicy = {
+  registryDigest: {
+    inputs: REGISTRY_INPUT_GLOBS,
+    baseline: REGISTRY_DIGEST_BASELINE_PATH,
+  },
+};
+
+test("registry inputs require owning the zero-pack digest baseline when configured", () => {
   const ownedPaths = [
     "event-runtime/agents/triage-scan.md",
     "event-runtime/agents/triage-scan.json",
@@ -277,10 +285,17 @@ test("registry inputs require owning the zero-pack digest baseline", () => {
     requiredBy: "event-runtime/agents/triage-scan.md",
   };
 
-  expectEqual(ownedPathsClosureGaps({ ownedPaths }), [expectedGap]);
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths,
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [expectedGap],
+  );
   expectEqual(
     ownedPathsClosureGaps({
       ownedPaths: [...ownedPaths, REGISTRY_DIGEST_BASELINE_PATH],
+      ownedPathsPolicy: registryDigestPolicy,
     }),
     [],
   );
@@ -295,23 +310,71 @@ test("each registry data input requires the digest baseline, but unrelated paths
     "event-runtime/edges.json",
     "event-runtime/schedules.json",
   ]) {
-    expectEqual(ownedPathsClosureGaps({ ownedPaths: [input] }), [
-      {
-        rule: "registry-digest",
-        requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
-        requiredBy: input,
-      },
-    ]);
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [input],
+        ownedPathsPolicy: registryDigestPolicy,
+      }),
+      [
+        {
+          rule: "registry-digest",
+          requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+          requiredBy: input,
+        },
+      ],
+    );
   }
 
   expectEqual(
-    ownedPathsClosureGaps({ ownedPaths: ["event-runtime/lib/planner.mjs"] }),
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/lib/planner.mjs"],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
     [],
   );
 });
 
 test("a broad glob that owns the baseline satisfies registry digest closure", () => {
-  expectEqual(ownedPathsClosureGaps({ ownedPaths: ["event-runtime/**"] }), []);
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/**"],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [],
+  );
+});
+
+test("registry digest closure is opt-in and ignores unanchored wildcards", () => {
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/agents/foo.md"],
+    }),
+    [],
+  );
+
+  for (const ownedPath of ["*.json", "**/*.json"]) {
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [ownedPath],
+        ownedPathsPolicy: registryDigestPolicy,
+      }),
+      [],
+    );
+  }
+
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/**/*.json"],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [
+      {
+        rule: "registry-digest",
+        requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+        requiredBy: "event-runtime/**/*.json",
+      },
+    ],
+  );
 });
 
 test("pin manifests require owning generated output manifests", () => {

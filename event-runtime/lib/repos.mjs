@@ -65,7 +65,7 @@ function normalizeOwnedPathsPolicy(raw = {}, repoName, file) {
   }
 
   const unknown = Object.keys(raw).filter(
-    (key) => !["direct", "pin_manifests"].includes(key),
+    (key) => !["direct", "pin_manifests", "registry_digest"].includes(key),
   );
   if (unknown.length) {
     throw new RepoError(
@@ -127,7 +127,48 @@ function normalizeOwnedPathsPolicy(raw = {}, repoName, file) {
     }
   }
 
-  return { direct, pinManifests };
+  let registryDigest;
+  if (raw.registry_digest !== undefined) {
+    const digest = raw.registry_digest;
+    if (!digest || typeof digest !== "object" || Array.isArray(digest)) {
+      throw new RepoError(
+        `${file}: repo ${repoName} owned_paths_policy.registry_digest must be an object`,
+      );
+    }
+    const unknownDigestKeys = Object.keys(digest).filter(
+      (key) => !["inputs", "baseline"].includes(key),
+    );
+    if (unknownDigestKeys.length) {
+      throw new RepoError(
+        `${file}: repo ${repoName} owned_paths_policy.registry_digest has unknown keys (${unknownDigestKeys.join(", ")})`,
+      );
+    }
+    if (!Array.isArray(digest.inputs) || digest.inputs.length === 0) {
+      throw new RepoError(
+        `${file}: repo ${repoName} owned_paths_policy.registry_digest.inputs must be a non-empty array`,
+      );
+    }
+    if (
+      !digest.inputs.every((input) => typeof input === "string" && input.trim())
+    ) {
+      throw new RepoError(
+        `${file}: repo ${repoName} owned_paths_policy.registry_digest.inputs must contain only non-empty strings`,
+      );
+    }
+    if (typeof digest.baseline !== "string" || !digest.baseline.trim()) {
+      throw new RepoError(
+        `${file}: repo ${repoName} owned_paths_policy.registry_digest.baseline must be a non-empty string`,
+      );
+    }
+    registryDigest = {
+      inputs: digest.inputs.map((input) => input.trim()),
+      baseline: digest.baseline.trim(),
+    };
+  }
+
+  return registryDigest
+    ? { direct, pinManifests, registryDigest }
+    : { direct, pinManifests };
 }
 
 // ---------------------------------------------------------------- toolchain ---
