@@ -322,7 +322,7 @@ export function itemView(row) {
 function inboxExpiredPredicate(item = "i") {
   return `(${item}.kind = 'proposal_expired' OR EXISTS (
     SELECT 1 FROM proposals p
-     WHERE p.id = json_extract(${item}.refs_json, '$.proposalId')
+     WHERE p.id = ${item}.proposal_id
        AND p.status = 'open'
        AND p.ttl_seconds > 0
        AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
@@ -434,8 +434,8 @@ export function createInboxItem(
       db.query(
         `INSERT INTO inbox_items
            (id, kind, severity, title, body, refs_json, source, created_at,
-            delivery_json, decision_json, dedupe_key, waiters_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
+            proposal_id, delivery_json, decision_json, dedupe_key, waiters_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
       ).run(
         id,
         kind,
@@ -445,6 +445,7 @@ export function createInboxItem(
         JSON.stringify(refs),
         source,
         createdAt,
+        refs.proposalId ?? null,
         decision === null ? null : JSON.stringify(decision),
         dedupeKey,
       );
@@ -558,12 +559,13 @@ function retargetInboxDecision(db, id, answer, proposalId, { now }) {
       : row.title;
   db.query(
     `UPDATE inbox_items
-     SET refs_json = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
+     SET refs_json = ?, proposal_id = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
          title = ?,
          response_json = NULL, decided_at = NULL, decided_by = NULL
      WHERE id = ?`,
   ).run(
     JSON.stringify(nextRefs),
+    proposalId,
     JSON.stringify(request),
     retargetedDedupeKey(db, row, previousProposalId, proposalId),
     JSON.stringify({
@@ -1079,9 +1081,9 @@ function bindProposalToItem(db, id, proposalId) {
      SET refs_json = json_set(
        CASE WHEN json_valid(refs_json) THEN refs_json ELSE '{}' END,
        '$.proposalId', ?
-     )
+     ), proposal_id = ?
      WHERE id = ? AND resolved_at IS NULL`,
-  ).run(proposalId, id);
+  ).run(proposalId, proposalId, id);
   return getInboxItem(db, id);
 }
 
