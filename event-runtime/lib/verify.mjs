@@ -11,7 +11,13 @@
  * evidence checking is slice 2.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { globToRegExp } from "../../orchestrator/owned-paths.mjs";
@@ -1088,6 +1094,13 @@ function verifyCompleted({
 
   const violations = [];
   const collected = [];
+  // `confinedRegularFile` returns a realpath-canonical source, so the workspace
+  // provenance root recorded below must be canonicalized in the same namespace
+  // (WM-1017). On macOS the workspace enters as `/tmp/...` while the artifact
+  // URI resolves to `/private/tmp/...`; recording the unresolved root made
+  // `storeCollected`'s `path.relative(root, src)` escape the lexical root and
+  // reject a valid artifact with a PathViolation. One namespace, both ends.
+  const canonicalWorkspaceRoot = realpathSync(path.resolve(workspaceDir));
   for (const entry of [...declared, ...injected]) {
     let abs;
     try {
@@ -1108,9 +1121,11 @@ function verifyCompleted({
         sha256: sha256Hex(readFileSync(abs)),
       };
       // Internal, non-serializable provenance lets durable storage repeat the
-      // same confinement preflight at its own trust boundary.
+      // same confinement preflight at its own trust boundary. Canonicalized to
+      // match the realpath'd artifact URI so a symlinked workspace parent does
+      // not read as an escape (WM-1017).
       Object.defineProperty(collectedEntry, "workspaceRoot", {
-        value: workspaceDir,
+        value: canonicalWorkspaceRoot,
       });
       collected.push(collectedEntry);
     } catch (err) {
