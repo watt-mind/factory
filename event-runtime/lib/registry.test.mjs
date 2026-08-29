@@ -303,8 +303,12 @@ describe("registry", () => {
     // `result.presentation` document (Layer B pilot); triage-scan.json is
     // re-pinned. Prompt text and its pin only — no schema, contract, route,
     // capability, or model tier changed.
+    // Regenerated (#1324): dispatch.md now tells factory ticket agents that
+    // the configured handoff gate includes Prettier after the unit and emit
+    // checks; dispatch.json is re-pinned. Prompt text only — no schema,
+    // contract, route, capability, or model tier changed.
     const expected =
-      "sha256:91a5c728b78852bfe450a71eebddd87a17231e43dbe739c0b590de81cfda34ab";
+      "sha256:c4b4d2eebf6e2a69a69018c9cad13d877c8b6f487d924ee936129bdd933e4647";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -548,8 +552,11 @@ describe("registry", () => {
     // table (observed results, no PR on a fail, bounded rows, must agree with
     // the Handoff), so the prompt pin moved. Prompt text only — `pack` stays
     // non-enumerable and no enumerable key was added.
+    // Regenerated (#1324): dispatch.md includes the factory Prettier handoff
+    // check, so its prompt pin legitimately moved; `pack` remains
+    // non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:9b9f59322454c0935cef3a83c85adf2dee84e6b1e6d5301d1b1de46267b05ea4",
+      "sha256:4476b2f37992c75814f4e8896f0332242c37885c9fcf94a5b7103d44797fe854",
     );
   });
 

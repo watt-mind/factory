@@ -22,7 +22,7 @@ repos:
     worktree_down: bin/worktree-down.sh
     worktree_root: ~/Develop/.worktrees/factory
     max_in_flight: 20
-    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check
+    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check
     # Executables this repo's worktree script and verify command need, with the
     # semver range each must satisfy (WM-316, docs/event-runtime-repos.md §5).
     # Preflight resolves each one on the node and compares versions BEFORE a
