@@ -250,9 +250,10 @@ def watchdog-sweep($runs) {
     if (clean) { cancel, unassign the ticket back to Todo } else { mark BLOCKED and escalate }
   }
 
-  # after any stack restart: in-flight runs are orphaned, and the reaper is disabled (WM-657)
-  compare `attempts.lease_owner` against `bun event-runtime/cli.mjs workers`
-  cancel the orphans
+  # after any stack restart: `serve` runs its `reap` step every tick
+  # (`event-runtime/cli/serve.mjs`), reclaiming expired leases after
+  # LEASE_GRACE_SECONDS. Before an orphan is retried, preserve and push any
+  # uncommitted worktree work; no reap tick runs while the stack is down.
 }
 ```
 
@@ -372,19 +373,19 @@ claim blocks.
 
 ## Traps
 
-| Trap                       | Mechanism                                                                               | Rule                                                                                   |
-| :------------------------- | :-------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------- |
-| CI rerun cache             | `gh run rerun` on a green run is refused; on a failed run it reuses the attempt         | Observe the run in a non-completed state before trusting green                         |
-| `GET /runs` has no `spec`  | WM-303 — `row.spec` reads empty                                                         | Take ticket identity from `eventId` or `cli.mjs inspect <runId>`                       |
-| Idempotency pinning        | `FAILED`/`BLOCKED` runs pin the input hash; re-injection no-ops                         | `cli.mjs retry <runId> --force`, or cancel + relabel + re-inject with a bumped eventId |
-| `git stash` in worktrees   | The stash stack is repo-global, not per-worktree                                        | Never stash, never `rebase --autostash`. Commit to a branch instead                    |
-| macOS bash 3.2             | No `mapfile` / `readarray`                                                              | POSIX `while IFS= read -r line` loops in every shell script                            |
-| Prettier scope             | Repo-wide prettier reformats hundreds of `.mjs` files                                   | Prettier covers `shared/**/*.md` only (`bun run format:check`)                         |
-| Label replacement          | Raw GraphQL label mutations replace the whole array, wiping `type:*` / `area:*`         | Always `--add` / `--remove` via `factory ticket labels` / `state`                      |
-| Restart orphans in-flight  | `live-stack.sh down` does not wait; the leaseholder dies and the reaper is off (WM-657) | Restart only when no `dispatch@1` run is RUNNING/LEASED; cancel orphans afterwards     |
-| Stale rebase reverts trunk | A rebase onto a stale `origin/develop` drops PRs merged since — and still passes CI     | `git diff --stat origin/develop origin/<branch>` must show no unexplained deletions    |
-| Blocking waits inline      | A `sleep`-recheck loop queues the operator's steering behind the whole wait             | Nothing inline blocks >~30s                                                            |
-| A hold only in your head   | `merge-scan`/`merge-apply` cannot read your intentions — #552 auto-merged a "held" PR   | On FIX/ESCALATE, convert to draft or add `ai:escalated` immediately                    |
+| Trap                           | Mechanism                                                                                                      | Rule                                                                                                                                                                                        |
+| :----------------------------- | :------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CI rerun cache                 | `gh run rerun` on a green run is refused; on a failed run it reuses the attempt                                | Observe the run in a non-completed state before trusting green                                                                                                                              |
+| `GET /runs` list has no `spec` | The list exposes `runId`, `agent`, and `adapter`, but `row.spec` is absent                                     | Take ticket identity from `eventId` or `cli.mjs inspect <runId>`                                                                                                                            |
+| Idempotency pinning            | `FAILED`/`BLOCKED` runs pin the input hash; re-injection no-ops                                                | `cli.mjs retry <runId> --force`, or cancel + relabel + re-inject with a bumped eventId                                                                                                      |
+| `git stash` in worktrees       | The stash stack is repo-global, not per-worktree                                                               | Never stash, never `rebase --autostash`. Commit to a branch instead                                                                                                                         |
+| macOS bash 3.2                 | No `mapfile` / `readarray`                                                                                     | POSIX `while IFS= read -r line` loops in every shell script                                                                                                                                 |
+| Prettier scope                 | Repo-wide prettier reformats hundreds of `.mjs` files                                                          | Prettier covers `shared/**/*.md` only (`bun run format:check`)                                                                                                                              |
+| Label replacement              | Raw GraphQL label mutations replace the whole array, wiping `type:*` / `area:*`                                | Always `--add` / `--remove` via `factory ticket labels` / `state`                                                                                                                           |
+| Restart orphans in-flight      | `live-stack.sh down` can end a leaseholder; `serve` reaps expired leases each tick after `LEASE_GRACE_SECONDS` | Restart only when no `dispatch@1` run is RUNNING/LEASED; after `down`, push uncommitted worktree work, then let `event-runtime/cli/serve.mjs` reclaim expired leases after the grace period |
+| Stale rebase reverts trunk     | A rebase onto a stale `origin/develop` drops PRs merged since — and still passes CI                            | `git diff --stat origin/develop origin/<branch>` must show no unexplained deletions                                                                                                         |
+| Blocking waits inline          | A `sleep`-recheck loop queues the operator's steering behind the whole wait                                    | Nothing inline blocks >~30s                                                                                                                                                                 |
+| A hold only in your head       | `merge-scan`/`merge-apply` cannot read your intentions — #552 auto-merged a "held" PR                          | On FIX/ESCALATE, convert to draft or add `ai:escalated` immediately                                                                                                                         |
 
 ## Command reference
 
