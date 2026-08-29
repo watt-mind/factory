@@ -28,11 +28,13 @@ function parseUpdatePinsArgs(args = []) {
   return { pack, check };
 }
 
-export default function updatePinsCommand(args = []) {
+export default async function updatePinsCommand(args = []) {
   const { pack, check } = parseUpdatePinsArgs(args);
   try {
     const changed =
-      pack === undefined ? updatePins({ check }) : updatePins({ pack, check });
+      pack === undefined
+        ? await updatePins({ check })
+        : await updatePins({ pack, check });
     // Harness content (contributes.harness, WM-849) is pack-independent —
     // one top-level event-runtime/pins.json covers shared/ plus every
     // policy-listed extension, so it only re-pins on the bare invocation.

@@ -2,6 +2,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-registry-
 import { describe, expect, test } from "bun:test";
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { format as prettierFormat, resolveConfig } from "prettier";
 import { canonicalJson, hashBytes } from "./canonical.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import {
@@ -702,17 +703,17 @@ describe("registry", () => {
     expect(getAgent(registry, "sample/echo@1").mutating).toBeUndefined();
   });
 
-  test("pack manifest and pins fail closed, and explicit pack pinning repairs drift", () => {
+  test("pack manifest and pins fail closed, and explicit pack pinning repairs drift", async () => {
     const pack = tempPack();
     const prompt = path.join(pack.path, "agents", "echo.md");
     writeFileSync(prompt, `${readFileSync(prompt, "utf8")}drift\n`);
     expect(() => loadRegistry({ packRoots: [pack] })).toThrow(
       /does not match pin/,
     );
-    expect(updatePins({ pack })).toEqual(["sample"]);
+    expect(await updatePins({ pack })).toEqual(["sample"]);
     expect(() => loadRegistry({ packRoots: [pack] })).not.toThrow();
     writeFileSync(path.join(pack.path, "pins.json"), "not-json\n");
-    expect(updatePins({ pack })).toEqual(["sample"]);
+    expect(await updatePins({ pack })).toEqual(["sample"]);
     expect(() => loadRegistry({ packRoots: [pack] })).not.toThrow();
 
     const mismatched = tempPack({ name: "policy-name" });
@@ -791,7 +792,7 @@ describe("registry", () => {
     );
   });
 
-  test("editing a pinned file without re-pinning fails closed", () => {
+  test("editing a pinned file without re-pinning fails closed", async () => {
     const root = tempRegistry();
     const promptFile = path.join(root, "agents", "factory-status-report.md");
     writeFileSync(
@@ -799,13 +800,61 @@ describe("registry", () => {
       `${readFileSync(promptFile, "utf8")}\n<!-- drift -->\n`,
     );
     expect(() => loadRegistry({ root })).toThrow(RegistryError);
-    expect(updatePins({ root, check: true })).toContain(
+    expect(await updatePins({ root, check: true })).toContain(
       "factory-status-report.json",
     );
     expect(() => loadRegistry({ root })).toThrow(RegistryError);
-    updatePins({ root });
+    await updatePins({ root });
     expect(() => loadRegistry({ root })).not.toThrow();
-    expect(updatePins({ root, check: true })).toEqual([]);
+    expect(await updatePins({ root, check: true })).toEqual([]);
+  });
+
+  test("re-pinning a changed built-in definition leaves it Prettier-canonical (WM-1119)", async () => {
+    const root = tempRegistry();
+    // dispatch.json carries short arrays (capabilities.services/tools, memo
+    // kinds) that Prettier keeps on one line but raw JSON.stringify(…, 2)
+    // expands — the exact churn the issue reproduced.
+    const defFile = path.join(root, "agents", "dispatch.json");
+    const before = JSON.parse(readFileSync(defFile, "utf8"));
+    // Resolve the repository's Prettier options (canonical for .json) so the
+    // assertion mirrors what `prettier --check` would decide.
+    const prettierOptions = {
+      ...(await resolveConfig(
+        path.join(RUNTIME_ROOT, "agents", "dispatch.json"),
+      )),
+      filepath: defFile,
+    };
+    const canonical = (content) => prettierFormat(content, prettierOptions);
+    // Guard: the committed definition must start canonical, or the test is void.
+    const original = readFileSync(defFile, "utf8");
+    expect(await canonical(original)).toBe(original);
+
+    // Force a real pin change by editing the pinned prompt.
+    const promptFile = path.join(root, before.prompt);
+    writeFileSync(
+      promptFile,
+      `${readFileSync(promptFile, "utf8")}\n<!-- WM-1119 -->\n`,
+    );
+
+    expect(await updatePins({ root })).toContain("dispatch.json");
+
+    const written = readFileSync(defFile, "utf8");
+    // Fails against origin/develop: JSON.stringify(…, 2) expands the short
+    // arrays, so `prettier --check` would redden here.
+    expect(await canonical(written)).toBe(written);
+
+    // Only the pins moved; every other parsed field is byte-identical content.
+    const after = JSON.parse(written);
+    expect({ ...after, pins: undefined }).toEqual({
+      ...before,
+      pins: undefined,
+    });
+    expect(after.pins).not.toEqual(before.pins);
+
+    // A second update is idempotent: no changed names, no byte changes.
+    const bytes = readFileSync(defFile);
+    expect(await updatePins({ root })).toEqual([]);
+    expect(readFileSync(defFile)).toEqual(bytes);
   });
 
   test("mutating agents are refused in the MVP", () => {
@@ -1147,7 +1196,7 @@ describe("registry", () => {
     expect(() => loadRegistry({ root })).toThrow(/unregistered agent/);
   });
 
-  test("artifact-view sidecars load beside their definition and are served off the pinned identity (WM-454)", () => {
+  test("artifact-view sidecars load beside their definition and are served off the pinned identity (WM-454)", async () => {
     const registry = loadRegistry();
     // The committed views: present, validated, keyed by ref, not on the def.
     const merge = getArtifactView(registry, "merge-scan@2");
@@ -1207,7 +1256,7 @@ describe("registry", () => {
       [...registry.agents.keys()].some((ref) => ref.includes(".view")),
     ).toBe(false);
     const root = tempRegistry();
-    expect(updatePins({ root })).toEqual([]);
+    expect(await updatePins({ root })).toEqual([]);
   });
 
   test("a view that drifts from its schema is a configuration anomaly, not a load error (WM-454)", () => {

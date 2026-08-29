@@ -10,6 +10,7 @@
  */
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { format as prettierFormat, resolveConfig } from "prettier";
 import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
@@ -1417,12 +1418,33 @@ export function getEventType(registry, type) {
 }
 
 /**
+ * Serialize `value` as JSON exactly as Prettier 3 would under the repository
+ * configuration for `file`, so a re-pin write leaves the definition canonical
+ * (WM-1119). Prettier's formatter is async; `updatePins` awaits it. `file` is
+ * only used to select the parser and resolve `.prettierrc`, not read or written.
+ */
+async function formatJsonCanonical(file, value) {
+  const options = await resolveConfig(file);
+  return prettierFormat(`${JSON.stringify(value)}\n`, {
+    ...options,
+    filepath: file,
+  });
+}
+
+/**
  * Recompute pins deliberately. With no `pack`, this is byte-for-byte the
  * built-in behavior: inline pins in built-in definitions only. A configured
  * pack must be named explicitly and receives one root-level pins.json.
  * `check: true` reports the same changed names without writing (WM-811).
+ * Changed built-in definitions are re-emitted in Prettier-canonical form so a
+ * re-pin does not redden `format:check` (WM-1119); this makes `updatePins`
+ * async — callers must await it.
  */
-export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
+export async function updatePins({
+  root = RUNTIME_ROOT,
+  pack,
+  check = false,
+} = {}) {
   if (pack !== undefined) {
     let descriptor = pack;
     if (typeof pack === "string") {
@@ -1469,7 +1491,7 @@ export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
       if (!check) {
         writeFileSync(
           file,
-          `${JSON.stringify({ ...def, pins }, null, 2)}\n`,
+          await formatJsonCanonical(file, { ...def, pins }),
           "utf8",
         );
       }
