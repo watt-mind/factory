@@ -10,7 +10,6 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-import { hashJson } from "../event-runtime/lib/canonical.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
 
 export const HANDOFF_SCHEMA_VERSION = "factory.handoff/v1";
@@ -211,7 +210,8 @@ function sameHandoffEnvelope(stored, expected) {
     stored.subject === expected.subject &&
     stored.correlationId === expected.correlationId &&
     (stored.causationId ?? null) === (expected.causationId ?? null) &&
-    hashJson(stored.payload) === hashJson(expected.payload),
+    stored.payload?.repo === expected.payload.repo &&
+    stored.payload?.ticket === expected.payload.ticket,
   );
 }
 
