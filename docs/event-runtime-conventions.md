@@ -212,8 +212,8 @@ wholesale. Provider API keys are removed so the CLIs use their configured
 subscription authentication.
 
 `PUSH_CREDENTIAL_ENV` is the shared list `SSH_AUTH_SOCK`, `SSH_AGENT_PID`,
-`GITHUB_TOKEN`, and `GH_TOKEN`. `pi.mjs` imports the list from `claude.mjs`
-rather than duplicating it. A `mutating: true` run may inherit those four
+`GITHUB_TOKEN`, and `GH_TOKEN`, exported by `adapters/child-env.mjs`. A
+`mutating: true` run may inherit those four
 values. A non-mutating run strips them _after_ merging the caller's `env`, so a
 caller cannot smuggle mutation authority back in through the overlay.
 
@@ -303,11 +303,10 @@ differences and known conformance gaps are:
 | Observer failure isolation   | per-line trace and terminal usage callbacks guarded                                      | per-line trace guarded; terminal usage trace gap tracked by WM-305 |
 | Policy denial matching       | confirmed Claude-authored patterns                                                       | empty until a pi-authored shape is observed                        |
 | Missing CLI                  | generic spawn error (known gap)                                                          | typed preflight with `npx` fallback                                |
-| `safeChildEnvironment` guard | valid registered booleans; legacy helper also treats some non-boolean values as mutating | only explicit `true` grants push credentials                       |
+| `safeChildEnvironment` guard | shared helper: only explicit `true` grants push credentials                              | shared helper: only explicit `true` grants push credentials       |
 
-For valid registered definitions, both environment helpers agree on
-`mutating: true` and `mutating: false`. New code should copy pi's fail-closed
-`=== true` authority check, not Claude's legacy non-boolean behavior.
+All adapters delegate the fail-closed authority check to the shared helper, so
+non-boolean values never gain push credentials.
 
 ## Fail closed at trust boundaries
 

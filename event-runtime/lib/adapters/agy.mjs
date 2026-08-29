@@ -21,9 +21,21 @@ import {
   verifiedPrompt,
 } from "./claude.mjs";
 import { FACTORY_ROOT } from "../config.mjs";
+import {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+export {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+};
 
 /**
  * No guest execution path exists for this adapter (WM-313): a sandboxed
@@ -146,69 +158,15 @@ export function buildAgyArgv({
   return args;
 }
 
-export const BASE_INHERITED_ENV = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
-];
-
 /**
  * Keep untrusted model subprocesses from inheriting the worker's authority.
  * Strips provider API keys to force subscription/login authentication.
  */
 export function safeChildEnvironment(env = {}, defOrOpts = {}) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-  Object.assign(childEnv, env);
-  // Same contract as pi/claude (WM-433): pinned procedures call Factory
-  // helpers through $FACTORY_ROOT even when the workspace is a target repo.
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
-
-  for (const key of [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-  ]) {
-    delete childEnv[key];
-  }
-
-  for (const key of Object.keys(childEnv)) {
-    if (key.startsWith("ANTIGRAVITY_")) {
-      delete childEnv[key];
-    }
-  }
-
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-
-  return childEnv;
+  return sharedSafeChildEnvironment(env, defOrOpts, {
+    factoryRoot: FACTORY_ROOT,
+    stripPrefixes: ["ANTIGRAVITY_"],
+  });
 }
 
 function clip(text) {

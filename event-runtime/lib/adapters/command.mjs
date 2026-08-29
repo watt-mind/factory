@@ -28,7 +28,13 @@ import { spawn } from "node:child_process";
 import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
-import { PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import {
+  BASE_INHERITED_ENV as SHARED_BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
 import { runSandboxed, sandboxRequested } from "./sandboxed.mjs";
 
 /** This adapter executes inside the VM when a definition asks (WM-185). */
@@ -54,43 +60,12 @@ const OUTPUT_TAIL_CHARS = 2_000;
  * .env — so no env token is required for reads. Mutating definitions receive
  * PUSH_CREDENTIAL_ENV below.
  */
-export const RUNTIME_IDENTITY_ENV = [
-  "FACTORY_EVENT_HOME",
-  "FACTORY_EVENT_PORT",
-  "FACTORY_EVENT_SECRET",
-  "FACTORY_EVENT_ENV",
-];
-
 export const BASE_INHERITED_ENV = [
   ...RUNTIME_IDENTITY_ENV,
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
+  ...SHARED_BASE_INHERITED_ENV,
 ];
 
-export { PUSH_CREDENTIAL_ENV };
-
-const PROVIDER_CREDENTIAL_ENV = [
-  "ANTHROPIC_API_KEY",
-  "OPENAI_API_KEY",
-  "GEMINI_API_KEY",
-  "GOOGLE_API_KEY",
-  "GOOGLE_GENAI_API_KEY",
-  "MISTRAL_API_KEY",
-  "DEEPSEEK_API_KEY",
-  "GROQ_API_KEY",
-  "CLAUDECODE",
-  "CLAUDE_CODE_ENTRYPOINT",
-];
+export { PROVIDER_CREDENTIAL_ENV, PUSH_CREDENTIAL_ENV, RUNTIME_IDENTITY_ENV };
 
 /**
  * Build the environment for an unsandboxed deterministic command.
@@ -101,30 +76,10 @@ const PROVIDER_CREDENTIAL_ENV = [
  * only to an explicitly mutating definition.
  */
 export function safeChildEnvironment(env = {}, defOrOpts = {}) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-
-  Object.assign(childEnv, env);
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
-
-  for (const key of PROVIDER_CREDENTIAL_ENV) {
-    delete childEnv[key];
-  }
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-
-  return childEnv;
+  return sharedSafeChildEnvironment(env, defOrOpts, {
+    factoryRoot: FACTORY_ROOT,
+    inheritRuntimeIdentity: true,
+  });
 }
 
 /**

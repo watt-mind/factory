@@ -517,7 +517,16 @@ describe("command-adapter registry (OPS-404)", () => {
       },
     };
     emitDueTicks(db, withReaper, { now: Date.parse("2026-08-14T04:30:00Z") });
-    planAdmittedEvents(db, withReaper, { policyVersion: "git:test-pv" });
+    // Planning resolves the runtime's directories even though the reaper is
+    // an ephemeral command. Tests must not fall back to the operator runtime.
+    const previousEventHome = process.env.FACTORY_EVENT_HOME;
+    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-reaper-home-");
+    try {
+      planAdmittedEvents(db, withReaper, { policyVersion: "git:test-pv" });
+    } finally {
+      if (previousEventHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousEventHome;
+    }
 
     const row = db.query(`SELECT spec_json FROM runs`).get();
     expect(row).toBeTruthy();

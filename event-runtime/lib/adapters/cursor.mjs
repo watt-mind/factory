@@ -31,14 +31,23 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
+<<<<<<< HEAD
+import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
-  PROMPT_SUFFIX,
+  BASE_INHERITED_ENV as SHARED_BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
-  verifiedPrompt,
-} from "./claude.mjs";
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+export {
+  PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+};
 
 /**
  * No guest execution path exists for this adapter (WM-313): a sandboxed
@@ -123,18 +132,7 @@ export function buildCursorArgv({ prompt, model }) {
 }
 
 export const BASE_INHERITED_ENV = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
+  ...SHARED_BASE_INHERITED_ENV,
   // `agent -p` ignores the login session and requires this Cursor user key
   // (WM-443). It authenticates as the account and bills the user's plan —
   // not a provider BYOK key. Still strip CURSOR_API_ENDPOINT below.
@@ -151,39 +149,17 @@ export const BASE_INHERITED_ENV = [
  * `CURSOR_API_ENDPOINT` stay stripped.
  */
 export function safeChildEnvironment(env = {}, defOrOpts = {}) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-  Object.assign(childEnv, env);
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
-  for (const key of [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-    "CURSOR_API_ENDPOINT",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-  ]) {
-    delete childEnv[key];
+  const cursorEnv = { ...env };
+  if (
+    !Object.hasOwn(cursorEnv, "CURSOR_API_KEY") &&
+    process.env.CURSOR_API_KEY !== undefined
+  ) {
+    cursorEnv.CURSOR_API_KEY = process.env.CURSOR_API_KEY;
   }
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-  return childEnv;
+  return sharedSafeChildEnvironment(cursorEnv, defOrOpts, {
+    factoryRoot: FACTORY_ROOT,
+    extraStrip: ["CURSOR_API_ENDPOINT"],
+  });
 }
 
 /** No confirmed Cursor-authored refusal shape yet (WM-127). */

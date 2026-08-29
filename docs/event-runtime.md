@@ -535,13 +535,13 @@ across every assistant turn's own reported tokens/cost and emitted once at
 process close; fields pi never reported land as explicit `null`/`{}`, never a
 guessed value.
 
-**Both LLM adapters apply the same push-credential carve-out (WM-128,
-WM-223).** `safeChildEnvironment(env, def)` in either adapter hands a mutating
+**All child-process adapters apply the same push-credential carve-out (WM-128,
+WM-223).** The shared `safeChildEnvironment(env, def)` helper hands a mutating
 run `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GITHUB_TOKEN` and `GH_TOKEN` on top of
 the base inherited set, and strips all four from a non-mutating one — after the
 caller's `env` is merged, so a read-only run cannot be handed a token through
-`env` either. `pi.mjs` imports `PUSH_CREDENTIAL_ENV` from `claude.mjs` rather
-than restating it: one list, no drift. Until WM-223 pi had no
+`env` either. `adapters/child-env.mjs` owns `PUSH_CREDENTIAL_ENV`, so every
+adapter uses one list without drift. Until WM-223 pi had no
 mutating/non-mutating distinction at all, which meant the runtime's only
 mutating LLM agent (`dispatch@1`, pi-routed since WM-215) reached its push step
 with no credential of any kind — surviving only because `gh` reads its own

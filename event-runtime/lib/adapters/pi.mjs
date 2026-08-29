@@ -61,6 +61,12 @@ import {
   verifiedPrompt,
 } from "./claude.mjs";
 import {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
+import {
   guestBinary,
   guestEnvironment,
   runSandboxed,
@@ -69,7 +75,13 @@ import {
 
 // PUSH_CREDENTIAL_ENV is imported, not redeclared: the WM-128 carve-out is one
 // list shared by both LLM adapters (WM-223), so it cannot drift between them.
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+export {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+};
 
 /** This adapter executes inside the VM when a definition asks (WM-313). */
 export const SANDBOX_SUPPORT = "gondolin";
@@ -286,21 +298,6 @@ export function piExtensions(def) {
   ];
 }
 
-export const BASE_INHERITED_ENV = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
-];
-
 /**
  * Keep untrusted model subprocesses from inheriting the worker's authority.
  *
@@ -316,54 +313,15 @@ export const BASE_INHERITED_ENV = [
  * The strip runs *after* the caller's `env` is merged in, so a read-only run
  * cannot be handed a token through `env` either.
  *
- * Deliberate divergence from claude.mjs: only an explicit `mutating: true` (or a
- * boolean argument) counts as mutating here, where claude.mjs also treats any
- * other non-`undefined` value as mutating. Identical for every real agent
- * definition — `mutating` is a JSON boolean — but this direction fails closed.
+ * The shared helper treats only an explicit `mutating: true` (or boolean
+ * argument) as mutating, so malformed definitions fail closed everywhere.
  */
 export function safeChildEnvironment(
   env = {},
   defOrOpts = {},
   { factoryRoot = FACTORY_ROOT } = {},
 ) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-  Object.assign(childEnv, env);
-  // Read-only repository workspaces contain the selected target checkout, not
-  // Factory's runtime support code. Expose the running Factory checkout through
-  // one adapter-owned, non-overridable path so pinned agent procedures can call
-  // shared helpers without assuming the target repo is Factory (WM-433).
-  childEnv.FACTORY_ROOT = factoryRoot;
-  // Subscription auth (Codex/ChatGPT OAuth) is the point of routing through
-  // pi at all — an inherited key would silently switch a run to per-token
-  // billing (same rationale as run-agent.sh's UNSET_KEYS, all providers pi
-  // itself recognizes, not just OpenAI's).
-  for (const key of [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-  ]) {
-    delete childEnv[key];
-  }
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-  return childEnv;
+  return sharedSafeChildEnvironment(env, defOrOpts, { factoryRoot });
 }
 
 /**
