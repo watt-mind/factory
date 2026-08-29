@@ -35,8 +35,23 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
-const makeServer = async (...args) => {
-  const result = await makeApiServer(...args);
+// Assertions here about shipped kernel defaults (reaper disabled, source
+// "kernel") must not inherit the operator's local config/schedule.yaml overlay
+// (#1053). Load the registry with the overlay pointed at an absent file so the
+// server sees only tracked kernel schedules, deterministic on any instance.
+const overlayFreeRegistry = loadRegistry({
+  scheduleConfigPath: path.join(
+    os.tmpdir(),
+    `evrt-no-schedule-overlay-${process.pid}`,
+    "schedule.yaml",
+  ),
+});
+
+const makeServer = async (opts = {}) => {
+  const result = await makeApiServer({
+    registry: overlayFreeRegistry,
+    ...opts,
+  });
   trackTmpDir(path.dirname(result.db.filename));
   return result;
 };

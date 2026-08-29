@@ -21,7 +21,16 @@ import {
 import { runOnce } from "./worker.mjs";
 
 const PV = "git:test-pv";
-const base = loadRegistry();
+// Assertions about shipped kernel defaults (reaper disabled, source "kernel")
+// must not inherit the operator's local config/schedule.yaml overlay (#1053).
+// Point the overlay at an absent file so `base` reflects only tracked kernel
+// schedules, deterministic regardless of instance config.
+const base = loadRegistry({
+  scheduleConfigPath: path.join(
+    tmpDir("evrt-sched-no-overlay-"),
+    "schedule.yaml",
+  ),
+});
 const db = () => openDb(path.join(tmpDir("evrt-sched-"), "runtime.db"));
 
 /** The real registry with one loop overridden — schedules are just data. */
