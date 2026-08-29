@@ -343,6 +343,31 @@ export function globsOverlap(a, b) {
   }
 }
 
+/**
+ * The literal directory portion shared by all paths matched by a glob.
+ * A concrete input file's directory is used rather than the file itself.
+ */
+function globDirectoryPrefix(glob) {
+  const segments = glob.split("/");
+  const wildcard = segments.findIndex((segment) => /[*?{]/.test(segment));
+  const directories = segments.slice(0, wildcard === -1 ? -1 : wildcard);
+  return directories.length ? `${directories.join("/")}/` : "";
+}
+
+/**
+ * Registry inputs are deliberately stricter than generic Owned Paths overlap.
+ * A leading wildcard can reach every directory, but must name an input's
+ * directory before it can opt a ticket into the registry-digest closure.
+ */
+function registryInputOverlaps(owned, input) {
+  const firstSegment = owned.split("/", 1)[0] ?? "";
+  if (/[*?{]/.test(firstSegment)) {
+    const inputDirectory = globDirectoryPrefix(input);
+    if (!inputDirectory || !owned.includes(inputDirectory)) return false;
+  }
+  return globsOverlap(owned, input);
+}
+
 /** Do two tickets' Owned Paths sets intersect? */
 export function pathsCollide(setA = [], setB = []) {
   return setA.some((a) => setB.some((b) => globsOverlap(a, b)));
@@ -553,6 +578,12 @@ export function ownedPathsClosureGaps({
     pinManifests: Array.isArray(ownedPathsPolicy?.pinManifests)
       ? ownedPathsPolicy.pinManifests
       : [],
+    registryDigest:
+      ownedPathsPolicy?.registryDigest &&
+      Array.isArray(ownedPathsPolicy.registryDigest.inputs) &&
+      typeof ownedPathsPolicy.registryDigest.baseline === "string"
+        ? ownedPathsPolicy.registryDigest
+        : null,
   };
 
   const gaps = [];
@@ -604,16 +635,20 @@ export function ownedPathsClosureGaps({
     }
   }
 
-  const registryInput = own.find((owned) =>
-    REGISTRY_INPUT_GLOBS.some((input) => globsOverlap(owned, input)),
-  );
+  const registryInput = policy.registryDigest
+    ? own.find((owned) =>
+        policy.registryDigest.inputs.some((input) =>
+          registryInputOverlaps(owned, input),
+        ),
+      )
+    : null;
   if (
     registryInput &&
-    !own.some((owned) => globsOverlap(owned, REGISTRY_DIGEST_BASELINE_PATH))
+    !own.some((owned) => globsOverlap(owned, policy.registryDigest.baseline))
   ) {
     addGap({
       rule: "registry-digest",
-      requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+      requiredPath: policy.registryDigest.baseline,
       requiredBy: registryInput,
     });
   }
