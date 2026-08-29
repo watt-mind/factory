@@ -38,6 +38,8 @@ export const PROVIDER_CREDENTIAL_ENV = [
   "MISTRAL_API_KEY",
   "DEEPSEEK_API_KEY",
   "GROQ_API_KEY",
+  // Nested-session markers, not keys: every adapter strips them so children
+  // do not inherit an interactive Claude Code session's execution context.
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
 ];

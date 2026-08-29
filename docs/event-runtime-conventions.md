@@ -217,6 +217,10 @@ subscription authentication.
 values. A non-mutating run strips them _after_ merging the caller's `env`, so a
 caller cannot smuggle mutation authority back in through the overlay.
 
+Nested Claude Code session markers (`CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`)
+are stripped for all adapters so child processes do not inherit the operator's
+interactive session context.
+
 [WM-223](https://linear.app/watt-mind/issue/WM-223/fixevent-runtime-pi-adapter-strips-push-credentials-for-mutating-runs)
 is the incident that proves the signature matters: pi's environment helper did
 not receive `def`, so mutating dispatch runs lost the credentials needed to

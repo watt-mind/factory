@@ -33,7 +33,6 @@ import { FACTORY_ROOT } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
-  BASE_INHERITED_ENV as SHARED_BASE_INHERITED_ENV,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -129,14 +128,6 @@ export function buildCursorArgv({ prompt, model }) {
   args.push("--", prompt);
   return args;
 }
-
-export const BASE_INHERITED_ENV = [
-  ...SHARED_BASE_INHERITED_ENV,
-  // `agent -p` ignores the login session and requires this Cursor user key
-  // (WM-443). It authenticates as the account and bills the user's plan —
-  // not a provider BYOK key. Still strip CURSOR_API_ENDPOINT below.
-  "CURSOR_API_KEY",
-];
 
 /**
  * Keep untrusted model subprocesses from inheriting the worker's authority.

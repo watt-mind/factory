@@ -312,6 +312,7 @@ export function piExtensions(def) {
  *
  * The shared helper treats only an explicit `mutating: true` (or boolean
  * argument) as mutating, so malformed definitions fail closed everywhere.
+ * Nested Claude Code session markers are stripped by the shared helper too.
  */
 export function safeChildEnvironment(
   env = {},
