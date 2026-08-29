@@ -370,7 +370,9 @@ async function defaultSpawn(argv) {
  * an attestation (docs/event-runtime-repos.md §6.2).
  *
  * Non-mutating by construction: the only command built here is
- * `[executable, "--version"]`. There is no install, upgrade, or version-manager
+ * `[resolved, "--version"]` — the PATH-resolved path from `which`, so the
+ * version reported is provably from the binary the attestation names. There is
+ * no install, upgrade, or version-manager
  * path, and adding one would be reopening a §10 decision.
  *
  * A repo with nothing declared is attested `ok` without probing anything —
@@ -413,7 +415,7 @@ export async function preflightToolchain(
     }
 
     const { exitCode, stdout, stderr } = await spawn([
-      executable,
+      resolved,
       TOOLCHAIN_VERSION_ARG,
     ]);
     const output = stdout?.trim() ? stdout : (stderr ?? "");
