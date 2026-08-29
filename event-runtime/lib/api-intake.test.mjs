@@ -344,6 +344,413 @@ describe("GitHub workflow_run merge trigger (WM-576)", () => {
   });
 });
 
+describe("GitHub full event-set mapping (WM-1150)", () => {
+  const ghSign = (body) =>
+    `sha256=${createHmac("sha256", GH_SECRET).update(body).digest("hex")}`;
+
+  async function postEvent(s, event, payload, deliveryId) {
+    const body = JSON.stringify(payload);
+    return fetch(s.url("/github"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": event,
+        "x-github-delivery": deliveryId,
+        "x-hub-signature-256": ghSign(body),
+      },
+      body,
+    });
+  }
+
+  const githubEventRow = (s, deliveryId) =>
+    s.db
+      .query(
+        `SELECT type, subject, correlation_id, envelope_json FROM events WHERE source = 'github' AND event_id = ?`,
+      )
+      .get(deliveryId);
+
+  const openIssue = (overrides = {}) => ({
+    action: "labeled",
+    issue: {
+      number: 42,
+      state: "open",
+      labels: [{ name: "ai:agent-ready" }],
+      assignees: [],
+      ...overrides.issue,
+    },
+    repository: { full_name: "watt-mind/factory" },
+    ...overrides,
+  });
+
+  test("issues → factory.work.requested when the ticket is agent-ready; redelivery is a no-op", async () => {
+    const s = await makeServer();
+    try {
+      const first = await postEvent(s, "issues", openIssue(), "d-issue-ready");
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({
+        admitted: true,
+        duplicate: false,
+        eventId: "d-issue-ready",
+      });
+      const row = githubEventRow(s, "d-issue-ready");
+      expect(row.type).toBe("factory.work.requested");
+      expect(row.subject).toBe("factory");
+      expect(JSON.parse(row.envelope_json).payload).toEqual({
+        repo: "factory",
+      });
+
+      // Same delivery id again → duplicate, no second wake-up.
+      const before = s.onEvents.length;
+      const again = await postEvent(s, "issues", openIssue(), "d-issue-ready");
+      expect(await again.json()).toEqual({
+        admitted: false,
+        duplicate: true,
+        eventId: "d-issue-ready",
+      });
+      expect(s.onEvents.length).toBe(before);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("issues irrelevant action (edited) is ignored without error", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "issues",
+        openIssue({ action: "edited" }),
+        "d-issue-edited",
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        admitted: false,
+        ignored: true,
+        reason: "unhandled_action",
+      });
+      expect(githubEventRow(s, "d-issue-edited")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("issues that are assigned or unlabeled are not agent-ready → ignored", async () => {
+    const s = await makeServer();
+    try {
+      const assigned = await postEvent(
+        s,
+        "issues",
+        openIssue({
+          action: "assigned",
+          issue: {
+            state: "open",
+            labels: [{ name: "ai:agent-ready" }],
+            assignees: [{ login: "someone" }],
+          },
+        }),
+        "d-issue-assigned",
+      );
+      expect((await assigned.json()).reason).toBe("not_agent_ready");
+
+      const unlabeled = await postEvent(
+        s,
+        "issues",
+        openIssue({
+          action: "unlabeled",
+          issue: { state: "open", labels: [{ name: "bug" }], assignees: [] },
+        }),
+        "d-issue-unlabeled",
+      );
+      expect((await unlabeled.json()).reason).toBe("not_agent_ready");
+      expect(githubEventRow(s, "d-issue-assigned")).toBeNull();
+      expect(githubEventRow(s, "d-issue-unlabeled")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("pull_request reopened → factory.merge.requested scoped to the PR", async () => {
+    const s = await makeServer();
+    try {
+      const payload = {
+        action: "reopened",
+        pull_request: { number: 314, base: { ref: "develop" }, draft: false },
+        repository: { full_name: "watt-mind/factory" },
+      };
+      const res = await postEvent(s, "pull_request", payload, "d-pr-reopened");
+      expect(res.status).toBe(200);
+      expect((await res.json()).admitted).toBe(true);
+      const row = githubEventRow(s, "d-pr-reopened");
+      expect(row.type).toBe("factory.merge.requested");
+      expect(JSON.parse(row.envelope_json).payload).toEqual({
+        repo: "factory",
+        prNumbers: [314],
+      });
+    } finally {
+      s.close();
+    }
+  });
+
+  test("pull_request opened still flows through the existing mapping (no regression)", async () => {
+    const s = await makeServer();
+    try {
+      const payload = {
+        action: "opened",
+        pull_request: { number: 5, base: { ref: "develop" }, draft: false },
+        repository: { full_name: "watt-mind/factory" },
+      };
+      const res = await postEvent(s, "pull_request", payload, "d-pr-opened");
+      expect((await res.json()).admitted).toBe(true);
+      expect(githubEventRow(s, "d-pr-opened").type).toBe(
+        "factory.merge.requested",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("a draft PR reopened is ignored as draft_pr", async () => {
+    const s = await makeServer();
+    try {
+      const payload = {
+        action: "reopened",
+        pull_request: { number: 6, base: { ref: "develop" }, draft: true },
+        repository: { full_name: "watt-mind/factory" },
+      };
+      const res = await postEvent(s, "pull_request", payload, "d-pr-draft");
+      expect((await res.json()).reason).toBe("draft_pr");
+      expect(githubEventRow(s, "d-pr-draft")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("pull_request_review submitted → merge-lane signal for the PR", async () => {
+    const s = await makeServer();
+    try {
+      const payload = {
+        action: "submitted",
+        review: { state: "approved" },
+        pull_request: { number: 271, base: { ref: "develop" } },
+        repository: { full_name: "watt-mind/factory" },
+      };
+      const res = await postEvent(
+        s,
+        "pull_request_review",
+        payload,
+        "d-review",
+      );
+      expect((await res.json()).admitted).toBe(true);
+      const row = githubEventRow(s, "d-review");
+      expect(row.type).toBe("factory.merge.requested");
+      expect(JSON.parse(row.envelope_json).payload).toEqual({
+        repo: "factory",
+        prNumbers: [271],
+      });
+    } finally {
+      s.close();
+    }
+  });
+
+  test("pull_request_review dismissed (not submitted) is ignored", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "pull_request_review",
+        {
+          action: "dismissed",
+          pull_request: { number: 8, base: { ref: "develop" } },
+          repository: { full_name: "watt-mind/factory" },
+        },
+        "d-review-dismissed",
+      );
+      expect((await res.json()).reason).toBe("unhandled_action");
+    } finally {
+      s.close();
+    }
+  });
+
+  for (const kind of ["check_run", "check_suite"]) {
+    test(`${kind} completed on a PR head → advance merge gating`, async () => {
+      const s = await makeServer();
+      try {
+        const check = {
+          status: "completed",
+          conclusion: "success",
+          pull_requests: [{ number: 99, base: { ref: "develop" } }],
+        };
+        const payload = {
+          action: "completed",
+          [kind]: check,
+          repository: { full_name: "watt-mind/factory" },
+        };
+        const res = await postEvent(s, kind, payload, `d-${kind}`);
+        expect((await res.json()).admitted).toBe(true);
+        const row = githubEventRow(s, `d-${kind}`);
+        expect(row.type).toBe("factory.merge.requested");
+        expect(JSON.parse(row.envelope_json).payload).toEqual({
+          repo: "factory",
+          prNumbers: [99],
+        });
+      } finally {
+        s.close();
+      }
+    });
+  }
+
+  test("check_run completed with no PR head on the base is ignored", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "check_run",
+        {
+          action: "completed",
+          check_run: { status: "completed", pull_requests: [] },
+          repository: { full_name: "watt-mind/factory" },
+        },
+        "d-check-nopr",
+      );
+      expect((await res.json()).reason).toBe("not_pull_request_head");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("issue_comment with a @watt-mind-factory mention is recognized as a command stub (handler is Stage 03)", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "issue_comment",
+        {
+          action: "created",
+          comment: { body: "@watt-mind-factory retry ci" },
+          issue: { number: 12 },
+          repository: { full_name: "watt-mind/factory" },
+        },
+        "d-comment-cmd",
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        admitted: false,
+        ignored: true,
+        reason: "command_recognized_stub",
+      });
+      // Nothing is admitted yet — the command handler is a later ticket.
+      expect(githubEventRow(s, "d-comment-cmd")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("a comment without the bot mention is ignored as not_a_command", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "pull_request_review_comment",
+        {
+          action: "created",
+          comment: { body: "looks good to me" },
+          repository: { full_name: "watt-mind/factory" },
+        },
+        "d-comment-plain",
+      );
+      expect((await res.json()).reason).toBe("not_a_command");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("push to the base branch → a lightweight base-moved merge re-scan", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "push",
+        {
+          ref: "refs/heads/develop",
+          deleted: false,
+          repository: {
+            full_name: "watt-mind/factory",
+            default_branch: "main",
+          },
+        },
+        "d-push-base",
+      );
+      expect((await res.json()).admitted).toBe(true);
+      const row = githubEventRow(s, "d-push-base");
+      expect(row.type).toBe("factory.merge.requested");
+      expect(JSON.parse(row.envelope_json).payload).toEqual({
+        repo: "factory",
+      });
+    } finally {
+      s.close();
+    }
+  });
+
+  test("push to a non-base branch is ignored", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "push",
+        {
+          ref: "refs/heads/feature/x",
+          repository: {
+            full_name: "watt-mind/factory",
+            default_branch: "main",
+          },
+        },
+        "d-push-feature",
+      );
+      expect((await res.json()).reason).toBe("not_base_branch");
+      expect(githubEventRow(s, "d-push-feature")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("an unconfigured repo is a benign 2xx ignore, never a 4xx", async () => {
+    const s = await makeServer();
+    try {
+      const res = await postEvent(
+        s,
+        "issues",
+        openIssue({ repository: { full_name: "watt-mind/not-configured" } }),
+        "d-issue-unconfigured",
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()).reason).toBe("unconfigured_repo");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("a bad signature still 401s before any mapping (no regression)", async () => {
+    const s = await makeServer();
+    try {
+      const body = JSON.stringify(openIssue());
+      const res = await fetch(s.url("/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "issues",
+          "x-github-delivery": "d-issue-forged",
+          "x-hub-signature-256": "sha256=deadbeef",
+        },
+        body,
+      });
+      expect(res.status).toBe(401);
+      expect(githubEventRow(s, "d-issue-forged")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+});
+
 describe("missing configured secret fails closed (§14)", () => {
   test("POST /events → 401 missing_secret; /replay still works", async () => {
     const s = await makeServer({ secret: null });
