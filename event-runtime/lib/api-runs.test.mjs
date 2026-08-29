@@ -6,6 +6,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   test,
@@ -1694,6 +1695,17 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
 });
 
 describe("GET /tickets/supply (WM-824)", () => {
+  // Pin a healthy budget so the supply loader exercises its GraphQL path
+  // deterministically. Without this, readBudget() falls back to the on-disk
+  // Linear budget of whatever host runs the suite (the self-hosted CI runner's
+  // real budget is often exhausted), which would non-deterministically short
+  // these tests to `linear_budget_exhausted`. Exhaustion is still exercised
+  // through explicitly-injected budgets in the merge test below.
+  beforeEach(async () => {
+    const { setLinearSupplyBudget } = await import("./linear.mjs");
+    setLinearSupplyBudget({ remaining: 2000, limit: 2500 });
+  });
+
   afterEach(async () => {
     const {
       clearLinearSupplyCache,
