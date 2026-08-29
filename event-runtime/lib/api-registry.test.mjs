@@ -36,7 +36,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
-import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
+import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
 import { handleRegistryApiRoute } from "./api-registry.mjs";
 import { KIND_EVENT_TYPE, putOverride } from "./runtime-overrides.mjs";
 
@@ -461,6 +461,18 @@ describe("runtime overlay API (WM-887)", () => {
 
 describe("overlay promotion routes (gh-860)", () => {
   const reg = loadRegistry();
+  // Promotion resolves targets relative to reposRoot(); pin it to the checkout
+  // the registry above was loaded from so a worker's FACTORY_REPOS_ROOT (the
+  // checkout it serves) cannot put every target "outside the registry root".
+  let previousReposRoot;
+  beforeAll(() => {
+    previousReposRoot = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = FACTORY_ROOT;
+  });
+  afterAll(() => {
+    if (previousReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
+  });
   const reposFn = () =>
     loadRepos({
       root: (() => {

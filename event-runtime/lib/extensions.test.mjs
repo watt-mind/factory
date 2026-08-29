@@ -36,6 +36,7 @@ import {
   loadExtensions,
   loadedExtensions,
   looksLikePackageName,
+  maskExtensionSecrets,
   resetExtensionSecretsCache,
   resolveExtensionPackage,
   validateExtensionManifest,
@@ -948,6 +949,91 @@ describe("extension config (contributes.config)", () => {
     expect(denied.anomalies[0]).toMatch(
       /config\.apiToken must not be set in policy\.yaml — use env FACTORY_EXT_SAMPLE_API_TOKEN/,
     );
+  });
+
+  test("rejects prototype-polluting schema paths before loading or masking", async () => {
+    const marker = "factoryExtensionPrototypePollution";
+    delete Object.prototype[marker];
+
+    try {
+      for (const segment of ["__proto__", "prototype", "constructor"]) {
+        const schema = {
+          type: "object",
+          properties: {
+            [segment]: {
+              type: "object",
+              properties: {
+                [marker]: { type: "string", format: "secret" },
+              },
+            },
+          },
+        };
+        expect(() => maskExtensionSecrets({}, schema)).toThrow(
+          `config schema path contains forbidden segment "${segment}"`,
+        );
+        expect(Object.prototype[marker]).toBeUndefined();
+      }
+
+      const dir = tempExtension((_manifest, extensionDir) => {
+        writeFileSync(
+          path.join(extensionDir, "config.schema.json"),
+          JSON.stringify({
+            type: "object",
+            properties: {
+              ["__proto__"]: {
+                type: "object",
+                properties: {
+                  [marker]: { type: "string", format: "secret" },
+                },
+              },
+            },
+          }),
+        );
+      });
+      const out = await load({ extensions: [{ path: dir }] });
+      expect(out.extensions).toEqual([]);
+      expect(out.anomalies[0]).toMatch(
+        /config schema path contains forbidden segment "__proto__"/,
+      );
+      expect(Object.prototype[marker]).toBeUndefined();
+    } finally {
+      delete Object.prototype[marker];
+    }
+  });
+
+  test("secret masking never descends through an inherited config record", () => {
+    const inheritedKey = "factoryInheritedExtensionConfig";
+    const inherited = {};
+    Object.defineProperty(Object.prototype, inheritedKey, {
+      value: inherited,
+      configurable: true,
+    });
+
+    try {
+      const masked = maskExtensionSecrets(
+        {},
+        {
+          type: "object",
+          properties: {
+            [inheritedKey]: {
+              type: "object",
+              properties: {
+                token: { type: "string", format: "secret" },
+              },
+            },
+          },
+        },
+        { [`${inheritedKey}.token`]: { set: true, source: "env" } },
+      );
+      expect(inherited).toEqual({});
+      expect(Object.hasOwn(masked, inheritedKey)).toBe(true);
+      expect(masked[inheritedKey].token).toEqual({
+        set: true,
+        source: "env",
+      });
+    } finally {
+      delete Object.prototype[inheritedKey];
+    }
   });
 
   test("a group/world-readable secrets.env warns once, is ignored (not read), and does not fail the load", () => {
