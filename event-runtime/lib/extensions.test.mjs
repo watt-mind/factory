@@ -25,6 +25,7 @@ import {
   ExtensionError,
   RESERVED_CONTRIBUTIONS,
   applyConfigDefaults,
+  collectSecretFields,
   collectHarnessRoots,
   contributionCounts,
   discoverExtensionPackRoots,
@@ -949,6 +950,170 @@ describe("extension config (contributes.config)", () => {
     expect(denied.anomalies[0]).toMatch(
       /config\.apiToken must not be set in policy\.yaml — use env FACTORY_EXT_SAMPLE_API_TOKEN/,
     );
+  });
+
+  test("secret discovery covers fixed nested objects and rejects dynamic schema locations", async () => {
+    const nestedSecretSchema = {
+      type: "object",
+      properties: {
+        auth: {
+          type: "object",
+          properties: {
+            label: { type: "string" },
+            value: { type: "string", format: "secret" },
+          },
+        },
+      },
+    };
+    expect(collectSecretFields(nestedSecretSchema)).toEqual([
+      { path: ["auth", "value"], key: "value" },
+    ]);
+
+    const nestedDir = tempExtension((manifest, extensionDir) => {
+      manifest.name = "factory/nested-secret";
+      manifest.contributes.config.namespace = "nested-secret";
+      writeFileSync(
+        path.join(extensionDir, "config.schema.json"),
+        JSON.stringify(nestedSecretSchema),
+      );
+    });
+    const nestedEnv = extensionSecretEnvVar("nested-secret", ["auth", "value"]);
+    const previousNestedEnv = process.env[nestedEnv];
+    try {
+      process.env[nestedEnv] = "resolved-innocuous-secret";
+      const nested = await load({
+        extensions: [
+          { path: nestedDir, config: { auth: { label: "primary" } } },
+        ],
+      });
+      expect(nested.anomalies).toEqual([]);
+      expect(nested.extensions[0].config.values).toEqual({
+        auth: { label: "primary", value: "resolved-innocuous-secret" },
+      });
+      const nestedMeta =
+        loadedExtensions().extensions[0].config.secretMeta["auth.value"];
+      expect(nestedMeta).toEqual({
+        set: true,
+        source: "env",
+      });
+      expect(
+        maskExtensionSecrets(
+          nested.extensions[0].config.values,
+          nestedSecretSchema,
+          { "auth.value": nestedMeta },
+        ),
+      ).toEqual({
+        auth: { label: "primary", value: { set: true, source: "env" } },
+      });
+    } finally {
+      if (previousNestedEnv === undefined) delete process.env[nestedEnv];
+      else process.env[nestedEnv] = previousNestedEnv;
+    }
+
+    const cases = [
+      {
+        name: "array of objects",
+        schema: {
+          type: "object",
+          properties: {
+            destinations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string" },
+                  value: { type: "string", format: "secret" },
+                },
+              },
+            },
+          },
+        },
+        error:
+          /\$\.destinations\[\]\.value.*beneath schema\.items at \$\.destinations/,
+      },
+      {
+        name: "nested arrays",
+        schema: {
+          type: "object",
+          properties: {
+            groups: {
+              type: "array",
+              items: {
+                type: "array",
+                items: { type: "string", format: "secret" },
+              },
+            },
+          },
+        },
+        error: /\$\.groups\[\]\[\].*beneath schema\.items at \$\.groups/,
+      },
+      {
+        name: "additional properties",
+        schema: {
+          type: "object",
+          additionalProperties: {
+            type: "object",
+            properties: {
+              value: { type: "string", format: "secret" },
+            },
+          },
+        },
+        error: /\$\.\*\.value.*beneath schema\.additionalProperties at \$/,
+      },
+    ];
+
+    for (const item of cases) {
+      const dir = tempExtension((manifest, extensionDir) => {
+        manifest.name = `factory/${item.name.replaceAll(" ", "-")}`;
+        manifest.contributes.config.namespace = item.name.replaceAll(" ", "-");
+        writeFileSync(
+          path.join(extensionDir, "config.schema.json"),
+          JSON.stringify(item.schema),
+        );
+      });
+      const out = await load({
+        extensions: [{ path: dir, config: {} }],
+      });
+      expect(out.extensions, item.name).toEqual([]);
+      expect(out.anomalies[0], item.name).toMatch(item.error);
+      expect(out.anomalies[0], item.name).toMatch(
+        /dynamic secret locations are unsupported/,
+      );
+    }
+  });
+
+  test("ordinary non-secret arrays remain supported", async () => {
+    const dir = tempExtension((manifest, extensionDir) => {
+      manifest.name = "factory/array-config";
+      manifest.contributes.config.namespace = "array-config";
+      writeFileSync(
+        path.join(extensionDir, "config.schema.json"),
+        JSON.stringify({
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            destinations: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["label", "value"],
+                properties: {
+                  label: { type: "string" },
+                  value: { type: "string" },
+                },
+              },
+            },
+          },
+        }),
+      );
+    });
+    const destinations = [{ label: "prod", value: "ordinary" }];
+    const out = await load({
+      extensions: [{ path: dir, config: { destinations } }],
+    });
+    expect(out.anomalies).toEqual([]);
+    expect(out.extensions[0].config.values.destinations).toEqual(destinations);
   });
 
   test("rejects prototype-polluting schema paths before loading or masking", async () => {
