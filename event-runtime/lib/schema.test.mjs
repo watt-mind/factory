@@ -8,11 +8,27 @@ const sharedCases = JSON.parse(
     "utf8",
   ),
 ).cases;
+const runtimeFixture = new URL(
+  "./fixtures/schema-validation-cases.json",
+  import.meta.url,
+);
+const webFixture = new URL(
+  "../web/src/lib/fixtures/schema-validation-cases.json",
+  import.meta.url,
+);
 
 // Drift guard (#823): event-runtime/web/src/lib/schema.test.ts reads this exact
 // same matrix, so a semantic change to one validator that is not mirrored in
-// the other turns red here or there.
+// the other turns red here or there. The runtime copy is the source of truth;
+// the web copy is deliberately checked in and must be recopied after edits.
 describe("shared fixture schema-validation-cases.json", () => {
+  test("the web copy is byte-for-byte identical", () => {
+    expect(
+      Buffer.compare(readFileSync(webFixture), readFileSync(runtimeFixture)),
+      "Copy event-runtime/lib/fixtures/schema-validation-cases.json to event-runtime/web/src/lib/fixtures/schema-validation-cases.json after editing the source fixture",
+    ).toBe(0);
+  });
+
   test("the matrix is non-empty and every case is well-formed", () => {
     expect(sharedCases.length).toBeGreaterThan(20);
     for (const c of sharedCases) {
@@ -20,8 +36,15 @@ describe("shared fixture schema-validation-cases.json", () => {
       expect(typeof c.valid, c.name).toBe("boolean");
       expect(Object.hasOwn(c, "schema"), c.name).toBe(true);
       expect(Object.hasOwn(c, "value"), c.name).toBe(true);
-      if (c.valid)
-        expect(Object.hasOwn(c, "errorContains"), c.name).toBe(false);
+      expect(Array.isArray(c.errors), c.name).toBe(true);
+      // #1282: errors is the exact contract; the old errorContains hint is
+      // dead and must not creep back in.
+      expect(Object.hasOwn(c, "errorContains"), c.name).toBe(false);
+      if (c.valid) {
+        expect(c.errors, c.name).toEqual([]);
+      } else {
+        expect(c.errors.length, c.name).toBeGreaterThan(0);
+      }
     }
   });
 
@@ -30,9 +53,7 @@ describe("shared fixture schema-validation-cases.json", () => {
     expect(result.valid, `${c.name}: ${result.errors.join("; ")}`).toBe(
       c.valid,
     );
-    for (const substring of c.errorContains ?? []) {
-      expect(result.errors.join("\n"), c.name).toContain(substring);
-    }
+    expect(result.errors, c.name).toEqual(c.errors);
   });
 });
 

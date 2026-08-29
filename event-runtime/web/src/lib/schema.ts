@@ -155,7 +155,7 @@ function check(
         return;
       }
       if (!pattern.test(str)) {
-        errors.push(`${path}: does not match pattern`);
+        errors.push(`${path}: does not match pattern ${s.pattern}`);
       }
     }
     if (s.format === "uri" && !URL.canParse(str)) {

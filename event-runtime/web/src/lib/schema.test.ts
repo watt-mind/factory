@@ -7,16 +7,13 @@ interface SharedCase {
   schema: unknown;
   value: unknown;
   valid: boolean;
-  errorContains?: string[];
+  errors: string[];
 }
 
 const sharedCases = (
   JSON.parse(
     readFileSync(
-      new URL(
-        "../../../lib/fixtures/schema-validation-cases.json",
-        import.meta.url,
-      ),
+      new URL("./fixtures/schema-validation-cases.json", import.meta.url),
       "utf8",
     ),
   ) as { cases: SharedCase[] }
@@ -35,9 +32,7 @@ describe("shared fixture schema-validation-cases.json", () => {
     expect(result.valid, `${c.name}: ${result.errors.join("; ")}`).toBe(
       c.valid,
     );
-    for (const substring of c.errorContains ?? []) {
-      expect(result.errors.join("\n"), c.name).toContain(substring);
-    }
+    expect(result.errors, c.name).toEqual(c.errors);
   });
 });
 
@@ -132,14 +127,15 @@ describe("validate (web port of lib/schema.mjs)", () => {
     expect(validate(schema, { a: "x", toString: "evil" }).valid).toBe(false);
   });
 
-  test("pattern validation error does not expose raw regex", () => {
+  // #1282: the message carries the pattern on both sides so the runtime and
+  // web validators stay byte-for-byte aligned on the shared fixture.
+  test("pattern validation error names the pattern", () => {
     const { valid, errors } = validate(
       { type: "string", pattern: "^[0-9a-f]{40}$" },
       "invalid",
     );
     expect(valid).toBe(false);
-    expect(errors[0]).toBe("$: does not match pattern");
-    expect(errors[0]).not.toContain("^[0-9a-f]{40}$");
+    expect(errors[0]).toBe("$: does not match pattern ^[0-9a-f]{40}$");
   });
 
   // #823: the dialog calls validate() on the render path. A malformed pattern

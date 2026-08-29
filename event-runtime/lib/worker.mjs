@@ -4275,10 +4275,13 @@ export function releaseStalledWorkerLease(
     }
 
     const spec = JSON.parse(run.spec_json);
-    const failureReason = typedFailureReason("lease_expired");
     db.query(
       `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
     ).run(iso(currentNow - 1), heldRunId, run.attempts);
+    const decision = retryDecision(db, heldRunId, spec, "lease_expired", {
+      includeCurrentFailure: true,
+    });
+    const failureReason = terminalFailureReason(decision, "lease_expired");
     if (run.state === "VERIFYING") {
       transition(db, {
         runId: heldRunId,
@@ -4298,7 +4301,6 @@ export function releaseStalledWorkerLease(
       "lease_expired",
       currentNow,
     );
-    const decision = retryDecision(db, heldRunId, spec, "lease_expired");
     if (decision.retry) {
       transition(db, {
         runId: heldRunId,

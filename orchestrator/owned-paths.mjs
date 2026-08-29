@@ -212,6 +212,15 @@ export class OwnedPathsPatternError extends Error {
   }
 }
 
+/** A closure policy was supplied by a caller but does not have a safe shape. */
+export class OwnedPathsPolicyError extends Error {
+  constructor(reason) {
+    super(`invalid Owned Paths policy registryDigest: ${reason}`);
+    this.name = "OwnedPathsPolicyError";
+    this.code = "invalid_owned_paths_policy";
+  }
+}
+
 function compileBraceAlternation(glob, start) {
   const alternatives = [];
   let index = start;
@@ -343,29 +352,102 @@ export function globsOverlap(a, b) {
   }
 }
 
+const hasGlobSyntax = (segment) => /[*?{]/.test(segment);
+
 /**
- * The literal directory portion shared by all paths matched by a glob.
- * A concrete input file's directory is used rather than the file itself.
+ * Whether two one-segment globs could name the same segment. This is
+ * deliberately conservative for two wildcarded segments, but preserves their
+ * literal prefixes/suffixes so `foo*` and `bar*` do not become an anchor.
  */
-function globDirectoryPrefix(glob) {
-  const segments = glob.split("/");
-  const wildcard = segments.findIndex((segment) => /[*?{]/.test(segment));
-  const directories = segments.slice(0, wildcard === -1 ? -1 : wildcard);
-  return directories.length ? `${directories.join("/")}/` : "";
+function segmentsMayOverlap(a, b) {
+  if (a === b) return true;
+  if (!hasGlobSyntax(a)) return globToRegExp(b).test(a);
+  if (!hasGlobSyntax(b)) return globToRegExp(a).test(b);
+  if (a.includes("{") || b.includes("{")) return true;
+
+  const literalPrefix = (segment) => segment.slice(0, segment.search(/[*?]/));
+  const literalSuffix = (segment) => {
+    const index = Math.max(segment.lastIndexOf("*"), segment.lastIndexOf("?"));
+    return segment.slice(index + 1);
+  };
+  const prefixA = literalPrefix(a);
+  const prefixB = literalPrefix(b);
+  const suffixA = literalSuffix(a);
+  const suffixB = literalSuffix(b);
+  return (
+    (!prefixA ||
+      !prefixB ||
+      prefixA.startsWith(prefixB) ||
+      prefixB.startsWith(prefixA)) &&
+    (!suffixA ||
+      !suffixB ||
+      suffixA.endsWith(suffixB) ||
+      suffixB.endsWith(suffixA))
+  );
+}
+
+/**
+ * Segment-aware intersection for registry inputs. Unlike generic Owned Paths
+ * collision detection, this must not let a leading `**` make unrelated input
+ * directories look like anchors.
+ */
+function registryGlobOverlaps(owned, input) {
+  // Validate the whole patterns first so malformed Owned Paths retain the
+  // generic fail-closed behavior below.
+  globToRegExp(owned);
+  globToRegExp(input);
+  const a = owned.replace(/^\.\//, "").split("/");
+  const b = input.replace(/^\.\//, "").split("/");
+  const memo = new Map();
+
+  const intersects = (i, j) => {
+    const key = `${i}:${j}`;
+    if (memo.has(key)) return memo.get(key);
+    let result;
+    if (i === a.length || j === b.length) {
+      result =
+        (i === a.length && b.slice(j).every((segment) => segment === "**")) ||
+        (j === b.length && a.slice(i).every((segment) => segment === "**"));
+    } else if (a[i] === "**") {
+      result = intersects(i + 1, j) || intersects(i, j + 1);
+    } else if (b[j] === "**") {
+      result = intersects(i, j + 1) || intersects(i + 1, j);
+    } else {
+      result = segmentsMayOverlap(a[i], b[j]) && intersects(i + 1, j + 1);
+    }
+    memo.set(key, result);
+    return result;
+  };
+
+  return intersects(0, 0);
 }
 
 /**
  * Registry inputs are deliberately stricter than generic Owned Paths overlap.
- * A leading wildcard can reach every directory, but must name an input's
- * directory before it can opt a ticket into the registry-digest closure.
+ * A leading wildcard can reach every directory, but must retain a literal
+ * segment anchor before it can opt a ticket into the registry-digest closure.
  */
 function registryInputOverlaps(owned, input) {
-  const firstSegment = owned.split("/", 1)[0] ?? "";
-  if (/[*?{]/.test(firstSegment)) {
-    const inputDirectory = globDirectoryPrefix(input);
-    if (!inputDirectory || !owned.includes(inputDirectory)) return false;
+  try {
+    const ownedSegments = owned.replace(/^\.\//, "").split("/");
+    const inputSegments = input.replace(/^\.\//, "").split("/");
+    // A leading wildcard alone is too broad to opt into a non-root registry
+    // input (for example, `**/*.json`). It must carry at least one literal
+    // path segment as an anchor; root-level files are their own anchor.
+    if (
+      hasGlobSyntax(ownedSegments[0] ?? "") &&
+      (ownedSegments[0] === "**" || inputSegments.length > 1) &&
+      !ownedSegments
+        .slice(1)
+        .some((segment) => segment !== "**" && !hasGlobSyntax(segment))
+    ) {
+      return false;
+    }
+    return registryGlobOverlaps(owned, input);
+  } catch (error) {
+    if (error instanceof OwnedPathsPatternError) return true;
+    throw error;
   }
-  return globsOverlap(owned, input);
 }
 
 /** Do two tickets' Owned Paths sets intersect? */
@@ -571,6 +653,29 @@ export function ownedPathsClosureGaps({
   pinManifestRequirements = [],
 } = {}) {
   const own = Array.isArray(ownedPaths) ? ownedPaths : [];
+  const rawRegistryDigest = ownedPathsPolicy?.registryDigest;
+  let registryDigest = null;
+  if (rawRegistryDigest !== undefined && rawRegistryDigest !== null) {
+    if (
+      typeof rawRegistryDigest !== "object" ||
+      Array.isArray(rawRegistryDigest) ||
+      !Array.isArray(rawRegistryDigest.inputs) ||
+      rawRegistryDigest.inputs.length === 0 ||
+      !rawRegistryDigest.inputs.every(
+        (input) => typeof input === "string" && input.trim(),
+      ) ||
+      typeof rawRegistryDigest.baseline !== "string" ||
+      !rawRegistryDigest.baseline.trim()
+    ) {
+      throw new OwnedPathsPolicyError(
+        "registryDigest must be { inputs: non-empty string[], baseline: non-empty string }",
+      );
+    }
+    registryDigest = {
+      inputs: rawRegistryDigest.inputs.map((input) => input.trim()),
+      baseline: rawRegistryDigest.baseline.trim(),
+    };
+  }
   const policy = {
     direct: Array.isArray(ownedPathsPolicy?.direct)
       ? ownedPathsPolicy.direct
@@ -578,12 +683,7 @@ export function ownedPathsClosureGaps({
     pinManifests: Array.isArray(ownedPathsPolicy?.pinManifests)
       ? ownedPathsPolicy.pinManifests
       : [],
-    registryDigest:
-      ownedPathsPolicy?.registryDigest &&
-      Array.isArray(ownedPathsPolicy.registryDigest.inputs) &&
-      typeof ownedPathsPolicy.registryDigest.baseline === "string"
-        ? ownedPathsPolicy.registryDigest
-        : null,
+    registryDigest,
   };
 
   const gaps = [];

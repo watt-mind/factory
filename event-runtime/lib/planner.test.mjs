@@ -293,12 +293,13 @@ describe("planEvent", () => {
       admit(db, webhook("check-proposed")),
       { now: NOW + 1000, policyVersion: "git:test" },
     );
-    expect(whileProposed).toEqual({
+    expect(whileProposed).toMatchObject({
       decision: "noop",
       runId: first.runId,
-      reason: "webhook_merge_scan_already_live",
+      reason: "webhook_merge_scan_pending",
     });
-    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+    expect(whileProposed.proposal.status).toBe("resolved");
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
 
     for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING"]) {
       transition(db, { runId: first.runId, to, actor: "test" });
@@ -403,6 +404,103 @@ describe("planEvent", () => {
     expect(other.decision).toBe("run");
     expect(other.runId).not.toBe(first.runId);
     expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(5);
+  });
+
+  test("never-executed merge scans retain one webhook delivery only when refused or cancelled", () => {
+    const webhook = (eventId) => ({
+      eventId,
+      type: "factory.merge.requested",
+      source: "github",
+      subject: "factory",
+      correlationId: eventId,
+      payload: { repo: "factory" },
+    });
+    const queueScan = (db, eventId) => {
+      const first = planEvent(db, registry, admit(db, webhook(eventId)), {
+        now: NOW,
+        policyVersion: "git:test",
+      });
+      for (const to of ["APPROVED", "QUEUED"]) {
+        transition(db, { runId: first.runId, to, actor: "test" });
+      }
+      return first;
+    };
+    const coalesceTwoDeliveries = (db, suffix, runId) => {
+      for (const eventId of [`${suffix}-1`, `${suffix}-2`]) {
+        expect(
+          planEvent(db, registry, admit(db, webhook(eventId)), {
+            now: NOW + 1000,
+            policyVersion: "git:test",
+          }),
+        ).toMatchObject({
+          decision: "noop",
+          runId,
+          reason: "webhook_merge_scan_pending",
+        });
+      }
+      expect(
+        db
+          .query(
+            `SELECT COUNT(*) AS n FROM proposals
+             WHERE run_id = ? AND reason = 'webhook_merge_scan_pending'`,
+          )
+          .get(runId).n,
+      ).toBe(1);
+    };
+
+    // A queued scan cancelled before any worker leased it never read GitHub:
+    // the retained pending delivery is re-admitted and plans a fresh scan.
+    {
+      const db = openDb(":memory:");
+      const first = queueScan(db, "cancelled-first");
+      coalesceTwoDeliveries(db, "cancelled", first.runId);
+      transition(db, { runId: first.runId, to: "CANCELLED", actor: "test" });
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW + 2000,
+          policyVersion: "git:test",
+        }),
+      ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+      expect(
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get("cancelled-1").status,
+      ).toBe("planned");
+      expect(
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get("cancelled-2").status,
+      ).toBe("noop");
+    }
+
+    // REFUSED is only reachable from VERIFYING, i.e. the scan executed and
+    // read current GitHub state; a pending marker must not re-arm a trailing
+    // scan for it. Same for the executed COMPLETED path.
+    for (const terminal of ["REFUSED", "COMPLETED"]) {
+      const db = openDb(":memory:");
+      const suffix = terminal.toLowerCase();
+      const first = queueScan(db, `${suffix}-first`);
+      coalesceTwoDeliveries(db, suffix, first.runId);
+      for (const to of ["LEASED", "RUNNING", "VERIFYING", terminal]) {
+        transition(db, { runId: first.runId, to, actor: "test" });
+      }
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW + 2000,
+          policyVersion: "git:test",
+        }),
+      ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+      for (const eventId of [`${suffix}-1`, `${suffix}-2`]) {
+        expect(
+          db.query(`SELECT status FROM events WHERE event_id = ?`).get(eventId)
+            .status,
+        ).toBe("noop");
+      }
+    }
   });
 
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {

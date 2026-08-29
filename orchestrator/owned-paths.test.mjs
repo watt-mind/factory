@@ -21,6 +21,7 @@ import {
   globsOverlap,
   isMatchEverythingGlob,
   OwnedPathsPatternError,
+  OwnedPathsPolicyError,
   pathsCollide,
   nextDispatchable,
   readPinManifestRequirements,
@@ -304,6 +305,46 @@ test("registry inputs require owning the zero-pack digest baseline when configur
   ]);
 });
 
+test("a present malformed registry digest policy fails closed", () => {
+  const malformedPolicies = [
+    { registryDigest: { inputs: ["event-runtime/agents/**"] } },
+    {
+      registryDigest: {
+        inputs: "event-runtime/agents/**",
+        baseline: REGISTRY_DIGEST_BASELINE_PATH,
+      },
+    },
+    {
+      registryDigest: {
+        inputs: [],
+        baseline: REGISTRY_DIGEST_BASELINE_PATH,
+      },
+    },
+  ];
+
+  for (const ownedPathsPolicy of malformedPolicies) {
+    try {
+      ownedPathsClosureGaps({ ownedPaths: [], ownedPathsPolicy });
+      throw new Error("expected malformed registry digest policy to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(OwnedPathsPolicyError);
+      expect(error.code).toBe("invalid_owned_paths_policy");
+    }
+  }
+
+  expectEqual(
+    ownedPathsClosureGaps({ ownedPaths: [], ownedPathsPolicy: {} }),
+    [],
+  );
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: [],
+      ownedPathsPolicy: { registryDigest: null },
+    }),
+    [],
+  );
+});
+
 test("each registry data input requires the digest baseline, but unrelated paths do not", () => {
   for (const input of [
     "event-runtime/event-types.json",
@@ -375,6 +416,41 @@ test("registry digest closure is opt-in and ignores unanchored wildcards", () =>
       },
     ],
   );
+});
+
+test("registry input overlap respects path segments and root-level inputs", () => {
+  const policy = {
+    registryDigest: {
+      inputs: [
+        "event-runtime/agents/*.md",
+        "lib/foobar/*.json",
+        "pins.json",
+        "event-types.json",
+      ],
+      baseline: REGISTRY_DIGEST_BASELINE_PATH,
+    },
+  };
+  const gap = (owned) =>
+    ownedPathsClosureGaps({ ownedPaths: [owned], ownedPathsPolicy: policy });
+
+  for (const owned of [
+    "**/agents/*.md",
+    "pins.json",
+    "*.json",
+    "**/pins.json",
+  ]) {
+    expectEqual(gap(owned), [
+      {
+        rule: "registry-digest",
+        requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+        requiredBy: owned,
+      },
+    ]);
+  }
+  expectEqual(gap("**/subagents/*.md"), []);
+  expectEqual(gap("**/lib/foo*"), []);
+  expectEqual(gap("**/*.json"), []);
+  expectEqual(gap("event-runtime/**"), []);
 });
 
 test("pin manifests require owning generated output manifests", () => {

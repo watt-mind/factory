@@ -1795,27 +1795,47 @@ function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
 }
 
 const WEBHOOK_MERGE_SCAN_ALREADY_LIVE = "webhook_merge_scan_already_live";
+const WEBHOOK_MERGE_SCAN_PENDING = "webhook_merge_scan_pending";
 const EXECUTING_MERGE_SCAN_STATES = new Set(["LEASED", "RUNNING", "VERIFYING"]);
 
-function hasQueuedWebhookMergeScan(db, runId) {
-  return Boolean(
-    db
-      .query(
-        `SELECT 1
+function queuedWebhookMergeScan(db, runId) {
+  return db
+    .query(
+      `SELECT id, reason
          FROM proposals
          WHERE run_id = ?
            AND decision = 'noop'
-           AND reason = ?
+           AND reason IN (?, ?)
          LIMIT 1`,
-      )
-      .get(runId, WEBHOOK_MERGE_SCAN_ALREADY_LIVE),
-  );
+    )
+    .get(runId, WEBHOOK_MERGE_SCAN_ALREADY_LIVE, WEBHOOK_MERGE_SCAN_PENDING);
+}
+
+function moveQueuedWebhookMergeScan(
+  db,
+  proposalId,
+  event,
+  reason,
+  at,
+  ttlSeconds,
+) {
+  db.query(
+    `UPDATE proposals
+     SET event_source = ?, event_id = ?, reason = ?,
+         spec_json = NULL, spec_hash = NULL, idempotency_key = NULL,
+         created_at = ?, ttl_seconds = ?
+     WHERE id = ?`,
+  ).run(event.source, event.event_id, reason, at, ttlSeconds, proposalId);
+  setEventStatus(db, event, "noop", reason);
+  return db.query(`SELECT * FROM proposals WHERE id = ?`).get(proposalId);
 }
 
 /**
  * Re-admit the single webhook delivery retained behind each finished merge
- * scan. The retained noop proposal is the durable queue marker: later burst
- * deliveries have no proposal, so they cannot create extra trailing scans.
+ * scan. A never-executed scan re-arms one coalesced delivery only when refused
+ * or cancelled; an executed scan re-arms only deliveries received while running.
+ * "Never executed" is proven by the lifecycle journal (no LEASED record) rather
+ * than `runs.attempts`, which a claim-lock contention requeue resets to 0.
  */
 function reAdmitQueuedWebhookMergeScans(db) {
   const queued = db
@@ -1829,11 +1849,19 @@ function reAdmitQueuedWebhookMergeScans(db) {
          AND e.type = 'factory.merge.requested'
          AND e.status = 'noop'
          AND p.decision = 'noop'
-         AND p.reason = ?
-         AND r.state IN ('COMPLETED', 'REFUSED', 'FAILED', 'TIMED_OUT', 'CANCELLED')
+         AND (
+           (p.reason = ?
+            AND r.state IN ('COMPLETED', 'REFUSED', 'FAILED', 'TIMED_OUT', 'CANCELLED'))
+           OR (p.reason = ?
+               AND r.state IN ('REFUSED', 'CANCELLED')
+               AND NOT EXISTS (
+                 SELECT 1 FROM lifecycle_events le
+                 WHERE le.run_id = r.run_id AND le.to_state = 'LEASED'
+               ))
+         )
        ORDER BY p.created_at, p.rowid`,
     )
-    .all(WEBHOOK_MERGE_SCAN_ALREADY_LIVE);
+    .all(WEBHOOK_MERGE_SCAN_ALREADY_LIVE, WEBHOOK_MERGE_SCAN_PENDING);
   for (const event of queued) {
     db.query(
       `UPDATE events
@@ -1847,10 +1875,10 @@ function reAdmitQueuedWebhookMergeScans(db) {
  * GitHub sends a delivery for each CI state change. Unlike an operator or
  * schedule request, those deliveries do not each deserve an auditable
  * proposal: a PROPOSED, APPROVED, or QUEUED scan will read current GitHub
- * state when it executes, so later deliveries stay pure noops. Once the scan
- * is LEASED, RUNNING, or VERIFYING, retain exactly one delivery as a
- * TTL-backed noop proposal; planAdmittedEvents re-admits it after that scan
- * reaches a terminal state. Further deliveries remain proposal-free noops.
+ * state when it executes, so later deliveries stay pure noops. Retain one
+ * pending marker before execution in case the scan is refused or cancelled;
+ * while executing, retain one delivery as the trailing-scan marker. Further
+ * deliveries remain proposal-free noops.
  */
 function coalesceWebhookMergeRequest(
   db,
@@ -1872,15 +1900,31 @@ function coalesceWebhookMergeRequest(
   });
   if (!blockingRun) return null;
 
-  const reason = WEBHOOK_MERGE_SCAN_ALREADY_LIVE;
-  if (
-    EXECUTING_MERGE_SCAN_STATES.has(blockingRun.state) &&
-    !hasQueuedWebhookMergeScan(db, blockingRun.run_id)
-  ) {
+  const executing = EXECUTING_MERGE_SCAN_STATES.has(blockingRun.state);
+  const marker = queuedWebhookMergeScan(db, blockingRun.run_id);
+  const reason = executing
+    ? WEBHOOK_MERGE_SCAN_ALREADY_LIVE
+    : WEBHOOK_MERGE_SCAN_PENDING;
+  if (!marker) {
     return noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds);
   }
-  setEventStatus(db, event, "noop", reason);
-  return { decision: "noop", runId: blockingRun.run_id, reason };
+  if (executing && marker.reason === WEBHOOK_MERGE_SCAN_PENDING) {
+    const proposal = moveQueuedWebhookMergeScan(
+      db,
+      marker.id,
+      event,
+      reason,
+      at,
+      ttlSeconds,
+    );
+    return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
+  }
+  setEventStatus(db, event, "noop", marker.reason);
+  return {
+    decision: "noop",
+    runId: blockingRun.run_id,
+    reason: marker.reason,
+  };
 }
 
 function humanNeeded(db, event, reason, at, ttlSeconds) {

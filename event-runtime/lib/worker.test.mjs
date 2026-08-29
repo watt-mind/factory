@@ -223,6 +223,24 @@ function opts(extra = {}) {
   };
 }
 
+function insertStalledWorker(db, workerId, runId, now) {
+  const staleAt = now - 90_001;
+  db.query(
+    `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    workerId,
+    "test-host",
+    1,
+    "{}",
+    "fake",
+    new Date(now).toISOString(),
+    new Date(staleAt).toISOString(),
+    "busy",
+    runId,
+  );
+}
+
 describe("worker", () => {
   test("materialized harness entries record hashes for every copied file", () => {
     const factoryRoot = tmpDir("evrt-harness-source-");
@@ -3089,6 +3107,134 @@ describe("worker", () => {
         )
         .get(spec.runId, claim.attempt),
     ).toEqual({ terminal_state: "FAILED", reason_code: "lease_expired" });
+  });
+
+  test("stalled-worker release matches reaper at the environment retry ceiling", () => {
+    const releasedDb = openDb(":memory:");
+    const reapedDb = openDb(":memory:");
+    const releasedSpec = queueRun(
+      releasedDb,
+      makeSpec({
+        runId: "run_stalled_release_ceiling",
+        maxAttempts: 5,
+        maxEnvironmentRetries: 0,
+      }),
+    );
+    const reapedSpec = queueRun(
+      reapedDb,
+      makeSpec({
+        runId: "run_stalled_reap_ceiling",
+        maxAttempts: 5,
+        maxEnvironmentRetries: 0,
+      }),
+    );
+
+    for (const [db, spec] of [
+      [releasedDb, releasedSpec],
+      [reapedDb, reapedSpec],
+    ]) {
+      db.query(`UPDATE runs SET attempts = 1 WHERE run_id = ?`).run(spec.runId);
+      db.query(
+        `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        spec.runId,
+        1,
+        1,
+        new Date(T0 - 1).toISOString(),
+        "FAILED",
+        "lease_expired",
+      );
+      db.query(`INSERT INTO counters (name, value) VALUES (?, ?)`).run(
+        "fencing",
+        1,
+      );
+    }
+
+    const releasedClaim = claimNext(releasedDb, opts({ owner: "w-release" }));
+    const reapedClaim = claimNext(reapedDb, opts({ owner: "reaper" }));
+    expect(releasedClaim.attempt).toBe(2);
+    expect(reapedClaim.attempt).toBe(2);
+    const afterExpiry = T0 + (releasedSpec.timeoutSeconds + 120) * 1000 + 1;
+    insertStalledWorker(
+      releasedDb,
+      "w-release",
+      releasedSpec.runId,
+      afterExpiry,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        releasedDb,
+        { workerId: "w-release", runId: releasedSpec.runId },
+        { now: afterExpiry, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: releasedSpec.runId });
+    expect(
+      reapExpiredLeases(reapedDb, { now: afterExpiry, policyVersion: "test" }),
+    ).toBe(1);
+
+    expect(runState(releasedDb, releasedSpec.runId)).toBe("FAILED");
+    expect(runState(reapedDb, reapedSpec.runId)).toBe("FAILED");
+    expect(
+      lifecycleOf(releasedDb, releasedSpec.runId)
+        .slice(-2)
+        .map(({ to_state, reason }) => ({ to_state, reason })),
+    ).toEqual(
+      lifecycleOf(reapedDb, reapedSpec.runId)
+        .slice(-2)
+        .map(({ to_state, reason }) => ({ to_state, reason })),
+    );
+    expect(lifecycleOf(releasedDb, releasedSpec.runId).at(-1).reason).toBe(
+      "failure:environment:lease_expired; environment_retry_budget_exhausted",
+    );
+  });
+
+  test("stalled-worker release matches reaper below the environment retry ceiling", () => {
+    const releasedDb = openDb(":memory:");
+    const reapedDb = openDb(":memory:");
+    const releasedSpec = queueRun(
+      releasedDb,
+      makeSpec({
+        runId: "run_stalled_release_retry",
+        maxEnvironmentRetries: 1,
+      }),
+    );
+    const reapedSpec = queueRun(
+      reapedDb,
+      makeSpec({ runId: "run_stalled_reap_retry", maxEnvironmentRetries: 1 }),
+    );
+    const releasedClaim = claimNext(releasedDb, opts({ owner: "w-release" }));
+    const reapedClaim = claimNext(reapedDb, opts({ owner: "reaper" }));
+    expect(releasedClaim.attempt).toBe(1);
+    expect(reapedClaim.attempt).toBe(1);
+    const afterExpiry = T0 + (releasedSpec.timeoutSeconds + 120) * 1000 + 1;
+    insertStalledWorker(
+      releasedDb,
+      "w-release",
+      releasedSpec.runId,
+      afterExpiry,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        releasedDb,
+        { workerId: "w-release", runId: releasedSpec.runId },
+        { now: afterExpiry, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: releasedSpec.runId });
+    expect(
+      reapExpiredLeases(reapedDb, { now: afterExpiry, policyVersion: "test" }),
+    ).toBe(1);
+
+    expect(runState(releasedDb, releasedSpec.runId)).toBe("QUEUED");
+    expect(runState(reapedDb, reapedSpec.runId)).toBe("QUEUED");
+    expect(lifecycleOf(releasedDb, releasedSpec.runId).at(-1).reason).toBe(
+      "retry:environment",
+    );
+    expect(lifecycleOf(reapedDb, reapedSpec.runId).at(-1).reason).toBe(
+      "retry:environment",
+    );
   });
 
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {

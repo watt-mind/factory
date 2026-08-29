@@ -40,7 +40,9 @@ import {
   symlinkSync,
   lstatSync,
   unlinkSync,
+  realpathSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -406,15 +408,59 @@ const agents = corePack.agents;
 // So the floor is SPLICED into each repo's AGENTS.md between its markers.
 // Marker-delimited rather than whole-file so a repo keeps its own content, and
 // idempotent so running it twice is a no-op.
+/**
+ * Return the canonical GitHub owner/repository slug for a remote URL.
+ * SSH and HTTPS remotes are both accepted because the checkout's transport
+ * does not change which repository it represents.
+ */
+function githubSlug(remote) {
+  const value = remote.trim();
+  const match = value.match(/github\.com[/:]([^/]+\/[^/#]+?)(?:\.git)?$/i);
+  if (!match && /^[^/]+\/[^/#]+$/.test(value)) return value.toLowerCase();
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function originGithubSlug(root) {
+  try {
+    return githubSlug(
+      execFileSync("git", ["-C", root, "remote", "get-url", "origin"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** [{name, path, state}] — state is ok | stale | missing | no-checkout. */
 function floorStatus() {
   const cfg = Bun.YAML.parse(
     readFileSync(resolveConfigPath("repos", { root: ROOT }), "utf8"),
   );
+  const runningRoot = realpathSync(ROOT);
+  const runningGithub = originGithubSlug(ROOT);
   return (cfg.repos ?? []).map((repo) => {
     const repoPath = String(repo.path).replace(/^~/, homedir());
-    const agentsFile = path.join(repoPath, "AGENTS.md");
-    if (!existsSync(repoPath))
+    // The configured path can name the operator's checkout, but a worktree
+    // often has the same origin while living elsewhere. Inspect this tree for
+    // the matching path or GitHub slug; only sibling repos use their config
+    // path so their floor status remains visible too.
+    let configuredRoot = null;
+    if (existsSync(repoPath)) {
+      try {
+        configuredRoot = realpathSync(repoPath);
+      } catch {
+        configuredRoot = null;
+      }
+    }
+    const isRunningRepo =
+      configuredRoot === runningRoot ||
+      (runningGithub &&
+        githubSlug(String(repo.github ?? "")) === runningGithub);
+    const checkoutPath = isRunningRepo ? ROOT : repoPath;
+    const agentsFile = path.join(checkoutPath, "AGENTS.md");
+    if (!existsSync(checkoutPath))
       return { ...repo, agents: agentsFile, state: "no-checkout" };
     if (!existsSync(agentsFile))
       return { ...repo, agents: agentsFile, state: "missing" };
