@@ -4,11 +4,22 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import {
+  isToolchainConstraint,
   loadRepos,
+  normalizeToolVersion,
+  preflightToolchain,
   proveMergeChecks,
+  REPO_ATTESTATION_STALE,
+  REPO_TOOLCHAIN_MISMATCH,
+  REPO_TOOLCHAIN_MISSING,
   RepoError,
+  repoDispatchPreflight,
+  repoReadiness,
   reposView,
   selectMergeCheckGate,
+  TOOLCHAIN_ATTESTATION_MAX_AGE_MS,
+  toolchainAttestationCurrent,
+  toolchainHash,
 } from "./repos.mjs";
 
 const scratch = [];
@@ -46,6 +57,9 @@ const YAML = `repos:
     worktree_root: ~/Develop/.worktrees/full
     max_in_flight: 20
     verify: npm run typecheck
+    toolchain:
+      bun: ">=1.3 <2"
+      node: ">=22 <25"
     smoke_workflow: smoke-prod.yml
     smoke_url: https://full.example.com/healthz
     smoke_deadline_seconds: 420
@@ -114,6 +128,10 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       worktreeDown: "bin/worktree-down.sh",
       worktreeWarm: "bin/worktree-warm.sh",
       verify: "npm run typecheck",
+      toolchain: [
+        { executable: "bun", constraint: ">=1.3 <2" },
+        { executable: "node", constraint: ">=22 <25" },
+      ],
       ownedPathsPolicy: {
         direct: [
           { source: "shared/**", requires: ["dist/**", "plugins/core/**"] },
@@ -145,6 +163,8 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       worktreeRoot: null,
       worktreeDown: null,
       verify: null,
+      // No `toolchain:` block is the nine-repos-today case: null, never [].
+      toolchain: null,
     });
   });
 
@@ -475,6 +495,490 @@ describe("reposView is what the control API serves", () => {
       ["full", false],
       ["bare", true],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WM-316 toolchain preflight (docs/event-runtime-repos.md §§5–6).
+// ---------------------------------------------------------------------------
+
+const CLOCK = new Date("2026-08-29T12:00:00.000Z");
+const now = () => CLOCK;
+
+/**
+ * A fake node. `which`/`spawn` are injected at the level the production code
+ * actually uses them, so the argv the real preflight builds is the argv these
+ * assertions see — a fake at the `probe` level would only test the fake.
+ */
+function fakeNode({ versions = {}, missing = [], exitCodes = {} } = {}) {
+  const whichCalls = [];
+  const spawnCalls = [];
+  return {
+    whichCalls,
+    spawnCalls,
+    which: async (executable) => {
+      whichCalls.push(executable);
+      return missing.includes(executable) ? null : `/opt/bin/${executable}`;
+    },
+    spawn: async (argv) => {
+      spawnCalls.push(argv);
+      return {
+        exitCode: exitCodes[argv[0]] ?? 0,
+        stdout: versions[argv[0]] ?? "",
+        stderr: "",
+      };
+    },
+  };
+}
+
+function repoWith(toolchainYaml, name = "tc") {
+  return loadRepos({
+    root: factoryRoot(
+      `repos:\n  - name: ${name}\n    path: /tmp/${name}\n${toolchainYaml}`,
+    ),
+  }).get(name);
+}
+
+describe("toolchain: declaration parsing and validation", () => {
+  test("the documented map form and the explicit list form normalize identically", () => {
+    const mapForm = repoWith(
+      `    toolchain:\n      bun: ">=1.3 <2"\n      git: ">=2.40"\n`,
+    );
+    const listForm = repoWith(
+      `    toolchain:\n      - executable: bun\n        constraint: ">=1.3 <2"\n      - executable: git\n        constraint: ">=2.40"\n`,
+    );
+    const expected = [
+      { executable: "bun", constraint: ">=1.3 <2" },
+      { executable: "git", constraint: ">=2.40" },
+    ];
+    expect(mapForm.toolchain).toEqual(expected);
+    expect(listForm.toolchain).toEqual(expected);
+    expect(toolchainHash(mapForm.toolchain)).toBe(
+      toolchainHash(listForm.toolchain),
+    );
+  });
+
+  test("absent reads null and an empty block reads [] — neither is a default constraint", () => {
+    expect(repoWith("").toolchain).toBeNull();
+    expect(repoWith(`    toolchain: {}\n`).toolchain).toEqual([]);
+    expect(repoWith(`    toolchain: []\n`).toolchain).toEqual([]);
+  });
+
+  test("an executable must be a bare command name, never a path or a shell fragment", () => {
+    const invalid = [
+      `    toolchain:\n      "/usr/local/bin/bun": ">=1.3"\n`,
+      `    toolchain:\n      "sh -c 'brew install bun'": ">=1.3"\n`,
+      `    toolchain:\n      "bun; rm -rf /": ">=1.3"\n`,
+      `    toolchain:\n      "": ">=1.3"\n`,
+      `    toolchain:\n      "../bun": ">=1.3"\n`,
+    ];
+    for (const yaml of invalid) {
+      expect(() => repoWith(yaml)).toThrow(RepoError);
+    }
+    expect(() =>
+      repoWith(`    toolchain:\n      "/usr/bin/bun": ">=1"\n`),
+    ).toThrow(/bare command name/);
+  });
+
+  test("a constraint must be a semver range, because Bun.semver is fail-open on garbage", () => {
+    // Guard on the real reason this validation exists: an unvalidated
+    // `satisfies("1.2.3", "not a range")` returns true, so a typo'd range
+    // would silently pass every version instead of gating anything.
+    expect(Bun.semver.satisfies("1.2.3", "not a range")).toBe(true);
+    expect(isToolchainConstraint("not a range")).toBe(false);
+
+    for (const good of [
+      ">=1.3 <2",
+      ">=22",
+      "^1.2.3",
+      "~2.0",
+      "1.x",
+      "*",
+      "1.2.3 || >=4.0.0",
+      "1.2.3 - 2.0.0",
+      ">=1.3.0-canary.1",
+    ]) {
+      expect([good, isToolchainConstraint(good)]).toEqual([good, true]);
+    }
+    for (const bad of [
+      "not a range",
+      "",
+      "   ",
+      ">=",
+      "latest",
+      ">=1.2; echo hi",
+      "$(id)",
+      ">=1.2 || ",
+      42,
+      null,
+    ]) {
+      expect([bad, isToolchainConstraint(bad)]).toEqual([bad, false]);
+    }
+    expect(() => repoWith(`    toolchain:\n      bun: latest\n`)).toThrow(
+      /must be a semver range/,
+    );
+  });
+
+  test("structural errors name the repo instead of loading a half-understood block", () => {
+    const invalid = [
+      `    toolchain: "bun >=1.3"\n`,
+      `    toolchain:\n      - bun\n`,
+      `    toolchain:\n      - executable: bun\n        constraint: ">=1"\n        install: brew install bun\n`,
+      `    toolchain:\n      - executable: bun\n        constraint: ">=1"\n      - executable: bun\n        constraint: ">=2"\n`,
+      `    toolchain:\n      bun: 13\n`,
+    ];
+    for (const yaml of invalid) {
+      expect(() => repoWith(yaml)).toThrow(RepoError);
+    }
+    expect(() =>
+      repoWith(
+        `    toolchain:\n      - executable: bun\n        constraint: ">=1"\n      - executable: bun\n        constraint: ">=2"\n`,
+      ),
+    ).toThrow(/declares toolchain executable "bun" twice/);
+  });
+
+  test("the registry projection does not publish toolchain yet", () => {
+    // Not an oversight: /repos and the config view assert this projection
+    // exactly, in files outside gh-1076's Owned Paths. Publishing toolchain
+    // belongs to the follow-up that surfaces it in `factory doctor`, which can
+    // update those assertions in the same commit.
+    const rows = reposView(loadRepos({ root: factoryRoot(YAML) }));
+    expect(rows[0]).not.toHaveProperty("toolchain");
+  });
+});
+
+describe("normalizeToolVersion reads what real tools actually print", () => {
+  test("the version formats of the tools this factory depends on", () => {
+    expect(normalizeToolVersion("1.2.23\n")).toBe("1.2.23");
+    expect(normalizeToolVersion("v22.1.0\n")).toBe("22.1.0");
+    expect(normalizeToolVersion("git version 2.39.5 (Apple Git-154)")).toBe(
+      "2.39.5",
+    );
+    expect(normalizeToolVersion("Python 3.12.1")).toBe("3.12.1");
+    expect(normalizeToolVersion("Docker version 24.0.7, build afdd53b")).toBe(
+      "24.0.7",
+    );
+    expect(normalizeToolVersion("1.3.0-canary.20260101")).toBe(
+      "1.3.0-canary.20260101",
+    );
+  });
+
+  test("a partial version widens to x.y.z so semver can compare it", () => {
+    expect(normalizeToolVersion("22")).toBe("22.0.0");
+    expect(normalizeToolVersion("1.2")).toBe("1.2.0");
+  });
+
+  test("nothing version-shaped is null, not a guess", () => {
+    expect(normalizeToolVersion("command not found")).toBeNull();
+    expect(normalizeToolVersion("")).toBeNull();
+    expect(normalizeToolVersion(undefined)).toBeNull();
+  });
+});
+
+describe("preflightToolchain verifies without mutating the host", () => {
+  test("every satisfied constraint attests ok with the observed versions", async () => {
+    const repo = repoWith(
+      `    toolchain:\n      bun: ">=1.3 <2"\n      node: ">=22 <25"\n`,
+    );
+    const node = fakeNode({
+      versions: { bun: "1.3.14\n", node: "v22.14.0\n" },
+    });
+    const attestation = await preflightToolchain(repo, {
+      node: "runner",
+      now,
+      ...node,
+    });
+    expect(attestation.ok).toBe(true);
+    expect(attestation.reasons).toEqual([]);
+    expect(attestation.node).toBe("runner");
+    expect(attestation.declared).toBe(true);
+    expect(attestation.verifiedAt).toBe(CLOCK.toISOString());
+    expect(
+      attestation.tools.map((t) => [t.executable, t.observed, t.satisfied]),
+    ).toEqual([
+      ["bun", "1.3.14", true],
+      ["node", "22.14.0", true],
+    ]);
+  });
+
+  test("an unresolvable executable is repo_toolchain_missing, naming node and constraint", async () => {
+    const repo = repoWith(`    toolchain:\n      uv: ">=0.5"\n`);
+    const node = fakeNode({ missing: ["uv"] });
+    const { ok, reasons } = await preflightToolchain(repo, {
+      node: "runner",
+      now,
+      ...node,
+    });
+    expect(ok).toBe(false);
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toMatchObject({
+      reason: REPO_TOOLCHAIN_MISSING,
+      node: "runner",
+      repo: "tc",
+      executable: "uv",
+      constraint: ">=0.5",
+      observed: null,
+    });
+    expect(reasons[0].action).toContain("uv");
+    // A missing executable is never probed for a version.
+    expect(node.spawnCalls).toEqual([]);
+  });
+
+  test("a version mismatch carries node, executable, constraint AND the observed version", async () => {
+    const repo = repoWith(`    toolchain:\n      node: ">=22 <25"\n`);
+    const node = fakeNode({ versions: { node: "v18.19.1\n" } });
+    const { ok, reasons } = await preflightToolchain(repo, {
+      node: "mac-mini",
+      now,
+      ...node,
+    });
+    expect(ok).toBe(false);
+    expect(reasons[0]).toMatchObject({
+      reason: REPO_TOOLCHAIN_MISMATCH,
+      node: "mac-mini",
+      repo: "tc",
+      executable: "node",
+      constraint: ">=22 <25",
+      observed: "18.19.1",
+      detail: "constraint_unsatisfied",
+    });
+    // The whole point of the payload: "node 18, not 22" without going to the box.
+    expect(reasons[0].action).toContain("18.19.1");
+  });
+
+  test("an unreadable or failing version probe fails closed, keeping the raw output", async () => {
+    const repo = repoWith(
+      `    toolchain:\n      broken: ">=1"\n      garbled: ">=1"\n`,
+    );
+    const node = fakeNode({
+      versions: { broken: "boom\n", garbled: "no version here\n" },
+      exitCodes: { broken: 1 },
+    });
+    const { ok, reasons } = await preflightToolchain(repo, { now, ...node });
+    expect(ok).toBe(false);
+    expect(reasons.map((r) => [r.executable, r.reason, r.detail])).toEqual([
+      ["broken", REPO_TOOLCHAIN_MISMATCH, "version_probe_failed"],
+      ["garbled", REPO_TOOLCHAIN_MISMATCH, "unparseable_version"],
+    ]);
+    expect(reasons[1].observed).toBeNull();
+    expect(reasons[1].observedRaw).toBe("no version here");
+  });
+
+  test("preflight is non-mutating: the only command spawned is `<exe> --version`", async () => {
+    const repo = repoWith(
+      `    toolchain:\n      bun: ">=1.3 <2"\n      node: ">=22 <25"\n      git: ">=2.40"\n`,
+    );
+    const node = fakeNode({
+      versions: { bun: "1.3.14", node: "v22.14.0", git: "git version 2.39.5" },
+    });
+    await preflightToolchain(repo, { now, ...node });
+
+    expect(node.whichCalls).toEqual(["bun", "node", "git"]);
+    expect(node.spawnCalls).toEqual([
+      ["bun", "--version"],
+      ["node", "--version"],
+      ["git", "--version"],
+    ]);
+    // Not just "the expected commands ran" — no install/upgrade verb reached
+    // the host under any name. Toolchain preflight validates; it does not
+    // install or mutate host tooling (docs/event-runtime-repos.md §10).
+    const mutating =
+      /\b(install|upgrade|update|add|remove|uninstall|link|use|brew|apt|apt-get|yum|pacman|port|npm|pnpm|yarn|pip|pipx|corepack|nvm|fnm|asdf|volta|rustup|curl|wget|sh|bash|zsh|sudo)\b/i;
+    for (const argv of node.spawnCalls) {
+      expect(argv).toHaveLength(2);
+      expect(argv[1]).toBe("--version");
+      expect(mutating.test(argv.join(" "))).toBe(false);
+    }
+  });
+
+  test("a repo with no toolchain block is attested without touching the host", async () => {
+    const repo = repoWith("");
+    const node = fakeNode();
+    const attestation = await preflightToolchain(repo, { now, ...node });
+    expect(attestation.ok).toBe(true);
+    expect(attestation.declared).toBe(false);
+    expect(attestation.tools).toEqual([]);
+    expect(node.whichCalls).toEqual([]);
+    expect(node.spawnCalls).toEqual([]);
+  });
+});
+
+describe("readiness: a repo is ready only on a current, passing attestation", () => {
+  const declared = () => repoWith(`    toolchain:\n      bun: ">=1.3 <2"\n`);
+  const passing = async (repo, overrides = {}) =>
+    preflightToolchain(repo, {
+      node: "runner",
+      now,
+      ...fakeNode({ versions: { bun: "1.3.14" } }),
+      ...overrides,
+    });
+
+  test("no declared toolchain is ready with no attestation at all — the additive case", () => {
+    // The nine repos in production today declare nothing; the upgrade must
+    // not turn a single one of them not-ready.
+    for (const repo of [repoWith(""), repoWith(`    toolchain: {}\n`)]) {
+      expect(repoReadiness({ repo, node: "runner", now })).toEqual({
+        ready: true,
+        attested: false,
+        reasons: [],
+        refusal: null,
+      });
+    }
+  });
+
+  test("a current passing attestation is ready", async () => {
+    const repo = declared();
+    const readiness = repoReadiness({
+      repo,
+      attestation: await passing(repo),
+      node: "runner",
+      now,
+    });
+    expect(readiness).toEqual({
+      ready: true,
+      attested: true,
+      reasons: [],
+      refusal: null,
+    });
+  });
+
+  test("absent, expired, re-declared, and wrong-node attestations are all stale", async () => {
+    const repo = declared();
+    const attestation = await passing(repo);
+    const cases = [
+      [null, "absent", { node: "runner", now }],
+      [
+        attestation,
+        "expired",
+        {
+          node: "runner",
+          now: () =>
+            new Date(CLOCK.getTime() + TOOLCHAIN_ATTESTATION_MAX_AGE_MS + 1000),
+        },
+      ],
+      [attestation, "node_changed", { node: "mac-mini", now }],
+      [
+        { ...attestation, toolchainHash: "sha256:stale" },
+        "config_changed",
+        { node: "runner", now },
+      ],
+      [
+        { ...attestation, implementationVersion: 0 },
+        "implementation_changed",
+        { node: "runner", now },
+      ],
+      [
+        { ...attestation, verifiedAt: "whenever" },
+        "unverifiable_timestamp",
+        { node: "runner", now },
+      ],
+    ];
+    for (const [candidate, detail, opts] of cases) {
+      expect(toolchainAttestationCurrent(candidate, repo, opts)).toEqual({
+        current: false,
+        detail,
+      });
+      const readiness = repoReadiness({
+        repo,
+        attestation: candidate,
+        ...opts,
+      });
+      expect(readiness.ready).toBe(false);
+      expect(readiness.reasons[0]).toMatchObject({
+        reason: REPO_ATTESTATION_STALE,
+        detail,
+      });
+    }
+  });
+
+  test("a failing attestation is not ready and the refusal names the failing constraint", async () => {
+    const repo = declared();
+    const attestation = await preflightToolchain(repo, {
+      node: "runner",
+      now,
+      ...fakeNode({ versions: { bun: "1.1.45" } }),
+    });
+    const readiness = repoReadiness({ repo, attestation, node: "runner", now });
+    expect(readiness.ready).toBe(false);
+    expect(readiness.reasons[0]).toMatchObject({
+      reason: REPO_TOOLCHAIN_MISMATCH,
+      observed: "1.1.45",
+    });
+    expect(readiness.refusal).toBe(
+      "repo tc toolchain preflight failed on runner: bun >=1.3 <2 (observed 1.1.45)",
+    );
+  });
+});
+
+describe("repoDispatchPreflight is the gate dispatch consults before claiming", () => {
+  test("a repo whose preflight fails is refused, with the failing constraint named", async () => {
+    const repo = repoWith(`    toolchain:\n      node: ">=22 <25"\n`);
+    const node = fakeNode({ versions: { node: "v18.19.1" } });
+    const gate = await repoDispatchPreflight(repo, {
+      node: "mac-mini",
+      now,
+      ...node,
+    });
+    expect(gate.ready).toBe(false);
+    expect(gate.refusal).toBe(
+      "repo tc toolchain preflight failed on mac-mini: node >=22 <25 (observed 18.19.1)",
+    );
+    expect(gate.reasons[0]).toMatchObject({
+      reason: REPO_TOOLCHAIN_MISMATCH,
+      node: "mac-mini",
+      executable: "node",
+      constraint: ">=22 <25",
+      observed: "18.19.1",
+    });
+    expect(gate.attestation.ok).toBe(false);
+  });
+
+  test("a passing repo is admitted and carries the attestation forward", async () => {
+    const repo = repoWith(`    toolchain:\n      bun: ">=1.3 <2"\n`);
+    const gate = await repoDispatchPreflight(repo, {
+      node: "runner",
+      now,
+      ...fakeNode({ versions: { bun: "1.3.14" } }),
+    });
+    expect(gate.ready).toBe(true);
+    expect(gate.refusal).toBeNull();
+    expect(gate.attestation.toolchainHash).toBe(toolchainHash(repo.toolchain));
+  });
+
+  test("a current attestation is reused instead of re-probing the host", async () => {
+    const repo = repoWith(`    toolchain:\n      bun: ">=1.3 <2"\n`);
+    const attestation = await preflightToolchain(repo, {
+      node: "runner",
+      now,
+      ...fakeNode({ versions: { bun: "1.3.14" } }),
+    });
+    const node = fakeNode({ versions: { bun: "1.3.14" } });
+    const gate = await repoDispatchPreflight(repo, {
+      node: "runner",
+      attestation,
+      now,
+      ...node,
+    });
+    expect(gate.ready).toBe(true);
+    expect(node.spawnCalls).toEqual([]);
+  });
+
+  test("an undeclared toolchain short-circuits: no probe, no gate, no latency", async () => {
+    const node = fakeNode();
+    const gate = await repoDispatchPreflight(repoWith(""), {
+      node: "runner",
+      now,
+      ...node,
+    });
+    expect(gate).toEqual({
+      ready: true,
+      attested: false,
+      reasons: [],
+      refusal: null,
+      attestation: null,
+    });
+    expect(node.whichCalls).toEqual([]);
+    expect(node.spawnCalls).toEqual([]);
   });
 });
 

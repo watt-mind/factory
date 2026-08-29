@@ -23,6 +23,27 @@ repos:
     worktree_root: ~/Develop/.worktrees/factory
     max_in_flight: 20
     verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check
+    # Executables this repo's worktree script and verify command need, with the
+    # semver range each must satisfy (WM-316, docs/event-runtime-repos.md §5).
+    # Preflight resolves each one on the node and compares versions BEFORE a
+    # ticket is claimed, so "this box has node 18, not 22" surfaces as a typed
+    # refusal instead of a confusing agent error halfway through a run.
+    #
+    # It only validates: nothing here installs, upgrades, or switches a version
+    # manager, and each executable is spawned exactly once as `<exe> --version`.
+    # Omit the block entirely and the repo behaves as it always has — no
+    # preflight, no gating.
+    #
+    # The map form below and the explicit list form are equivalent:
+    #   toolchain:
+    #     - executable: bun
+    #       constraint: ">=1.3 <2"
+    #
+    # Constraints are validated at load: a range that is not semver (`latest`,
+    # a typo) is a config error rather than a gate that silently passes.
+    toolchain:
+      bun: ">=1.3 <2"
+      git: ">=2.40"
     owned_paths_policy:
       direct:
         - source: shared/**
