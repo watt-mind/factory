@@ -112,7 +112,8 @@ function renderBlock(block, width) {
           (candidate) =>
             item[candidate] !== undefined && item[candidate] !== null,
         );
-        return `${item.label} <${key ? text(item[key]) : "—"}>`;
+        const target = key ? text(item[key]) : "—";
+        return `${item.label ?? target} <${target}>`;
       });
     default:
       return [];
