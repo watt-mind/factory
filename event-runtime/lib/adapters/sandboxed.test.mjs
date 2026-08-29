@@ -11,6 +11,7 @@ import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapte
 import { describe, expect, test } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -379,7 +380,7 @@ describe("workspace-only model admission (#962)", () => {
       const home = process.env.HOME;
       const configPath = path.join(home, ".config", "sometool");
       const localPath = path.join(home, ".local", "share", "x");
-      const workspacePath = path.join(home, ".factory", "event-runtime", "workspaces", "run-x");
+      const workspacePath = path.join(process.env.FACTORY_EVENT_HOME, "workspaces", "run-x");
       const rawCredentialPath = path.join(home, ".config", "gh");
       mkdirSync(configPath, { recursive: true });
       mkdirSync(localPath, { recursive: true });
@@ -401,9 +402,112 @@ describe("workspace-only model admission (#962)", () => {
     const child = Bun.spawnSync({
       cmd: [process.execPath, "--eval", program],
       cwd: import.meta.dir,
-      env: { ...process.env, HOME: home, ALIAS_ROOT: ws() },
+      env: {
+        ...process.env,
+        HOME: home,
+        FACTORY_EVENT_HOME: home,
+        ALIAS_ROOT: ws(),
+      },
       stderr: "pipe",
     });
+    expect(child.exitCode).toBe(0);
+  });
+
+  test("workspace allowlist follows relocated FACTORY_EVENT_HOME", () => {
+    const operatorHome = ws();
+    const runtimeHome = ws();
+    const program = String.raw`
+      import { mkdirSync } from "node:fs";
+      import path from "node:path";
+      import { filesystemConfinementRefusal } from "./sandboxed.mjs";
+
+      const mountRefusal = (hostPath) =>
+        filesystemConfinementRefusal("pi", {
+          ref: "confined@1",
+          mutating: false,
+          capabilities: { filesystem: "workspace-only", services: [] },
+          sandbox: {
+            provider: "gondolin",
+            mounts: { "/opt/tools": { path: hostPath, readonly: true } },
+          },
+        });
+      const configuredWorkspace = path.join(
+        process.env.FACTORY_EVENT_HOME,
+        "workspaces",
+        "run-x",
+      );
+      const legacyWorkspace = path.join(
+        process.env.HOME,
+        ".factory",
+        "event-runtime",
+        "workspaces",
+        "run-x",
+      );
+      mkdirSync(configuredWorkspace, { recursive: true });
+      mkdirSync(legacyWorkspace, { recursive: true });
+      if (mountRefusal(configuredWorkspace) !== null) {
+        throw new Error("relocated workspace was refused");
+      }
+      if (!mountRefusal(legacyWorkspace)?.detail.includes("lies inside the operator home")) {
+        throw new Error("legacy workspace was not refused");
+      }
+    `;
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "--eval", program],
+      cwd: import.meta.dir,
+      env: {
+        ...process.env,
+        HOME: operatorHome,
+        FACTORY_EVENT_HOME: runtimeHome,
+      },
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+  });
+
+  test("mount guard refuses instead of throwing when FACTORY_EVENT_HOME is unset under NODE_ENV=test", () => {
+    const operatorHome = ws();
+    const program = String.raw`
+      import { mkdirSync } from "node:fs";
+      import path from "node:path";
+      import { filesystemConfinementRefusal, HOME_MOUNT_ALLOWLIST } from "./sandboxed.mjs";
+
+      const mountRefusal = (hostPath) =>
+        filesystemConfinementRefusal("pi", {
+          ref: "confined@1",
+          mutating: false,
+          capabilities: { filesystem: "workspace-only", services: [] },
+          sandbox: {
+            provider: "gondolin",
+            mounts: { "/opt/tools": { path: hostPath, readonly: true } },
+          },
+        });
+      const home = process.env.HOME;
+      const allow = HOME_MOUNT_ALLOWLIST(home);
+      if (allow.length !== 1 || allow[0] !== path.join(".factory", "event-runtime", "workspaces")) {
+        throw new Error("allowlist did not fall back to the default subtree: " + JSON.stringify(allow));
+      }
+      const configPath = path.join(home, ".config", "sometool");
+      mkdirSync(configPath, { recursive: true });
+      const refusal = mountRefusal(configPath);
+      if (!refusal?.detail.includes("lies inside the operator home")) {
+        throw new Error("home-data mount was not refused: " + JSON.stringify(refusal));
+      }
+      const defaultWorkspace = path.join(home, ".factory", "event-runtime", "workspaces", "run-x");
+      mkdirSync(defaultWorkspace, { recursive: true });
+      if (mountRefusal(defaultWorkspace) !== null) {
+        throw new Error("default workspace subtree was refused");
+      }
+    `;
+    const env = { ...process.env, HOME: operatorHome, NODE_ENV: "test" };
+    delete env.FACTORY_EVENT_HOME;
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "--eval", program],
+      cwd: import.meta.dir,
+      env,
+      stderr: "pipe",
+    });
+    expect(child.stderr.toString()).toBe("");
     expect(child.exitCode).toBe(0);
   });
 
