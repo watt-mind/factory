@@ -4826,7 +4826,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
 
   test(
     "worktree-up handles an actual baseline-red repo verification and deduplicates baseline blocker comments",
-    { timeout: 45_000 },
+    // This test provisions real git worktrees and child processes twice. The
+    // 45s ceiling has headroom over the ~9s observed under the 8-run burst
+    // (load ~76 on 32 CPUs), and scales with the shared-runner load factor.
+    { timeout: loadAdjustedTimeout(45_000) },
     async () => {
       const repoRoot = process.cwd();
       const repoName = "wm-baseline-real";

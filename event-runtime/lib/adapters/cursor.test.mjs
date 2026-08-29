@@ -510,7 +510,9 @@ if (behavior === "emit_error_tool_result") {
       spec: { ...defaultSpec, model: "composer-2.5" },
       def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
-      timeoutMs: 5000,
+      // The stub still has to spawn and flush a real child; stretch its
+      // liveness ceiling when concurrent CI runs report shared-host load.
+      timeoutMs: loadAdjustedTimeout(5_000),
       env: {
         PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
         CURSOR_API_KEY: "sk-must-be-passed",
