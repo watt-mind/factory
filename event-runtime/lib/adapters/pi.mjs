@@ -648,7 +648,8 @@ async function executeSandboxed({
   // this preflight also covers injected VM runners used by tests and leaves
   // no stray prompt behind when the definition itself is invalid.
   normalizePolicy(def.sandbox, { workspaceDir });
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt =
+    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
   writeFileSync(path.join(workspaceDir, SANDBOX_PROMPT_FILE), prompt, "utf8");
   const argv = [
     bin,
@@ -731,7 +732,8 @@ export async function execute({
     });
   }
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt =
+    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
   // A remote worker can execute this checked-out adapter from a persistent
   // runner checkout, whose ignored config/ is intentionally absent. Preserve
   // the launching operator's root for the ticket CLI instead of replacing it

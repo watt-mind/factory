@@ -41,6 +41,7 @@ describe("sandbox decision (WM-313): deferred, so refused — never ignored", ()
   const sandboxedDef = (promptPath) => ({
     ref: "sandboxed-claude@1",
     promptPath,
+    promptText: "hello",
     mutating: false,
     sandbox: { provider: "gondolin", allowedHosts: ["api.anthropic.com"] },
   });
@@ -720,6 +721,7 @@ if (behavior === "emit_denial_then_recovery") {
   const defaultDef = {
     ref: "test-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
     capabilities: { tools: ["Read", "Grep"] },
   };
@@ -767,14 +769,16 @@ if (behavior === "emit_denial_then_recovery") {
     }
   }
 
-  test("executes stub binary in workspaceDir, strips ANTHROPIC_API_KEY, captures .transcript.json and trace", async () => {
+  test("executes the verified prompt snapshot after its path changes and captures trace", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: defaultSpec,
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
       timeoutMs: 5000,
       env: {
@@ -1136,6 +1140,7 @@ if (behavior === "emit_denial_then_recovery") {
     const mutatingDef = {
       ref: "dispatch@1",
       promptPath: promptFile,
+      promptText: "You are a test agent.",
       mutating: true,
       capabilities: { tools: ["Bash", "Read", "Write", "Edit"] },
     };
@@ -1177,6 +1182,7 @@ if (behavior === "emit_denial_then_recovery") {
     const readOnlyDef = {
       ref: "status-report@1",
       promptPath: promptFile,
+      promptText: "You are a test agent.",
       mutating: false,
       capabilities: { tools: ["Read", "Grep"] },
     };
