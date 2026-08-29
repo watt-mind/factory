@@ -77,6 +77,11 @@ const YAML = `repos:
             - plugins/core/**
       pin_manifests:
         - event-runtime/agents/*.json
+      registry_digest:
+        inputs:
+          - event-runtime/agents/**
+          - event-runtime/event-types.json
+        baseline: event-runtime/lib/registry.test.mjs
     merge_ci:
       workflow: CI
       required_checks:
@@ -138,6 +143,10 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
           { source: "shared/**", requires: ["dist/**", "plugins/core/**"] },
         ],
         pinManifests: ["event-runtime/agents/*.json"],
+        registryDigest: {
+          inputs: ["event-runtime/agents/**", "event-runtime/event-types.json"],
+          baseline: "event-runtime/lib/registry.test.mjs",
+        },
       },
     });
   });
@@ -299,6 +308,10 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      direct:\n        - source: "shared/**"\n          requires: []\n`,
       `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      pin_manifests: [null]\n`,
       `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      extra: 1\n`,
+      `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      registry_digest: []\n`,
+      `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      registry_digest:\n        inputs: []\n        baseline: event-runtime/lib/registry.test.mjs\n`,
+      `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      registry_digest:\n        inputs: [event-runtime/agents/**]\n        baseline: ""\n`,
+      `repos:\n  - name: bad\n    path: /tmp/a\n    owned_paths_policy:\n      registry_digest:\n        inputs: [event-runtime/agents/**]\n        baseline: event-runtime/lib/registry.test.mjs\n        extra: 1\n`,
     ];
     for (const yaml of invalidCases) {
       expect(() => loadRepos({ root: factoryRoot(yaml) })).toThrow(RepoError);
@@ -455,6 +468,10 @@ describe("reposView is what the control API serves", () => {
           { source: "shared/**", requires: ["dist/**", "plugins/core/**"] },
         ],
         pinManifests: ["event-runtime/agents/*.json"],
+        registryDigest: {
+          inputs: ["event-runtime/agents/**", "event-runtime/event-types.json"],
+          baseline: "event-runtime/lib/registry.test.mjs",
+        },
       },
       security: { pythonVersion: "3.12" },
     });
