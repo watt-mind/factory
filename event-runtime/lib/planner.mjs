@@ -1732,19 +1732,24 @@ function queuedWebhookMergeScan(db, runId) {
            AND reason IN (?, ?)
          LIMIT 1`,
     )
-    .get(
-      runId,
-      WEBHOOK_MERGE_SCAN_ALREADY_LIVE,
-      WEBHOOK_MERGE_SCAN_PENDING,
-    );
+    .get(runId, WEBHOOK_MERGE_SCAN_ALREADY_LIVE, WEBHOOK_MERGE_SCAN_PENDING);
 }
 
-function moveQueuedWebhookMergeScan(db, proposalId, event, reason) {
+function moveQueuedWebhookMergeScan(
+  db,
+  proposalId,
+  event,
+  reason,
+  at,
+  ttlSeconds,
+) {
   db.query(
     `UPDATE proposals
-     SET event_source = ?, event_id = ?, reason = ?
+     SET event_source = ?, event_id = ?, reason = ?,
+         spec_json = NULL, spec_hash = NULL, idempotency_key = NULL,
+         created_at = ?, ttl_seconds = ?
      WHERE id = ?`,
-  ).run(event.source, event.event_id, reason, proposalId);
+  ).run(event.source, event.event_id, reason, at, ttlSeconds, proposalId);
   setEventStatus(db, event, "noop", reason);
   return db.query(`SELECT * FROM proposals WHERE id = ?`).get(proposalId);
 }
@@ -1753,6 +1758,8 @@ function moveQueuedWebhookMergeScan(db, proposalId, event, reason) {
  * Re-admit the single webhook delivery retained behind each finished merge
  * scan. A never-executed scan re-arms one coalesced delivery only when refused
  * or cancelled; an executed scan re-arms only deliveries received while running.
+ * "Never executed" is proven by the lifecycle journal (no LEASED record) rather
+ * than `runs.attempts`, which a claim-lock contention requeue resets to 0.
  */
 function reAdmitQueuedWebhookMergeScans(db) {
   const queued = db
@@ -1769,7 +1776,12 @@ function reAdmitQueuedWebhookMergeScans(db) {
          AND (
            (p.reason = ?
             AND r.state IN ('COMPLETED', 'REFUSED', 'FAILED', 'TIMED_OUT', 'CANCELLED'))
-           OR (p.reason = ? AND r.state IN ('REFUSED', 'CANCELLED'))
+           OR (p.reason = ?
+               AND r.state IN ('REFUSED', 'CANCELLED')
+               AND NOT EXISTS (
+                 SELECT 1 FROM lifecycle_events le
+                 WHERE le.run_id = r.run_id AND le.to_state = 'LEASED'
+               ))
          )
        ORDER BY p.created_at, p.rowid`,
     )
@@ -1821,7 +1833,14 @@ function coalesceWebhookMergeRequest(
     return noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds);
   }
   if (executing && marker.reason === WEBHOOK_MERGE_SCAN_PENDING) {
-    const proposal = moveQueuedWebhookMergeScan(db, marker.id, event, reason);
+    const proposal = moveQueuedWebhookMergeScan(
+      db,
+      marker.id,
+      event,
+      reason,
+      at,
+      ttlSeconds,
+    );
     return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
   }
   setEventStatus(db, event, "noop", marker.reason);

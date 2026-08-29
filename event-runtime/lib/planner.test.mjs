@@ -447,18 +447,13 @@ describe("planEvent", () => {
       ).toBe(1);
     };
 
-    for (const terminal of ["REFUSED", "CANCELLED"]) {
+    // A queued scan cancelled before any worker leased it never read GitHub:
+    // the retained pending delivery is re-admitted and plans a fresh scan.
+    {
       const db = openDb(":memory:");
-      const first = queueScan(db, `${terminal.toLowerCase()}-first`);
-      const suffix = terminal.toLowerCase();
-      coalesceTwoDeliveries(db, suffix, first.runId);
-
-      // A queued run has not reached a worker. REFUSED is normally emitted
-      // from VERIFYING, so model the durable terminal state directly here.
-      db.query(`UPDATE runs SET state = ? WHERE run_id = ?`).run(
-        terminal,
-        first.runId,
-      );
+      const first = queueScan(db, "cancelled-first");
+      coalesceTwoDeliveries(db, "cancelled", first.runId);
+      transition(db, { runId: first.runId, to: "CANCELLED", actor: "test" });
 
       expect(
         planAdmittedEvents(db, registry, {
@@ -470,29 +465,41 @@ describe("planEvent", () => {
       expect(
         db
           .query(`SELECT status FROM events WHERE event_id = ?`)
-          .get(`${suffix}-1`).status,
+          .get("cancelled-1").status,
       ).toBe("planned");
       expect(
         db
           .query(`SELECT status FROM events WHERE event_id = ?`)
-          .get(`${suffix}-2`).status,
+          .get("cancelled-2").status,
       ).toBe("noop");
     }
 
-    const db = openDb(":memory:");
-    const first = queueScan(db, "completed-first");
-    coalesceTwoDeliveries(db, "completed", first.runId);
-    for (const to of ["LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
-      transition(db, { runId: first.runId, to, actor: "test" });
-    }
+    // REFUSED is only reachable from VERIFYING, i.e. the scan executed and
+    // read current GitHub state; a pending marker must not re-arm a trailing
+    // scan for it. Same for the executed COMPLETED path.
+    for (const terminal of ["REFUSED", "COMPLETED"]) {
+      const db = openDb(":memory:");
+      const suffix = terminal.toLowerCase();
+      const first = queueScan(db, `${suffix}-first`);
+      coalesceTwoDeliveries(db, suffix, first.runId);
+      for (const to of ["LEASED", "RUNNING", "VERIFYING", terminal]) {
+        transition(db, { runId: first.runId, to, actor: "test" });
+      }
 
-    expect(
-      planAdmittedEvents(db, registry, {
-        now: NOW + 2000,
-        policyVersion: "git:test",
-      }),
-    ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
-    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW + 2000,
+          policyVersion: "git:test",
+        }),
+      ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+      for (const eventId of [`${suffix}-1`, `${suffix}-2`]) {
+        expect(
+          db.query(`SELECT status FROM events WHERE event_id = ?`).get(eventId)
+            .status,
+        ).toBe("noop");
+      }
+    }
   });
 
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {
