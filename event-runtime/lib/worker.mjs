@@ -39,6 +39,11 @@ import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
+import {
+  filesystemConfinementRefusal,
+  MODEL_BACKED_ADAPTERS,
+} from "./adapters/sandboxed.mjs";
+import { isSandboxGuarded } from "./adapters/index.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
 import {
   HARNESS_KINDS,
@@ -753,6 +758,7 @@ const ENVIRONMENT_FAILURES = new Set([
 const AGENT_FAILURES = new Set(["contract_violation", ...HANDOFF_REASON_CODES]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
+  "filesystem_confinement_unavailable",
   "sandbox_unsupported",
   "worktree_sandbox_unsupported",
   "unknown_adapter",
@@ -2283,6 +2289,66 @@ export async function executeClaimed(
       return { fenced: true };
     }
 
+    const adapterKey = adapterOverride ?? spec.adapter;
+    const selectedAdapter = adapters[adapterKey];
+    // Production entry points supply only registry-wrapped adapters. Unit and
+    // integration tests may inject a raw non-model contract stub under a model
+    // route; that stub spawns no model and is outside this boundary.
+    const modelRuntimeSelected =
+      MODEL_BACKED_ADAPTERS.includes(adapterKey) &&
+      isSandboxGuarded(selectedAdapter);
+    const missingModelDefinitionPin =
+      def?.mutating === false && modelRuntimeSelected && !spec.defHash;
+    if (missingModelDefinitionPin || (def && !verifyDefHash(spec, def))) {
+      const refusedRes = refuseTerminal(
+        "agent_definition_mismatch",
+        [missingModelDefinitionPin ? "def_hash_missing" : "def_hash_mismatch"],
+        { causeTyped: true },
+      );
+      stopCancellationMonitor();
+      if (refusedRes?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: "agent_definition_mismatch",
+        receipt: refusedRes.receipt,
+      };
+    }
+    const filesystemIntent =
+      spec.filesystem ?? def?.capabilities?.filesystem ?? null;
+    const confinementDef =
+      filesystemIntent === def?.capabilities?.filesystem
+        ? def
+        : {
+            ...def,
+            capabilities: {
+              ...(def?.capabilities ?? {}),
+              filesystem: filesystemIntent,
+            },
+          };
+    const confinementRefusal = modelRuntimeSelected
+      ? filesystemConfinementRefusal(adapterKey, confinementDef, {
+          sandboxSupport: selectedAdapter?.SANDBOX_SUPPORT ?? null,
+        })
+      : null;
+    if (confinementRefusal) {
+      const res = refuseTerminal(
+        confinementRefusal.code,
+        ["filesystem_confinement"],
+        { detail: confinementRefusal.detail },
+      );
+      stopCancellationMonitor();
+      if (res?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: confinementRefusal.code,
+        receipt: res?.receipt,
+      };
+    }
+
     if (isWorktree && repoName && ticketId) {
       if (!linearConfigured) {
         const res = failTerminal(
@@ -2556,7 +2622,6 @@ export async function executeClaimed(
       }
     }
 
-    const adapterKey = adapterOverride ?? spec.adapter;
     const created = createWorkspace({
       root: workspacesRoot,
       runId,
@@ -2596,23 +2661,6 @@ export async function executeClaimed(
       };
     }
     if (!def) def = getAgent(registry, spec.agent);
-
-    if (!verifyDefHash(spec, def)) {
-      const refusedRes = refuseTerminal(
-        "agent_definition_mismatch",
-        ["def_hash_mismatch"],
-        { causeTyped: true },
-      );
-      cleanupWorkspace();
-      if (refusedRes?.fenced) return { fenced: true };
-      return {
-        runId,
-        attempt,
-        terminalState: "REFUSED",
-        reasonCode: "agent_definition_mismatch",
-        receipt: refusedRes.receipt,
-      };
-    }
 
     try {
       const writtenHarness = materializeRunHarness({

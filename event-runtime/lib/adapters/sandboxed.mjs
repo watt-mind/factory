@@ -35,9 +35,55 @@
  * the whole of `process.env`) is not forwarded, because keeping the worker's
  * credentials out of a model-controlled guest is the point of the exercise.
  */
-import { createWriteStream } from "node:fs";
+import { createWriteStream, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { runInSandbox } from "../sandbox/gondolin.mjs";
+import { normalizePolicy } from "../sandbox/policy.mjs";
+import { MODEL_ADAPTERS } from "../registry.mjs";
+import { FACTORY_ROOT } from "../config.mjs";
+
+/**
+ * Stable refusal code shared by the planner and worker. A workspace-only
+ * declaration is a security boundary, not documentation: model execution is
+ * admitted only when this module can prove that the selected adapter enters a
+ * disposable guest rather than spawning on the worker host.
+ */
+export const FILESYSTEM_CONFINEMENT_REASON =
+  "filesystem_confinement_unavailable";
+
+/** Model-process adapters: registry model routes plus Hermes' fixed LLM harness. */
+export const MODEL_BACKED_ADAPTERS = Object.freeze(
+  [...new Set([...MODEL_ADAPTERS, "hermes"])].sort(),
+);
+const MODEL_BACKED_ADAPTER_SET = new Set(MODEL_BACKED_ADAPTERS);
+
+const RAW_CREDENTIAL_PATH =
+  /(?:^|\/)\.(?:aws|azure|claude|config\/gcloud|config\/gh|cursor|factory|gnupg|kube|ssh)(?:\/|$)|(?:^|\/)(?:credentials|hosts\.yml|secrets\.env)(?:\/|$)|(?:^|\/)\.worktrees(?:\/|$)/;
+
+function pathContains(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
+/** A runtime mount must not expose a broad host root or a raw credential store. */
+function unsafeHostMountReason(hostPath) {
+  const resolved = path.resolve(hostPath);
+  if (pathContains(resolved, homedir())) return "contains the operator home";
+  if (resolved === "/root" || /^\/(?:home|Users)\/[^/]+$/.test(resolved))
+    return "names a broad host user home";
+  if (pathContains(resolved, FACTORY_ROOT))
+    return "contains the Factory runtime checkout";
+  if (resolved === "/tmp") return "contains the shared host temporary root";
+  if (["/dev", "/etc", "/proc", "/run", "/sys", "/var"].includes(resolved))
+    return "names a broad host system root";
+  if (RAW_CREDENTIAL_PATH.test(resolved))
+    return "names a raw credential store or sibling worktree";
+  return null;
+}
 
 /**
  * Where an agent-CLI adapter expects its binary inside the guest, per the
@@ -56,6 +102,7 @@ export const GUEST_BINARIES = Object.freeze({
 export const GUEST_PATH = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 export const GUEST_HOME = "/root";
 export const GUEST_SHELL = "/bin/sh";
+export const GUEST_XDG_ROOT = "/tmp/factory-xdg";
 
 /**
  * Guest console capture: boot timing, guest stderr, exit/timeout/failure, in
@@ -83,6 +130,96 @@ export class SandboxUnsupportedError extends Error {
 /** Does this definition ask to be sandboxed? Anything but absent/null counts, so a malformed block is refused later, not ignored. */
 export function sandboxRequested(def) {
   return def?.sandbox !== undefined && def?.sandbox !== null;
+}
+
+/**
+ * Return a typed admission refusal when a non-mutating model run promises a
+ * workspace-only filesystem but the selected adapter cannot enforce it.
+ *
+ * Today pi is the only admitted model adapter: it owns the Gondolin execution
+ * path. agy, Cursor, Claude and Hermes deliberately fail closed until they
+ * have an equivalent guest route. Extra host mounts are accepted only when
+ * explicitly declared read-only; the workspace itself remains the one
+ * writable mount.
+ * `normalizePolicy()` also proves that secrets are named host variables scoped
+ * to allowed hosts rather than raw values copied into the guest.
+ *
+ * Non-model adapters and mutating definitions are outside this ticket's
+ * boundary and retain their existing admission semantics.
+ *
+ * @param {{ sandboxSupport?: string|null }} [runtime] - worker-side attestation
+ *   from the actual selected adapter module; omitted by the deterministic
+ *   planner, which admits the built-in pi route by name.
+ * @returns {{ code: string, detail: string } | null}
+ */
+export function filesystemConfinementRefusal(adapter, def, runtime = {}) {
+  if (
+    def?.mutating !== false ||
+    def?.capabilities?.filesystem !== "workspace-only" ||
+    !MODEL_BACKED_ADAPTER_SET.has(adapter)
+  ) {
+    return null;
+  }
+
+  const refuse = (detail) => ({
+    code: FILESYSTEM_CONFINEMENT_REASON,
+    detail: `${def?.ref ?? "definition"}: ${detail}`,
+  });
+
+  if (adapter !== "pi") {
+    return refuse(
+      `adapter "${adapter}" has no enforced workspace-only guest path; refusing before model spawn`,
+    );
+  }
+  if (
+    Object.hasOwn(runtime, "sandboxSupport") &&
+    runtime.sandboxSupport !== "gondolin"
+  ) {
+    return refuse(
+      `selected adapter "pi" reports SANDBOX_SUPPORT=${JSON.stringify(runtime.sandboxSupport)} instead of "gondolin"`,
+    );
+  }
+  if (!sandboxRequested(def)) {
+    return refuse(
+      'adapter "pi" requires an explicit sandbox policy for capabilities.filesystem="workspace-only"',
+    );
+  }
+
+  let policy;
+  try {
+    policy = normalizePolicy(def.sandbox);
+  } catch (err) {
+    return refuse(`sandbox policy is not enforceable: ${err.message}`);
+  }
+  const writableAsset = policy.mounts.find((mount) => !mount.readonly);
+  if (writableAsset) {
+    return refuse(
+      `sandbox runtime mount ${JSON.stringify(writableAsset.guestPath)} must be read-only; only the declared workspace may be writable`,
+    );
+  }
+  for (const mount of policy.mounts) {
+    let unsafe = unsafeHostMountReason(mount.hostPath);
+    if (unsafe) {
+      return refuse(
+        `sandbox runtime mount ${JSON.stringify(mount.hostPath)} ${unsafe}; credentials must use the declared secret broker`,
+      );
+    }
+    let realHostPath;
+    try {
+      realHostPath = realpathSync(mount.hostPath);
+    } catch (err) {
+      return refuse(
+        `sandbox runtime mount ${JSON.stringify(mount.hostPath)} cannot be resolved before admission: ${err.message}`,
+      );
+    }
+    unsafe = unsafeHostMountReason(realHostPath);
+    if (unsafe) {
+      return refuse(
+        `sandbox runtime mount ${JSON.stringify(mount.hostPath)} resolves to ${JSON.stringify(realHostPath)}, which ${unsafe}; credentials must use the declared secret broker`,
+      );
+    }
+  }
+  return null;
 }
 
 /**
@@ -118,12 +255,23 @@ export function guestBinary(def, adapter) {
  * @param {Record<string,string|undefined>} [hostEnv]
  */
 export function guestEnvironment(extra = {}, hostEnv = process.env) {
-  const env = { HOME: GUEST_HOME, PATH: GUEST_PATH, TERM: "dumb" };
+  const env = {
+    HOME: GUEST_HOME,
+    PATH: GUEST_PATH,
+    TERM: "dumb",
+    XDG_CONFIG_HOME: `${GUEST_XDG_ROOT}/config`,
+    XDG_CACHE_HOME: `${GUEST_XDG_ROOT}/cache`,
+    XDG_DATA_HOME: `${GUEST_XDG_ROOT}/data`,
+    XDG_RUNTIME_DIR: `${GUEST_XDG_ROOT}/run`,
+  };
   for (const key of GUEST_LOCALE_ENV) {
     if (typeof hostEnv[key] === "string" && hostEnv[key] !== "")
       env[key] = hostEnv[key];
   }
-  return { ...env, ...extra };
+  // Adapter additions cannot replace confinement-critical paths. Secret
+  // placeholders are injected later by the broker and do not travel through
+  // this escape hatch.
+  return { ...extra, ...env };
 }
 
 /**
