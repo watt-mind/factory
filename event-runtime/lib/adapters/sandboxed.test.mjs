@@ -208,6 +208,54 @@ describe("workspace-only model admission (#962)", () => {
     });
   });
 
+  test("runtime mounts deny operator-home data except the workspace allow-list", () => {
+    const home = ws();
+    const program = String.raw`
+      import { mkdirSync, symlinkSync } from "node:fs";
+      import path from "node:path";
+      import { filesystemConfinementRefusal } from "./sandboxed.mjs";
+
+      const mountRefusal = (hostPath) =>
+        filesystemConfinementRefusal("pi", {
+          ref: "confined@1",
+          mutating: false,
+          capabilities: { filesystem: "workspace-only", services: [] },
+          sandbox: {
+            provider: "gondolin",
+            mounts: { "/opt/tools": { path: hostPath, readonly: true } },
+          },
+        });
+      const home = process.env.HOME;
+      const configPath = path.join(home, ".config", "sometool");
+      const localPath = path.join(home, ".local", "share", "x");
+      const workspacePath = path.join(home, ".factory", "event-runtime", "workspaces", "run-x");
+      const rawCredentialPath = path.join(home, ".config", "gh");
+      mkdirSync(configPath, { recursive: true });
+      mkdirSync(localPath, { recursive: true });
+      mkdirSync(workspacePath, { recursive: true });
+      mkdirSync(rawCredentialPath, { recursive: true });
+      const requireReason = (hostPath, reason) => {
+        if (!mountRefusal(hostPath)?.detail.includes(reason)) throw new Error(hostPath + " did not report " + reason);
+      };
+      requireReason(configPath, "lies inside the operator home");
+      requireReason(localPath, "lies inside the operator home");
+      if (mountRefusal(path.dirname(workspacePath)) !== null) throw new Error("workspace root was refused");
+      if (mountRefusal(workspacePath) !== null) throw new Error("workspace descendant was refused");
+      requireReason(rawCredentialPath, "raw credential store");
+      const alias = path.join(process.env.ALIAS_ROOT, "config-alias");
+      symlinkSync(configPath, alias);
+      requireReason(alias, "resolves to");
+      requireReason(alias, "lies inside the operator home");
+    `;
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "--eval", program],
+      cwd: import.meta.dir,
+      env: { ...process.env, HOME: home, ALIAS_ROOT: ws() },
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+  });
+
   test("non-model adapters and mutating definitions retain their existing semantics", () => {
     expect(filesystemConfinementRefusal("fake", confinedDef())).toBeNull();
     expect(

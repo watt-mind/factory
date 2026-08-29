@@ -59,7 +59,12 @@ export const MODEL_BACKED_ADAPTERS = Object.freeze(
 const MODEL_BACKED_ADAPTER_SET = new Set(MODEL_BACKED_ADAPTERS);
 
 const RAW_CREDENTIAL_PATH =
-  /(?:^|\/)\.(?:aws|azure|claude|config\/gcloud|config\/gh|cursor|factory|gnupg|kube|ssh)(?:\/|$)|(?:^|\/)(?:credentials|hosts\.yml|secrets\.env)(?:\/|$)|(?:^|\/)\.worktrees(?:\/|$)/;
+  /(?:^|\/)\.(?:aws|azure|claude|config\/gcloud|config\/gh|cursor|gnupg|kube|ssh)(?:\/|$)|(?:^|\/)(?:credentials|hosts\.yml|secrets\.env)(?:\/|$)|(?:^|\/)\.worktrees(?:\/|$)/;
+
+/** The only runtime-owned subtree that a sandboxed adapter may mount from HOME. */
+export const HOME_MOUNT_ALLOWLIST = Object.freeze([
+  ".factory/event-runtime/workspaces",
+]);
 
 function pathContains(parent, child) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
@@ -69,10 +74,11 @@ function pathContains(parent, child) {
   );
 }
 
-/** A runtime mount must not expose a broad host root or a raw credential store. */
+/** A runtime mount must not expose a broad host root, credentials, or operator-home data. */
 function unsafeHostMountReason(hostPath) {
   const resolved = path.resolve(hostPath);
-  if (pathContains(resolved, homedir())) return "contains the operator home";
+  const home = homedir();
+  if (pathContains(resolved, home)) return "contains the operator home";
   if (resolved === "/root" || /^\/(?:home|Users)\/[^/]+$/.test(resolved))
     return "names a broad host user home";
   if (pathContains(resolved, FACTORY_ROOT))
@@ -82,6 +88,14 @@ function unsafeHostMountReason(hostPath) {
     return "names a broad host system root";
   if (RAW_CREDENTIAL_PATH.test(resolved))
     return "names a raw credential store or sibling worktree";
+  if (
+    pathContains(home, resolved) &&
+    !HOME_MOUNT_ALLOWLIST.some((prefix) =>
+      pathContains(path.join(home, prefix), resolved),
+    )
+  ) {
+    return "lies inside the operator home";
+  }
   return null;
 }
 
