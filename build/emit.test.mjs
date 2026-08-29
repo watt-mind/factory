@@ -39,7 +39,9 @@ test("GitHub slug helpers distinguish remotes from configured values", () => {
   expect(configuredGithubSlug("HTTPS://GITHUB.COM/Owner/Repository.git")).toBe(
     "owner/repository",
   );
-  expect(configuredGithubSlug("https://gitlab.com/Owner/Repository")).toBeNull();
+  expect(
+    configuredGithubSlug("https://gitlab.com/Owner/Repository"),
+  ).toBeNull();
 });
 
 test("floor checkout resolution prefers real paths before matching a slug", () => {
@@ -57,7 +59,11 @@ test("floor checkout resolution prefers real paths before matching a slug", () =
       runningGithub: "watt-mind/factory",
       repos,
     });
-    expect(resolved.map((repo) => repo.isRunningRepo)).toEqual([false, true, true]);
+    expect(resolved.map((repo) => repo.isRunningRepo)).toEqual([
+      false,
+      true,
+      true,
+    ]);
     expect(resolved[0].checkoutPath).toBe(siblingRoot);
     expect(resolved[1].checkoutPath).toBe(realpathSync(runningRoot));
     expect(resolved[2].checkoutPath).toBe(realpathSync(runningRoot));

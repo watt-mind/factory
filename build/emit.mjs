@@ -412,9 +412,11 @@ const agents = corePack.agents;
 /** Return the canonical GitHub owner/repository slug from a Git remote URL. */
 export function remoteGithubSlug(remote) {
   if (typeof remote !== "string") return null;
-  const match = remote.trim().match(
-    /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https?:\/\/github\.com\/)([^/\s]+)\/([^\/#?\s]+)\/?$/i,
-  );
+  const match = remote
+    .trim()
+    .match(
+      /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https?:\/\/github\.com\/)([^/\s]+)\/([^\/#?\s]+)\/?$/i,
+    );
   if (!match) return null;
   const repository = match[2].replace(/\.git$/i, "");
   return repository ? `${match[1]}/${repository}`.toLowerCase() : null;
