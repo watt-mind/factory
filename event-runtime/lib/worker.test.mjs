@@ -40,6 +40,7 @@ import {
 } from "./adapters/claude.mjs";
 import * as fake from "./adapters/fake.mjs";
 import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
+import { createAdapterRegistry } from "./adapters/index.mjs";
 import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -1578,7 +1579,25 @@ describe("worker", () => {
 
   test("attempt 2 resumes the prior harness session and stale attempt 1 remains fenced", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const resumeRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    resumeRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      // This test owns resume/fencing, not workspace-only admission.
+      capabilities: { filesystem: "read-only", services: ["tracker:read"] },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        maxAttempts: 2,
+        defHash: computeDefHash(
+          resumeRegistry.agents.get("factory-status-report@1"),
+        ),
+      }),
+    );
     const o = opts();
     const stale = claimNext(db, o);
     const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
@@ -1610,7 +1629,7 @@ describe("worker", () => {
     };
     const done = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: resumeAdapter },
       fresh,
       { ...o, now: afterExpiry },
@@ -1624,7 +1643,7 @@ describe("worker", () => {
 
     const zombie = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: resumeAdapter },
       stale,
       { ...o, now: afterExpiry },
@@ -1640,7 +1659,25 @@ describe("worker", () => {
 
   test("attempt 2 cold-starts cleanly when the prior transcript has no resumable session", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const resumeRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    resumeRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      // This test owns resume extraction, not workspace-only admission.
+      capabilities: { filesystem: "read-only", services: ["tracker:read"] },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        maxAttempts: 2,
+        defHash: computeDefHash(
+          resumeRegistry.agents.get("factory-status-report@1"),
+        ),
+      }),
+    );
     const o = opts();
     claimNext(db, o);
     const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
@@ -1678,7 +1715,7 @@ describe("worker", () => {
     };
     const done = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: coldAdapter },
       fresh,
       { ...o, now: afterExpiry },
@@ -1886,6 +1923,90 @@ describe("worker", () => {
     const summary = await runOnce(db, registry, adapters, opts());
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("unknown_adapter");
+  });
+
+  test("workspace-only model execution is refused before workspace creation or adapter spawn (#962)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        defHash: computeDefHash(getAgent(registry, "factory-status-report@1")),
+      }),
+    );
+    const workspacesRoot = freshRoot();
+    let executed = false;
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        claude: {
+          SANDBOX_SUPPORT: "unsupported",
+          async execute() {
+            executed = true;
+            throw new Error("model adapter must not spawn");
+          },
+        },
+      },
+    }).toMap();
+
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({ workspacesRoot }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "filesystem_confinement_unavailable",
+    });
+    expect(executed).toBe(false);
+    expect(readdirSync(workspacesRoot)).toEqual([]);
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ).verification,
+    ).toEqual({ status: "passed", checks: ["filesystem_confinement"] });
+  });
+
+  test("legacy non-mutating model specs without a definition pin fail closed before using the live definition (#962)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "hermes" }));
+    const workspacesRoot = freshRoot();
+    let executed = false;
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        hermes: {
+          SANDBOX_SUPPORT: "unsupported",
+          async execute() {
+            executed = true;
+          },
+        },
+      },
+    }).toMap();
+
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({ workspacesRoot }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "agent_definition_mismatch",
+    });
+    expect(executed).toBe(false);
+    expect(readdirSync(workspacesRoot)).toEqual([]);
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ).verification.checks,
+    ).toEqual(["def_hash_missing"]);
   });
 
   test("cancelRun on a QUEUED run → CANCELLED; on a terminal run → IllegalTransition", () => {
