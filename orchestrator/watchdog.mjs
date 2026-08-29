@@ -23,6 +23,114 @@ const c = {
   red: (s) => `\x1b[31m${s}\x1b[0m`,
 };
 
+export const SANDBOX_REFUSAL_WINDOW_MS = 60 * 60 * 1000;
+const SCAN_AGENT = /^(?:work-scan|triage-scan|ci-doctor)@\d+$/;
+
+export function isScanLoopAgent(agent) {
+  return typeof agent === "string" && SCAN_AGENT.test(agent);
+}
+
+/**
+ * Find recent run refusals caused by a missing Gondolin host capability.
+ * Kept as the pure join/filter seam for tests and API consumers that already
+ * hold both projections.
+ */
+export function recentSandboxRefusals(
+  journal,
+  runs,
+  { now = Date.now(), windowMs = SANDBOX_REFUSAL_WINDOW_MS } = {},
+) {
+  const agentsByRun = new Map(
+    (runs?.runs ?? [])
+      .filter((run) => isScanLoopAgent(run.agent))
+      .map((run) => [run.runId, run.agent]),
+  );
+  const cutoff = now - windowMs;
+  const seen = new Set();
+  const refusals = [];
+  for (const entry of journal?.entries ?? []) {
+    const observedAt = Date.parse(entry?.at);
+    if (
+      entry?.to !== "REFUSED" ||
+      !agentsByRun.has(entry.runId) ||
+      typeof entry.reason !== "string" ||
+      !entry.reason.includes("sandbox_unavailable:") ||
+      !Number.isFinite(observedAt) ||
+      observedAt < cutoff ||
+      seen.has(entry.runId)
+    ) {
+      continue;
+    }
+    seen.add(entry.runId);
+    refusals.push({
+      runId: entry.runId,
+      agent: agentsByRun.get(entry.runId) ?? "unknown",
+      reason: entry.reason,
+      at: entry.at,
+    });
+  }
+  return refusals;
+}
+
+/**
+ * Read every scan refusal whose terminal transition is inside the alert
+ * window. The run API's terminal population is time-bounded server-side, and
+ * cursor pagination avoids losing an incident behind fixed collection limits.
+ */
+export async function fetchRecentSandboxRefusals({
+  host = "127.0.0.1",
+  port = 7381,
+  fetchFn = fetch,
+  now = Date.now(),
+  windowMs = SANDBOX_REFUSAL_WINDOW_MS,
+} = {}) {
+  const runs = [];
+  const seenCursors = new Set();
+  let before = null;
+  do {
+    const url = new URL(`http://${host}:${port}/runs`);
+    url.searchParams.set("state", "REFUSED");
+    url.searchParams.set("population", "terminal");
+    url.searchParams.set("from", new Date(now - windowMs).toISOString());
+    url.searchParams.set("to", new Date(now + 1_000).toISOString());
+    url.searchParams.set("limit", "200");
+    if (before) url.searchParams.set("before", before);
+    const page = await fetchFn(url, {
+      signal: AbortSignal.timeout(3000),
+    }).then((response) => response.json());
+    runs.push(...(page?.runs ?? []).filter((run) => isScanLoopAgent(run.agent)));
+    before = page?.nextBefore ?? null;
+    if (before && seenCursors.has(before)) break;
+    if (before) seenCursors.add(before);
+  } while (before);
+
+  const details = await Promise.all(
+    runs.map(async (run) => {
+      const detail = await fetchFn(
+        `http://${host}:${port}/runs/${encodeURIComponent(run.runId)}`,
+        { signal: AbortSignal.timeout(3000) },
+      ).then((response) => response.json());
+      const refusal = [...(detail?.lifecycle ?? [])]
+        .reverse()
+        .find(
+          (entry) =>
+            entry?.to_state === "REFUSED" &&
+            typeof entry.reason === "string" &&
+            entry.reason.includes("sandbox_unavailable:"),
+        );
+      return refusal
+        ? {
+            runId: run.runId,
+            agent: run.agent,
+            reason: refusal.reason,
+            at: refusal.at,
+          }
+        : null;
+    }),
+  );
+  return details.filter(Boolean);
+}
+
 export async function runWatchdogCheck({
   host = "127.0.0.1",
   port = 7381,
@@ -38,6 +146,7 @@ export async function runWatchdogCheck({
     runningRuns: 0,
     wedgedRuns: 0,
     queuedRuns: 0,
+    sandboxRefusals: [],
     anomalies: [],
   };
 
@@ -84,17 +193,19 @@ export async function runWatchdogCheck({
 
   // 3. Workers & Runs Status from API
   try {
-    const [statusRes, workersRes, runningRes] = await Promise.all([
-      fetch(`http://${host}:${port}/status`, {
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => r.json()),
-      fetch(`http://${host}:${port}/workers`, {
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => r.json()),
-      fetch(`http://${host}:${port}/runs?state=RUNNING`, {
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => r.json()),
-    ]);
+    const [statusRes, workersRes, runningRes, sandboxRefusals] =
+      await Promise.all([
+        fetch(`http://${host}:${port}/status`, {
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => r.json()),
+        fetch(`http://${host}:${port}/workers`, {
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => r.json()),
+        fetch(`http://${host}:${port}/runs?state=RUNNING`, {
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => r.json()),
+        fetchRecentSandboxRefusals({ host, port }),
+      ]);
 
     const workers = workersRes?.workers ?? [];
     metrics.workersCount = workers.length;
@@ -130,6 +241,17 @@ export async function runWatchdogCheck({
     }
 
     metrics.queuedRuns = statusRes?.runs?.byState?.QUEUED ?? 0;
+    metrics.sandboxRefusals = sandboxRefusals;
+    if (metrics.sandboxRefusals.length > 0) {
+      const agents = [
+        ...new Set(metrics.sandboxRefusals.map((entry) => entry.agent)),
+      ].sort();
+      issues.push({
+        severity: "CRITICAL",
+        code: "SCAN_SANDBOX_UNAVAILABLE",
+        message: `Scan loops refused: sandbox unavailable (${agents.join(", ")})`,
+      });
+    }
     const idleWorkers = workers.filter((w) => w.state === "idle").length;
     if (
       metrics.queuedRuns > 0 &&

@@ -5,6 +5,15 @@
 packs: []
 extensions: []
 
+# Workspace-only model runs fail closed when this host cannot provide the
+# Gondolin guest boundary. An operator may temporarily accept host execution
+# for definitions that do not carry their own `sandbox:` block by uncommenting
+# the exact opt-out below. Every admitted run records
+# `filesystemConfinement.status: unconfined` in its receipt. Prefer installing
+# QEMU/Gondolin and leaving this absent; see docs/event-runtime-adapters.md.
+# sandbox:
+#   workspace_only_fallback: host
+
 chain_auto_approval:
   # New installations may opt into this closed set after reviewing their
   # tracker, credentials, and merge policy.
