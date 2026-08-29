@@ -58,6 +58,7 @@ import {
   acquireClaimLock,
   adapterExecuteTimeoutMs,
   cancelRun,
+  CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
   CODE_RELOAD_EXIT,
   codeStamp,
@@ -795,7 +796,9 @@ describe("worker", () => {
     expect(runState(db, spec.runId)).toBe("REFUSED");
     expect(
       db
-        .query(`SELECT status, reason FROM proposals WHERE id = 'prop-stale-open'`)
+        .query(
+          `SELECT status, reason FROM proposals WHERE id = 'prop-stale-open'`,
+        )
         .get(),
     ).toEqual({ status: "rejected", reason: "run_refused" });
 
@@ -3531,6 +3534,153 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     ).toEqual([1, 1, 1]);
     expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
     expect(maxActiveClaims).toBe(1);
+  });
+
+  // WM-1124: a full-width same-repo dispatch burst must not starve itself. One
+  // worker holds the claim lock across a long claim window while the rest of the
+  // burst contends against it for many more cycles than the old fixed requeue
+  // ceiling (24) allowed. Every contender must durably defer-and-retry — none
+  // may terminally REFUSE with claim_lock_starvation just because a live holder
+  // still owns the lock — and the atomic claim must be preserved throughout
+  // (at most one active tracker claim, each ticket claimed exactly once).
+  test("a same-repo dispatch burst never claim_lock_starves against a live holder", async () => {
+    const db = openDb(":memory:");
+    const lockDir = tmpDir("evrt-lock-burst20-");
+    const BURST = 20;
+    const tickets = Array.from({ length: BURST }, (_, i) => `WM-${720 + i}`);
+    const specs = tickets.map((ticket, index) =>
+      queueRun(
+        db,
+        makeDispatchSpec({
+          runId: `run_burst_${String(index + 1).padStart(2, "0")}`,
+          input: { repo: "wt-worker", ticket },
+        }),
+      ),
+    );
+
+    let now = T0;
+    let releaseHolder;
+    let markHolderStarted;
+    const holderStarted = new Promise((resolve) => {
+      markHolderStarted = resolve;
+    });
+    const holderRelease = new Promise((resolve) => {
+      releaseHolder = resolve;
+    });
+    let activeClaims = 0;
+    let maxActiveClaims = 0;
+    const claimedTickets = [];
+    const holderTicket = tickets[0];
+
+    const o = opts({
+      now: () => now,
+      dispatch: {
+        locksDir: lockDir,
+        // Deterministic worst case: full backoff (random -> the cap) every time.
+        random: () => 1,
+        fetchTicket: (ticket) => readyDispatchTicket(ticket),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: async ({ ticket }) => {
+          activeClaims += 1;
+          maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+          claimedTickets.push(ticket);
+          if (ticket === holderTicket) {
+            // Pin the lock open so the rest of the burst repeatedly contends.
+            markHolderStarted();
+            await holderRelease;
+          }
+          activeClaims -= 1;
+          return { ok: true };
+        },
+      },
+    });
+
+    // One worker wins the lock and holds it across a long claim window.
+    const holder = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+    await holderStarted;
+
+    // While the live holder keeps the lock, sweep the other 19 through far more
+    // contention cycles than the old fixed ceiling (24) permitted. Every sweep
+    // must defer (QUEUED / claim_lock_contention); none may terminally REFUSE.
+    const CONTENTION_ROUNDS = 30;
+    const contenders = specs.slice(1);
+    for (let round = 0; round < CONTENTION_ROUNDS; round++) {
+      // Advance past every deferred not-before so the whole cohort is eligible.
+      now += CLAIM_LOCK_BACKOFF_MAX_MS;
+      for (let i = 0; i < contenders.length; i++) {
+        const summary = await runOnce(
+          db,
+          registry,
+          { fake: dispatchFakeAdapter },
+          o,
+        );
+        expect(summary).toMatchObject({
+          terminalState: "QUEUED",
+          reasonCode: "claim_lock_contention",
+        });
+      }
+      // The holder is RUNNING and the rest are deferred to a future not-before,
+      // so nothing else is claimable within this round.
+      expect(claimNext(db, o)).toBeNull();
+    }
+
+    // Contention must not have spent an execution attempt or left an attempt row.
+    for (const spec of contenders) {
+      expect(
+        db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+          .attempts,
+      ).toBe(0);
+      expect(
+        db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId),
+      ).toHaveLength(0);
+    }
+
+    // Release the holder and drain the whole burst.
+    releaseHolder();
+    expect((await holder).terminalState).toBe("COMPLETED");
+
+    let completed = 1; // the holder
+    let guard = 0;
+    while (completed < BURST && guard++ < BURST * 3) {
+      now += CLAIM_LOCK_BACKOFF_MAX_MS;
+      let summary;
+      while (
+        (summary = await runOnce(
+          db,
+          registry,
+          { fake: dispatchFakeAdapter },
+          o,
+        ))
+      ) {
+        expect(summary.terminalState).toBe("COMPLETED");
+        completed += 1;
+      }
+    }
+
+    // Every burst member ran to completion — none terminally REFUSED.
+    expect(completed).toBe(BURST);
+    expect(specs.map((spec) => runState(db, spec.runId))).toEqual(
+      Array.from({ length: BURST }, () => "COMPLETED"),
+    );
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempts WHERE reason_code = 'claim_lock_starvation'`,
+        )
+        .get().n,
+    ).toBe(0);
+    // Claim atomicity: exactly one claim in flight at a time, each ticket once.
+    expect(maxActiveClaims).toBe(1);
+    expect(claimedTickets.slice().sort()).toEqual(tickets.slice().sort());
+    expect(new Set(claimedTickets).size).toBe(BURST);
+    expect(
+      specs.map(
+        (spec) =>
+          db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+            .attempts,
+      ),
+    ).toEqual(Array.from({ length: BURST }, () => 1));
   });
 
   test("merge-fix gate accepts an assigned In Review ticket without invoking the dispatch claim", async () => {
