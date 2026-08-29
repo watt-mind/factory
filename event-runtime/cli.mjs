@@ -384,12 +384,19 @@ export async function inspectWithPresentation(args) {
   }
   const extra = [];
   if (detail?.result?.presentation) {
-    const rendered = renderText(
-      resolveRefs(detail.result.presentation, detail.result.artifact ?? {}),
-      { width: Math.max(20, Number(process.stdout.columns ?? 80) - 2) },
-    );
-    extra.push("  presentation");
-    for (const line of rendered.split("\n")) extra.push(`  ${line}`);
+    try {
+      const rendered = renderText(
+        resolveRefs(detail.result.presentation, detail.result.artifact ?? {}),
+        { width: Math.max(20, Number(process.stdout.columns ?? 80) - 2) },
+      );
+      extra.push("  presentation");
+      for (const line of rendered.split("\n")) extra.push(`  ${line}`);
+    } catch (error) {
+      // Garnish must never mask the buffered inspect output.
+      console.warn(
+        `warning: presentation not rendered: ${error?.message ?? error}`,
+      );
+    }
   } else if (detail?.result?.presentationErrors?.length) {
     const errors = detail.result.presentationErrors;
     extra.push(`  the agent's summary was dropped: ${errors.length} errors`);
@@ -398,7 +405,7 @@ export async function inspectWithPresentation(args) {
 
   if (extra.length > 0) {
     const artifactAt = lines.findIndex((line) => /^  artifact /.test(line));
-    const resultAt = lines.findIndex((line) => line === "result");
+    const resultAt = lines.findIndex((line) => line.trim() === "result");
     const at =
       artifactAt >= 0
         ? artifactAt
