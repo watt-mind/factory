@@ -367,6 +367,12 @@ outside the model process — runs in the delegated worktree, in this order:
    `dispatch.owned_paths_conformance: strict` (config/policy.yaml, default
    `advisory`) they refuse the handoff.
 
+Handoff commands use a scrubbed copy of the worker environment: every
+`FACTORY_*` variable associated with the live instance is removed, then
+`FACTORY_REPOS_ROOT` is set explicitly to the delegated worktree. This keeps
+repo resolution, instance paths, and endpoints confined to the worktree rather
+than inheriting the live worker stack.
+
 Each command runs with the repo-verify timeout (`FACTORY_REPO_VERIFY_TIMEOUT_MS`,
 default 600 s) and its full output lands in the workspace (`.verify.log`,
 `.verify.ticket.log`, `.verify.web.log`). Failure-shaped outcomes:

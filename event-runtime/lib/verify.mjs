@@ -111,6 +111,31 @@ export const DEFAULT_OWNED_PATHS_CONFORMANCE = "advisory";
 export const HANDOFF_COMMENT_HEADING =
   "## Handoff verification (worker-observed)";
 
+/**
+ * Handoff commands inspect the candidate worktree, never the worker's live
+ * runtime. Keep this as a wildcard instead of enumerating today's instance
+ * variables: a new FACTORY_* path or endpoint must be scrubbed by default.
+ * #967 shares this seam for its credential-specific handoff sanitisation.
+ */
+export const HANDOFF_FACTORY_ENV_DENYLIST = Object.freeze(["FACTORY_*"]);
+
+function handoffEnvironment(worktreePath) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (
+      HANDOFF_FACTORY_ENV_DENYLIST.some(
+        (pattern) => pattern === "FACTORY_*" && key.startsWith("FACTORY_"),
+      )
+    ) {
+      delete env[key];
+    }
+  }
+  // reposRoot() is the one Factory setting handoff commands need. Pin it
+  // after scrubbing so the command always resolves files in this worktree.
+  env.FACTORY_REPOS_ROOT = worktreePath;
+  return env;
+}
+
 /** `dispatch.owned_paths_conformance` in config/policy.yaml: advisory (default) | strict. */
 export function policyOwnedPathsConformance(root = reposRoot()) {
   const file = resolveConfigPath("policy", { root });
@@ -148,6 +173,7 @@ function runHandoffCommand({ command, cwd, logPath, timeoutMs }) {
   try {
     res = spawnSync("/bin/bash", ["-c", command], {
       cwd,
+      env: handoffEnvironment(cwd),
       stdio: ["ignore", fd, fd],
       timeout: timeoutMs,
     });
