@@ -292,12 +292,13 @@ describe("planEvent", () => {
       admit(db, webhook("check-proposed")),
       { now: NOW + 1000, policyVersion: "git:test" },
     );
-    expect(whileProposed).toEqual({
+    expect(whileProposed).toMatchObject({
       decision: "noop",
       runId: first.runId,
-      reason: "webhook_merge_scan_already_live",
+      reason: "webhook_merge_scan_pending",
     });
-    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+    expect(whileProposed.proposal.status).toBe("resolved");
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
 
     for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING"]) {
       transition(db, { runId: first.runId, to, actor: "test" });
@@ -402,6 +403,96 @@ describe("planEvent", () => {
     expect(other.decision).toBe("run");
     expect(other.runId).not.toBe(first.runId);
     expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(5);
+  });
+
+  test("never-executed merge scans retain one webhook delivery only when refused or cancelled", () => {
+    const webhook = (eventId) => ({
+      eventId,
+      type: "factory.merge.requested",
+      source: "github",
+      subject: "factory",
+      correlationId: eventId,
+      payload: { repo: "factory" },
+    });
+    const queueScan = (db, eventId) => {
+      const first = planEvent(db, registry, admit(db, webhook(eventId)), {
+        now: NOW,
+        policyVersion: "git:test",
+      });
+      for (const to of ["APPROVED", "QUEUED"]) {
+        transition(db, { runId: first.runId, to, actor: "test" });
+      }
+      return first;
+    };
+    const coalesceTwoDeliveries = (db, suffix, runId) => {
+      for (const eventId of [`${suffix}-1`, `${suffix}-2`]) {
+        expect(
+          planEvent(db, registry, admit(db, webhook(eventId)), {
+            now: NOW + 1000,
+            policyVersion: "git:test",
+          }),
+        ).toMatchObject({
+          decision: "noop",
+          runId,
+          reason: "webhook_merge_scan_pending",
+        });
+      }
+      expect(
+        db
+          .query(
+            `SELECT COUNT(*) AS n FROM proposals
+             WHERE run_id = ? AND reason = 'webhook_merge_scan_pending'`,
+          )
+          .get(runId).n,
+      ).toBe(1);
+    };
+
+    for (const terminal of ["REFUSED", "CANCELLED"]) {
+      const db = openDb(":memory:");
+      const first = queueScan(db, `${terminal.toLowerCase()}-first`);
+      const suffix = terminal.toLowerCase();
+      coalesceTwoDeliveries(db, suffix, first.runId);
+
+      // A queued run has not reached a worker. REFUSED is normally emitted
+      // from VERIFYING, so model the durable terminal state directly here.
+      db.query(`UPDATE runs SET state = ? WHERE run_id = ?`).run(
+        terminal,
+        first.runId,
+      );
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW + 2000,
+          policyVersion: "git:test",
+        }),
+      ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+      expect(
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get(`${suffix}-1`).status,
+      ).toBe("planned");
+      expect(
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get(`${suffix}-2`).status,
+      ).toBe("noop");
+    }
+
+    const db = openDb(":memory:");
+    const first = queueScan(db, "completed-first");
+    coalesceTwoDeliveries(db, "completed", first.runId);
+    for (const to of ["LEASED", "RUNNING", "VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    expect(
+      planAdmittedEvents(db, registry, {
+        now: NOW + 2000,
+        policyVersion: "git:test",
+      }),
+    ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
   });
 
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {
