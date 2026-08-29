@@ -183,7 +183,12 @@ const SEMVER_COMPARATOR =
  */
 export function isToolchainConstraint(constraint) {
   if (typeof constraint !== "string") return false;
-  const trimmed = constraint.trim();
+  // node-semver allows whitespace between an operator and its version
+  // (`>= 1.2.3`), so collapse it before tokenizing. A false reject here is
+  // louder than a missed constraint: this throws inside `loadRepos`, which
+  // would take down every command that reads the registry, not just the repo
+  // with the odd spelling.
+  const trimmed = constraint.trim().replace(/([<>]=?|=|\^|~)\s+/g, "$1");
   if (!trimmed) return false;
   for (const clause of trimmed.split("||")) {
     const tokens = clause.trim().split(/\s+/).filter(Boolean);
@@ -268,28 +273,51 @@ function normalizeToolchain(raw, repoName, file) {
 }
 
 /**
+ * A **dotted** version token: `1.2`, `1.2.3`, `1.3.0-canary.1`, with an
+ * optional prefix glued to it so `go1.22.0` reads as `1.22.0`.
+ *
+ * The dot is load-bearing. An earlier version of this accepted any bare
+ * integer anywhere in the line, which manufactured a version out of ordinary
+ * error output — `"Error 404: not found"` became `404.0.0`, and
+ * `satisfies("404.0.0", ">=1.3")` is **true**. A tool that exits 0 and prints
+ * a non-version line would have silently passed a loose constraint: the same
+ * fail-open hazard `isToolchainConstraint` exists to close, one field over.
+ *
+ * The leading `(?<![\d.])` and trailing `(?![\d.])` keep the token whole, so
+ * an IPv4 address (`10.0.0.1`) or a four-part build number matches nothing
+ * rather than yielding a plausible-looking prefix.
+ */
+const VERSION_TOKEN =
+  /(?<![\d.])v?(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?![\d.])/;
+
+/**
  * Extract a comparable version from whatever a tool prints. `node --version`
  * says `v22.1.0`, `git --version` says `git version 2.39.5 (Apple Git-154)`,
- * `bun --version` says `1.2.23`. Only the first non-empty line is considered,
- * and a partial version is widened to x.y.z so semver can compare it.
+ * `go version` says `go version go1.22.0 darwin/arm64`, `bun --version` says
+ * `1.2.23`. Only the first non-empty line is considered, and a partial version
+ * is widened to x.y.z so semver can compare it.
  *
- * Returns null when nothing version-shaped is there — which fails closed
- * rather than guessing.
+ * Anything that is not a dotted version token is null — including a stray
+ * integer inside an error message. The one exception is a line that is
+ * *nothing but* an integer (`22`), which is unambiguous. Null fails closed:
+ * the constraint cannot be proven, so the repo is not ready.
  */
 export function normalizeToolVersion(raw) {
   if (typeof raw !== "string") return null;
   const line = raw.split("\n").find((candidate) => candidate.trim());
   if (!line) return null;
-  // Anchored at a token boundary and tolerant of the `v` prefix, so `v22.1.0`
-  // reads as 22.1.0 while `Git-154` inside `git version 2.39.5 (Apple
-  // Git-154)` never wins over the real version earlier in the line.
-  const match = line.match(
-    /(?:^|[^\w.])v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?/,
-  );
-  if (!match) return null;
-  const [, major, minor = "0", patch = "0", prerelease] = match;
-  const base = `${Number(major)}.${Number(minor)}.${Number(patch)}`;
-  return prerelease ? `${base}-${prerelease}` : base;
+  const trimmed = line.trim();
+
+  const match = trimmed.match(VERSION_TOKEN);
+  if (match) {
+    const [, major, minor, patch = "0", prerelease] = match;
+    const base = `${Number(major)}.${Number(minor)}.${Number(patch)}`;
+    return prerelease ? `${base}-${prerelease}` : base;
+  }
+  // A bare integer counts only when it is the entire line. `bun --version`
+  // could legitimately print `2`; `Segmentation fault: 11` must not.
+  if (/^\d+$/.test(trimmed)) return `${Number(trimmed)}.0.0`;
+  return null;
 }
 
 /** Stable fingerprint of a repo's declared toolchain; a change invalidates attestations. */
@@ -504,18 +532,27 @@ export function repoReadiness({
           node,
           repo: repo.name,
           detail,
-          action: `run \`factory repo doctor ${repo.name}\` on ${node} to refresh the toolchain attestation`,
+          // Must be runnable: `bin/factory` has no `repo` subcommand, so the
+          // repo-scoped `factory repo doctor <name>` the design sketches does
+          // not exist yet. Name what exists and what is pending.
+          action: `re-run toolchain preflight for repo ${repo.name} on ${node} — \`factory doctor\` reports it once #1097 lands`,
         },
       ],
       refusal: `repo ${repo.name} has no current toolchain attestation on ${node} (${detail})`,
     };
   }
   if (!attestation.ok) {
+    // Tolerate a malformed attestation rather than throwing. WM-317 persists
+    // and reloads these, and once #1096 puts this on the pre-claim path a
+    // throw would stall dispatch where a refusal merely skips one repo.
+    const reasons = Array.isArray(attestation.reasons)
+      ? attestation.reasons
+      : [];
     return {
       ready: false,
       attested: true,
-      reasons: attestation.reasons,
-      refusal: refusalLine(repo, node, attestation.reasons),
+      reasons,
+      refusal: refusalLine(repo, node, reasons),
     };
   }
   return { ready: true, attested: true, reasons: [], refusal: null };
@@ -523,6 +560,9 @@ export function repoReadiness({
 
 /** One line an operator can act on, naming every failing constraint. */
 function refusalLine(repo, node, reasons) {
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return `repo ${repo.name} toolchain preflight failed on ${node} with no recorded reason — re-run preflight`;
+  }
   const failures = reasons.map((r) =>
     r.reason === REPO_TOOLCHAIN_MISSING
       ? `${r.executable} ${r.constraint} (not found)`
@@ -540,8 +580,8 @@ function refusalLine(repo, node, reasons) {
  * latency, no behaviour change. Otherwise a current attestation is reused and
  * a stale or absent one triggers a fresh, non-mutating preflight.
  *
- * Wiring this into orchestrator/tick.mjs is deliberately a separate change:
- * tick.mjs is outside this ticket's Owned Paths.
+ * Wiring this into orchestrator/tick.mjs is deliberately a separate change
+ * (#1096): tick.mjs is outside this ticket's Owned Paths.
  */
 export async function repoDispatchPreflight(
   repo,
@@ -799,9 +839,10 @@ export function reposView(repos) {
     verify: repo.verify,
     // `toolchain` is deliberately NOT published here yet. Adding a field to
     // this projection changes /repos and the config view in the same commit,
-    // and both are asserted exactly in files outside gh-1076's Owned Paths.
-    // The follow-up that teaches `factory doctor` to report toolchain status
-    // publishes it, with those assertions updated alongside.
+    // and both are asserted exactly in files outside gh-1076's Owned Paths
+    // (api-registry.test.mjs, api-config.test.mjs). Issue #1097 — teach
+    // `factory doctor` to report toolchain status — publishes it and updates
+    // those assertions alongside.
   }));
 }
 

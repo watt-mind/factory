@@ -355,7 +355,12 @@ Both are validated at config load, and both are strict on purpose:
 - a constraint must parse as a semver range. This is not decoration:
   `Bun.semver.satisfies("1.2.3", "not a range")` returns **true**, so an
   unvalidated typo would produce a gate that silently admits every version.
-  `isToolchainConstraint` rejects it at load instead.
+  `isToolchainConstraint` rejects it at load instead. Whitespace after an
+  operator (`>= 1.2.3`) is valid node-semver and is accepted — a false reject
+  throws inside `loadRepos` and takes down every command that reads the
+  registry, so the validator is strict about garbage and lenient about
+  spelling. Known residue: some wildcard forms (`*.2.3`, `<*`) still validate
+  while constraining nothing (#1115).
 
 The contract records what the repo requires; it does not select a version
 manager or install system packages. `repo doctor` resolves each executable in
@@ -368,16 +373,29 @@ installation, or model spawn.
 `preflightToolchain(repo, {node, which, spawn})` is that check. The only
 subprocess it starts, per declared executable, is `<executable> --version`;
 PATH resolution and the probe are injected so the non-mutation property is
-asserted on the argv the real code builds. A resolution failure is
+asserted on the argv the real code builds. (Resolution and the probe currently
+perform two independent PATH lookups, so the attestation's `resolved` path and
+the binary that answered can in principle differ — #1116.) A resolution failure is
 `repo_toolchain_missing`; a version that is out of range, unparseable, or
 unobtainable (non-zero exit) is `repo_toolchain_mismatch`, which carries
 `observed` (normalized) and `observedRaw` (the tool's own first line) so an
 operator never has to go to the node to learn what is installed.
 
 Version output is normalized before comparison, because tools disagree about
-format: `v22.1.0`, `git version 2.39.5 (Apple Git-154)`, `Python 3.12.1`, and a
-bare `1.2` all reduce to a comparable `x.y.z`. Nothing version-shaped reduces
-to `null`, which fails closed rather than guessing.
+format: `v22.1.0`, `git version 2.39.5 (Apple Git-154)`, `Python 3.12.1`,
+`go version go1.22.0 darwin/arm64`, and a bare `1.2` all reduce to a comparable
+`x.y.z`.
+
+The normalizer requires a **dotted** version token, and that requirement is the
+gate's second fail-open guard rather than a formatting nicety. Accepting a bare
+integer anywhere in the line turns ordinary error output into a version:
+`"Error 404: not found"` reduces to `404.0.0`, and
+`satisfies("404.0.0", ">=1.3")` is `true` — a tool that exits 0 while printing
+something that is not a version would silently pass a loose constraint. So a
+lone integer counts only when it is the _entire_ line, and a token that is part
+of a longer dotted number (an IPv4 address, a four-part build) matches nothing
+rather than yielding a plausible prefix. Anything else is `null`, which fails
+closed: the constraint cannot be proven, so the repo is not ready.
 
 **A repo that declares no `toolchain:` block is unaffected.** `toolchain` reads
 as `null`, readiness short-circuits to ready, and no executable is resolved or
@@ -460,9 +478,12 @@ different node or repo, a bumped implementation version, an unparseable
 timestamp, or age beyond `TOOLCHAIN_ATTESTATION_MAX_AGE_MS` (one hour).
 `repoReadiness` then returns `ready` only for a **current and passing**
 attestation — a stale one is `repo_attestation_stale` with the specific detail
-(`absent`, `expired`, `config_changed`, `node_changed`,
+(`absent`, `expired`, `config_changed`, `node_changed`, `repo_changed`,
 `implementation_changed`, `unverifiable_timestamp`), never a silent pass on a
-green-but-old result. Durable persistence of the attestation and its
+green-but-old result. A malformed attestation — `ok: false` with no `reasons` —
+refuses with a generic line rather than throwing: once this sits on the
+pre-claim path a throw would stall dispatch where a refusal only skips one
+repo. Durable persistence of the attestation and its
 advertisement in worker registration remain WM-317; today it is computed and
 consumed in-process.
 

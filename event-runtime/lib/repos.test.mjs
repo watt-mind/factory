@@ -597,6 +597,13 @@ describe("toolchain: declaration parsing and validation", () => {
       "1.2.3 || >=4.0.0",
       "1.2.3 - 2.0.0",
       ">=1.3.0-canary.1",
+      // node-semver allows whitespace after an operator. Rejecting these
+      // throws inside loadRepos, which takes down every command that reads
+      // the registry — a false reject is louder than a missed constraint.
+      ">= 1.2.3",
+      "> 1.2.3 < 2.0.0",
+      "^ 1.2.3",
+      ">= 1.2.3 || < 1.0.0",
     ]) {
       expect([good, isToolchainConstraint(good)]).toEqual([good, true]);
     }
@@ -637,11 +644,12 @@ describe("toolchain: declaration parsing and validation", () => {
     ).toThrow(/declares toolchain executable "bun" twice/);
   });
 
-  test("the registry projection does not publish toolchain yet", () => {
+  test("the registry projection does not publish toolchain yet (removed by #1097)", () => {
     // Not an oversight: /repos and the config view assert this projection
-    // exactly, in files outside gh-1076's Owned Paths. Publishing toolchain
-    // belongs to the follow-up that surfaces it in `factory doctor`, which can
-    // update those assertions in the same commit.
+    // exactly, in api-registry.test.mjs and api-config.test.mjs, both outside
+    // gh-1076's Owned Paths. Issue #1097 — toolchain status in `factory
+    // doctor` — publishes the field and updates those assertions in the same
+    // commit, and deletes this pin.
     const rows = reposView(loadRepos({ root: factoryRoot(YAML) }));
     expect(rows[0]).not.toHaveProperty("toolchain");
   });
@@ -661,11 +669,49 @@ describe("normalizeToolVersion reads what real tools actually print", () => {
     expect(normalizeToolVersion("1.3.0-canary.20260101")).toBe(
       "1.3.0-canary.20260101",
     );
+    expect(normalizeToolVersion("GNU bash, version 5.2.15(1)-release")).toBe(
+      "5.2.15",
+    );
+  });
+
+  test("a version glued to its own name still reads — `go` must be usable", () => {
+    // `[^\w.]`-style boundaries reject `go1.22.0`, which would give every Go
+    // repo a permanent unparseable_version and make the gate undispatchable
+    // for them. Fails closed, but unusable.
+    expect(normalizeToolVersion("go version go1.22.0 darwin/arm64")).toBe(
+      "1.22.0",
+    );
+    expect(normalizeToolVersion("go1.22")).toBe("1.22.0");
   });
 
   test("a partial version widens to x.y.z so semver can compare it", () => {
     expect(normalizeToolVersion("22")).toBe("22.0.0");
     expect(normalizeToolVersion("1.2")).toBe("1.2.0");
+  });
+
+  test("a stray integer in error output is never a version — the gate must not fail open", () => {
+    // Each of these once produced a version that satisfies a loose range:
+    // "Error 404: not found" became "404.0.0", and
+    // satisfies("404.0.0", ">=1.3") is true. A tool that exits 0 while
+    // printing a non-version line would have passed the constraint.
+    for (const line of [
+      "Error 404: not found",
+      "Permission denied (os error 13)",
+      "Segmentation fault: 11",
+      "Tool (build 1234)",
+      "usage: tool [-h] [--verbose]",
+      "released 2024-01-15",
+    ]) {
+      expect([line, normalizeToolVersion(line)]).toEqual([line, null]);
+    }
+    expect(Bun.semver.satisfies("404.0.0", ">=1.3")).toBe(true);
+  });
+
+  test("a partial token of a longer number is not a version either", () => {
+    // An IPv4 address or a four-part build must match nothing rather than
+    // yielding a plausible-looking prefix like "10.0.0".
+    expect(normalizeToolVersion("connect: 10.0.0.1 refused")).toBeNull();
+    expect(normalizeToolVersion("1.2.3.4")).toBeNull();
   });
 
   test("nothing version-shaped is null, not a guess", () => {
@@ -907,6 +953,39 @@ describe("readiness: a repo is ready only on a current, passing attestation", ()
     expect(readiness.refusal).toBe(
       "repo tc toolchain preflight failed on runner: bun >=1.3 <2 (observed 1.1.45)",
     );
+  });
+
+  test("a malformed attestation refuses instead of throwing", async () => {
+    // WM-317 persists and reloads attestations, and once #1096 puts this on
+    // the pre-claim path a throw stalls dispatch where a refusal only skips
+    // one repo. `reasons` missing entirely must still produce a refusal.
+    const repo = declared();
+    const attestation = await passing(repo);
+    for (const reasons of [undefined, null, "not-an-array"]) {
+      const readiness = repoReadiness({
+        repo,
+        attestation: { ...attestation, ok: false, reasons },
+        node: "runner",
+        now,
+      });
+      expect(readiness.ready).toBe(false);
+      expect(readiness.reasons).toEqual([]);
+      expect(readiness.refusal).toBe(
+        "repo tc toolchain preflight failed on runner with no recorded reason — re-run preflight",
+      );
+    }
+  });
+
+  test("the stale-attestation action names a command that exists", () => {
+    // `bin/factory` has no `repo` subcommand; an action an operator cannot run
+    // is not an action. Publishing this through `factory doctor` is #1097.
+    const { reasons } = repoReadiness({
+      repo: declared(),
+      node: "runner",
+      now,
+    });
+    expect(reasons[0].action).not.toContain("factory repo doctor");
+    expect(reasons[0].action).toContain("factory doctor");
   });
 });
 
