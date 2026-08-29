@@ -13,19 +13,8 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": [
-      "tracker:write",
-      "repo:write",
-      "github:write"
-    ],
-    "tools": [
-      "Bash",
-      "Read",
-      "Write",
-      "Edit",
-      "Grep",
-      "Glob"
-    ]
+    "services": ["tracker:write", "repo:write", "github:write"],
+    "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"]
   },
   "limits": {
     "timeout_seconds": 5400,
@@ -39,10 +28,7 @@
         "type": "ticket",
         "id": "$.input.ticket"
       },
-      "kinds": [
-        "postmortem",
-        "decision"
-      ],
+      "kinds": ["postmortem", "decision"],
       "max": 10
     },
     {
@@ -50,9 +36,7 @@
         "type": "repo",
         "id": "$.input.repo"
       },
-      "kinds": [
-        "decision"
-      ],
+      "kinds": ["decision"],
       "max": 10
     }
   ],
