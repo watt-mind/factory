@@ -33,6 +33,8 @@ jobs:
         run: |
           set -euo pipefail
           github_changed=false
+          # Fail loudly on an API error; an incomplete file list must not skip the smoke job.
+          changed_files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"
           while IFS= read -r file; do
             case "$file" in
               .github/*)
@@ -40,7 +42,7 @@ jobs:
                 break
                 ;;
             esac
-          done < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+          done <<< "$changed_files"
           echo "github_changed=$github_changed" >> "$GITHUB_OUTPUT"
 
   pinned-tools-smoke:

@@ -269,7 +269,7 @@ describe("planEvent", () => {
     expect(event.status).toBe("noop");
   });
 
-  test("GitHub CI bursts coalesce per repo without proposals; schedule and other repos remain distinct", () => {
+  test("GitHub CI bursts retain one trailing scan only behind an executing merge scan", () => {
     const db = openDb(":memory:");
     const webhook = (eventId, repo = "factory") => ({
       eventId,
@@ -286,7 +286,36 @@ describe("planEvent", () => {
     });
     expect(first.decision).toBe("run");
 
-    for (const eventId of ["check-2", "check-3", "check-4", "check-5"]) {
+    const whileProposed = planEvent(
+      db,
+      registry,
+      admit(db, webhook("check-proposed")),
+      { now: NOW + 1000, policyVersion: "git:test" },
+    );
+    expect(whileProposed).toEqual({
+      decision: "noop",
+      runId: first.runId,
+      reason: "webhook_merge_scan_already_live",
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    const queued = planEvent(db, registry, admit(db, webhook("check-2")), {
+      now: NOW + 1000,
+      policyVersion: "git:test",
+    });
+    expect(queued).toMatchObject({
+      decision: "noop",
+      runId: first.runId,
+      reason: "webhook_merge_scan_already_live",
+    });
+    expect(queued.proposal.status).toBe("resolved");
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
+
+    for (const eventId of ["check-3", "check-4", "check-5"]) {
       const next = planEvent(db, registry, admit(db, webhook(eventId)), {
         now: NOW + 1000,
         policyVersion: "git:test",
@@ -298,8 +327,30 @@ describe("planEvent", () => {
       });
     }
     expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
-    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
 
+    for (const to of ["VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    expect(
+      planAdmittedEvents(db, registry, {
+        now: NOW + 2000,
+        policyVersion: "git:test",
+      }),
+    ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+    const trailing = db
+      .query(`SELECT status FROM events WHERE event_id = 'check-2'`)
+      .get();
+    expect(trailing.status).toBe("planned");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(3);
+
+    const trailingRun = db
+      .query(
+        `SELECT run_id FROM proposals WHERE event_id = 'check-2' AND decision = 'run'`,
+      )
+      .get();
     for (const to of [
       "APPROVED",
       "QUEUED",
@@ -308,7 +359,7 @@ describe("planEvent", () => {
       "VERIFYING",
       "COMPLETED",
     ]) {
-      transition(db, { runId: first.runId, to, actor: "test" });
+      transition(db, { runId: trailingRun.run_id, to, actor: "test" });
     }
 
     const clockRef = admit(db, {
@@ -350,7 +401,7 @@ describe("planEvent", () => {
     );
     expect(other.decision).toBe("run");
     expect(other.runId).not.toBe(first.runId);
-    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(3);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(5);
   });
 
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {

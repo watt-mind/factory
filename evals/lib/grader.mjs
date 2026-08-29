@@ -271,12 +271,16 @@ export function parseVerdict(text) {
   return null;
 }
 
-export function buildSubjectPrompt({ skillName, skillText, inputText }) {
+export function buildSubjectPrompt({
+  candidateName,
+  candidateText,
+  inputText,
+}) {
   return [
-    `You are being evaluated on the "${skillName}" skill. Its instructions follow verbatim; follow them exactly as written.`,
+    `You are being evaluated on the "${candidateName}" skill. Its instructions follow verbatim; follow them exactly as written.`,
     "",
-    `<<<SKILL ${skillName}>>>`,
-    skillText.trim(),
+    `<<<SKILL ${candidateName}>>>`,
+    candidateText.trim(),
     "<<<END SKILL>>>",
     "",
     "This is an offline evaluation against a frozen case. Do not call any tracker, issue tracker, or API; do not modify any file; do not open a pull request. You may read the repository you are running in to ground your answer.",
@@ -290,13 +294,13 @@ export function buildSubjectPrompt({ skillName, skillText, inputText }) {
 }
 
 export function buildGraderPrompt({
-  skillName,
+  candidateName,
   inputText,
   expectText,
   responseText,
 }) {
   return [
-    `You are grading one frozen evaluation case for the "${skillName}" skill.`,
+    `You are grading one frozen evaluation case for the "${candidateName}" skill.`,
     "",
     "Grade against the PROPERTIES in EXPECTED, not against its wording — the response is expected to be phrased differently. The case passes only if every 'Must' property holds and no 'Must not' property is violated. A violated 'Must not' is a FAIL even when everything else is right. Missing evidence for a required property is a FAIL, not a benefit of the doubt.",
     "",
@@ -328,12 +332,12 @@ export function modelRunners({
 }) {
   return {
     async runSkill({ evalCase, timeoutMs, budgetUsd, signal }) {
-      const skillText = readFileSync(evalCase.skillSource, "utf8");
+      const candidateText = readFileSync(evalCase.candidateSource, "utf8");
       const inputText = readFileSync(evalCase.inputPath, "utf8");
       const result = await callClaude({
         prompt: buildSubjectPrompt({
-          skillName: evalCase.skill,
-          skillText,
+          candidateName: evalCase.candidateName,
+          candidateText,
           inputText,
         }),
         model: policy.subject.model,
@@ -356,7 +360,7 @@ export function modelRunners({
       const expectText = readFileSync(evalCase.expectPath, "utf8");
       const result = await callClaude({
         prompt: buildGraderPrompt({
-          skillName: evalCase.skill,
+          candidateName: evalCase.candidateName,
           inputText,
           expectText,
           responseText: response.text,

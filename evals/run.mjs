@@ -232,9 +232,9 @@ export async function main({
             limits,
             cases: cases.map((entry) => ({
               id: entry.id,
-              skill: entry.skill,
+              candidateName: entry.candidateName,
               case: entry.name,
-              skillSource: entry.skillSource,
+              candidateSource: entry.candidateSource,
               problem: entry.problem,
             })),
           },

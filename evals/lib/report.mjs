@@ -26,7 +26,7 @@ export function formatDryRun({ cases, policy, repoRoot }) {
   for (const entry of cases) {
     const source = entry.problem
       ? `!! ${entry.problem}`
-      : rel(repoRoot, entry.skillSource);
+      : rel(repoRoot, entry.candidateSource);
     lines.push(`  ${entry.id.padEnd(width)}  ->  ${source}`);
   }
   lines.push("");

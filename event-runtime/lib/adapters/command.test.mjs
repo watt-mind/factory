@@ -529,6 +529,14 @@ describe("command-adapter registry (OPS-404)", () => {
       else process.env.FACTORY_EVENT_HOME = previousEventHome;
     }
 
+    const tick = db
+      .query(
+        `SELECT last_plan_error FROM events
+         WHERE source = 'schedule' AND subject = 'reaper'`,
+      )
+      .get();
+    expect(tick).toEqual({ last_plan_error: null });
+
     const row = db.query(`SELECT spec_json FROM runs`).get();
     expect(row).toBeTruthy();
     const planned = JSON.parse(row.spec_json);
