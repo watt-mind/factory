@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterAll, expect, test } from "bun:test";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
@@ -932,6 +933,68 @@ test("ticket_number dies on malformed ticket inputs", () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("ticket must look like OPS-123");
   }
+});
+
+test("ticket_normalize qualifies a bare number with the run's repo", () => {
+  // The dispatch schema accepts a bare GitHub issue number (#908); qualify it
+  // to owner/repo#N so ticket_is_valid, ticket_slug, and ticket_number all
+  // treat it exactly like the canonical GitHub contract form.
+  expect(sh("ticket_normalize 822 watt-mind/factory").stdout.trim()).toBe(
+    "watt-mind/factory#822",
+  );
+  const id = sh("ticket_normalize 822 watt-mind/factory").stdout.trim();
+  expect(sh(`ticket_is_valid "${id}"`).status).toBe(0);
+  expect(sh(`ticket_slug "${id}"`).stdout.trim()).toBe("gh-822");
+  expect(sh(`ticket_number "${id}"`).stdout.trim()).toBe("822");
+});
+
+test("ticket_normalize leaves non-bare and unqualifiable ids untouched", () => {
+  // Linear keys and already-qualified GitHub forms pass through verbatim, so
+  // normalization never disturbs the existing id space.
+  expect(sh("ticket_normalize OPS-123 watt-mind/factory").stdout.trim()).toBe(
+    "OPS-123",
+  );
+  expect(
+    sh("ticket_normalize watt-mind/factory#7 watt-mind/factory").stdout.trim(),
+  ).toBe("watt-mind/factory#7");
+  expect(sh("ticket_normalize '#7' watt-mind/factory").stdout.trim()).toBe(
+    "#7",
+  );
+  // A bare number with no repo to qualify against is left as-is, so it still
+  // fails validation rather than being silently invented into a ticket.
+  const bare = sh('ticket_normalize 822 ""').stdout.trim();
+  expect(bare).toBe("822");
+  expect(sh(`ticket_is_valid "${bare}"`).status).not.toBe(0);
+});
+
+test("github_repo_slug prefers FACTORY_GITHUB_REPO and parses github remotes", () => {
+  expect(
+    sh("github_repo_slug", {
+      FACTORY_GITHUB_REPO: "acme/widgets",
+    }).stdout.trim(),
+  ).toBe("acme/widgets");
+
+  const withRemote = (url) => {
+    const repo = mkdtempSync(path.join(tmpdir(), "wm-908-remote-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      execFileSync("git", ["remote", "add", "origin", url], { cwd: repo });
+      // Empty FACTORY_GITHUB_REPO so the override does not shadow the remote.
+      return sh(`github_repo_slug "${repo}"`, {
+        FACTORY_GITHUB_REPO: "",
+      }).stdout.trim();
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  };
+  expect(withRemote("https://github.com/watt-mind/factory.git")).toBe(
+    "watt-mind/factory",
+  );
+  expect(withRemote("git@github.com:watt-mind/factory.git")).toBe(
+    "watt-mind/factory",
+  );
+  // A non-GitHub remote yields nothing — there is no repo to qualify against.
+  expect(withRemote("https://gitlab.com/watt-mind/factory.git")).toBe("");
 });
 
 test("web_build_hash computes deterministic sha1 and changes on file rename or content edit", () => {

@@ -211,16 +211,50 @@ repo_root() { git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel;
 #   ABC-123 / ABC-123-scratch   tracker-key form (Linear)
 #   owner/repo#123 / #123       GitHub forms
 #
-# A BARE number is deliberately NOT accepted: `worktree-up.sh 123` is far more
-# likely a typo than an intent, the existing arg-parsing test guards it as
-# such, and the GitHub adapter always emits the `owner/repo#123` contract form
-# anyway (issueIdentifier), so nothing needs it.
+# A BARE number is deliberately NOT accepted here: `worktree-up.sh 123` is far
+# more likely an interactive typo than an intent, and the arg-parsing test
+# guards it as such. A bare number arriving through automated dispatch is a
+# different case — see ticket_normalize below — so it is qualified to
+# `owner/repo#N` before it ever reaches this validator.
 ticket_is_valid() {
   [[ "$1" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] && return 0
   [[ "$1" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#[0-9]+$ ]] && return 0
   [[ "$1" =~ ^\#[0-9]+$ ]] && return 0
   [[ "$1" =~ ^gh-[0-9]+$ ]] && return 0
   return 1
+}
+
+# The run's GitHub `owner/repo`, used to qualify a bare issue number (#908).
+# Prefer an explicit override (the run's repo config can export it); otherwise
+# read the checkout's `origin` remote. Prints nothing when origin is not a
+# GitHub remote — there is then no repo to qualify a bare number against.
+github_repo_slug() { # [checkout]
+  local url
+  if [[ -n "${FACTORY_GITHUB_REPO:-}" ]]; then
+    printf '%s' "$FACTORY_GITHUB_REPO"
+    return 0
+  fi
+  url=$(git -C "${1:-$(repo_root)}" remote get-url origin 2>/dev/null) || return 0
+  [[ "$url" =~ github\.com[:/]+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+) ]] || return 0
+  printf '%s' "${BASH_REMATCH[1]%.git}"
+}
+
+# Normalize a dispatched ticket id to a form ticket_is_valid accepts (#908).
+# The dispatch schema (WM-1006, #878) accepts a bare GitHub issue number
+# (`822`) because parseIssueIdentifier() reads it as repo-relative, but the
+# tracker-agnostic worktree scripts key everything off a fully-qualified id, so
+# a dispatched bare `N` used to die at validation. Qualify it to the run's
+# `owner/repo#N`, mirroring parseIssueIdentifier. Anything that is not a bare
+# number — every Linear key, every already-qualified GitHub form — is returned
+# untouched, and a bare number with no resolvable repo is left as-is so it
+# still fails validation (an interactive typo must not be silently invented).
+ticket_normalize() { # <ticket> [owner/repo]
+  local id="$1" repo="${2:-}"
+  if [[ "$id" =~ ^[0-9]+$ && "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    printf '%s#%s' "$repo" "$id"
+  else
+    printf '%s' "$id"
+  fi
 }
 
 ticket_number() {

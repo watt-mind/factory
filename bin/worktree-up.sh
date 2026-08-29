@@ -117,6 +117,14 @@ if [[ "$HERE" -eq 1 ]]; then
   LABEL="here"
 else
   [[ -n "$TICKET" ]] || die "usage: worktree-up.sh <TICKET-ID> [type] [slug] | --here   (--checkout-only, --no-seed, --no-fetch, --reseed, --resume)"
+  # A dispatched run (marked by FACTORY_WORKTREE_REPORT) may hand us a bare
+  # GitHub issue number (#908): the dispatch schema accepts `822` as a
+  # repo-relative id, but this tracker-agnostic script needs the qualified
+  # form. Qualify it to the run's owner/repo#822 before validating. Interactive
+  # use has no dispatch marker, so a bare-number typo there still errors out.
+  if [[ -n "${FACTORY_WORKTREE_REPORT:-}" ]]; then
+    TICKET="$(ticket_normalize "$TICKET" "$(github_repo_slug "$REPO")")"
+  fi
   # Accepts ABC-123 and owner/repo#123 (#881). The directory and
   # branch use the slug, since `/` and `#` are not usable in either.
   ticket_is_valid "$TICKET" || die "ticket must look like OPS-123 or owner/repo#123 (got '$TICKET')"
