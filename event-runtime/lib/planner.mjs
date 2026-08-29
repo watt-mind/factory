@@ -1622,6 +1622,31 @@ function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
   return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
 }
 
+/**
+ * GitHub sends a delivery for each CI state change. Unlike an operator or
+ * schedule request, those deliveries do not each deserve an auditable
+ * proposal: one live repo-wide merge scan will read the current GitHub state
+ * when it runs. Mark later deliveries as consumed without creating the noisy
+ * noop proposals that otherwise flood the merge lane.
+ */
+function coalesceWebhookMergeRequest(db, event, envelope, agentRef) {
+  if (
+    event.source !== "github" ||
+    event.type !== "factory.merge.requested" ||
+    typeof envelope.payload?.repo !== "string"
+  ) {
+    return null;
+  }
+  const blockingRun = liveRunForInput(db, agentRef, {
+    repo: envelope.payload.repo,
+  });
+  if (!blockingRun) return null;
+
+  const reason = "webhook_merge_scan_already_live";
+  setEventStatus(db, event, "noop", reason);
+  return { decision: "noop", runId: blockingRun.run_id, reason };
+}
+
 function humanNeeded(db, event, reason, at, ttlSeconds) {
   const proposal = insertProposal(db, {
     id: newProposalId(),
@@ -1865,6 +1890,19 @@ export function planEvent(
         );
       }
     }
+
+    // CI emits a separate GitHub delivery for every check transition. A merge
+    // scan is repo-wide, so a live scan already observes the final state of a
+    // burst; suppress the later webhook deliveries before they can create
+    // duplicate noop proposals. Schedule, operator, and chain requests retain
+    // their ordinary idempotency and proposal semantics.
+    const webhookMergeCoalesced = coalesceWebhookMergeRequest(
+      db,
+      event,
+      envelope,
+      mapping.agent,
+    );
+    if (webhookMergeCoalesced) return webhookMergeCoalesced;
 
     // §5 singleton is agent policy, not clock-envelope policy: operator and
     // chain origins mapped to an enabled singleton agent must not bypass it by

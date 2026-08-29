@@ -268,6 +268,90 @@ describe("planEvent", () => {
     expect(event.status).toBe("noop");
   });
 
+  test("GitHub CI bursts coalesce per repo without proposals; schedule and other repos remain distinct", () => {
+    const db = openDb(":memory:");
+    const webhook = (eventId, repo = "factory") => ({
+      eventId,
+      type: "factory.merge.requested",
+      source: "github",
+      subject: repo,
+      correlationId: eventId,
+      payload: { repo },
+    });
+    const firstRef = admit(db, webhook("check-1"));
+    const first = planEvent(db, registry, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(first.decision).toBe("run");
+
+    for (const eventId of ["check-2", "check-3", "check-4", "check-5"]) {
+      const next = planEvent(db, registry, admit(db, webhook(eventId)), {
+        now: NOW + 1000,
+        policyVersion: "git:test",
+      });
+      expect(next).toEqual({
+        decision: "noop",
+        runId: first.runId,
+        reason: "webhook_merge_scan_already_live",
+      });
+    }
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+
+    for (const to of [
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    const clockRef = admit(db, {
+      eventId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      type: "factory.merge.requested",
+      source: "schedule",
+      subject: "factory",
+      correlationId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      payload: {
+        repo: "factory",
+        loop: "merge-factory",
+        slot: "2026-08-12T10:30:00.000Z",
+        cadenceSeconds: 14400,
+        skippedSlots: 0,
+      },
+    });
+    const clock = planEvent(db, registry, clockRef, {
+      now: NOW + 2000,
+      policyVersion: "git:test",
+    });
+    expect(clock.decision).toBe("run");
+
+    for (const to of [
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]) {
+      transition(db, { runId: clock.runId, to, actor: "test" });
+    }
+
+    const other = planEvent(
+      db,
+      registry,
+      admit(db, webhook("other-check", "bj29")),
+      { now: NOW + 3000, policyVersion: "git:test" },
+    );
+    expect(other.decision).toBe("run");
+    expect(other.runId).not.toBe(first.runId);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(3);
+  });
+
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {
     const db = openDb(":memory:");
     const ref1 = admit(db, {
