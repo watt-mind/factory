@@ -7,6 +7,7 @@ import { RUNTIME_ROOT } from "./config.mjs";
 import {
   DEFAULT_MODEL,
   RegistryError,
+  agentDefinitionFile,
   createFsPackLoader,
   getAgent,
   getArtifactView,
@@ -121,6 +122,32 @@ describe("registry", () => {
       getEventType(registry, "factory.status-report.requested").agent,
     ).toBe("factory-status-report@1");
     expect(getEventType(registry, "unknown.event")).toBeNull();
+  });
+
+  test("agentDefinitionFile resolves the owning JSON relative to a chosen root (gh-860)", () => {
+    const registry = loadRegistry();
+    const packRelative = agentDefinitionFile(
+      registry,
+      "factory-status-report@1",
+    );
+    expect(packRelative.file).toBe("agents/factory-status-report.json");
+    expect(packRelative.absSource).toBe(
+      path.join(RUNTIME_ROOT, "agents", "factory-status-report.json"),
+    );
+    // Given the repo root, the path is what a full checkout carries.
+    const repoRelative = agentDefinitionFile(
+      registry,
+      "factory-status-report@1",
+      {
+        root: path.dirname(RUNTIME_ROOT),
+      },
+    );
+    expect(repoRelative.file).toBe(
+      "event-runtime/agents/factory-status-report.json",
+    );
+    expect(() => agentDefinitionFile(registry, "no-such@9")).toThrow(
+      RegistryError,
+    );
   });
 
   test("work-scan scopes every queue and inflight ticket read to its input repo", () => {

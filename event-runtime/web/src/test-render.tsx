@@ -386,6 +386,13 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
       async (_endpoint: string, _query?: Record<string, string>) => ({}),
     ),
     repos: mock(async (): Promise<{ repos: RepoItem[] }> => ({ repos: [] })),
+    // Overlay promotion (gh-860): default mocks return an empty, no-op preview.
+    promotionPreview: mock(async () => ({ digest: "", selections: [] })),
+    promotionApply: mock(async () => ({
+      status: "noop" as const,
+      ticket: null,
+      pr: null,
+    })),
     janitor: mock(
       async (name: string, apply = false): Promise<JanitorResult> => ({
         repo: name,

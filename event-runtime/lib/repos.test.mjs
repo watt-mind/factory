@@ -8,6 +8,7 @@ import {
   proveMergeChecks,
   RepoError,
   reposView,
+  resolvePromotionTarget,
   selectMergeCheckGate,
 } from "./repos.mjs";
 
@@ -515,6 +516,38 @@ describe("control_plane on a repo entry", () => {
     );
     expect(reposView(loadRepos({ root: pinned }))[0].controlPlane).toBe(
       "github",
+    );
+  });
+});
+
+describe("resolvePromotionTarget requires an isolated-checkout target (gh-860)", () => {
+  const repos = loadRepos({ root: factoryRoot(YAML) });
+
+  test("a fully configured repo yields base, github, and worktree_up", () => {
+    const target = resolvePromotionTarget(repos, "full");
+    expect(target.base).toBe("develop");
+    expect(target.github).toBe("watt-mind/full");
+    expect(target.worktreeUp).toBe("bin/worktree-up.sh");
+    expect(target.name).toBe("full");
+  });
+
+  test("a repo without worktree_up fails closed", () => {
+    // `bare` has no worktree_up, github, and only the default base.
+    expect(() => resolvePromotionTarget(repos, "bare")).toThrow(
+      /no worktree_up script/,
+    );
+  });
+
+  test("an unknown repo fails closed", () => {
+    expect(() => resolvePromotionTarget(repos, "nope")).toThrow(RepoError);
+  });
+
+  test("a repo with worktree_up but no github fails closed", () => {
+    const root = factoryRoot(
+      "repos:\n  - name: a\n    path: /tmp/a\n    base: develop\n    worktree_up: bin/x.sh\n",
+    );
+    expect(() => resolvePromotionTarget(loadRepos({ root }), "a")).toThrow(
+      /no github slug/,
     );
   });
 });

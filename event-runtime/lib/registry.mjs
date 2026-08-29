@@ -795,6 +795,16 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     writable: true,
     configurable: true,
   });
+  // The definition's own JSON file, kept non-enumerably for the same reason as
+  // `pack`: it is loader-injected filesystem provenance, not definition content
+  // hashed into the defHash. Overlay promotion (gh-860) needs the owning file to
+  // write a tracked model_tier/model default; `agentDefinitionFile` reads it.
+  Object.defineProperty(loaded, "defSource", {
+    value: entry?.source ?? null,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
   if (def.memos !== undefined) {
     validateMemosDeclaration(def.memos, {
       source,
@@ -1362,6 +1372,42 @@ export function getAgent(registry, ref) {
   const def = registry.agents.get(ref);
   if (!def) throw new RegistryError(`unregistered agent ${ref}`);
   return def;
+}
+
+/**
+ * The repo-relative JSON file that owns an agent's tracked defaults (gh-860).
+ * Overlay promotion writes model_tier/model into this file inside an isolated
+ * worktree; it never resolves against the live checkout. `root` defaults to the
+ * registry root the definition was loaded from, so the returned `file` is the
+ * path a `worktree_up` checkout of the same repo would carry.
+ *
+ * @returns {{ ref: string, file: string, absSource: string }}
+ */
+export function agentDefinitionFile(
+  registry,
+  ref,
+  { root = registry.root } = {},
+) {
+  const def = registry.agents.get(ref);
+  if (!def) throw new RegistryError(`unregistered agent ${ref}`);
+  const absSource = def.defSource;
+  if (typeof absSource !== "string" || absSource.trim() === "") {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} has no owning definition file (not a filesystem pack)`,
+    );
+  }
+  if (!path.isAbsolute(absSource)) {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} definition source ${JSON.stringify(absSource)} is not an absolute path`,
+    );
+  }
+  const file = path.relative(path.resolve(root), absSource);
+  if (file.startsWith("..") || path.isAbsolute(file)) {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} definition ${JSON.stringify(absSource)} is outside root ${JSON.stringify(root)}`,
+    );
+  }
+  return { ref: def.ref, file, absSource };
 }
 
 export function getEventType(registry, type) {

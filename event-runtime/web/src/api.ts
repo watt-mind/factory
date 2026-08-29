@@ -1,6 +1,8 @@
 import type {
   AdmittedEvent,
   AgentsView,
+  PromotionPreview,
+  PromotionResult,
   ArtifactInventoryItem,
   ArtifactView,
   ChainListItem,
@@ -437,6 +439,13 @@ export const api = {
       "DELETE",
       `/overrides/agents/${encodeURIComponent(ref)}`,
     ),
+  // Overlay promotion (gh-860): a read-only preview of which runtime overrides
+  // can become tracked Git defaults, and the digest an apply must echo back.
+  promotionPreview: () => call<PromotionPreview>("GET", "/promotion/preview"),
+  // Promote a non-empty subset of preview keys into a PR against the repo's
+  // configured base. Never clears the runtime overrides — that is separate.
+  promotionApply: (body: { repo: string; digest: string; keys: string[] }) =>
+    call<PromotionResult>("POST", "/promotion/apply", body),
   // Declarative Overview panels (WM-840) and the data behind one of them:
   // `panelSource` only ever GETs an endpoint the runtime already
   // allow-listed for the panel; the query is the panel's own `source.query`.

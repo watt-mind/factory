@@ -1,11 +1,13 @@
 /** Agent and repository registry endpoints. */
 import { readFileSync } from "node:fs";
 import { getArtifactView, resolveModel } from "./registry.mjs";
-import { RepoError, reposView } from "./repos.mjs";
+import { RepoError, resolvePromotionTarget, reposView } from "./repos.mjs";
 import {
   KIND_AGENT,
   KIND_EVENT_TYPE,
   OverlayError,
+  applyPromotion,
+  buildPromotionPreview,
   deleteOverride,
   emptyOverrides,
   knownAdapters,
@@ -123,10 +125,63 @@ export async function handleRegistryApiRoute({
   actor,
   db,
   nowMs,
+  promotionSeams,
 }) {
   if (route === "GET /agents") {
     const overrides = db ? listOverrides(db) : emptyOverrides();
     return send(200, agentsView(registry, { overrides }));
+  }
+
+  // Overlay promotion preview (gh-860): read-only snapshot of the promotable
+  // override rows against tracked definitions, with the digest an apply must
+  // echo back. Never touches the checkout.
+  if (route === "GET /promotion/preview") {
+    try {
+      return send(200, buildPromotionPreview({ db, registry }));
+    } catch (err) {
+      return sendOverlayError(send, err);
+    }
+  }
+
+  // Overlay promotion apply (gh-860): requires the confirmed digest and a
+  // non-empty selected-key subset, and drives the injected isolated-checkout
+  // seams. An empty selection is a typed no-op; unconfigured seams fail closed.
+  if (route === "POST /promotion/apply") {
+    const parsed = parseJson(await readBody(req));
+    if (parsed.error) return send(422, { error: parsed.error });
+    const body = parsed.value ?? {};
+    if (typeof body.repo !== "string" || body.repo.trim() === "") {
+      return send(422, { error: "repo is required" });
+    }
+    if (!Array.isArray(body.keys)) {
+      return send(422, { error: "keys must be an array" });
+    }
+    let target;
+    try {
+      target = resolvePromotionTarget(repos(), body.repo);
+    } catch (err) {
+      if (err instanceof RepoError) return send(422, { error: err.message });
+      throw err;
+    }
+    try {
+      const result = await applyPromotion({
+        db,
+        registry,
+        target,
+        digest: body.digest,
+        keys: body.keys,
+        seams: promotionSeams ?? {},
+        actor,
+      });
+      return send(200, { actor, repo: target.name, ...result });
+    } catch (err) {
+      if (err instanceof OverlayError) {
+        const payload = { error: err.message };
+        if (err.evidence) payload.evidence = err.evidence;
+        return send(err.status, payload);
+      }
+      throw err;
+    }
   }
 
   if (route === "GET /overrides") {

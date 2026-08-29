@@ -596,6 +596,41 @@ export interface AgentsView {
   adapters?: string[];
 }
 
+/** One promotable runtime override row in a promotion preview (gh-860). */
+export interface PromotionSelection {
+  key: string;
+  kind: "eventType" | "agent";
+  ref: string;
+  field: "adapter" | "modelTier" | "model";
+  target: { file: string; path: string };
+  before: unknown;
+  effective: unknown;
+  /** Whether the override still diverges from the tracked default. */
+  current: boolean;
+}
+
+/** Preview of the overrides that can be promoted, plus the digest apply echoes. */
+export interface PromotionPreview {
+  digest: string;
+  selections: PromotionSelection[];
+}
+
+export interface PromotionResult {
+  status: "noop" | "opened";
+  repo?: string;
+  ticket: string | null;
+  worktree?: string;
+  branch?: string;
+  files?: string[];
+  promoted?: Array<{
+    key: string;
+    target: { file: string; path: string };
+    before: unknown;
+    after: unknown;
+  }>;
+  pr: { url: string; number: number } | null;
+}
+
 /** A worker's own report of what it is doing; "stopped" is a clean exit. */
 export type WorkerState = "idle" | "busy" | "stopped";
 

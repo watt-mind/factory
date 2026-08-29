@@ -359,6 +359,42 @@ export function getRepo(repos, name) {
 }
 
 /**
+ * The isolated-checkout target for an overlay promotion PR (gh-860).
+ *
+ * Promotion never edits the live checkout: it hands `worktree_up` a base and a
+ * ticket branch, writes tracked defaults in that worktree, and opens a PR
+ * against the configured base. This resolver fails closed when the repo does
+ * not declare the machinery that isolation requires — a base branch, a
+ * `worktree_up` script, and a GitHub slug for the forge — so an operator can
+ * never accidentally promote onto the wrong branch or into the live root.
+ *
+ * @returns {{ name: string, path: string, base: string, github: string,
+ *             worktreeUp: string, worktreeRoot: string|null }}
+ */
+export function resolvePromotionTarget(repos, name) {
+  const repo = getRepo(repos, name);
+  if (typeof repo.base !== "string" || repo.base.trim() === "") {
+    throw new RepoError(`repo "${name}" has no base branch for promotion`);
+  }
+  if (typeof repo.worktreeUp !== "string" || repo.worktreeUp.trim() === "") {
+    throw new RepoError(
+      `repo "${name}" has no worktree_up script; promotion requires an isolated checkout`,
+    );
+  }
+  if (typeof repo.github !== "string" || repo.github.trim() === "") {
+    throw new RepoError(`repo "${name}" has no github slug for a promotion PR`);
+  }
+  return {
+    name: repo.name,
+    path: repo.path,
+    base: repo.base,
+    github: repo.github,
+    worktreeUp: repo.worktreeUp,
+    worktreeRoot: repo.worktreeRoot,
+  };
+}
+
+/**
  * Select the merge gate without treating an empty branch-protection response
  * as green. GitHub-owned required contexts win whenever they are nonempty;
  * the repo-owned declaration is the only permitted fallback.

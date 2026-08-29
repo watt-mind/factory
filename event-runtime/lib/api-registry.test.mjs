@@ -37,6 +37,8 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
+import { handleRegistryApiRoute } from "./api-registry.mjs";
+import { KIND_EVENT_TYPE, putOverride } from "./runtime-overrides.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -454,5 +456,146 @@ describe("runtime overlay API (WM-887)", () => {
       close();
       server.close();
     }
+  });
+});
+
+describe("overlay promotion routes (gh-860)", () => {
+  const reg = loadRegistry();
+  const reposFn = () =>
+    loadRepos({
+      root: (() => {
+        const root = tmpDir("evrt-promo-repos-");
+        mkdirSync(path.join(root, "config"), { recursive: true });
+        writeFileSync(
+          path.join(root, "config", "repos.yaml"),
+          "repos:\n  - name: factory\n    path: /tmp/factory\n    github: watt-mind/factory\n    base: develop\n    worktree_up: bin/worktree-up.sh\n",
+        );
+        return root;
+      })(),
+    });
+
+  function seed(db) {
+    putOverride(db, {
+      kind: KIND_EVENT_TYPE,
+      key: "factory.status-report.requested",
+      patch: { adapter: "cursor" },
+      actor: "operator",
+    });
+  }
+
+  async function invoke(method, pathname, { db, body, promotionSeams } = {}) {
+    const captured = {};
+    const send = (status, payload) => {
+      captured.status = status;
+      captured.body = payload;
+      return true;
+    };
+    await handleRegistryApiRoute({
+      route: `${method} ${pathname}`,
+      req: { method },
+      url: new URL(`http://x${pathname}`),
+      send,
+      readBody: async () => Buffer.from(JSON.stringify(body ?? {})),
+      parseJson: (buf) => {
+        try {
+          return { value: JSON.parse(buf.toString() || "{}") };
+        } catch (err) {
+          return { error: err.message };
+        }
+      },
+      registry: reg,
+      repos: reposFn,
+      actor: "operator",
+      db,
+      promotionSeams,
+    });
+    return captured;
+  }
+
+  test("GET /promotion/preview returns a digest and selectable rows", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const res = await invoke("GET", "/promotion/preview", { db });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.digest).toBe("string");
+    expect(
+      res.body.selections.some(
+        (s) => s.ref === "factory.status-report.requested",
+      ),
+    ).toBe(true);
+    db.close();
+  });
+
+  test("POST /promotion/apply with an empty selection is a typed no-op", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const preview = await invoke("GET", "/promotion/preview", { db });
+    const res = await invoke("POST", "/promotion/apply", {
+      db,
+      body: { repo: "factory", digest: preview.body.digest, keys: [] },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("noop");
+    db.close();
+  });
+
+  test("POST /promotion/apply drives injected seams and returns the PR", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const preview = await invoke("GET", "/promotion/preview", { db });
+    const key = preview.body.selections.find(
+      (s) => s.ref === "factory.status-report.requested",
+    ).key;
+    const writes = new Map();
+    const promotionSeams = {
+      readTracked: (file) =>
+        readFileSync(path.join(registry.root, "..", file), "utf8"),
+      tracker: { ensure: () => ({ ticket: "gh-860-x" }) },
+      worktree: {
+        up: () => ({ dir: "/tmp/promo-x", branch: "promo/x" }),
+      },
+      readWorktree: (dir, file) =>
+        writes.has(file)
+          ? writes.get(file)
+          : readFileSync(path.join(registry.root, "..", file), "utf8"),
+      writeWorktree: (dir, file, text) => writes.set(file, text),
+      git: { commit: () => {}, push: () => {} },
+      forge: { openPr: () => ({ url: "u", number: 7 }) },
+    };
+    const res = await invoke("POST", "/promotion/apply", {
+      db,
+      body: { repo: "factory", digest: preview.body.digest, keys: [key] },
+      promotionSeams,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.pr).toEqual({ url: "u", number: 7 });
+    expect(res.body.repo).toBe("factory");
+    db.close();
+  });
+
+  test("POST /promotion/apply without configured seams fails closed (501)", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const preview = await invoke("GET", "/promotion/preview", { db });
+    const key = preview.body.selections.find(
+      (s) => s.ref === "factory.status-report.requested",
+    ).key;
+    const res = await invoke("POST", "/promotion/apply", {
+      db,
+      body: { repo: "factory", digest: preview.body.digest, keys: [key] },
+    });
+    expect(res.status).toBe(501);
+    db.close();
+  });
+
+  test("POST /promotion/apply rejects a missing repo", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const res = await invoke("POST", "/promotion/apply", {
+      db,
+      body: { digest: "x", keys: ["k"] },
+    });
+    expect(res.status).toBe(422);
+    db.close();
   });
 });

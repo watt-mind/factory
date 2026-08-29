@@ -133,3 +133,33 @@ upgrade contract. `templates/starter/package.json` and
 `tools/publish-starter.mjs` still validate a Git commit pin as of this
 decision; migrating the starter template itself to the npm-published pin is
 follow-up scope, not part of this change.
+
+## Promote a runtime overlay into a git PR (gh-860)
+
+Decided 2026-08-25. Machine-local runtime overrides give a fast operational
+loop, but fleet defaults live in tracked agent/event-type definitions.
+Promotion is the explicit, reviewable path that turns selected effective
+overrides into a normal Git change — never an auto-commit on the live checkout
+(rejected 2026-08-19), because serve may run against production state and
+concurrent agents.
+
+Promotion is an explicit operator action. It shows a deterministic preview,
+lets the operator select all or a subset, creates an isolated ticket worktree
+via the configured repository `worktree_up` (checkout-only, from the
+configured base), writes the tracked defaults there, commits and pushes on one
+conventional commit, and opens a normal PR against the configured base. No
+merge is performed. The first version promotes only event-type adapter and
+agent `modelTier`/`model` overrides.
+
+Fail-closed rules: apply requires the exact preview digest and an explicit
+non-empty selected-key list. A stale preview, an unknown key, an unsupported
+field, invalid tracked JSON, or target drift fails before any worktree is
+created. Serve never edits, commits, or checks out branches in the live
+`FACTORY_ROOT`; the only live-root access is the read-only drift check.
+An empty selection is a typed no-op. A failure after checkout leaves the live
+checkout and the runtime override rows unchanged and returns the
+worktree/branch as recoverable evidence for operator cleanup.
+
+Promotion does not clear the runtime overrides. Clearing the overlay is a
+separate explicit action the operator takes after the promoted defaults have
+deployed, so the fast loop keeps winning until the fleet default catches up.
