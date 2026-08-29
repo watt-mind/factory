@@ -493,6 +493,20 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 17,
+    name: "proposal_and_event_lookup_indexes",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_proposals_run_id
+          ON proposals (run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_proposals_event
+          ON proposals (event_source, event_id);
+        CREATE INDEX IF NOT EXISTS idx_events_correlation
+          ON events (correlation_id);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

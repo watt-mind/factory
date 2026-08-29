@@ -424,6 +424,14 @@ export async function inspectWithPresentation(args) {
 
 export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
+  if (!command) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+  if (["help", "-h", "--help"].includes(command)) {
+    console.log(USAGE);
+    return;
+  }
   if (command === "init") return initCommand(args);
   if (command === "decide") return decideCommand(args);
   if (command === "inbox") return inboxCommand(args);
@@ -433,7 +441,7 @@ export async function dispatch(argv = process.argv.slice(2)) {
   if (command === "artifacts") return artifactsCommand(args);
   if (command === "inspect") return inspectWithPresentation(args);
   if (!Object.hasOwn(COMMANDS, command)) {
-    console.error(USAGE);
+    console.error(`unknown command: ${command} (try: cli.mjs help)`);
     process.exit(1);
   }
   return COMMANDS[command](args);
