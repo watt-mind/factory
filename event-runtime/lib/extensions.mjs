@@ -787,7 +787,7 @@ function setAt(obj, keyPath, value) {
       !isPrototypeSafeRecord(node[key])
     ) {
       Object.defineProperty(node, key, {
-        value: Object.create(null),
+        value: {},
         writable: true,
         enumerable: true,
         configurable: true,
