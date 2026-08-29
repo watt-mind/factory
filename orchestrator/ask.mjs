@@ -633,6 +633,20 @@ const count = (section) =>
  * is only `updatedAt` says so, because "silent for 40m" and "last touched 40m
  * ago" are different claims about whether an agent is alive.
  */
+/**
+ * A comment read that FAILED must not render like a ticket that simply has no
+ * comments — falling back to the title in both cases is the section-level
+ * "unavailable vs empty" mistake repeated per row. Rate limits hit these reads
+ * one ticket at a time, so this is the common case, not the exotic one.
+ */
+const heldRowText = (r, repoW, idW) => {
+  const head = `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(r.holds.join(","), 22)}  `;
+  if (r.questionError)
+    return `${head}comment unreadable — ${oneLine(r.questionError, 60)}`;
+  if (r.question) return `${head}last comment: ${oneLine(r.question, 60)}`;
+  return `${head}${oneLine(r.title, 70)} (no comments)`;
+};
+
 const heartbeatText = (row) => {
   if (row.heartbeatSource === "comment")
     return `heartbeat ${humanAge(row.heartbeatAgeMs)} ago`;
@@ -687,12 +701,8 @@ export function formatAsk(doc) {
     // "what is waiting on me" into a lie.
     if (doc.held.rows?.length)
       lines.push("  (newest comment shown — may be the reply, not the ask)");
-    renderRows(
-      lines,
-      doc.held,
-      "nothing held",
-      (r) =>
-        `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(r.holds.join(","), 22)}  ${r.question ? `last comment: ${oneLine(r.question, 60)}` : oneLine(r.title, 70)}`,
+    renderRows(lines, doc.held, "nothing held", (r) =>
+      heldRowText(r, repoW, idW),
     );
   }
 

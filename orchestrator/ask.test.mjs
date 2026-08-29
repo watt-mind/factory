@@ -499,6 +499,48 @@ test("held rows never present a comment as the outstanding question", async () =
   expect(text).toContain("may be the reply, not the ask");
 });
 
+test("a held comment read that failed does not render like a ticket with no comments", async () => {
+  // Rate limits hit these reads one ticket at a time, so a per-row failure is
+  // the common case. Falling back to the title in both cases would repeat the
+  // section-level "unavailable vs empty" mistake once per row.
+  const flaky = {
+    kind: "memory",
+    async listTickets() {
+      return ["WM-6", "WM-7"].map((identifier) => ({
+        identifier,
+        title: `Held ${identifier}`,
+        state: { name: "Blocked" },
+        labels: [{ name: "ai:blocked" }],
+        createdAt: ago(6 * HOUR),
+        updatedAt: ago(1 * HOUR),
+      }));
+    },
+    async listDispatchable() {
+      return [];
+    },
+    async listComments(identifier) {
+      if (identifier === "WM-6") throw new Error("HTTP 403 rate limited");
+      return [];
+    },
+  };
+  const doc = await gatherAsk(
+    askArgs({ controlPlaneFor: () => flaky, sections: ["held"] }),
+  );
+
+  // The section survives: both rows are present, neither is dropped.
+  expect(doc.held.error).toBeNull();
+  expect(doc.held.rows.length).toBe(2);
+  const held = byId(doc.held.rows);
+  expect(held["WM-6"].questionError).toContain("rate limited");
+  expect(held["WM-6"].question).toBeNull();
+  expect(held["WM-7"].questionError).toBeNull();
+  expect(held["WM-7"].question).toBeNull();
+
+  const text = formatAsk(doc);
+  expect(text).toContain("comment unreadable — HTTP 403 rate limited");
+  expect(text).toContain("(no comments)");
+});
+
 test("held comment reads are bounded-concurrent, not serialized", async () => {
   const HELD = 12;
   let inFlight = 0;
