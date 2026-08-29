@@ -1,5 +1,4 @@
 /** Agent and repository registry endpoints. */
-import { readFileSync } from "node:fs";
 import { getArtifactView, resolveModel } from "./registry.mjs";
 import { RepoError, resolvePromotionTarget, reposView } from "./repos.mjs";
 import {
@@ -45,7 +44,7 @@ export function agentsView(registry, { overrides = emptyOverrides() } = {}) {
         limits: def.limits,
         mutating: def.mutating,
         promptFile: def.prompt,
-        prompt: readFileSync(def.promptPath, "utf8"),
+        prompt: def.promptText,
         inputSchemaFile: def.input_schema,
         inputSchema: def.inputSchema,
         outputSchemaFile: def.output_schema,

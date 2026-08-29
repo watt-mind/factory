@@ -639,6 +639,43 @@ function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const FORBIDDEN_CONFIG_PATH_SEGMENTS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+]);
+
+function assertSafeConfigPath(keyPath) {
+  for (const key of keyPath) {
+    if (FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key)) {
+      throw new ExtensionError(
+        `config schema path contains forbidden segment "${key}"`,
+      );
+    }
+  }
+}
+
+function assertSafeConfigSchemaPaths(schema, path = []) {
+  assertSafeConfigPath(path);
+  if (!isPlainObject(schema)) return;
+  if (isPlainObject(schema.properties)) {
+    for (const [key, sub] of Object.entries(schema.properties)) {
+      const next = [...path, key];
+      assertSafeConfigPath(next);
+      assertSafeConfigSchemaPaths(sub, next);
+    }
+  }
+  if (isPlainObject(schema.items)) {
+    assertSafeConfigSchemaPaths(schema.items, path);
+  }
+}
+
+function isPrototypeSafeRecord(value) {
+  if (!isPlainObject(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 /**
  * Fill `default`s from a schema into a value, recursively through
  * `properties` and `items`. A nested object property with no value is only
@@ -648,6 +685,11 @@ function isPlainObject(value) {
  * invented unless the schema supplies a `default`).
  */
 export function applyConfigDefaults(schema, value) {
+  assertSafeConfigSchemaPaths(schema);
+  return applyConfigDefaultsUnchecked(schema, value);
+}
+
+function applyConfigDefaultsUnchecked(schema, value) {
   if (!isPlainObject(schema)) return cloneJson(value);
   let out = cloneJson(value);
   if (out === undefined) {
@@ -659,17 +701,17 @@ export function applyConfigDefaults(schema, value) {
   if (isPlainObject(out) && isPlainObject(schema.properties)) {
     for (const [key, sub] of Object.entries(schema.properties)) {
       if (Object.hasOwn(out, key)) {
-        out[key] = applyConfigDefaults(sub, out[key]);
+        out[key] = applyConfigDefaultsUnchecked(sub, out[key]);
         continue;
       }
-      const filled = applyConfigDefaults(sub, undefined);
+      const filled = applyConfigDefaultsUnchecked(sub, undefined);
       if (filled === undefined) continue;
       if (isPlainObject(filled) && Object.keys(filled).length === 0) continue;
       out[key] = filled;
     }
   }
   if (Array.isArray(out) && isPlainObject(schema.items)) {
-    out = out.map((item) => applyConfigDefaults(schema.items, item));
+    out = out.map((item) => applyConfigDefaultsUnchecked(schema.items, item));
   }
   return out;
 }
@@ -704,48 +746,129 @@ export function extensionSecretEnvVar(namespace, keyPath) {
 }
 
 /**
- * Every `format: "secret"` property in a config schema, depth-first, with
- * the path used for env names and published `{ set, source }` overlays.
+ * Every supported `format: "secret"` property in a config schema,
+ * depth-first, with the path used for env names and published
+ * `{ set, source }` overlays.
+ *
+ * Array items and `additionalProperties` are valid schema locations, but
+ * their runtime keys are dynamic: one schema path cannot map their potentially
+ * many values to one unambiguous `FACTORY_EXT_*` variable. Fail those schemas
+ * closed at load rather than letting policy rejection, resolution, connector
+ * splitting and `/config` masking disagree about which values are secret.
  */
 export function collectSecretFields(schema, path = []) {
-  if (!isPlainObject(schema) || !isPlainObject(schema.properties)) return [];
+  assertSafeConfigSchemaPaths(schema, path);
+  return collectSecretFieldsUnchecked(schema, path);
+}
+
+function collectSecretFieldsUnchecked(
+  schema,
+  path = [],
+  schemaPath = "$",
+  dynamicLocation = null,
+) {
+  if (!isPlainObject(schema)) return [];
+  if (schema.format === "secret") {
+    if (dynamicLocation) {
+      throw new ExtensionError(
+        `config schema ${schemaPath} declares format "secret" beneath ${dynamicLocation}; dynamic secret locations are unsupported — declare a fixed object property`,
+      );
+    }
+    if (path.length === 0) {
+      throw new ExtensionError(
+        'config schema $ declares format "secret" at the config root; secrets must be fixed object properties',
+      );
+    }
+    return [{ path, key: path[path.length - 1] }];
+  }
+
   const out = [];
-  for (const [key, sub] of Object.entries(schema.properties)) {
-    const next = [...path, key];
-    if (isPlainObject(sub) && sub.format === "secret")
-      out.push({ path: next, key });
-    else out.push(...collectSecretFields(sub, next));
+  if (isPlainObject(schema.properties)) {
+    for (const [key, sub] of Object.entries(schema.properties)) {
+      out.push(
+        ...collectSecretFieldsUnchecked(
+          sub,
+          [...path, key],
+          `${schemaPath}.${key}`,
+          dynamicLocation,
+        ),
+      );
+    }
+  }
+  if (isPlainObject(schema.items)) {
+    out.push(
+      ...collectSecretFieldsUnchecked(
+        schema.items,
+        path,
+        `${schemaPath}[]`,
+        dynamicLocation ?? `schema.items at ${schemaPath}`,
+      ),
+    );
+  }
+  if (isPlainObject(schema.additionalProperties)) {
+    out.push(
+      ...collectSecretFieldsUnchecked(
+        schema.additionalProperties,
+        path,
+        `${schemaPath}.*`,
+        dynamicLocation ?? `schema.additionalProperties at ${schemaPath}`,
+      ),
+    );
   }
   return out;
 }
 
 function hasAt(obj, keyPath) {
+  assertSafeConfigPath(keyPath);
   let node = obj;
   for (const key of keyPath) {
-    if (!isPlainObject(node) || !Object.hasOwn(node, key)) return false;
+    if (!isPrototypeSafeRecord(node) || !Object.hasOwn(node, key)) return false;
     node = node[key];
   }
   return true;
 }
 
 function setAt(obj, keyPath, value) {
+  assertSafeConfigPath(keyPath);
   let node = obj;
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
-    if (!isPlainObject(node[key])) node[key] = {};
+    if (!isPrototypeSafeRecord(node)) return;
+    if (!Object.hasOwn(node, key) || !isPrototypeSafeRecord(node[key])) {
+      Object.defineProperty(node, key, {
+        value: {},
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
     node = node[key];
   }
-  node[keyPath[keyPath.length - 1]] = value;
+  if (!isPrototypeSafeRecord(node)) return;
+  Object.defineProperty(node, keyPath[keyPath.length - 1], {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function deleteAt(obj, keyPath) {
+  assertSafeConfigPath(keyPath);
   let node = obj;
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
-    if (!isPlainObject(node[key])) return;
+    if (
+      !isPrototypeSafeRecord(node) ||
+      !Object.hasOwn(node, key) ||
+      !isPrototypeSafeRecord(node[key])
+    )
+      return;
     node = node[key];
   }
-  delete node[keyPath[keyPath.length - 1]];
+  if (!isPrototypeSafeRecord(node)) return;
+  const key = keyPath[keyPath.length - 1];
+  if (Object.hasOwn(node, key)) delete node[key];
 }
 
 /** Public config vs secrets bag for a connector's `ctx`. */
@@ -1165,6 +1288,80 @@ function packRootFor(extensionRoot, rel) {
     throw new RegistryError(`${manifestFile}: name must be a non-empty string`);
   }
   return { kind: "fs", name: manifest.name, path: packDir };
+}
+
+/**
+ * Read only the pack descriptors contributed by configured extensions.
+ *
+ * This is deliberately narrower than `loadExtensions`: it validates the
+ * allow-list, manifests, and realpath confinement needed to identify a pack,
+ * but does not validate pins, load a registry, import a module, or register a
+ * contribution. `update-pins --pack` uses it to repair a stale extension
+ * pack, which full loading must reject before it can import extension code.
+ *
+ * Failures are scoped to the request. With no `name`, any rejected root,
+ * invalid manifest, unreadable pack, or duplicate pack name fails closed.
+ * With a `name`, an unrelated broken extension is skipped so it cannot block
+ * re-pinning a different pack; the collected errors are only raised when the
+ * requested pack is itself a duplicate or cannot be found.
+ *
+ * @param {{ root?: string, policy?: object, packRoots?: Array<object>, name?: string }} [options]
+ * @returns {Array<{ kind: "fs", name: string, path: string }>}
+ */
+export function discoverExtensionPackRoots({
+  root = reposRoot(),
+  policy,
+  packRoots = [],
+  name,
+} = {}) {
+  const { roots, anomalies } = loadExtensionRoots({ root, policy });
+  const errors = anomalies.map((anomaly) => `configured roots: ${anomaly}`);
+  const discovered = [];
+  const names = new Set(packRoots.map((pack) => pack.name));
+  for (const { path: dir } of roots) {
+    const checked = validateExtensionManifest(dir, { root });
+    if (!checked.valid) {
+      errors.push(`${dir}: ${checked.errors.join("; ")}`);
+      continue;
+    }
+    for (const rel of checked.manifest.contributes?.packs ?? []) {
+      let pack;
+      try {
+        pack = packRootFor(dir, rel);
+      } catch (err) {
+        errors.push(`${dir}: ${err.message}`);
+        continue;
+      }
+      if (names.has(pack.name)) {
+        const message = `pack name "${pack.name}" is already configured by a policy pack or an earlier extension`;
+        if (pack.name === name) {
+          throw new ExtensionError(
+            `extension metadata discovery: ${message} (${dir})`,
+          );
+        }
+        errors.push(`${dir}: ${message}`);
+        continue;
+      }
+      names.add(pack.name);
+      discovered.push(pack);
+    }
+  }
+  if (name === undefined) {
+    if (errors.length > 0) {
+      throw new ExtensionError(
+        `extension metadata discovery rejected: ${errors.join("; ")}`,
+      );
+    }
+    return discovered;
+  }
+  const match = discovered.find((pack) => pack.name === name);
+  if (match) return [match];
+  if (errors.length > 0) {
+    throw new ExtensionError(
+      `extension metadata discovery: pack "${name}" not found; rejected: ${errors.join("; ")}`,
+    );
+  }
+  return [];
 }
 
 /**

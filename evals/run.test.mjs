@@ -164,6 +164,38 @@ describe("discovery", () => {
       expect(entry.problem).toBeNull();
     }));
 
+  test("resolves a pinned event-runtime agent prompt", () =>
+    withTmpDir("evals-discovery-agent-", (dir) => {
+      const { repoRoot, evalsDir } = buildFixture(dir, {
+        skills: {},
+        cases: { "dispatch/a": { input: "i", expect: "e" } },
+      });
+      const agentDir = path.join(repoRoot, "event-runtime", "agents");
+      mkdirSync(agentDir, { recursive: true });
+      const agentPrompt = path.join(agentDir, "dispatch.md");
+      writeFileSync(agentPrompt, "# dispatch\n");
+
+      const [entry] = discoverCases({ evalsDir, repoRoot });
+      expect(entry.skillSource).toBe(agentPrompt);
+      expect(entry.problem).toBeNull();
+    }));
+
+  test("prefers a shared skill over an agent prompt with the same name", () =>
+    withTmpDir("evals-discovery-precedence-", (dir) => {
+      const { repoRoot, evalsDir } = buildFixture(dir, {
+        skills: { dispatch: "# shared dispatch" },
+        cases: { "dispatch/a": { input: "i", expect: "e" } },
+      });
+      const agentDir = path.join(repoRoot, "event-runtime", "agents");
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(path.join(agentDir, "dispatch.md"), "# dispatch\n");
+
+      const [entry] = discoverCases({ evalsDir, repoRoot });
+      expect(entry.skillSource).toBe(
+        path.join(repoRoot, "shared", "skills", "dispatch", "SKILL.md"),
+      );
+    }));
+
   test("a case missing expect.md, or naming an unknown skill, is reported not skipped", () =>
     withTmpDir("evals-discovery-broken-", (dir) => {
       const { repoRoot, evalsDir } = buildFixture(dir, {
@@ -179,7 +211,9 @@ describe("discovery", () => {
         ]),
       );
       expect(problems["ticket-spec/no-expect"]).toBe("missing expect.md");
-      expect(problems["ghost-skill/orphan"]).toContain("no skill source");
+      expect(problems["ghost-skill/orphan"]).toBe(
+        'no skill source for "ghost-skill" (looked in shared/skills/ghost-skill/SKILL.md, plugins/core/skills/ghost-skill/SKILL.md, event-runtime/agents/ghost-skill.md)',
+      );
     }));
 
   test("discovers the repo's own cases against the real skill tree", () => {

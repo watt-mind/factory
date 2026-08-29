@@ -23,6 +23,18 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 
+/** Inputs whose changes alter the zero-pack merged registry digest. */
+export const REGISTRY_INPUT_GLOBS = [
+  "event-runtime/agents/**",
+  "event-runtime/event-types.json",
+  "event-runtime/edges.json",
+  "event-runtime/schedules.json",
+];
+
+/** The tracked zero-pack registry digest baseline. */
+export const REGISTRY_DIGEST_BASELINE_PATH =
+  "event-runtime/lib/registry.test.mjs";
+
 /**
  * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
  * Returns [] when the section is missing or fails to parse — for dispatch,
@@ -592,6 +604,20 @@ export function ownedPathsClosureGaps({
     }
   }
 
+  const registryInput = own.find((owned) =>
+    REGISTRY_INPUT_GLOBS.some((input) => globsOverlap(owned, input)),
+  );
+  if (
+    registryInput &&
+    !own.some((owned) => globsOverlap(owned, REGISTRY_DIGEST_BASELINE_PATH))
+  ) {
+    addGap({
+      rule: "registry-digest",
+      requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+      requiredBy: registryInput,
+    });
+  }
+
   return gaps;
 }
 
@@ -600,6 +626,9 @@ export function formatOwnedPathClosureGaps(gaps = []) {
   return gaps.map((gap) => {
     if (gap.rule === "direct") {
       return `Missing required Owned Paths entry: ${gap.requiredPath} (required by ${gap.requiredBy})`;
+    }
+    if (gap.rule === "registry-digest") {
+      return `own ${gap.requiredPath}: registry input ${gap.requiredBy} changes the zero-pack digest baseline`;
     }
     return `Missing required Owned Paths entry: ${gap.requiredPath} (required by ${gap.requiredBy} from ${gap.manifestPath})`;
   });

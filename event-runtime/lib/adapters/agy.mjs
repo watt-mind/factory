@@ -405,7 +405,8 @@ export async function execute({
   signal,
 }) {
   refuseSandbox("agy", def, SANDBOX_REFUSAL_REASON);
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt =
+    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
   const childEnv = safeChildEnvironment(env, def);
 
   const resolved = resolveAgyCommand({

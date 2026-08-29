@@ -163,3 +163,19 @@ worktree/branch as recoverable evidence for operator cleanup.
 Promotion does not clear the runtime overrides. Clearing the overlay is a
 separate explicit action the operator takes after the promoted defaults have
 deployed, so the fast loop keeps winning until the fleet default catches up.
+
+## Extension pack pin repair metadata boundary (gh-857)
+
+Decided 2026-08-25. `update-pins --pack <name>` may discover packs contributed
+by configured extensions through a CLI-only metadata path. It reads the
+extension allow-list (path and package roots), parses and validates
+`factory-extension.json`, confines contributed pack paths by realpath, and
+rejects duplicate pack names. It then writes pins for only the selected pack.
+
+This discovery imports no extension modules and does not register adapters,
+connectors, hooks, panels, or any other contribution. It exists specifically
+so an absent or stale extension `pins.json` can be repaired: normal extension
+loading correctly fails closed on that state before executing extension code.
+Serve and work retain the ordinary full validated loader; they cannot request
+metadata-only loading, and a repaired extension still has to pass the normal
+fail-closed pin and registry checks before it is loaded.

@@ -17,6 +17,7 @@
  * watched like any other.
  */
 import { admitEvent } from "./intake.mjs";
+import { tx } from "./db.mjs";
 
 export const CHAIN_SOURCE = "chain";
 
@@ -79,7 +80,7 @@ function chainEventId(edge, row, context, fallback, { mixed = false } = {}) {
   });
 }
 
-/** Completed runs whose agent has registered edges and no derived chain event yet. */
+/** Completed edge-agent runs that have not reached a durable chain terminal. */
 function chainCandidates(db, edges) {
   const agents = Object.keys(edges);
   if (agents.length === 0) return [];
@@ -93,9 +94,39 @@ function chainCandidates(db, edges) {
        JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
        JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        WHERE r.state = 'COMPLETED'
+         AND r.chain_resolved_at IS NULL
          AND json_extract(r.spec_json, '$.agent') IN (${placeholders})`,
     )
     .all(...agents);
+}
+
+/**
+ * Fetch every existing child for this tick's unresolved edge-agent population
+ * in one indexed statement. Keeping this outside the candidate loop is the
+ * important bound: historical fan-out is one events lookup, not one per run.
+ */
+function existingChainEvents(db, edges) {
+  const agents = Object.keys(edges);
+  if (agents.length === 0) return new Map();
+  const placeholders = agents.map(() => "?").join(", ");
+  const byRun = new Map();
+  const rows = db
+    .query(
+      `SELECT child.causation_id, child.event_id
+         FROM runs r
+         JOIN events child
+           ON child.causation_id = r.run_id AND child.source = ?
+        WHERE r.state = 'COMPLETED'
+          AND r.chain_resolved_at IS NULL
+          AND json_extract(r.spec_json, '$.agent') IN (${placeholders})`,
+    )
+    .all(CHAIN_SOURCE, ...agents);
+  for (const row of rows) {
+    const ids = byRun.get(row.causation_id) ?? new Set();
+    ids.add(row.event_id);
+    byRun.set(row.causation_id, ids);
+  }
+  return byRun;
 }
 
 /**
@@ -110,8 +141,13 @@ function chainCandidates(db, edges) {
 export function resolveChains(db, registry, { now = Date.now() } = {}) {
   const edges = registry.edges ?? {};
   const outcome = { emitted: 0, skipped: 0, errors: [] };
+  const candidates = chainCandidates(db, edges);
+  if (candidates.length === 0) return outcome;
+  const existingByRun = existingChainEvents(db, edges);
+  const resolvedRunIds = [];
+  const resolvedAt = new Date(now).toISOString();
 
-  for (const row of chainCandidates(db, edges)) {
+  for (const row of candidates) {
     const spec = JSON.parse(row.spec_json);
     const result = JSON.parse(row.result_json);
     const rule = edges[spec.agent];
@@ -168,8 +204,10 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
           })();
       if (selectedEdges.length === 0) {
         // An unmapped value or an independent result with no actionable items
-        // is a legitimate terminal — record nothing, chain nothing.
+        // is a legitimate terminal — record nothing, chain nothing, and do
+        // not re-parse the same accepted result on every later tick.
         outcome.skipped += 1;
+        resolvedRunIds.push(row.run_id);
         continue;
       }
 
@@ -295,30 +333,46 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
       // set. Reconstruct the full set and admit only the missing siblings. An
       // event from an older routing configuration is a durable completion
       // marker, not permission to backfill stale actions under today's edges.
-      const existingIds = new Set(
-        db
-          .query(
-            `SELECT event_id FROM events WHERE source = ? AND causation_id = ?`,
-          )
-          .all(CHAIN_SOURCE, row.run_id)
-          .map((event) => event.event_id),
-      );
-      if ([...existingIds].some((eventId) => !ids.includes(eventId))) continue;
+      const existingIds = existingByRun.get(row.run_id) ?? new Set();
+      if ([...existingIds].some((eventId) => !ids.includes(eventId))) {
+        resolvedRunIds.push(row.run_id);
+        continue;
+      }
       const pending = envelopes.filter(
         (envelope) => !existingIds.has(envelope.eventId),
       );
       for (const envelope of pending) {
         const admitted = admitChainEvent(db, registry, envelope, { now });
-        if (admitted.admitted) outcome.emitted += 1;
-        else if (admitted.duplicate) outcome.skipped += 1;
-        else
+        if (admitted.admitted) {
+          outcome.emitted += 1;
+          existingIds.add(envelope.eventId);
+        } else if (admitted.duplicate) {
+          outcome.skipped += 1;
+          if (admitted.event?.causation_id === row.run_id) {
+            existingIds.add(envelope.eventId);
+          }
+        } else {
           outcome.errors.push(
             `${envelope.eventId}: ${admitted.errors.join("; ")}`,
           );
+        }
+      }
+      if (envelopes.every((envelope) => existingIds.has(envelope.eventId))) {
+        resolvedRunIds.push(row.run_id);
       }
     } catch (err) {
       outcome.errors.push(`chain-${row.run_id}: ${err.message}`);
     }
+  }
+  if (resolvedRunIds.length > 0) {
+    const markResolved = db.query(
+      `UPDATE runs
+          SET chain_resolved_at = ?
+        WHERE run_id = ? AND chain_resolved_at IS NULL`,
+    );
+    tx(db, () => {
+      for (const runId of resolvedRunIds) markResolved.run(resolvedAt, runId);
+    });
   }
   return outcome;
 }

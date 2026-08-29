@@ -376,6 +376,13 @@ export function buildRunSpec(
     // otherwise identical planner inputs nondeterministic.
     defHash: computeDefHash(def),
     capabilities: def.capabilities.services,
+    // Pin workspace-only intent into new RunSpecs so the worker's execution
+    // backstop does not depend solely on a mutable live definition. Legacy
+    // model specs without defHash are refused by the worker instead.
+    ...(def.mutating === false &&
+    def.capabilities.filesystem === "workspace-only"
+      ? { filesystem: "workspace-only" }
+      : {}),
     // Declared repo scope (WM-64) rides in the spec so the proposal the
     // operator approves names it, same as capabilities.
     ...(def.repos ? { repos: def.repos } : {}),
@@ -1199,14 +1206,19 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_trusted_author = trustedAuthor;
     if (!trustedAuthor) return refusal("ticket_untrusted_author", evidence);
 
-    // Absent pin (never labeled through a pin-aware path) is not itself a
-    // refusal — only a MISMATCHED pin proves the body changed since it was
-    // marked ready. Refusing on absence would strand every ticket labeled
-    // before this gate shipped.
+    // Verification Command is executable worker input, so an absent pin is
+    // not evidence. Legacy tickets must be re-labelled through the pin-aware
+    // path before dispatch rather than silently retaining a rollout bypass.
+    // The two refusals are kept distinct: a MISSING pin is a ticket the
+    // orchestrator can simply re-stamp (relabel sweep), while a MISMATCHED
+    // pin means the body actually changed after readiness and needs a human
+    // to look at what changed.
+    const hasPin = Boolean(evidence.ticket.readyPinHash);
     const pinMatches =
-      !evidence.ticket.readyPinHash ||
+      hasPin &&
       evidence.ticket.readyPinHash === evidence.ticket.descriptionHash;
     evidence.checks.ticket_body_pin_matches = pinMatches;
+    if (!hasPin) return refusal("ticket_ready_pin_missing", evidence);
     if (!pinMatches)
       return refusal("ticket_body_changed_since_ready", evidence);
   }
@@ -1615,6 +1627,31 @@ function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
   return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
 }
 
+/**
+ * GitHub sends a delivery for each CI state change. Unlike an operator or
+ * schedule request, those deliveries do not each deserve an auditable
+ * proposal: one live repo-wide merge scan will read the current GitHub state
+ * when it runs. Mark later deliveries as consumed without creating the noisy
+ * noop proposals that otherwise flood the merge lane.
+ */
+function coalesceWebhookMergeRequest(db, event, envelope, agentRef) {
+  if (
+    event.source !== "github" ||
+    event.type !== "factory.merge.requested" ||
+    typeof envelope.payload?.repo !== "string"
+  ) {
+    return null;
+  }
+  const blockingRun = liveRunForInput(db, agentRef, {
+    repo: envelope.payload.repo,
+  });
+  if (!blockingRun) return null;
+
+  const reason = "webhook_merge_scan_already_live";
+  setEventStatus(db, event, "noop", reason);
+  return { decision: "noop", runId: blockingRun.run_id, reason };
+}
+
 function humanNeeded(db, event, reason, at, ttlSeconds) {
   const proposal = insertProposal(db, {
     id: newProposalId(),
@@ -1858,6 +1895,19 @@ export function planEvent(
         );
       }
     }
+
+    // CI emits a separate GitHub delivery for every check transition. A merge
+    // scan is repo-wide, so a live scan already observes the final state of a
+    // burst; suppress the later webhook deliveries before they can create
+    // duplicate noop proposals. Schedule, operator, and chain requests retain
+    // their ordinary idempotency and proposal semantics.
+    const webhookMergeCoalesced = coalesceWebhookMergeRequest(
+      db,
+      event,
+      envelope,
+      mapping.agent,
+    );
+    if (webhookMergeCoalesced) return webhookMergeCoalesced;
 
     // §5 singleton is agent policy, not clock-envelope policy: operator and
     // chain origins mapped to an enabled singleton agent must not bypass it by

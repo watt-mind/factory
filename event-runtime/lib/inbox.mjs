@@ -1008,12 +1008,21 @@ export function resolveInboxItem(
 }
 
 export function inboxCounts(db) {
+  // The expiry predicate below must agree with `isExpiredInboxItem` in
+  // event-runtime/web/src/views/Inbox.tsx (badge vs. Open tab count).
   const totals = db
     .query(
       `SELECT
-       SUM(CASE WHEN resolved_at IS NULL AND acked_at IS NULL THEN 1 ELSE 0 END) AS open,
-       SUM(CASE WHEN resolved_at IS NULL AND acked_at IS NOT NULL THEN 1 ELSE 0 END) AS acked
-     FROM inbox_items`,
+       SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NULL
+                      AND NOT (i.kind = 'proposal_expired' OR EXISTS (
+                        SELECT 1 FROM proposals p
+                         WHERE p.id = json_extract(i.refs_json, '$.proposalId')
+                           AND p.status = 'open'
+                           AND p.ttl_seconds > 0
+                           AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
+                      )) THEN 1 ELSE 0 END) AS open,
+       SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NOT NULL THEN 1 ELSE 0 END) AS acked
+     FROM inbox_items i`,
     )
     .get();
   const byKind = {};

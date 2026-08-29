@@ -150,6 +150,22 @@ describe("merge concurrency policy", () => {
 });
 
 describe("planEvent", () => {
+  test("pins workspace-only intent into the RunSpec for the execute-time admission backstop (#962)", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, {
+      eventId: "workspace-only-pin",
+      correlationId: "workspace-only-pin",
+    });
+    const outcome = planEvent(db, registry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("run");
+    expect(JSON.parse(outcome.proposal.spec_json).filesystem).toBe(
+      "workspace-only",
+    );
+  });
+
   test("run decision: PROPOSED run + open proposal with the §5.2 spec", () => {
     const db = openDb(":memory:");
     const ref = admit(db);
@@ -182,6 +198,7 @@ describe("planEvent", () => {
       // verifyDefHash consumes.
       defHash: computeDefHash(registry.agents.get("factory-status-report@1")),
       capabilities: ["tracker:read"],
+      filesystem: "workspace-only",
       // Model-tier routing (WM-135): the committed definition declares
       // standard, policy maps it to models.pi.standard (WM-215 made pi the
       // default harness), and the planner pins the resolution.
@@ -249,6 +266,90 @@ describe("planEvent", () => {
       .query(`SELECT status FROM events WHERE event_id = 'delivery-2'`)
       .get();
     expect(event.status).toBe("noop");
+  });
+
+  test("GitHub CI bursts coalesce per repo without proposals; schedule and other repos remain distinct", () => {
+    const db = openDb(":memory:");
+    const webhook = (eventId, repo = "factory") => ({
+      eventId,
+      type: "factory.merge.requested",
+      source: "github",
+      subject: repo,
+      correlationId: eventId,
+      payload: { repo },
+    });
+    const firstRef = admit(db, webhook("check-1"));
+    const first = planEvent(db, registry, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(first.decision).toBe("run");
+
+    for (const eventId of ["check-2", "check-3", "check-4", "check-5"]) {
+      const next = planEvent(db, registry, admit(db, webhook(eventId)), {
+        now: NOW + 1000,
+        policyVersion: "git:test",
+      });
+      expect(next).toEqual({
+        decision: "noop",
+        runId: first.runId,
+        reason: "webhook_merge_scan_already_live",
+      });
+    }
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+
+    for (const to of [
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    const clockRef = admit(db, {
+      eventId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      type: "factory.merge.requested",
+      source: "schedule",
+      subject: "factory",
+      correlationId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      payload: {
+        repo: "factory",
+        loop: "merge-factory",
+        slot: "2026-08-12T10:30:00.000Z",
+        cadenceSeconds: 14400,
+        skippedSlots: 0,
+      },
+    });
+    const clock = planEvent(db, registry, clockRef, {
+      now: NOW + 2000,
+      policyVersion: "git:test",
+    });
+    expect(clock.decision).toBe("run");
+
+    for (const to of [
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]) {
+      transition(db, { runId: clock.runId, to, actor: "test" });
+    }
+
+    const other = planEvent(
+      db,
+      registry,
+      admit(db, webhook("other-check", "bj29")),
+      { now: NOW + 3000, policyVersion: "git:test" },
+    );
+    expect(other.decision).toBe("run");
+    expect(other.runId).not.toBe(first.runId);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(3);
   });
 
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {
@@ -1229,17 +1330,21 @@ describe("planEvent worktree gate (WM-108)", () => {
       lastEditorAssociation = "OWNER",
       readyPinHash,
       description = "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
-    } = {}) => ({
-      identifier: "acme/widget#1",
-      state: { name: "Todo" },
-      assignee: null,
-      labels: [{ name: "ai:agent-ready" }],
-      description,
-      controlPlaneKind: "github",
-      authorAssociation,
-      lastEditorAssociation,
-      readyPinHash,
-    });
+    } = {}) => {
+      const ticket = {
+        identifier: "acme/widget#1",
+        state: { name: "Todo" },
+        assignee: null,
+        labels: [{ name: "ai:agent-ready" }],
+        description,
+        controlPlaneKind: "github",
+        authorAssociation,
+        lastEditorAssociation,
+        readyPinHash:
+          readyPinHash === undefined ? hashJson(description) : readyPinHash,
+      };
+      return ticket;
+    };
 
     const githubDispatch = (ticket) => ({
       countLeases: () => 0,
@@ -1334,14 +1439,17 @@ describe("planEvent worktree gate (WM-108)", () => {
       });
     });
 
-    test("no pin ever stamped (pre-rollout ticket) does not refuse — only a mismatch does", () => {
+    test("an absent ready pin fails closed under its own reason code", () => {
       withReposRoot(tierRepo, () => {
         const result = worktreeDispatchAutoEligibility(
           { repo: "tiered", ticket: "acme/widget#1" },
           githubDispatch(githubTicket({ readyPinHash: null })),
         );
-        expect(result.ok).toBe(true);
-        expect(result.evidence.checks.ticket_body_pin_matches).toBe(true);
+        expect(result.ok).toBe(false);
+        // Distinct from a mismatch (GH-967): an unpinned ticket is re-stamped
+        // by a relabel sweep, a changed body needs a human.
+        expect(result.refusal.reason).toBe("ticket_ready_pin_missing");
+        expect(result.evidence.checks.ticket_body_pin_matches).toBe(false);
       });
     });
 
@@ -3229,15 +3337,18 @@ describe("GitHub dispatch candidate parsing (GH-974)", () => {
           budgetRefusal: () => null,
           fetchTicket: (ticket) => {
             reads.push(ticket);
+            const description =
+              "## Owned Paths\n- event-runtime/lib/planner.mjs\n";
             return {
               identifier: ticket,
               state: { name: "Todo" },
               assignee: null,
               labels: [{ name: "ai:agent-ready" }],
-              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+              description,
               controlPlaneKind: "github",
               authorAssociation: "MEMBER",
               lastEditorAssociation: "MEMBER",
+              readyPinHash: hashJson(description),
             };
           },
           fetchInFlight: () => [],

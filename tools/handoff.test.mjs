@@ -225,7 +225,14 @@ describe("forced-command accept server", () => {
                 subject: REQUEST.ticket,
                 correlationId: REQUEST.requestId,
                 causationId: null,
-                payload: { repo: REQUEST.repo, ticket: REQUEST.ticket },
+                payload: {
+                  repo: REQUEST.repo,
+                  ticket: REQUEST.ticket,
+                  memoPin: {
+                    foldedAt: "2026-08-24T12:00:01.000Z",
+                    entries: [{ sha256: "planner-owned" }],
+                  },
+                },
               },
             },
           ],
