@@ -785,37 +785,28 @@ function collectSecretFieldsUnchecked(
   if (isPlainObject(schema.properties)) {
     for (const [key, sub] of Object.entries(schema.properties)) {
       out.push(
-        ...collectSecretFieldsUnchecked(
-          sub,
-          [...path, key],
-          { schemaPath: `${schemaPath}.${key}`, dynamicLocation },
-        ),
+        ...collectSecretFieldsUnchecked(sub, [...path, key], {
+          schemaPath: `${schemaPath}.${key}`,
+          dynamicLocation,
+        }),
       );
     }
   }
   if (isPlainObject(schema.items)) {
     out.push(
-      ...collectSecretFieldsUnchecked(
-        schema.items,
-        path,
-        {
-          schemaPath: `${schemaPath}[]`,
-          dynamicLocation: dynamicLocation ?? `schema.items at ${schemaPath}`,
-        },
-      ),
+      ...collectSecretFieldsUnchecked(schema.items, path, {
+        schemaPath: `${schemaPath}[]`,
+        dynamicLocation: dynamicLocation ?? `schema.items at ${schemaPath}`,
+      }),
     );
   }
   if (isPlainObject(schema.additionalProperties)) {
     out.push(
-      ...collectSecretFieldsUnchecked(
-        schema.additionalProperties,
-        path,
-        {
-          schemaPath: `${schemaPath}.*`,
-          dynamicLocation:
-            dynamicLocation ?? `schema.additionalProperties at ${schemaPath}`,
-        },
-      ),
+      ...collectSecretFieldsUnchecked(schema.additionalProperties, path, {
+        schemaPath: `${schemaPath}.*`,
+        dynamicLocation:
+          dynamicLocation ?? `schema.additionalProperties at ${schemaPath}`,
+      }),
     );
   }
   return out;
