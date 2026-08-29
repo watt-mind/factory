@@ -1,5 +1,40 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { SCHEMA_FORMATS, validate } from "./schema.mjs";
+
+const sharedCases = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/schema-validation-cases.json", import.meta.url),
+    "utf8",
+  ),
+).cases;
+
+// Drift guard (#823): event-runtime/web/src/lib/schema.test.ts reads this exact
+// same matrix, so a semantic change to one validator that is not mirrored in
+// the other turns red here or there.
+describe("shared fixture schema-validation-cases.json", () => {
+  test("the matrix is non-empty and every case is well-formed", () => {
+    expect(sharedCases.length).toBeGreaterThan(20);
+    for (const c of sharedCases) {
+      expect(typeof c.name, JSON.stringify(c)).toBe("string");
+      expect(typeof c.valid, c.name).toBe("boolean");
+      expect(Object.hasOwn(c, "schema"), c.name).toBe(true);
+      expect(Object.hasOwn(c, "value"), c.name).toBe(true);
+      if (c.valid)
+        expect(Object.hasOwn(c, "errorContains"), c.name).toBe(false);
+    }
+  });
+
+  test.each(sharedCases.map((c) => [c.name, c]))("%s", (_name, c) => {
+    const result = validate(c.schema, c.value);
+    expect(result.valid, `${c.name}: ${result.errors.join("; ")}`).toBe(
+      c.valid,
+    );
+    for (const substring of c.errorContains ?? []) {
+      expect(result.errors.join("\n"), c.name).toContain(substring);
+    }
+  });
+});
 
 describe("validate", () => {
   test("accepts a conforming object", () => {
@@ -48,6 +83,27 @@ describe("validate", () => {
       false,
     );
     expect(validate({ type: "array", minItems: 1 }, []).valid).toBe(false);
+  });
+
+  // #823: a malformed registered pattern is a schema defect, not a crash.
+  test("a malformed pattern fails closed instead of throwing", () => {
+    expect(() =>
+      validate({ type: "string", pattern: "[" }, "value"),
+    ).not.toThrow();
+    expect(validate({ type: "string", pattern: "[" }, "value")).toEqual({
+      valid: false,
+      errors: ["$: invalid pattern"],
+    });
+    expect(
+      validate(
+        {
+          type: "object",
+          properties: { sha: { type: "string", pattern: "(?<=" } },
+        },
+        { sha: "deadbeef" },
+      ),
+    ).toEqual({ valid: false, errors: ["$.sha: invalid pattern"] });
+    expect(validate({ pattern: "[" }, 12)).toEqual({ valid: true, errors: [] });
   });
 
   test("empty schema accepts anything", () => {

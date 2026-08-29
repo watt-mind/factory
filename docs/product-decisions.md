@@ -164,6 +164,23 @@ Promotion does not clear the runtime overrides. Clearing the overlay is a
 separate explicit action the operator takes after the promoted defaults have
 deployed, so the fast loop keeps winning until the fleet default catches up.
 
+## Runtime policy model cells are restart-applied overlays (gh-859)
+
+Decided 2026-08-25. Operators may override one `models:` policy cell at a
+time, keyed canonically by the closed `(adapter, tier)` pair. Each cell is an
+independent runtime database row so concurrent changes to different cells
+cannot replace one another. The effective map is the tracked policy with
+stored cells composed over it; deleting a cell restores its tracked value.
+
+Persistence and activation are deliberately separate. PUT and DELETE journal
+and persist immediately, but the running registry remains a startup snapshot.
+Serve loads tracked models first and then overlays validated stored cells, so
+changes apply only after an explicit restart and API responses always report
+`restartRequired: true`. Invalid stored keys or patches fail startup closed
+with the row named for operator repair. Settings exposes only this focused
+adapter-by-tier model surface, not a generic policy YAML editor or unrelated
+policy and secret values.
+
 ## Exhausted dispatches escalate once to the strong tier (gh-845)
 
 Decided 2026-08-25. When an admitted `light` or `standard` dispatch exhausts

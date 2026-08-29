@@ -10,11 +10,18 @@ import path from "node:path";
 import { builtinAdapters } from "./adapters/index.mjs";
 import { hashJson } from "./canonical.mjs";
 import { txImmediate } from "./db.mjs";
-import { agentDefinitionFile } from "./registry.mjs";
+import {
+  MODEL_ADAPTERS,
+  MODEL_TIERS as REGISTRY_MODEL_TIERS,
+  RegistryError,
+  agentDefinitionFile,
+  composeModelTierMap,
+} from "./registry.mjs";
 import { reposRoot } from "./repos.mjs";
 
 export const KIND_EVENT_TYPE = "eventType";
 export const KIND_AGENT = "agent";
+export const KIND_MODEL_TIER_CELL = "modelTierCell";
 export const MODEL_TIERS = new Set(["strong", "standard", "light"]);
 
 export class OverlayError extends Error {
@@ -30,7 +37,7 @@ export class OverlayError extends Error {
 }
 
 export function emptyOverrides() {
-  return { eventTypes: {}, agents: {} };
+  return { eventTypes: {}, agents: {}, modelTierCells: {} };
 }
 
 /** Adapters the overlay may name: builtins plus any currently routed. */
@@ -55,8 +62,142 @@ export function listOverrides(db) {
     const patch = JSON.parse(row.patch_json);
     if (row.kind === KIND_EVENT_TYPE) out.eventTypes[row.key] = patch;
     else if (row.kind === KIND_AGENT) out.agents[row.key] = patch;
+    else if (row.kind === KIND_MODEL_TIER_CELL)
+      out.modelTierCells[row.key] = patch;
   }
   return out;
+}
+
+export function modelTierCellKey(adapter, tier) {
+  return `${adapter}:${tier}`;
+}
+
+function parseModelTierCellKey(key) {
+  const parts = key.split(":");
+  if (parts.length !== 2 || parts.some((part) => part === "")) {
+    throw new OverlayError(
+      500,
+      `invalid stored ${KIND_MODEL_TIER_CELL} key ${JSON.stringify(key)}; expected adapter:tier — delete or correct this runtime_overrides row`,
+    );
+  }
+  return { adapter: parts[0], tier: parts[1] };
+}
+
+export function validateModelTierCellPatch(adapter, tier, patch) {
+  if (!MODEL_ADAPTERS.has(adapter)) {
+    throw new OverlayError(
+      422,
+      `unknown model adapter ${JSON.stringify(adapter)} (expected one of ${[...MODEL_ADAPTERS].join(", ")})`,
+    );
+  }
+  if (!REGISTRY_MODEL_TIERS.includes(tier)) {
+    throw new OverlayError(
+      422,
+      `unknown model tier ${JSON.stringify(tier)} (expected ${REGISTRY_MODEL_TIERS.join(", ")})`,
+    );
+  }
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new OverlayError(422, "body must be an object");
+  }
+  const keys = Object.keys(patch);
+  if (keys.length !== 1 || keys[0] !== "model") {
+    throw new OverlayError(
+      422,
+      "model-tier cell overlay accepts exactly one field: model",
+    );
+  }
+  if (typeof patch.model !== "string" || patch.model.trim() === "") {
+    throw new OverlayError(422, "model must be a non-empty string");
+  }
+  return { model: patch.model };
+}
+
+/** Read and validate only independently stored policy model cells. */
+export function runtimeModelTierCells(db) {
+  if (!db) return {};
+  const rows = db
+    .query(
+      `SELECT key, patch_json FROM runtime_overrides WHERE kind = ? ORDER BY key`,
+    )
+    .all(KIND_MODEL_TIER_CELL);
+  const runtime = {};
+  for (const row of rows) {
+    const { adapter, tier } = parseModelTierCellKey(row.key);
+    let parsed;
+    try {
+      parsed = JSON.parse(row.patch_json);
+    } catch (err) {
+      throw new OverlayError(
+        500,
+        `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: patch_json is not JSON (${err.message}); delete or correct this runtime_overrides row`,
+      );
+    }
+    let patch;
+    try {
+      patch = validateModelTierCellPatch(adapter, tier, parsed);
+    } catch (err) {
+      if (err instanceof OverlayError) {
+        throw new OverlayError(
+          500,
+          `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: ${err.message}; delete or correct this runtime_overrides row`,
+        );
+      }
+      throw err;
+    }
+    runtime[adapter] = { ...(runtime[adapter] ?? {}), [tier]: patch.model };
+  }
+  return runtime;
+}
+
+/** Compose stored cells over tracked policy; used before registry startup. */
+export function applyModelTierCellOverrides(db, tracked) {
+  try {
+    return composeModelTierMap(tracked, runtimeModelTierCells(db));
+  } catch (err) {
+    if (err instanceof RegistryError) {
+      throw new OverlayError(
+        500,
+        `invalid stored ${KIND_MODEL_TIER_CELL} override: ${err.message}; delete or correct the runtime_overrides row`,
+      );
+    }
+    throw err;
+  }
+}
+
+/** Focused, secret-free policy model projection for API and Settings. */
+export function modelTierConfigView(db, tracked) {
+  const runtime = runtimeModelTierCells(db);
+  const effective = composeModelTierMap(tracked, runtime);
+  const adapters = [...MODEL_ADAPTERS];
+  return {
+    adapters,
+    tiers: [...REGISTRY_MODEL_TIERS],
+    tracked: Object.fromEntries(
+      adapters.map((adapter) => [adapter, { ...(tracked?.[adapter] ?? {}) }]),
+    ),
+    runtime: Object.fromEntries(
+      adapters.map((adapter) => [adapter, { ...(runtime[adapter] ?? {}) }]),
+    ),
+    effective: Object.fromEntries(
+      adapters.map((adapter) => [adapter, { ...(effective[adapter] ?? {}) }]),
+    ),
+  };
+}
+
+export function modelTierCellResult(db, tracked, adapter, tier, extra = {}) {
+  const view = modelTierConfigView(db, tracked);
+  const runtimeModel = view.runtime[adapter]?.[tier] ?? null;
+  const trackedModel = view.tracked[adapter]?.[tier] ?? null;
+  return {
+    adapter,
+    tier,
+    trackedModel,
+    runtimeModel,
+    effectiveModel: runtimeModel ?? trackedModel,
+    source: runtimeModel === null ? "tracked" : "runtime",
+    restartRequired: true,
+    ...extra,
+  };
 }
 
 export function listOverrideJournal(db, { limit = 100 } = {}) {

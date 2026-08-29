@@ -23,8 +23,22 @@ const SUPPORTED = new Set([
   "maximum",
   "description",
   "title",
+  "format",
   "$schema",
 ]);
+
+/** Closed UI/validation hints (WM-920). Unknown values fail closed. */
+export const SCHEMA_FORMATS = Object.freeze([
+  "secret",
+  "uri",
+  "channel-id",
+  "ticket",
+  "duration",
+  "multiline",
+  "email",
+]);
+const FORMAT_SET = new Set(SCHEMA_FORMATS);
+const DURATION_PATTERN = /^\d+(ms|s|m|h|d)$/;
 
 const hasOwn = (obj: unknown, key: string): boolean =>
   obj !== null &&
@@ -82,6 +96,15 @@ function check(
     }
   }
 
+  if (hasOwn(s, "format")) {
+    if (typeof s.format !== "string" || !FORMAT_SET.has(s.format)) {
+      errors.push(
+        `${path}: unsupported format ${JSON.stringify(s.format)} — contracts fail closed`,
+      );
+      return;
+    }
+  }
+
   const actual = typeOf(value);
 
   if (hasOwn(s, "type") && s.type !== undefined) {
@@ -123,12 +146,23 @@ function check(
     ) {
       errors.push(`${path}: longer than maxLength ${s.maxLength}`);
     }
-    if (
-      hasOwn(s, "pattern") &&
-      typeof s.pattern === "string" &&
-      !new RegExp(s.pattern).test(str)
-    ) {
-      errors.push(`${path}: does not match pattern`);
+    if (hasOwn(s, "pattern") && typeof s.pattern === "string") {
+      let pattern: RegExp;
+      try {
+        pattern = new RegExp(s.pattern);
+      } catch {
+        errors.push(`${path}: invalid pattern`);
+        return;
+      }
+      if (!pattern.test(str)) {
+        errors.push(`${path}: does not match pattern`);
+      }
+    }
+    if (s.format === "uri" && !URL.canParse(str)) {
+      errors.push(`${path}: format "uri" value is not a valid URI`);
+    }
+    if (s.format === "duration" && !DURATION_PATTERN.test(str)) {
+      errors.push(`${path}: format "duration" must match ${DURATION_PATTERN}`);
     }
   }
 
