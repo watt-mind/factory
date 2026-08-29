@@ -61,7 +61,12 @@ Repo <https://github.com/watt-mind/factory>`);
     expect(
       Math.max(...output.split("\n").map((line) => line.length)),
     ).toBeLessThanOrEqual(24);
-    expect(output.replaceAll(/\s|\|/g, "")).toContain("averylongvalue");
-    expect(output.replaceAll(/\s|\|/g, "")).toContain("anotherlongvalue");
+    const physicalRows = output.split("\n").slice(2);
+    expect(physicalRows.map((line) => line.split("|")[0].trim()).join("")).toBe(
+      "a very long value",
+    );
+    expect(physicalRows.map((line) => line.split("|")[1].trim()).join("")).toBe(
+      "another long value",
+    );
   });
 });
