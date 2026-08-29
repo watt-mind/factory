@@ -639,6 +639,43 @@ function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const FORBIDDEN_CONFIG_PATH_SEGMENTS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+]);
+
+function assertSafeConfigPath(keyPath) {
+  for (const key of keyPath) {
+    if (FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key)) {
+      throw new ExtensionError(
+        `config schema path contains forbidden segment "${key}"`,
+      );
+    }
+  }
+}
+
+function assertSafeConfigSchemaPaths(schema, path = []) {
+  assertSafeConfigPath(path);
+  if (!isPlainObject(schema)) return;
+  if (isPlainObject(schema.properties)) {
+    for (const [key, sub] of Object.entries(schema.properties)) {
+      const next = [...path, key];
+      assertSafeConfigPath(next);
+      assertSafeConfigSchemaPaths(sub, next);
+    }
+  }
+  if (isPlainObject(schema.items)) {
+    assertSafeConfigSchemaPaths(schema.items, path);
+  }
+}
+
+function isPrototypeSafeRecord(value) {
+  if (!isPlainObject(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 /**
  * Fill `default`s from a schema into a value, recursively through
  * `properties` and `items`. A nested object property with no value is only
@@ -648,6 +685,11 @@ function isPlainObject(value) {
  * invented unless the schema supplies a `default`).
  */
 export function applyConfigDefaults(schema, value) {
+  assertSafeConfigSchemaPaths(schema);
+  return applyConfigDefaultsUnchecked(schema, value);
+}
+
+function applyConfigDefaultsUnchecked(schema, value) {
   if (!isPlainObject(schema)) return cloneJson(value);
   let out = cloneJson(value);
   if (out === undefined) {
@@ -659,17 +701,17 @@ export function applyConfigDefaults(schema, value) {
   if (isPlainObject(out) && isPlainObject(schema.properties)) {
     for (const [key, sub] of Object.entries(schema.properties)) {
       if (Object.hasOwn(out, key)) {
-        out[key] = applyConfigDefaults(sub, out[key]);
+        out[key] = applyConfigDefaultsUnchecked(sub, out[key]);
         continue;
       }
-      const filled = applyConfigDefaults(sub, undefined);
+      const filled = applyConfigDefaultsUnchecked(sub, undefined);
       if (filled === undefined) continue;
       if (isPlainObject(filled) && Object.keys(filled).length === 0) continue;
       out[key] = filled;
     }
   }
   if (Array.isArray(out) && isPlainObject(schema.items)) {
-    out = out.map((item) => applyConfigDefaults(schema.items, item));
+    out = out.map((item) => applyConfigDefaultsUnchecked(schema.items, item));
   }
   return out;
 }
@@ -708,44 +750,73 @@ export function extensionSecretEnvVar(namespace, keyPath) {
  * the path used for env names and published `{ set, source }` overlays.
  */
 export function collectSecretFields(schema, path = []) {
+  assertSafeConfigSchemaPaths(schema, path);
+  return collectSecretFieldsUnchecked(schema, path);
+}
+
+function collectSecretFieldsUnchecked(schema, path = []) {
   if (!isPlainObject(schema) || !isPlainObject(schema.properties)) return [];
   const out = [];
   for (const [key, sub] of Object.entries(schema.properties)) {
     const next = [...path, key];
     if (isPlainObject(sub) && sub.format === "secret")
       out.push({ path: next, key });
-    else out.push(...collectSecretFields(sub, next));
+    else out.push(...collectSecretFieldsUnchecked(sub, next));
   }
   return out;
 }
 
 function hasAt(obj, keyPath) {
+  assertSafeConfigPath(keyPath);
   let node = obj;
   for (const key of keyPath) {
-    if (!isPlainObject(node) || !Object.hasOwn(node, key)) return false;
+    if (!isPrototypeSafeRecord(node) || !Object.hasOwn(node, key)) return false;
     node = node[key];
   }
   return true;
 }
 
 function setAt(obj, keyPath, value) {
+  assertSafeConfigPath(keyPath);
   let node = obj;
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
-    if (!isPlainObject(node[key])) node[key] = {};
+    if (!isPrototypeSafeRecord(node)) return;
+    if (!Object.hasOwn(node, key) || !isPrototypeSafeRecord(node[key])) {
+      Object.defineProperty(node, key, {
+        value: {},
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
     node = node[key];
   }
-  node[keyPath[keyPath.length - 1]] = value;
+  if (!isPrototypeSafeRecord(node)) return;
+  Object.defineProperty(node, keyPath[keyPath.length - 1], {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function deleteAt(obj, keyPath) {
+  assertSafeConfigPath(keyPath);
   let node = obj;
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
-    if (!isPlainObject(node[key])) return;
+    if (
+      !isPrototypeSafeRecord(node) ||
+      !Object.hasOwn(node, key) ||
+      !isPrototypeSafeRecord(node[key])
+    )
+      return;
     node = node[key];
   }
-  delete node[keyPath[keyPath.length - 1]];
+  if (!isPrototypeSafeRecord(node)) return;
+  const key = keyPath[keyPath.length - 1];
+  if (Object.hasOwn(node, key)) delete node[key];
 }
 
 /** Public config vs secrets bag for a connector's `ctx`. */
