@@ -315,7 +315,14 @@ export function createFsPackLoader(
   { builtIn = false, ignorePins = false } = {},
 ) {
   const root = path.resolve(pack.path);
-  const canonicalRoot = realpathSync(root);
+  let canonicalRoot;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch (err) {
+    throw new RegistryError(
+      `pack "${pack.name}": root ${root} is not accessible — ${err.message}`,
+    );
+  }
   let pins;
   return {
     listAgentDefs() {
