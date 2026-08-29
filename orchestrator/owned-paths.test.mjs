@@ -286,7 +286,10 @@ test("registry inputs require owning the zero-pack digest baseline when configur
   };
 
   expectEqual(
-    ownedPathsClosureGaps({ ownedPaths, ownedPathsPolicy: registryDigestPolicy }),
+    ownedPathsClosureGaps({
+      ownedPaths,
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
     [expectedGap],
   );
   expectEqual(

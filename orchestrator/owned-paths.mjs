@@ -644,9 +644,7 @@ export function ownedPathsClosureGaps({
     : null;
   if (
     registryInput &&
-    !own.some((owned) =>
-      globsOverlap(owned, policy.registryDigest.baseline),
-    )
+    !own.some((owned) => globsOverlap(owned, policy.registryDigest.baseline))
   ) {
     addGap({
       rule: "registry-digest",

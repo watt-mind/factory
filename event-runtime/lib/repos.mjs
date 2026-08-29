@@ -149,9 +149,7 @@ function normalizeOwnedPathsPolicy(raw = {}, repoName, file) {
       );
     }
     if (
-      !digest.inputs.every(
-        (input) => typeof input === "string" && input.trim(),
-      )
+      !digest.inputs.every((input) => typeof input === "string" && input.trim())
     ) {
       throw new RepoError(
         `${file}: repo ${repoName} owned_paths_policy.registry_digest.inputs must contain only non-empty strings`,

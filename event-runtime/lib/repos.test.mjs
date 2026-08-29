@@ -144,10 +144,7 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
         ],
         pinManifests: ["event-runtime/agents/*.json"],
         registryDigest: {
-          inputs: [
-            "event-runtime/agents/**",
-            "event-runtime/event-types.json",
-          ],
+          inputs: ["event-runtime/agents/**", "event-runtime/event-types.json"],
           baseline: "event-runtime/lib/registry.test.mjs",
         },
       },
@@ -472,10 +469,7 @@ describe("reposView is what the control API serves", () => {
         ],
         pinManifests: ["event-runtime/agents/*.json"],
         registryDigest: {
-          inputs: [
-            "event-runtime/agents/**",
-            "event-runtime/event-types.json",
-          ],
+          inputs: ["event-runtime/agents/**", "event-runtime/event-types.json"],
           baseline: "event-runtime/lib/registry.test.mjs",
         },
       },
