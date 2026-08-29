@@ -293,17 +293,17 @@ Both LLM adapters implement the shared execution, result, workspace,
 transcript, credential, timeout, and cancellation shapes above. Their deliberate
 differences and known conformance gaps are:
 
-| Concern                      | Claude                                                                                   | pi                                                                 |
-| :--------------------------- | :--------------------------------------------------------------------------------------- | :----------------------------------------------------------------- |
-| Prompt transport             | `-p <prompt>` argv                                                                       | stdin                                                              |
-| Structured stream            | `stream-json`                                                                            | `--mode json`                                                      |
-| Non-mutating containment     | generated settings/sandbox plus worker integrity gate                                    | restricted tool list; audited-not-enforced                         |
-| Required result write path   | `Write`/`Edit` remain available outside denied checkout                                  | `write` remains in `READ_ONLY_TOOLS`                               |
-| Usage                        | terminal result plus `onUsage` callback                                                  | accumulated turns, emitted as trace                                |
-| Observer failure isolation   | per-line trace and terminal usage callbacks guarded                                      | per-line trace guarded; terminal usage trace gap tracked by WM-305 |
-| Policy denial matching       | confirmed Claude-authored patterns                                                       | empty until a pi-authored shape is observed                        |
-| Missing CLI                  | generic spawn error (known gap)                                                          | typed preflight with `npx` fallback                                |
-| `safeChildEnvironment` guard | shared helper: only explicit `true` grants push credentials                              | shared helper: only explicit `true` grants push credentials       |
+| Concern                      | Claude                                                      | pi                                                                 |
+| :--------------------------- | :---------------------------------------------------------- | :----------------------------------------------------------------- |
+| Prompt transport             | `-p <prompt>` argv                                          | stdin                                                              |
+| Structured stream            | `stream-json`                                               | `--mode json`                                                      |
+| Non-mutating containment     | generated settings/sandbox plus worker integrity gate       | restricted tool list; audited-not-enforced                         |
+| Required result write path   | `Write`/`Edit` remain available outside denied checkout     | `write` remains in `READ_ONLY_TOOLS`                               |
+| Usage                        | terminal result plus `onUsage` callback                     | accumulated turns, emitted as trace                                |
+| Observer failure isolation   | per-line trace and terminal usage callbacks guarded         | per-line trace guarded; terminal usage trace gap tracked by WM-305 |
+| Policy denial matching       | confirmed Claude-authored patterns                          | empty until a pi-authored shape is observed                        |
+| Missing CLI                  | generic spawn error (known gap)                             | typed preflight with `npx` fallback                                |
+| `safeChildEnvironment` guard | shared helper: only explicit `true` grants push credentials | shared helper: only explicit `true` grants push credentials        |
 
 All adapters delegate the fail-closed authority check to the shared helper, so
 non-boolean values never gain push credentials.

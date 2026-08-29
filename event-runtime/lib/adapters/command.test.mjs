@@ -524,7 +524,8 @@ describe("command-adapter registry (OPS-404)", () => {
     try {
       planAdmittedEvents(db, withReaper, { policyVersion: "git:test-pv" });
     } finally {
-      if (previousEventHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      if (previousEventHome === undefined)
+        delete process.env.FACTORY_EVENT_HOME;
       else process.env.FACTORY_EVENT_HOME = previousEventHome;
     }
 
