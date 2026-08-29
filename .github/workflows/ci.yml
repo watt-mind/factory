@@ -489,6 +489,23 @@ jobs:
       - name: Formatting check (prettier)
         run: bun run format:check
 
+      # WM-1122: the shadow/verify self-hosted image ships ripgrep, but the
+      # GitHub-hosted ubuntu-latest cloud lane (nightly/fork/force_hosted) does
+      # not. Without it the guard below hits `rg: command not found` and
+      # misreports it as a stale search contract, failing Verify on every
+      # cloud-lane run. Install it only when missing so the self-hosted lane is
+      # untouched.
+      - name: Ensure ripgrep is available
+        if: runner.environment != 'self-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version | head -1
+
       - name: Guard host-serialized spawn suites
         shell: bash
         run: |
