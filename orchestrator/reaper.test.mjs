@@ -166,6 +166,8 @@ import { memoryControlPlane } from "../lib/control-plane/memory.mjs";
 import { runReaper } from "./reaper.mjs";
 import { Database } from "bun:sqlite";
 import { reapDeadDispatchWorktrees, ticketHasLiveRun } from "./reaper.mjs";
+import { reapDeadWorkers, workerIsPrunable, localPidAlive } from "./reaper.mjs";
+import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 
 describe("reclaim label computation (WM-14)", () => {
   test("restores ai:agent-ready when returning In Progress ticket to Todo", () => {
@@ -872,5 +874,196 @@ describe("dead-dispatch worktree reaper (WM-1066)", () => {
       "2026-08-29T00:00:00Z",
     );
     expect(ticketHasLiveRun(db, "factory", "WM-1066")).toBe(true);
+  });
+});
+
+describe("dead-worker registry prune (WM-1125)", () => {
+  const DB_FILE = "/runtime/factory.db";
+  const HOST = "operator-box";
+  const NOW = Date.parse("2026-08-29T12:00:00Z");
+  const fresh = new Date(NOW - 5_000).toISOString(); // 5s ago — heartbeating
+  const laggy = new Date(NOW - (HEARTBEAT_STALE_MS - 5_000)).toISOString(); // just inside window
+  const expired = new Date(NOW - 60 * 60 * 1000).toISOString(); // an hour ago
+
+  function registryWith(rows) {
+    const db = new Database(":memory:");
+    db.run(
+      `CREATE TABLE workers (
+        worker_id   TEXT PRIMARY KEY,
+        host        TEXT NOT NULL,
+        pid         INTEGER NOT NULL,
+        labels_json TEXT NOT NULL DEFAULT '{}',
+        adapters    TEXT NOT NULL DEFAULT '',
+        started_at  TEXT NOT NULL,
+        last_seen   TEXT NOT NULL,
+        state       TEXT NOT NULL DEFAULT 'idle',
+        current_run TEXT,
+        stopped_at  TEXT
+      )`,
+    );
+    const insert = db.query(
+      `INSERT INTO workers (worker_id, host, pid, started_at, last_seen, state, current_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const r of rows) {
+      insert.run(
+        r.worker_id,
+        r.host ?? HOST,
+        r.pid,
+        r.started_at ?? r.last_seen,
+        r.last_seen,
+        r.state ?? "idle",
+        r.current_run ?? null,
+      );
+    }
+    return db;
+  }
+
+  function reapWith(db, args, overrides = {}) {
+    const logs = [];
+    // Keep the in-memory db open so the test can inspect it after the reap;
+    // production still closes the handle it opens.
+    db.close = () => {};
+    const totals = reapDeadWorkers(args, {
+      databasePath: DB_FILE,
+      openDatabase: () => db,
+      fileExists: (p) => p === DB_FILE,
+      now: NOW,
+      localHost: HOST,
+      // Default: every pid is dead unless the row opts into `alivePids`.
+      pidAlive: (pid) => (overrides.alivePids ?? []).includes(pid),
+      log: (...parts) => logs.push(parts.join(" ")),
+      ...overrides,
+    });
+    return { totals, logs };
+  }
+
+  test("prunes a table of live + dead rows down to only the live set", () => {
+    const db = registryWith([
+      // live: fresh heartbeat, pid running
+      { worker_id: "live-1", pid: 1001, last_seen: fresh, state: "idle" },
+      { worker_id: "live-2", pid: 1002, last_seen: fresh, state: "busy" },
+      // dead: crashed process, heartbeat long expired
+      { worker_id: "dead-idle", pid: 2001, last_seen: expired, state: "idle" },
+      {
+        worker_id: "dead-busy",
+        pid: 2002,
+        last_seen: expired,
+        state: "busy",
+        current_run: "run_terminal",
+      },
+      {
+        worker_id: "dead-stop",
+        pid: 2003,
+        last_seen: expired,
+        state: "stopped",
+      },
+    ]);
+    const { totals } = reapWith(db, parseArgs(["--apply"]), {
+      alivePids: [1001, 1002],
+    });
+    expect(totals.pruned).toBe(3);
+    expect(totals.live).toBe(2);
+    const remaining = db
+      .query(`SELECT worker_id FROM workers ORDER BY worker_id`)
+      .all()
+      .map((r) => r.worker_id);
+    expect(remaining).toEqual(["live-1", "live-2"]);
+  });
+
+  test("never prunes a worker whose heartbeat briefly lagged within the threshold", () => {
+    const db = registryWith([
+      // pid reported dead, but heartbeat is still inside the stale window
+      { worker_id: "lagging", pid: 3001, last_seen: laggy, state: "busy" },
+    ]);
+    const { totals } = reapWith(db, parseArgs(["--apply"]), { alivePids: [] });
+    expect(totals.pruned).toBe(0);
+    expect(totals.live).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM workers`).get().n).toBe(1);
+  });
+
+  test("keeps a hung-but-alive local process (expired heartbeat, pid still up)", () => {
+    const db = registryWith([
+      { worker_id: "hung", pid: 4001, last_seen: expired, state: "busy" },
+    ]);
+    const { totals } = reapWith(db, parseArgs(["--apply"]), {
+      alivePids: [4001],
+    });
+    expect(totals.pruned).toBe(0);
+    expect(totals.live).toBe(1);
+  });
+
+  test("prunes an expired remote worker whose pid cannot be probed from here", () => {
+    const db = registryWith([
+      {
+        worker_id: "remote-dead",
+        host: "worker-node-2",
+        pid: 5001,
+        last_seen: expired,
+        state: "idle",
+      },
+    ]);
+    // pidAlive would say alive for 5001, but it must not be consulted for a
+    // different host — the row still prunes on its expired heartbeat alone.
+    const { totals } = reapWith(db, parseArgs(["--apply"]), {
+      alivePids: [5001],
+    });
+    expect(totals.pruned).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM workers`).get().n).toBe(0);
+  });
+
+  test("dry run reports the prunable rows without deleting anything", () => {
+    const db = registryWith([
+      { worker_id: "dead-1", pid: 6001, last_seen: expired, state: "idle" },
+    ]);
+    const { totals, logs } = reapWith(db, parseArgs([]), { alivePids: [] });
+    expect(totals.considered).toBe(1);
+    expect(totals.pruned).toBe(0);
+    expect(db.query(`SELECT COUNT(*) AS n FROM workers`).get().n).toBe(1);
+    expect(logs.join("\n")).toContain("STALE worker dead-1");
+  });
+
+  test("no runtime registry on disk is a safe no-op", () => {
+    const totals = reapDeadWorkers(parseArgs(["--apply"]), {
+      databasePath: DB_FILE,
+      openDatabase: () => {
+        throw new Error("should not open");
+      },
+      fileExists: () => false,
+      log: () => {},
+    });
+    expect(totals).toEqual({ considered: 0, pruned: 0, live: 0, failed: 0 });
+  });
+
+  test("workerIsPrunable gates on the heartbeat before the pid verdict", () => {
+    // Fresh heartbeat is never prunable, whatever the pid probe says.
+    expect(
+      workerIsPrunable({ last_seen: fresh }, { now: NOW, alive: false }),
+    ).toBe(false);
+    // Expired + dead pid → prune; expired + alive pid → keep.
+    expect(
+      workerIsPrunable({ last_seen: expired }, { now: NOW, alive: false }),
+    ).toBe(true);
+    expect(
+      workerIsPrunable({ last_seen: expired }, { now: NOW, alive: true }),
+    ).toBe(false);
+    // Expired + unprobeable (remote, alive undefined/null) → prune.
+    expect(
+      workerIsPrunable({ last_seen: expired }, { now: NOW, alive: null }),
+    ).toBe(true);
+  });
+
+  test("localPidAlive: dead pid is false, EPERM-owned pid counts as alive", () => {
+    expect(localPidAlive(999999)).toBe(false);
+    expect(localPidAlive(0)).toBe(false);
+    expect(localPidAlive(-1)).toBe(false);
+    expect(localPidAlive(process.pid)).toBe(true);
+    // A kernel EPERM means the process exists but is another user's — alive.
+    const eperm = () => {
+      const err = new Error("operation not permitted");
+      err.code = "EPERM";
+      throw err;
+    };
+    expect(localPidAlive(4242, eperm)).toBe(true);
   });
 });

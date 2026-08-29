@@ -34,13 +34,14 @@ import {
   statSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import { dbPath } from "../event-runtime/lib/config.mjs";
+import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 import { ticketSlug } from "../lib/ticket-slug.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
@@ -837,6 +838,126 @@ export async function reapDeadDispatchWorktrees(
   return totals;
 }
 
+/**
+ * Is a local process still alive? `kill(pid, 0)` sends no signal — it only asks
+ * the kernel whether the pid exists. ESRCH means gone; EPERM means it exists but
+ * is owned by another user (still alive, so keep the row). Exported so the pid
+ * probe can be stubbed in tests without spawning real processes.
+ */
+export function localPidAlive(pid, kill = process.kill.bind(process)) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+/**
+ * True when a worker registry row is a dead husk safe to delete: its heartbeat
+ * has expired past the threshold AND its process is not alive. The heartbeat
+ * gate is what protects a live worker — one that checked in within the window,
+ * or whose clock briefly lagged, is never prunable however its pid probes. Pure
+ * and exported so the decision stays testable without a database.
+ *
+ * `alive` is the pid probe's verdict: true (running — keep), false (gone —
+ * prune), or null (a worker on another host, whose pid this box cannot probe;
+ * an expired heartbeat is then the only proof of death, so it prunes).
+ */
+export function workerIsPrunable(
+  row,
+  { now = Date.now(), staleMs = HEARTBEAT_STALE_MS, alive } = {},
+) {
+  const lastSeen = Date.parse(row.last_seen);
+  const heartbeatExpired =
+    !Number.isFinite(lastSeen) || now - lastSeen > staleMs;
+  if (!heartbeatExpired) return false; // live or briefly-lagged — never touch it
+  return alive !== true;
+}
+
+/**
+ * Prune dead-pid / expired-heartbeat worker rows from the runtime registry
+ * (WM-1125). The `workers` table is durable, so every stack restart and host
+ * crash leaves the dead process's rows behind — they never claim work, but they
+ * clutter `factory workers`, mislead idle/capacity views, and used to need a
+ * manual DELETE after a reboot. This reclaims them on the reaper's cadence.
+ *
+ * A currently-heartbeating worker is never removed: the heartbeat gate in
+ * workerIsPrunable() is measured against the same HEARTBEAT_STALE_MS the
+ * registry itself uses to call a worker stale. A local row also gets a
+ * definitive pid probe, so a hung-but-alive process is kept, not pruned.
+ * Deleting a `busy!stale` row that pointed at a terminal run releases it as a
+ * side effect — the row was the only thing still "holding" the finished run.
+ *
+ * Dependencies are injectable so selection and deletion can be tested without a
+ * live runtime database, the local process table, or a real hostname.
+ */
+export function reapDeadWorkers(
+  args,
+  {
+    databasePath = dbPath(),
+    openDatabase = (file) => new Database(file),
+    fileExists = existsSync,
+    now = Date.now(),
+    staleMs = HEARTBEAT_STALE_MS,
+    localHost = hostname(),
+    pidAlive = localPidAlive,
+    log = (...values) => console.log(...values),
+  } = {},
+) {
+  const totals = { considered: 0, pruned: 0, live: 0, failed: 0 };
+  if (!fileExists(databasePath)) return totals;
+
+  let db;
+  try {
+    db = openDatabase(databasePath);
+  } catch (err) {
+    totals.failed += 1;
+    log(`  ! dead-worker reap: registry unreadable: ${err.message || err}`);
+    return totals;
+  }
+
+  try {
+    const rows = db
+      .query(
+        `SELECT worker_id, host, pid, state, last_seen, current_run FROM workers`,
+      )
+      .all();
+    const remove = db.query(`DELETE FROM workers WHERE worker_id = ?`);
+
+    for (const row of rows) {
+      // A worker on another host cannot have its pid probed from here, so its
+      // heartbeat is the only proof of life (alive = null). Local rows get the
+      // definitive check, keeping a hung-but-alive local process off the list.
+      const alive = row.host === localHost ? pidAlive(row.pid) : null;
+      if (!workerIsPrunable(row, { now, staleMs, alive })) {
+        totals.live += 1;
+        continue;
+      }
+
+      totals.considered += 1;
+      const label =
+        `${row.worker_id} (host ${row.host} pid ${row.pid}, state ${row.state}` +
+        `${row.current_run ? `, holding ${row.current_run}` : ""})`;
+      if (!args.apply) {
+        log(`  STALE worker ${label} — dead process, heartbeat expired`);
+        continue;
+      }
+      remove.run(row.worker_id);
+      totals.pruned += 1;
+      log(`  pruned worker ${label}`);
+    }
+  } catch (err) {
+    totals.failed += 1;
+    log(`  ! dead-worker reap failed: ${err.message || err}`);
+  } finally {
+    db.close?.();
+  }
+
+  return totals;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -885,6 +1006,21 @@ Options:
     );
   } catch (err) {
     console.error(`Dead-dispatch worktree reap failed: ${err.message || err}`);
+  }
+
+  // WM-1125: prune dead-pid / expired-heartbeat worker registry rows so they
+  // stop accumulating across restarts. Best-effort and isolated — a failure
+  // here must never mask the reaps above.
+  try {
+    console.log(`\n=== Dead-worker registry prune [${mode}] ===\n`);
+    const workerTotals = reapDeadWorkers(args);
+    console.log(
+      `\n=== Workers ${args.apply ? "pruned" : "prunable"}: ${
+        args.apply ? workerTotals.pruned : workerTotals.considered
+      } | Live: ${workerTotals.live} | Failures: ${workerTotals.failed} ===`,
+    );
+  } catch (err) {
+    console.error(`Dead-worker registry prune failed: ${err.message || err}`);
   }
 
   return totals;
