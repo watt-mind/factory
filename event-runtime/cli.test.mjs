@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { COMMAND_NAMES } from "./cli/commands.mjs";
 import { renderInspect } from "./cli/inspect.mjs";
-import { CLI, freePort, runCli } from "./cli/test-helpers.mjs";
+import {
+  CLI,
+  freePort,
+  runCli,
+  throwawayRunDir,
+} from "./cli/test-helpers.mjs";
+import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
 
 const EXPECTED_COMMANDS = [
   "serve",
@@ -126,7 +132,9 @@ describe("cli routing", () => {
       const child = Bun.spawn(["bun", CLI, "inspect", "run-1289"], {
         env: {
           ...process.env,
+          FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
           FACTORY_EVENT_PORT: String(server.port),
+          FACTORY_RUN_DIR: throwawayRunDir(),
         },
         stdout: "pipe",
         stderr: "pipe",
