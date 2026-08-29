@@ -12,6 +12,34 @@ import path from "node:path";
 import { validateExtensionManifest } from "../lib/extensions.mjs";
 
 /**
+ * Normalize `npm pack --dry-run --json` into a flat list of report entries,
+ * tolerant of the shape differences between npm versions:
+ *   - older npm returns an array of report objects `[{ name, files, ... }]`;
+ *   - newer npm (>=12) returns an object keyed by package name
+ *     `{ "@scope/name": { name, files, ... } }`;
+ *   - a bare single report object `{ name, files, ... }` is also accepted.
+ * Each returned entry carries `name`/`version`/`files` when npm provides them.
+ *
+ * @param {unknown} report
+ * @returns {Array<Record<string, unknown>>}
+ */
+export function normalizePackReport(report) {
+  if (Array.isArray(report)) return report;
+  if (report && typeof report === "object") {
+    // A single report object exposes its own file list at the top level;
+    // the keyed-by-name shape does not — its entries live under each key.
+    if (Array.isArray(report.files) || "filename" in report || "id" in report) {
+      return [report];
+    }
+    const entries = Object.values(report).filter(
+      (value) => value && typeof value === "object",
+    );
+    if (entries.length) return entries;
+  }
+  return [report];
+}
+
+/**
  * Validate `dir` (filesystem path or package name) and list the files
  * `npm pack --dry-run` would include.
  *
@@ -45,7 +73,7 @@ export function packExtension(
     console.log(packed.stdout);
     return checked;
   }
-  const entries = Array.isArray(report) ? report : [report];
+  const entries = normalizePackReport(report);
   for (const item of entries) {
     const files = item.files ?? [];
     const name = item.name ?? checked.manifest.name;
