@@ -625,19 +625,14 @@ function fetchViewerDefault(repoName) {
     // GitHub control plane's claim uses the ambient `gh auth` user as the
     // lock owner, so resume checks must read that same identity via /user.
     // The ticket CLI routes the raw call through the repo's own plane.
-    const rawQuery = repo?.controlPlane === "github"
-      ? "/user"
-      : "query{ viewer{ id name } }";
+    const rawQuery =
+      repo?.controlPlane === "github" ? "/user" : "query{ viewer{ id name } }";
     const args = [linearCli(), "raw", rawQuery];
     if (repoName) args.push("--repo", repoName);
-    const out = execFileSync(
-      "bun",
-      args,
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    const out = execFileSync("bun", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const parsed = JSON.parse(out);
     if (repo?.controlPlane === "github") {
       return parsed?.id == null
@@ -1202,8 +1197,8 @@ export function worktreeDispatchAutoEligibility(
     escalationChecks && Object.values(escalationChecks).every(Boolean),
   );
   const failedEscalationCheck = escalationChecks
-    ? Object.entries(escalationChecks).find(([, passed]) => !passed)?.[0] ??
-      null
+    ? (Object.entries(escalationChecks).find(([, passed]) => !passed)?.[0] ??
+      null)
     : null;
 
   let budgetReason;
@@ -1299,9 +1294,7 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_claim_viewer_identity = viewerOwnsClaim;
     if (!viewerOwnsClaim) {
       return refusal(
-        canResumeEscalation
-          ? "ticket_claimed_by_other"
-          : "ticket_assigned",
+        canResumeEscalation ? "ticket_claimed_by_other" : "ticket_assigned",
         evidence,
         "noop",
         canResumeEscalation

@@ -4320,6 +4320,123 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     db.close();
   });
 
+  test("tier escalation continuation is deferred, not refused, while its projection is pending (#1290)", async () => {
+    const db = openDb(":memory:");
+    const failed = queueRun(
+      db,
+      makeDispatchSpec({
+        runId: "run_pending_projection_light",
+        input: {
+          repo: "wt-worker",
+          ticket: "WM-1290",
+          modelTier: "light",
+        },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, failed.runId, {
+      type: "factory.dispatch.requested",
+      correlationId: "pending-projection-tier-root",
+    });
+    let now = T0;
+    let projectionWorks = false;
+    const dispatchOpts = {
+      locksDir: tmpDir("tier-pending-locks-"),
+      leasesDir: tmpDir("tier-pending-leases-"),
+      random: () => 0,
+      fetchTicket: () =>
+        readyDispatchTicket("WM-1290", {
+          labels: {
+            nodes: [{ name: "ai:agent-ready" }, { name: "tier:light" }],
+          },
+        }),
+      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+      projectTierEscalation: () => projectionWorks,
+      onTierEscalationProjectionError: () => {},
+    };
+    const o = opts({
+      now: () => now,
+      onTierEscalationProjectionError: () => {},
+      dispatch: dispatchOpts,
+    });
+    const failure = await runOnce(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      o,
+    );
+    expect(failure).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+    });
+    const continuationRunId = failure.escalatedRunId;
+    const projectionState = () =>
+      db
+        .query(
+          `SELECT projection_state AS projectionState
+             FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId).projectionState;
+    expect(projectionState()).toBe("pending");
+    expect(runState(db, continuationRunId)).toBe("APPROVED");
+
+    // A continuation admitted to the queue before its projection landed must
+    // not reach the eligibility gate: the planner would refuse it terminally.
+    transition(db, {
+      runId: continuationRunId,
+      to: "QUEUED",
+      expectFrom: "APPROVED",
+      actor: "test",
+      reason: "queued_before_projection",
+      now,
+    });
+    const deferred = await runOnce(
+      db,
+      registry,
+      { fake: dispatchFakeAdapter },
+      o,
+    );
+    expect(deferred).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "QUEUED",
+      reasonCode: "tier_escalation_projection_pending",
+    });
+    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
+    expect(runState(db, continuationRunId)).toBe("QUEUED");
+    expect(projectionState()).toBe("pending");
+    expect(claimNext(db, o)).toBeNull();
+
+    // Once the projection is applied the same continuation proceeds as before.
+    projectionWorks = true;
+    now += deferred.requeueAfterMs;
+    const completed = await runOnce(
+      db,
+      registry,
+      { fake: dispatchFakeAdapter },
+      o,
+    );
+    expect(completed).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "COMPLETED",
+      reasonCode: "ok",
+    });
+    expect(projectionState()).toBe("applied");
+    db.close();
+  });
+
   test("only a durable escalation handoff authorises the operator bypass at execute time (GH-845)", async () => {
     // Regression: an inherited spec field must never be an authorisation.
     // approvalPolicy — dispatchEvidence included — is copied onto chain runs

@@ -1091,9 +1091,7 @@ function originatingEvent(db, runId) {
 
 function tierEscalationForContinuation(db, runId) {
   const row = db
-    .query(
-      `SELECT * FROM tier_escalations WHERE continuation_run_id = ?`,
-    )
+    .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
     .get(runId);
   if (!row) return null;
   return {
@@ -1110,7 +1108,11 @@ function tierEscalationForContinuation(db, runId) {
 
 /** Leave a foreign-owned escalation in an explicit terminal projection state. */
 function refuseTierEscalationClaim(db, handoff, reasonCode) {
-  if (!handoff?.rootRunId || !handoff?.failedRunId || !handoff?.continuationRunId)
+  if (
+    !handoff?.rootRunId ||
+    !handoff?.failedRunId ||
+    !handoff?.continuationRunId
+  )
     return false;
   const changed = db
     .query(
@@ -3071,6 +3073,15 @@ export async function executeClaimed(
             now: nowFn,
           });
         } else {
+          // A continuation whose tracker projection has not been applied yet
+          // is not runnable: the planner would refuse it terminally as
+          // ticket_assigned (tier_escalation_check_failed:
+          // ticket_escalation_projection_applied) and the row would stay
+          // pending forever (#1290). Requeue and let reconcileTierEscalations
+          // finish the projection first.
+          if (worktreeHandoff?.projectionState === "pending") {
+            return deferTransientGate("tier_escalation_projection_pending");
+          }
           gateResult = worktreeDispatchAutoEligibility(spec.input, {
             ...(dispatchOpts ?? {}),
             claimedRetry: claimedRetryFor(db, runId, attempt),
@@ -3131,18 +3142,12 @@ export async function executeClaimed(
           gateRefusal.reason === "ticket_claimed_by_other" &&
           worktreeHandoff
         ) {
-          refuseTierEscalationClaim(
-            db,
-            worktreeHandoff,
-            gateRefusal.reason,
-          );
+          refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
         }
         const res = refuseTerminal(gateRefusal.reason, [`${gate}_gate`], {
           detail: gateRefusal.detail,
           receiptEvidence:
-            gate === "dispatch" && worktreeHandoff
-              ? gateResult.evidence
-              : null,
+            gate === "dispatch" && worktreeHandoff ? gateResult.evidence : null,
         });
         if (res?.fenced) return { fenced: true };
         return {
