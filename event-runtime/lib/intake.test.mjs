@@ -215,7 +215,7 @@ describe("admitEvent", () => {
   });
 
   test("external admission rejects all reserved provenance before persistence", () => {
-    for (const source of ["chain", "handoff"]) {
+    for (const source of ["chain", "handoff", "schedule"]) {
       const db = openDb(":memory:");
       const result = admitExternalEvent(
         db,
@@ -258,6 +258,32 @@ describe("admitEvent", () => {
       duplicate: false,
       errors: ['source: reserved internal provenance "chain"'],
     });
+  });
+
+  test("a signed caller cannot forge schedule provenance to inherit auto-approval (#960)", () => {
+    const db = openDb(":memory:");
+    // The concrete attack from #960: a holder of the shared event secret posts
+    // a merge request wearing the enabled auto-approved loop's provenance.
+    const forged = envelope({
+      source: "schedule",
+      eventId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      type: "factory.merge.requested",
+      payload: { loop: "merge-factory", repo: "factory" },
+    });
+    expect(admitSignedEvent(db, registry, forged, { now: NOW })).toEqual({
+      admitted: false,
+      duplicate: false,
+      errors: ['source: reserved internal provenance "schedule"'],
+    });
+    expect(admitExternalEvent(db, registry, forged, { now: NOW })).toEqual({
+      admitted: false,
+      duplicate: false,
+      errors: ['source: reserved internal provenance "schedule"'],
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+
+    // The in-process scheduler still owns the provenance it writes.
+    expect(admitEvent(db, registry, forged, { now: NOW }).admitted).toBe(true);
   });
 
   test("schema-invalid envelope returns errors and writes no row", () => {

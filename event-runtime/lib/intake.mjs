@@ -248,7 +248,19 @@ export function translateGitHubEvent({
  *         | { admitted: false, duplicate: true, event: object }
  *         | { admitted: false, duplicate: false, errors: string[] }}
  */
-export const RESERVED_INTERNAL_SOURCES = new Set(["chain", "handoff"]);
+/**
+ * Provenance a caller may never select. `chain` is durable proof the chain
+ * resolver created the event; `handoff` proof the handoff boundary did; and
+ * `schedule` proof the in-process tick loop did — the fact
+ * `autoApproveScheduled` reads as authority to approve a run nobody watched
+ * (#960). Each is written only by a trusted in-process producer that calls
+ * `admitEvent` (or a narrow wrapper) directly.
+ */
+export const RESERVED_INTERNAL_SOURCES = new Set([
+  "chain",
+  "handoff",
+  "schedule",
+]);
 
 function reservedSourceRefusal(envelope, allowed = new Set()) {
   if (
@@ -281,7 +293,8 @@ export function admitExternalEvent(db, registry, envelope, options = {}) {
 /**
  * Persist an envelope after the existing factory HMAC boundary authenticated
  * its exact bytes. Handoff is the one reserved provenance that boundary may
- * admit; chain remains in-process-only and caller text can never select it.
+ * admit; chain and schedule remain in-process-only, so a holder of the shared
+ * event secret cannot forge scheduler provenance and inherit auto-approval.
  */
 export function admitSignedEvent(db, registry, envelope, options = {}) {
   const refusal = reservedSourceRefusal(envelope, new Set(["handoff"]));
