@@ -223,8 +223,13 @@ describe("registry", () => {
     // Regenerated (security-ticket dispatch, WM-1060): work-scan.md now admits
     // `type:security` candidates when input.dispatchSecurity == "auto" instead
     // of always pre-filtering them. work-scan.md re-pinned.
+    // Regenerated (#1077): dispatch.md specifies the PR body's `## Validation`
+    // table and merge-review.md is told to treat it as claimed, not verified,
+    // evidence. Both prompts are registry inputs; dispatch.json and
+    // merge-review.json are re-pinned. Prompt text only — no schema, contract,
+    // route, or capability changed.
     const expected =
-      "sha256:2a45a320768f5d1f70657b4fb2940742ba0418637b22b65cc5ce4808256c33df";
+      "sha256:5af0bf31532d3fcd8e119e4c054d2a3f119dea89004fe95bce4ed061bb2e44e8";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -464,8 +469,12 @@ describe("registry", () => {
     // commands, leaving full suites to CI, and re-pins dispatch.
     // Regenerated (WM-1039 rebase over tracker-neutral sweep)
     // Regenerated (WM-1006 cutover: ticket patterns accept GitHub owner/repo#N ids; schemas re-pinned)
+    // Regenerated (#1077): dispatch.md specifies the PR body's `## Validation`
+    // table (observed results, no PR on a fail, bounded rows, must agree with
+    // the Handoff), so the prompt pin moved. Prompt text only — `pack` stays
+    // non-enumerable and no enumerable key was added.
     expect(computeDefHash(def)).toBe(
-      "sha256:1e8c07fc1354070bfa88f82c0ef0537404d70f0c7e616d6359a23177ed6f3057",
+      "sha256:9b9f59322454c0935cef3a83c85adf2dee84e6b1e6d5301d1b1de46267b05ea4",
     );
   });
 

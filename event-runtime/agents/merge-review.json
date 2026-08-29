@@ -13,7 +13,11 @@
   },
   "capabilities": {
     "filesystem": "workspace-only",
-    "services": ["gh:read", "tracker:read", "repo:read"]
+    "services": [
+      "gh:read",
+      "tracker:read",
+      "repo:read"
+    ]
   },
   "limits": {
     "timeout_seconds": 300,
@@ -26,12 +30,14 @@
         "type": "repo",
         "id": "$.input.repo"
       },
-      "kinds": ["decision"],
+      "kinds": [
+        "decision"
+      ],
       "max": 10
     }
   ],
   "pins": {
-    "agents/merge-review.md": "sha256:77be28101f5e4645a37501bc4aa2dd80dd87519b528eb8b9db0c2ed55ea1d73f",
+    "agents/merge-review.md": "sha256:992f89bdeeae3280ced0a62e4ac33927fb3ef9062144578193bfe43373ad814d",
     "schemas/merge-review.input.json": "sha256:d7051604031742a3b0e060f9fb1359aa5de3b3d42a80714f11492054e81a50f8",
     "schemas/merge-review.output.json": "sha256:efad4e30c1fed1978794630397819d71d78391381a6375edab704eaf5458b282"
   }

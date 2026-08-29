@@ -37,6 +37,24 @@ comments. Require a valid structured Handoff, diff containment in Owned Paths,
 mergeability, non-draft state, real required CI, behavior correctness, and
 falsifiable regression tests. Green CI alone is never MERGE.
 
+The PR body may carry a `## Validation` table from the agent that wrote the
+diff. It is **claimed** evidence, never verified evidence: one run's own
+account of what it ran, written by the author. Read it as a map of where to
+look first. **Your own verification still governs** — every gate above is
+yours to evidence, and a table can never be the reason you skipped one.
+Required checks come only from the resolver below; Owned Paths containment,
+Handoff validity, falsifiable tests, and behavior correctness come only from
+the diff, the checks, and the ticket. If you find yourself accepting a row in
+place of running a gate, that is exactly the failure this paragraph exists to
+stop.
+
+A `pass` row contradicted by a red required check, or by the worker's
+`## Handoff verification (worker-observed)` comment, softens neither: the
+observed exit code wins, and the contradiction is itself a finding. An absent,
+partial, or malformed table is not by itself FIX or ESCALATE — it only means
+you start with less. Judge the PR on the gates, exactly as you would with no
+table at all.
+
 Resolve the CI gate mechanically for the pinned head SHA with the supported
 PR-level command and the checked-in resolver. Capture status and combined
 output from exactly:
