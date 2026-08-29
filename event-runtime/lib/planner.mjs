@@ -2115,7 +2115,7 @@ export function planEvent(
 
     let approvalPolicy = null;
     let dispatchEvidence = worktreeEligibility?.evidence ?? null;
-    if (envelope.source === "chain") {
+    if (envelope.source === "chain" || envelope.source === "handoff") {
       approvalPolicy = buildChainApprovalPolicy(envelope.type, {
         source: envelope.source,
       });
@@ -2127,7 +2127,9 @@ export function planEvent(
           ? worktreeEligibility
           : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, {
               ...dispatch,
-              operatorAuthorized: envelope.source === "operator",
+              // Remote handoff is unattended. Only a durable operator event
+              // may exercise the sensitive/escalate-path bypass.
+              operatorAuthorized: false,
             });
         if (!result?.ok) {
           return humanNeeded(
