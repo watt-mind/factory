@@ -91,11 +91,32 @@ export function initializeLocalConfig({ root = FACTORY_ROOT } = {}) {
   });
 }
 
-export function runtimeHome() {
+/**
+ * True when this process is a test or CI run: `bun test` sets NODE_ENV=test
+ * for the test process (inherited by CLIs it spawns), and CI runners export
+ * CI=true. Such a process must never resolve the operator's real runtime home.
+ */
+export function isTestOrCiProcess(env = process.env) {
   return (
-    process.env.FACTORY_EVENT_HOME ||
-    path.join(homedir(), ".factory", "event-runtime")
+    env.NODE_ENV === "test" ||
+    env.BUN_ENV === "test" ||
+    (env.CI !== undefined && env.CI !== "" && env.CI !== "false")
   );
+}
+
+export function runtimeHome(env = process.env) {
+  if (env.FACTORY_EVENT_HOME) return env.FACTORY_EVENT_HOME;
+  if (isTestOrCiProcess(env)) {
+    // Fail closed: CI runs on the operator's own machine, and a test that
+    // reached the default home once migrated the live runtime.db to a schema
+    // newer than the running workers (2026-08-29).
+    throw new Error(
+      "refusing to use the default runtime home (~/.factory/event-runtime) " +
+        "from a test or CI process: set FACTORY_EVENT_HOME to an isolated " +
+        "directory (event-runtime/test-helpers.mjs does this on import)",
+    );
+  }
+  return path.join(homedir(), ".factory", "event-runtime");
 }
 
 export function dbPath(home = runtimeHome()) {

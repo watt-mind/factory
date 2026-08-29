@@ -1,4 +1,7 @@
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-merge-test-mjs";
+// Side effect: pins FACTORY_EVENT_HOME to a temp dir before any spawned CLI
+// (merge-apply.mjs) can resolve the operator's live runtime home.
+import "./test-helpers.mjs";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {

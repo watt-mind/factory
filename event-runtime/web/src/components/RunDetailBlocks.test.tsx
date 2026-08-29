@@ -34,6 +34,7 @@ import type { RunDetail, RunState } from "../types";
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   restoreApi();
 });
 
@@ -167,6 +168,58 @@ describe("RunDetailBlocks field tiering (WM-129)", () => {
     expect(isCancellable("TIMED_OUT")).toBe(false);
     expect(isCancellable("CANCELLED")).toBe(false);
     expect(isCancellable("REFUSED")).toBe(false);
+  });
+});
+
+describe("presentation result rendering", () => {
+  test("renders a presentation above the artifact with its own Raw toggle", async () => {
+    const r = renderBlocks(
+      createRunDetailFixture({
+        result: {
+          terminalState: "completed",
+          reasonCode: null,
+          artifact: { recommendation: "TRIAGE", count: 2 },
+          presentation: {
+            schemaVersion: "factory.presentation/v1",
+            blocks: [
+              { type: "heading", text: "Two issues need attention" },
+              {
+                type: "keyvalue",
+                items: [{ label: "Issues", value: { $ref: "/count" } }],
+              },
+            ],
+          },
+        },
+      }),
+    );
+    expect(await r.findByText("Two issues need attention")).toBeTruthy();
+    const summary = r.getByText("agent summary").closest("details");
+    const artifact = r.getByText("artifact").closest("details");
+    expect(summary && artifact).toBeTruthy();
+    expect(
+      summary!.compareDocumentPosition(artifact!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(summary!.querySelectorAll("button")).not.toHaveLength(0);
+  });
+
+  test("shows dropped presentation errors while keeping Layer A", async () => {
+    const r = renderBlocks(
+      createRunDetailFixture({
+        result: {
+          terminalState: "completed",
+          reasonCode: null,
+          artifact: { recommendation: "TRIAGE" },
+          presentationErrors: ["bad ref", "bad block"],
+        },
+      }),
+    );
+    expect(
+      r.getByText("the agent's summary was dropped: 2 errors"),
+    ).toBeTruthy();
+    expect(r.getByText("artifact")).toBeTruthy();
+    fireEvent.click(r.getByText("presentation errors"));
+    expect(r.getByText("bad ref")).toBeTruthy();
   });
 });
 
