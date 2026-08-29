@@ -3446,7 +3446,10 @@ export async function executeClaimed(
 /**
  * Explicit operator recovery for a worker that stopped heartbeating while it
  * still owned a run. This mirrors the lease reaper's retry/exhaustion rules,
- * but targets exactly the selected worker/run and records an operator reason.
+ * but targets exactly the selected worker/run. When the run is retried it is
+ * re-queued with the fixed `retry:environment` reason (matching the reaper's
+ * lease-expiry requeue); operator provenance is carried by `actor` (default
+ * "operator") on the recorded transitions, not by the reason string.
  */
 export function releaseStalledWorkerLease(
   db,
