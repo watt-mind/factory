@@ -71,6 +71,7 @@ case "$cmd" in
     echo "factory linear is deprecated — use 'factory ticket'" >&2
     run_bun tools/ticket.mjs "$@"
     ;;
+  ask)          run_bun orchestrator/ask.mjs "$@" ;;
   queue)        run_bun orchestrator/queue.mjs "$@" ;;
   next)         run_bun orchestrator/next.mjs "$@" ;;
   state)        run_bun orchestrator/state.mjs "$@" ;;
@@ -282,6 +283,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   init          scaffold config/*.yaml from tracked examples (never overwrites)
   ticket        tools/ticket.mjs
   linear        tools/ticket.mjs (deprecated alias for 'ticket')
+  ask           orchestrator/ask.mjs (read-only factory state: queue, in-flight,
+                held, recent runs, planner declines, spend; --json --section --repo)
   queue         orchestrator/queue.mjs
   next          orchestrator/next.mjs
   state         orchestrator/state.mjs
