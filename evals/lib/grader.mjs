@@ -271,7 +271,11 @@ export function parseVerdict(text) {
   return null;
 }
 
-export function buildSubjectPrompt({ candidateName, candidateText, inputText }) {
+export function buildSubjectPrompt({
+  candidateName,
+  candidateText,
+  inputText,
+}) {
   return [
     `You are being evaluated on the "${candidateName}" skill. Its instructions follow verbatim; follow them exactly as written.`,
     "",
