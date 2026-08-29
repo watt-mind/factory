@@ -37,7 +37,32 @@ export const SANDBOX_SUPPORT = "gondolin";
 const KILL_GRACE_MS = 10_000;
 const OUTPUT_TAIL_CHARS = 2_000;
 
+/**
+ * Runtime-identity variables every command-adapter child needs so that it
+ * talks to the SAME event-runtime instance as the worker that spawned it.
+ * bin/live-stack.sh and bin/worktree-daemons.sh set these on the worker only;
+ * without them a child's `config.mjs` silently resolves the DEFAULT live home,
+ * port, secret, and env — a worktree stack's merge-apply/merge-scan/reaper/
+ * digest/ci-log-capture would then read and write the production runtime.
+ * This is an explicit allow-list on purpose: no `FACTORY_EVENT_*` wildcard.
+ *
+ * GitHub and Linear credentials are deliberately NOT here. Read-only agents
+ * (merge-scan, merge-plan, ci-log-capture, unblock-digest) authenticate via
+ * files under HOME — `gh` reads its config/hosts (and the App token file that
+ * lib/control-plane/gh-app-auth.mjs resolves from FACTORY_GH_APP_TOKEN_FILE
+ * or ~/.factory/gh-app-token.json), and `factory linear` reads the operator
+ * .env — so no env token is required for reads. Mutating definitions receive
+ * PUSH_CREDENTIAL_ENV below.
+ */
+export const RUNTIME_IDENTITY_ENV = [
+  "FACTORY_EVENT_HOME",
+  "FACTORY_EVENT_PORT",
+  "FACTORY_EVENT_SECRET",
+  "FACTORY_EVENT_ENV",
+];
+
 export const BASE_INHERITED_ENV = [
+  ...RUNTIME_IDENTITY_ENV,
   "HOME",
   "LANG",
   "LC_ALL",

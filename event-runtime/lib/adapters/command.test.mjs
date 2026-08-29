@@ -268,6 +268,41 @@ describe("execute", () => {
     });
   });
 
+  test("an unsandboxed child inherits the worker's runtime identity (#825)", async () => {
+    const workspaceDir = ws();
+    const identity = {
+      FACTORY_EVENT_HOME: "/tmp/command-adapter-runtime-home",
+      FACTORY_EVENT_SECRET: "worker-runtime-secret",
+      FACTORY_EVENT_PORT: "17381",
+      FACTORY_EVENT_ENV: "worktree-test",
+    };
+    const saved = Object.fromEntries(
+      Object.keys(identity).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, identity);
+    const script = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(identity))}.map((key) => [key, process.env[key] ?? null]))))`;
+
+    try {
+      const outcome = await execute({
+        spec: spec({}),
+        def: { ...def(["bun", "-e", script]), mutating: false },
+        workspaceDir,
+        timeoutMs: 5000,
+      });
+
+      expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+      const result = JSON.parse(
+        readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+      );
+      expect(JSON.parse(result.artifact.outputTail.trim())).toEqual(identity);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   test("writesResult leaves a command-authored result.json in place (WM-907)", async () => {
     const workspaceDir = ws();
     const script = `import { writeFileSync } from "node:fs";
