@@ -32,6 +32,7 @@ import {
   registerMemos,
   withProvenance,
 } from "./memos.mjs";
+import { computeDefHash } from "./receipts.mjs";
 import { LinearRateLimitError } from "../../tools/ticket.mjs";
 import {
   KIND_AGENT,
@@ -176,6 +177,10 @@ describe("planEvent", () => {
       promptVersion: "git:test",
       policyVersion: "git:test",
       outputContract: "factory.status-report/v1",
+      // Attested definition pin (WM-1056): the content sha256 of the
+      // registered agent def, the same value worker claim-time
+      // verifyDefHash consumes.
+      defHash: computeDefHash(registry.agents.get("factory-status-report@1")),
       capabilities: ["tracker:read"],
       // Model-tier routing (WM-135): the committed definition declares
       // standard, policy maps it to models.pi.standard (WM-215 made pi the
@@ -2152,8 +2157,52 @@ describe("buildRunSpec", () => {
       now: 0,
     });
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:9b9f59322454c0935cef3a83c85adf2dee84e6b1e6d5301d1b1de46267b05ea4","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
+  });
+
+  test("persists the registered definition's defHash pin (WM-1056)", () => {
+    const mapping = registry.eventTypes["factory.status-report.requested"];
+    const def = registry.agents.get("factory-status-report@1");
+    const spec = buildRunSpec(registry, envelope(), mapping, {
+      runId: "run_defhash",
+      policyVersion: "git:test",
+      now: NOW,
+    });
+    // Present and computed with the canonical helper the worker's
+    // claim-time verifyDefHash consumes.
+    expect(spec.defHash).toBe(computeDefHash(def));
+    expect(spec.defHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // Deterministic for identical definitions.
+    const again = buildRunSpec(registry, envelope(), mapping, {
+      runId: "run_defhash_2",
+      policyVersion: "git:test",
+      now: NOW,
+    });
+    expect(again.defHash).toBe(spec.defHash);
+    // Changes when attested definition content changes.
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("factory-status-report@1", {
+      ...def,
+      output_contract: "factory.status-report/v2",
+    });
+    const mutated = buildRunSpec(
+      synthetic,
+      envelope(),
+      synthetic.eventTypes["factory.status-report.requested"],
+      { runId: "run_defhash_3", policyVersion: "git:test", now: NOW },
+    );
+    expect(mutated.defHash).not.toBe(spec.defHash);
+    // Per-ticket model/model-tier overrides must NOT redefine the attested
+    // definition (AC4): defHash stays pinned to the registered def.
+    const overridden = buildRunSpec(registry, envelope(), mapping, {
+      runId: "run_defhash_4",
+      policyVersion: "git:test",
+      now: NOW,
+      modelTierOverride: "strong",
+      modelOverride: "openai-codex/gpt-5.6-terra",
+    });
+    expect(overridden.defHash).toBe(spec.defHash);
   });
 
   test("is pure and honors adapterOverride", () => {
