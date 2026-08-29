@@ -1790,8 +1790,16 @@ describe("worker", () => {
       chmodSync(executable, 0o755);
     }
     const promptPath = path.join(root, "prompt.md");
-    writeFileSync(promptPath, "Continue the run.\n");
-    const def = { promptPath, mutating: true, capabilities: { tools: [] } };
+    const promptText = "Continue the run.\n";
+    writeFileSync(promptPath, promptText);
+    // Adapters execute only registry-verified promptText (#1218); promptPath
+    // stays on the def for provenance.
+    const def = {
+      promptPath,
+      promptText,
+      mutating: true,
+      capabilities: { tools: [] },
+    };
     const spec = { model: null, input: {} };
 
     const claudeWorkspace = path.join(root, "claude-workspace");
