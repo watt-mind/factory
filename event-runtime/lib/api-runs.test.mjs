@@ -18,6 +18,7 @@ import {
   mergeTicketSupply,
   scanTicketSupply,
   setTicketDetailControlPlane,
+  ticketJourneyView,
   ticketIndexView,
   ticketSupplyView,
 } from "./api-runs.mjs";
@@ -619,6 +620,12 @@ describe("ticket journey join (WM-595)", () => {
           "sha256:result-merge",
           "2026-01-01T11:01:00.000Z",
         );
+      await s.client.replay(
+        envelope({
+          eventId: "pr-linked-merge",
+          payload: { pr: 595 },
+        }),
+      );
 
       const response = await fetch(s.url("/runs?ticket=WM-595"));
       expect(response.status).toBe(200);
@@ -633,6 +640,9 @@ describe("ticket journey join (WM-595)", () => {
       expect(journey.events.map((event) => event.eventId)).toContain(
         "ticket-dispatch",
       );
+      expect(journey.events.map((event) => event.eventId)).toContain(
+        "pr-linked-merge",
+      );
       expect(journey.runs.map((run) => run.run.runId)).toEqual([
         "run_ticket",
         "run_merge",
@@ -643,6 +653,69 @@ describe("ticket journey join (WM-595)", () => {
       expect((await unknown.json()).activity).toBe(false);
       const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
       expect(invalid.status).toBe(422);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("keeps unrelated records out without issuing unrestricted table reads", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-json-only",
+          payload: { ticket: "WM-1328" },
+        }),
+      );
+      await s.client.replay(
+        envelope({
+          eventId: "unrelated-ticket",
+          subject: "WM-999",
+          payload: { ticket: "WM-999" },
+        }),
+      );
+      const spec = (ticket) =>
+        JSON.stringify({
+          schemaVersion: "factory.run-spec/v1",
+          runId: "ignored",
+          agent: "dispatch@1",
+          input: { repo: "factory", ticket },
+        });
+      for (const [runId, ticket] of [
+        ["run-json-only", "WM-1328"],
+        ["run-unrelated", "WM-999"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(
+            runId,
+            `${runId}-key`,
+            spec(ticket),
+            `sha256:${runId}`,
+            "COMPLETED",
+            "2026-01-01T10:00:00.000Z",
+            "2026-01-01T10:01:00.000Z",
+          );
+      }
+      const guardedDb = {
+        query(sql) {
+          if (
+            /SELECT \* FROM (events|proposals|runs|results) ORDER BY/i.test(sql)
+          )
+            throw new Error(`unrestricted ticket journey query: ${sql}`);
+          return s.db.query(sql);
+        },
+      };
+      const journey = ticketJourneyView(guardedDb, "WM-1328");
+      expect(journey.events.map((event) => event.eventId)).toEqual([
+        "ticket-json-only",
+      ]);
+      expect(journey.runs.map((run) => run.run.runId)).toEqual([
+        "run-json-only",
+      ]);
     } finally {
       s.close();
     }
