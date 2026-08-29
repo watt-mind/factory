@@ -977,10 +977,7 @@ describe("extension config (contributes.config)", () => {
         JSON.stringify(nestedSecretSchema),
       );
     });
-    const nestedEnv = extensionSecretEnvVar("nested-secret", [
-      "auth",
-      "value",
-    ]);
+    const nestedEnv = extensionSecretEnvVar("nested-secret", ["auth", "value"]);
     const previousNestedEnv = process.env[nestedEnv];
     try {
       process.env[nestedEnv] = "resolved-innocuous-secret";
@@ -1031,7 +1028,8 @@ describe("extension config (contributes.config)", () => {
             },
           },
         },
-        error: /\$\.destinations\[\]\.value.*beneath schema\.items at \$\.destinations/,
+        error:
+          /\$\.destinations\[\]\.value.*beneath schema\.items at \$\.destinations/,
       },
       {
         name: "nested arrays",
