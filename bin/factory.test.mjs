@@ -61,6 +61,7 @@ function runNotify({ args, stdin = "", exitCode = "0", env = {} }) {
 async function withInboxStub(response, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), "factory-inbox-server-"));
   const requestFile = path.join(dir, "request.json");
+  const headersFile = path.join(dir, "headers.json");
   const serverScript = path.join(dir, "server.py");
   writeFileSync(
     serverScript,
@@ -72,6 +73,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         with open(${JSON.stringify(requestFile)}, "w") as f:
             f.write(self.rfile.read(length).decode())
+        with open(${JSON.stringify(headersFile)}, "w") as f:
+            f.write(json.dumps({k.lower(): v for k, v in self.headers.items()}))
         body = json.dumps(json.loads(${JSON.stringify(JSON.stringify(response))})).encode()
         self.send_response(201)
         self.send_header("content-type", "application/json")
@@ -93,7 +96,7 @@ server.handle_request()
   const { value } = await reader.read();
   const port = Number(new TextDecoder().decode(value).trim());
   try {
-    return await fn({ port, requestFile });
+    return await fn({ port, requestFile, headersFile });
   } finally {
     server.kill();
     await server.exited;
@@ -145,6 +148,56 @@ test("factory notify posts a structured inbox item when serve is reachable", asy
           refs: { issue: "WM-1" },
           source: "agent:run_test",
         });
+      } finally {
+        result.cleanup();
+      }
+    },
+  );
+});
+
+// #1132: the durable /inbox POST must present the operator credential when
+// FACTORY_CONTROL_API_TOKEN is configured (#1152), and stay header-free when
+// it is not. Note that runNotify spreads process.env, so the unset case has to
+// override any token the operator's shell carries.
+test("factory notify sends the bearer on /inbox when FACTORY_CONTROL_API_TOKEN is set", async () => {
+  const token = "notify-test-token-1132";
+  await withInboxStub(
+    { delivery: { ok: true } },
+    async ({ port, headersFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: {
+          FACTORY_EVENT_PORT: String(port),
+          FACTORY_CONTROL_API_TOKEN: token,
+        },
+      });
+      try {
+        expect(result.status).toBe(0);
+        const headers = JSON.parse(readFileSync(headersFile, "utf8"));
+        expect(headers.authorization).toBe(`Bearer ${token}`);
+        expect(result.stderr).not.toContain(token);
+      } finally {
+        result.cleanup();
+      }
+    },
+  );
+});
+
+test("factory notify sends no authorization header when FACTORY_CONTROL_API_TOKEN is unset", async () => {
+  await withInboxStub(
+    { delivery: { ok: true } },
+    async ({ port, headersFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: {
+          FACTORY_EVENT_PORT: String(port),
+          FACTORY_CONTROL_API_TOKEN: "",
+        },
+      });
+      try {
+        expect(result.status).toBe(0);
+        const headers = JSON.parse(readFileSync(headersFile, "utf8"));
+        expect(headers.authorization).toBeUndefined();
       } finally {
         result.cleanup();
       }
