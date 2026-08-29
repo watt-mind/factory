@@ -2,7 +2,7 @@
 /** Event-runtime CLI argument routing and command dispatch. */
 import path from "node:path";
 import { COMMANDS } from "./cli/commands.mjs";
-import { inspect as inspectCommand } from "./cli/inspect.mjs";
+import { renderInspect } from "./cli/inspect.mjs";
 import { withClient } from "./cli/shared.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
@@ -380,7 +380,7 @@ export async function inspectWithPresentation(args) {
         // presentation is optional garnish, so it must not make inspect pay
         // for a second GET /runs/:id.
         detail = await client.run(args[0]);
-        await inspectCommand({ ...client, run: async () => detail }, args[0]);
+        await renderInspect(detail, client);
       });
     }
   } finally {
