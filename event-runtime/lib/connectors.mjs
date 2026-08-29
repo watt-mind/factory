@@ -301,6 +301,8 @@ export function createConnectorClient({ db, registry, extension, name }) {
  * fields come first; remaining keys matching the heuristic are moved too
  * so a schema that predates WM-920 still does not leak credentials into
  * `ctx.config`.
+ * Paths containing forbidden segments are deleted from `config` and are
+ * never copied to `secrets`.
  *
  * @param {object|null|undefined} values
  * @param {Array<{ path: string[] }>} secretFields
@@ -309,7 +311,10 @@ export function splitConfigSecrets(values, secretFields = []) {
   const config = cloneJson(values) ?? {};
   const secrets = {};
   const move = (keyPath) => {
-    if (keyPath.some((key) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key))) return;
+    if (keyPath.some((key) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key))) {
+      deleteConfigPath(config, keyPath);
+      return;
+    }
     let node = values;
     for (const key of keyPath) {
       if (
@@ -333,6 +338,7 @@ function moveHeuristic(from, secrets, path) {
   for (const [key, inner] of Object.entries(from)) {
     const next = [...path, key];
     if (next.some((segment) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(segment))) {
+      delete from[key];
       continue;
     }
     if (SECRET_KEY_HEURISTIC.test(key) && !isPlainObject(inner)) {
@@ -341,6 +347,19 @@ function moveHeuristic(from, secrets, path) {
       continue;
     }
     moveHeuristic(inner, secrets, next);
+  }
+}
+
+function deleteConfigPath(config, keyPath) {
+  let node = config;
+  for (let i = 0; i < keyPath.length; i++) {
+    const key = keyPath[i];
+    if (!isPlainObject(node) || !Object.hasOwn(node, key)) return;
+    if (FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key)) {
+      delete node[key];
+      return;
+    }
+    node = node[key];
   }
 }
 

@@ -121,6 +121,21 @@ describe("splitConfigSecrets", () => {
     }
   });
 
+  test("deletes forbidden heuristic subtrees from config", () => {
+    const values = JSON.parse(
+      '{"__proto__":{"token":"x"},"constructor":{"apiKey":"y"},"nested":{"prototype":{"secret":"z"}}}',
+    );
+    const { config, secrets } = splitConfigSecrets(values);
+
+    expect(config).toEqual({ nested: {} });
+    expect(Object.hasOwn(config, "__proto__")).toBe(false);
+    expect(Object.hasOwn(config, "constructor")).toBe(false);
+    expect(Object.hasOwn(secrets, "__proto__")).toBe(false);
+    expect(Object.hasOwn(secrets, "constructor")).toBe(false);
+    expect(secrets).toEqual({});
+    expect({}.token).toBeUndefined();
+  });
+
   test("does not traverse constructor.prototype config keys", () => {
     const { secrets } = splitConfigSecrets(
       JSON.parse('{"constructor":{"prototype":{"apiKey":"x"}}}'),
@@ -129,17 +144,28 @@ describe("splitConfigSecrets", () => {
     expect(Object.hasOwn(secrets, "constructor")).toBe(false);
   });
 
-  test("ignores explicit secret paths containing forbidden segments", () => {
-    const values = JSON.parse(
-      '{"nested":{"value":"x"},"constructor":{"prototype":{"apiKey":"y"}}}',
+  test("deletes forbidden nested heuristic subtrees from config", () => {
+    const { config, secrets } = splitConfigSecrets(
+      JSON.parse('{"nested":{"prototype":{"secret":"x"}}}'),
     );
-    const { secrets } = splitConfigSecrets(values, [
-      { path: ["nested", "__proto__", "value"] },
-      { path: ["constructor", "prototype", "apiKey"] },
-    ]);
-    expect(Object.prototype.token).toBeUndefined();
-    expect(Object.prototype.apiKey).toBeUndefined();
+    expect(config).toEqual({ nested: {} });
+    expect(Object.hasOwn(config.nested, "prototype")).toBe(false);
     expect(secrets).toEqual({});
+    expect({}.secret).toBeUndefined();
+  });
+
+  test("deletes explicit secret paths containing forbidden segments", () => {
+    const values = JSON.parse(
+      '{"nested":{"__proto__":{"value":"x"}},"constructor":{"apiKey":"y"}}',
+    );
+    const { config, secrets } = splitConfigSecrets(values, [
+      { path: ["nested", "__proto__", "value"] },
+      { path: ["constructor", "apiKey"] },
+    ]);
+    expect(config).toEqual({ nested: {} });
+    expect(secrets).toEqual({});
+    expect({}.value).toBeUndefined();
+    expect({}.apiKey).toBeUndefined();
   });
 
   test("does not write through an inherited intermediate object", () => {
