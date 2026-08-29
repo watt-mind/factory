@@ -5,10 +5,7 @@
       "name": "conforming nested object",
       "schema": {
         "type": "object",
-        "required": [
-          "name",
-          "count"
-        ],
+        "required": ["name", "count"],
         "additionalProperties": false,
         "properties": {
           "name": {
@@ -30,9 +27,7 @@
       "value": {
         "name": "bj29",
         "count": 2,
-        "tags": [
-          "a"
-        ]
+        "tags": ["a"]
       },
       "valid": true,
       "errors": []
@@ -46,9 +41,7 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": [
-                "id"
-              ],
+              "required": ["id"],
               "properties": {
                 "id": {
                   "type": "string"
@@ -87,9 +80,7 @@
       "name": "missing required property",
       "schema": {
         "type": "object",
-        "required": [
-          "name"
-        ],
+        "required": ["name"],
         "properties": {
           "name": {
             "type": "string"
@@ -98,12 +89,8 @@
       },
       "value": {},
       "valid": false,
-      "errorContains": [
-        "$: missing required property \"name\""
-      ],
-      "errors": [
-        "$: missing required property \"name\""
-      ]
+      "errorContains": ["$: missing required property \"name\""],
+      "errors": ["$: missing required property \"name\""]
     },
     {
       "name": "unknown object property",
@@ -121,12 +108,8 @@
         "extra": true
       },
       "valid": false,
-      "errorContains": [
-        "$: unknown property \"extra\""
-      ],
-      "errors": [
-        "$: unknown property \"extra\""
-      ]
+      "errorContains": ["$: unknown property \"extra\""],
+      "errors": ["$: unknown property \"extra\""]
     },
     {
       "name": "additionalProperties schema validates the extras",
@@ -146,22 +129,14 @@
         "retries": "three"
       },
       "valid": false,
-      "errorContains": [
-        "$.retries: expected type integer, got string"
-      ],
-      "errors": [
-        "$.retries: expected type integer, got string"
-      ]
+      "errorContains": ["$.retries: expected type integer, got string"],
+      "errors": ["$.retries: expected type integer, got string"]
     },
     {
       "name": "empty schema accepts anything",
       "schema": {},
       "value": {
-        "any": [
-          "thing",
-          1,
-          null
-        ]
+        "any": ["thing", 1, null]
       },
       "valid": true,
       "errors": []
@@ -182,20 +157,13 @@
       },
       "value": 1.5,
       "valid": false,
-      "errorContains": [
-        "$: expected type integer, got number"
-      ],
-      "errors": [
-        "$: expected type integer, got number"
-      ]
+      "errorContains": ["$: expected type integer, got number"],
+      "errors": ["$: expected type integer, got number"]
     },
     {
       "name": "nullable type array accepts null",
       "schema": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": ["string", "null"]
       },
       "value": null,
       "valid": true,
@@ -204,10 +172,7 @@
     {
       "name": "nullable type array accepts the non-null member",
       "schema": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": ["string", "null"]
       },
       "value": "ok",
       "valid": true,
@@ -216,27 +181,17 @@
     {
       "name": "nullable type array rejects an unlisted type",
       "schema": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": ["string", "null"]
       },
       "value": 7,
       "valid": false,
-      "errorContains": [
-        "$: expected type string|null, got integer"
-      ],
-      "errors": [
-        "$: expected type string|null, got integer"
-      ]
+      "errorContains": ["$: expected type string|null, got integer"],
+      "errors": ["$: expected type string|null, got integer"]
     },
     {
       "name": "nullable string skips string keyword checks for null",
       "schema": {
-        "type": [
-          "string",
-          "null"
-        ],
+        "type": ["string", "null"],
         "minLength": 4
       },
       "value": null,
@@ -259,20 +214,13 @@
       },
       "value": "factory.event/v2",
       "valid": false,
-      "errorContains": [
-        "$: expected const \"factory.event/v1\""
-      ],
-      "errors": [
-        "$: expected const \"factory.event/v1\""
-      ]
+      "errorContains": ["$: expected const \"factory.event/v1\""],
+      "errors": ["$: expected const \"factory.event/v1\""]
     },
     {
       "name": "enum match",
       "schema": {
-        "enum": [
-          "a",
-          "b"
-        ]
+        "enum": ["a", "b"]
       },
       "value": "b",
       "valid": true,
@@ -281,19 +229,12 @@
     {
       "name": "enum mismatch",
       "schema": {
-        "enum": [
-          "a",
-          "b"
-        ]
+        "enum": ["a", "b"]
       },
       "value": "c",
       "valid": false,
-      "errorContains": [
-        "$: value not in enum [\"a\",\"b\"]"
-      ],
-      "errors": [
-        "$: value not in enum [\"a\",\"b\"]"
-      ]
+      "errorContains": ["$: value not in enum [\"a\",\"b\"]"],
+      "errors": ["$: value not in enum [\"a\",\"b\"]"]
     },
     {
       "name": "string length bounds satisfied",
@@ -314,12 +255,8 @@
       },
       "value": "a",
       "valid": false,
-      "errorContains": [
-        "$: shorter than minLength 2"
-      ],
-      "errors": [
-        "$: shorter than minLength 2"
-      ]
+      "errorContains": ["$: shorter than minLength 2"],
+      "errors": ["$: shorter than minLength 2"]
     },
     {
       "name": "longer than maxLength",
@@ -329,12 +266,8 @@
       },
       "value": "abc",
       "valid": false,
-      "errorContains": [
-        "$: longer than maxLength 2"
-      ],
-      "errors": [
-        "$: longer than maxLength 2"
-      ]
+      "errorContains": ["$: longer than maxLength 2"],
+      "errors": ["$: longer than maxLength 2"]
     },
     {
       "name": "pattern match",
@@ -354,12 +287,8 @@
       },
       "value": "prop_1",
       "valid": false,
-      "errorContains": [
-        "does not match pattern"
-      ],
-      "errors": [
-        "$: does not match pattern"
-      ]
+      "errorContains": ["does not match pattern"],
+      "errors": ["$: does not match pattern"]
     },
     {
       "name": "unanchored pattern matches a substring",
@@ -379,12 +308,8 @@
       },
       "value": "anything",
       "valid": false,
-      "errorContains": [
-        "$: invalid pattern"
-      ],
-      "errors": [
-        "$: invalid pattern"
-      ]
+      "errorContains": ["$: invalid pattern"],
+      "errors": ["$: invalid pattern"]
     },
     {
       "name": "malformed pattern with an unterminated group fails closed",
@@ -394,12 +319,8 @@
       },
       "value": "unclosed",
       "valid": false,
-      "errorContains": [
-        "$: invalid pattern"
-      ],
-      "errors": [
-        "$: invalid pattern"
-      ]
+      "errorContains": ["$: invalid pattern"],
+      "errors": ["$: invalid pattern"]
     },
     {
       "name": "malformed pattern nested under a property fails closed",
@@ -416,12 +337,8 @@
         "sha": "deadbeef"
       },
       "valid": false,
-      "errorContains": [
-        "$.sha: invalid pattern"
-      ],
-      "errors": [
-        "$.sha: invalid pattern"
-      ]
+      "errorContains": ["$.sha: invalid pattern"],
+      "errors": ["$.sha: invalid pattern"]
     },
     {
       "name": "malformed pattern is not reported for a non-string value",
@@ -440,12 +357,8 @@
       },
       "value": [],
       "valid": false,
-      "errorContains": [
-        "$: fewer than minItems 1"
-      ],
-      "errors": [
-        "$: fewer than minItems 1"
-      ]
+      "errorContains": ["$: fewer than minItems 1"],
+      "errors": ["$: fewer than minItems 1"]
     },
     {
       "name": "array maxItems",
@@ -453,17 +366,10 @@
         "type": "array",
         "maxItems": 1
       },
-      "value": [
-        "a",
-        "b"
-      ],
+      "value": ["a", "b"],
       "valid": false,
-      "errorContains": [
-        "$: more than maxItems 1"
-      ],
-      "errors": [
-        "$: more than maxItems 1"
-      ]
+      "errorContains": ["$: more than maxItems 1"],
+      "errors": ["$: more than maxItems 1"]
     },
     {
       "name": "array item type mismatch reports the index",
@@ -473,17 +379,10 @@
           "type": "string"
         }
       },
-      "value": [
-        "a",
-        2
-      ],
+      "value": ["a", 2],
       "valid": false,
-      "errorContains": [
-        "$[1]: expected type string, got integer"
-      ],
-      "errors": [
-        "$[1]: expected type string, got integer"
-      ]
+      "errorContains": ["$[1]: expected type string, got integer"],
+      "errors": ["$[1]: expected type string, got integer"]
     },
     {
       "name": "numeric bounds satisfied",
@@ -505,12 +404,8 @@
       },
       "value": 150,
       "valid": false,
-      "errorContains": [
-        "$: above maximum 100"
-      ],
-      "errors": [
-        "$: above maximum 100"
-      ]
+      "errorContains": ["$: above maximum 100"],
+      "errors": ["$: above maximum 100"]
     },
     {
       "name": "below minimum",
@@ -520,12 +415,8 @@
       },
       "value": -1,
       "valid": false,
-      "errorContains": [
-        "$: below minimum 0"
-      ],
-      "errors": [
-        "$: below minimum 0"
-      ]
+      "errorContains": ["$: below minimum 0"],
+      "errors": ["$: below minimum 0"]
     },
     {
       "name": "valid uri format",
@@ -545,12 +436,8 @@
       },
       "value": "not a url",
       "valid": false,
-      "errorContains": [
-        "$: format \"uri\" value is not a valid URI"
-      ],
-      "errors": [
-        "$: format \"uri\" value is not a valid URI"
-      ]
+      "errorContains": ["$: format \"uri\" value is not a valid URI"],
+      "errors": ["$: format \"uri\" value is not a valid URI"]
     },
     {
       "name": "valid duration format",
@@ -570,12 +457,8 @@
       },
       "value": "quarter past",
       "valid": false,
-      "errorContains": [
-        "$: format \"duration\" must match"
-      ],
-      "errors": [
-        "$: format \"duration\" must match /^\\d+(ms|s|m|h|d)$/"
-      ]
+      "errorContains": ["$: format \"duration\" must match"],
+      "errors": ["$: format \"duration\" must match /^\\d+(ms|s|m|h|d)$/"]
     },
     {
       "name": "secret format carries no value constraint",
@@ -598,9 +481,7 @@
       "errorContains": [
         "$: unsupported format \"uuid\" — contracts fail closed"
       ],
-      "errors": [
-        "$: unsupported format \"uuid\" — contracts fail closed"
-      ]
+      "errors": ["$: unsupported format \"uuid\" — contracts fail closed"]
     },
     {
       "name": "non-string format fails closed",
@@ -610,12 +491,8 @@
       },
       "value": "x",
       "valid": false,
-      "errorContains": [
-        "$: unsupported format 7 — contracts fail closed"
-      ],
-      "errors": [
-        "$: unsupported format 7 — contracts fail closed"
-      ]
+      "errorContains": ["$: unsupported format 7 — contracts fail closed"],
+      "errors": ["$: unsupported format 7 — contracts fail closed"]
     },
     {
       "name": "unsupported keyword fails closed",
@@ -663,16 +540,10 @@
         "type": "array",
         "items": null
       },
-      "value": [
-        "a"
-      ],
+      "value": ["a"],
       "valid": false,
-      "errorContains": [
-        "$[0]: schema is missing"
-      ],
-      "errors": [
-        "$[0]: schema is missing"
-      ]
+      "errorContains": ["$[0]: schema is missing"],
+      "errors": ["$[0]: schema is missing"]
     },
     {
       "name": "array-valued schema is rejected",
@@ -686,12 +557,8 @@
         "a": 1
       },
       "valid": false,
-      "errorContains": [
-        "$.a: schema must be an object"
-      ],
-      "errors": [
-        "$.a: schema must be an object"
-      ]
+      "errorContains": ["$.a: schema must be an object"],
+      "errors": ["$.a: schema must be an object"]
     },
     {
       "name": "prototype-named schema keyword fails closed",
@@ -723,12 +590,8 @@
         "__proto__": 1
       },
       "valid": false,
-      "errorContains": [
-        "$.__proto__: expected type string, got integer"
-      ],
-      "errors": [
-        "$.__proto__: expected type string, got integer"
-      ]
+      "errorContains": ["$.__proto__: expected type string, got integer"],
+      "errors": ["$.__proto__: expected type string, got integer"]
     },
     {
       "name": "inherited constructor key is not a declared property",
@@ -746,12 +609,8 @@
         "constructor": 1
       },
       "valid": false,
-      "errorContains": [
-        "$: unknown property \"constructor\""
-      ],
-      "errors": [
-        "$: unknown property \"constructor\""
-      ]
+      "errorContains": ["$: unknown property \"constructor\""],
+      "errors": ["$: unknown property \"constructor\""]
     },
     {
       "name": "inherited toString key is not a declared property",
@@ -771,20 +630,14 @@
         "toString": "nope"
       },
       "valid": false,
-      "errorContains": [
-        "$.toString: expected type integer, got string"
-      ],
-      "errors": [
-        "$.toString: expected type integer, got string"
-      ]
+      "errorContains": ["$.toString: expected type integer, got string"],
+      "errors": ["$.toString: expected type integer, got string"]
     },
     {
       "name": "inherited hasOwnProperty key does not satisfy required",
       "schema": {
         "type": "object",
-        "required": [
-          "hasOwnProperty"
-        ],
+        "required": ["hasOwnProperty"],
         "properties": {
           "hasOwnProperty": {
             "type": "string"
@@ -793,12 +646,8 @@
       },
       "value": {},
       "valid": false,
-      "errorContains": [
-        "$: missing required property \"hasOwnProperty\""
-      ],
-      "errors": [
-        "$: missing required property \"hasOwnProperty\""
-      ]
+      "errorContains": ["$: missing required property \"hasOwnProperty\""],
+      "errors": ["$: missing required property \"hasOwnProperty\""]
     }
   ]
 }
