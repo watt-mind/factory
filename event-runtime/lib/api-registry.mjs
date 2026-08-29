@@ -1,5 +1,10 @@
 /** Agent and repository registry endpoints. */
-import { getArtifactView, loadModelTierMap, resolveModel } from "./registry.mjs";
+import {
+  RegistryError,
+  getArtifactView,
+  loadModelTierMap,
+  resolveModel,
+} from "./registry.mjs";
 import {
   RepoError,
   reposRoot,
@@ -118,6 +123,12 @@ export function agentsView(registry, { overrides = emptyOverrides() } = {}) {
 function sendOverlayError(send, err) {
   if (err instanceof OverlayError)
     return send(err.status, { error: err.message });
+  // The tracked model map is reread from disk per request; a corrupt
+  // policy.yaml is an operator-fixable 500, not an uncaught handler throw.
+  if (err instanceof RegistryError)
+    return send(500, {
+      error: `tracked policy.yaml is unreadable: ${err.message}`,
+    });
   throw err;
 }
 

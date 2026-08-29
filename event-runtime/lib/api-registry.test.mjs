@@ -563,10 +563,7 @@ describe("runtime overlay API (WM-887)", () => {
     const root = tmpDir("evrt-api-model-map-");
     mkdirSync(path.join(root, "config"), { recursive: true });
     const policy = path.join(root, "config", "policy.yaml");
-    writeFileSync(
-      policy,
-      "models:\n  pi:\n    standard: disk-model-before\n",
-    );
+    writeFileSync(policy, "models:\n  pi:\n    standard: disk-model-before\n");
     const previousRoot = process.env.FACTORY_REPOS_ROOT;
     process.env.FACTORY_REPOS_ROOT = root;
     const { server, port, close } = await makeServer({
@@ -574,11 +571,10 @@ describe("runtime overlay API (WM-887)", () => {
       repos: () => new Map(),
     });
     try {
-      writeFileSync(
-        policy,
-        "models:\n  pi:\n    standard: disk-model-after\n",
-      );
-      const config = await (await fetch(`http://127.0.0.1:${port}/config`)).json();
+      writeFileSync(policy, "models:\n  pi:\n    standard: disk-model-after\n");
+      const config = await (
+        await fetch(`http://127.0.0.1:${port}/config`)
+      ).json();
       const overrides = await (
         await fetch(`http://127.0.0.1:${port}/overrides/config`)
       ).json();
@@ -608,9 +604,7 @@ describe("runtime overlay API (WM-887)", () => {
       "test",
     );
     try {
-      const response = await fetch(
-        `http://127.0.0.1:${port}/overrides/config`,
-      );
+      const response = await fetch(`http://127.0.0.1:${port}/overrides/config`);
       expect(response.status).toBe(500);
       expect((await response.json()).error).toContain(
         "delete or correct this runtime_overrides row",
@@ -618,6 +612,44 @@ describe("runtime overlay API (WM-887)", () => {
     } finally {
       close();
       server.close();
+    }
+  });
+
+  test("GET /overrides/config maps a corrupt tracked policy.yaml to a 500 with a clear message", async () => {
+    const root = tmpDir("evrt-api-corrupt-policy-");
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    const policy = path.join(root, "config", "policy.yaml");
+    writeFileSync(policy, "models:\n  pi:\n    standard: ok\n");
+    const previousRoot = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    const { server, port, close } = await makeServer({
+      configRoot: root,
+      repos: () => new Map(),
+    });
+    try {
+      writeFileSync(policy, "models:\n  pi:\n    turbo: not-a-tier\n");
+      const response = await fetch(`http://127.0.0.1:${port}/overrides/config`);
+      expect(response.status).toBe(500);
+      const { error } = await response.json();
+      expect(error).toContain("tracked policy.yaml is unreadable");
+      expect(error).toContain("models.pi.turbo is not a tier");
+      const cell = await fetch(
+        `http://127.0.0.1:${port}/overrides/config/models/pi/standard`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "x" }),
+        },
+      );
+      expect(cell.status).toBe(500);
+      expect((await cell.json()).error).toContain(
+        "models.pi.turbo is not a tier",
+      );
+    } finally {
+      close();
+      server.close();
+      if (previousRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previousRoot;
     }
   });
 

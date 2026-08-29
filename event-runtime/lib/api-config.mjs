@@ -283,7 +283,10 @@ export function configView({
   extensions = loadedExtensions(),
 } = {}) {
   const policy = readYaml(resolveConfigPath("policy", { root }));
-  const policyModels = modelTierConfigViewTolerant(db, loadModelTierMap({ root }));
+  const policyModels = modelTierConfigViewTolerant(
+    db,
+    loadModelTierMap({ root }),
+  );
   const schedule = readYaml(resolveConfigPath("schedule", { root }));
   const nodesFile = nodesConfigPath(root);
   const loadedAt = registryLoadedAt ?? new Date(now).toISOString();
