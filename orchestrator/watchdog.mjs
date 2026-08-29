@@ -20,6 +20,7 @@
  */
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
@@ -27,7 +28,11 @@ import {
 import path from "node:path";
 import { homedir } from "node:os";
 import { ROOT } from "../lib/schedule.mjs";
+import { STATE_DIR } from "../lib/factory-state.mjs";
+import { budgetExhausted } from "../lib/spend.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
+import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
+import { reposRoot } from "../event-runtime/lib/repos.mjs";
 
 const c = {
   bold: (s) => `\x1b[1m${s}\x1b[0m`,
@@ -290,6 +295,10 @@ export async function sendWatchdogNotification(issues) {
  *      runtime gets a scan storm on top of being wedged.
  *   3. Only proposals the planner already decided to `run` are approved.
  *      `human_needed` is a question addressed to a human and stays open.
+ *   4. The loop never buys what unattended approval would refuse. Approving
+ *      over the day budget, or with no runtime policy on disk, would let an
+ *      unattended loop spend exactly where event-runtime/lib/auto-approval.mjs
+ *      (`chainRuntimeGuard`) deliberately stops and waits for an operator.
  * ------------------------------------------------------------------ */
 
 /**
@@ -312,8 +321,92 @@ export const IDLE_APPROVABLE_AGENTS = ["work-scan@1", "dispatch@1"];
 /** One inject per minute, floor. Slower than any real dispatch, faster than a stall. */
 export const IDLE_MIN_INJECT_INTERVAL_MS = 60_000;
 
+/** Pages of open proposals a tick will read (200 each) before it stops asking. */
+export const IDLE_PROPOSAL_MAX_PAGES = 5;
+
 /** Default cadence for the loop itself: short, because a stall costs a whole slot. */
 export const IDLE_DEFAULT_INTERVAL_SEC = 300;
+
+/** Repeated `error=`/unreadable ticks before the loop shouts for a human. */
+export const IDLE_FAILURE_ALERT_THRESHOLD = 3;
+
+/** At most one repeated-failure notify an hour; the log line is free. */
+export const IDLE_ALERT_MIN_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Skip reasons that mean "the read failed", not "the factory said no". These
+ * are what a missing FACTORY_CONTROL_API_TOKEN looks like from here: every
+ * call 401s, every tick skips, and nothing ever tells anyone.
+ */
+export const IDLE_READ_FAILURE_REASONS = new Set([
+  "serve_unreachable",
+  "runtime_state_unreadable",
+  "proposals_unreadable",
+  "supply_unreadable",
+]);
+
+/**
+ * Stored `reason` codes on an open proposal that this loop may still approve.
+ *
+ * Anything auto-approval wrote as `auto_approval_ineligible:<code>` is its
+ * refusal, and an unattended loop must not overturn it with an `operator`
+ * approval that carries no spend policy. The one exception is a dispatch
+ * recheck that deferred *because work was in flight* — the very condition an
+ * idle tick has already observed to be false. A proposal with no stored
+ * reason is the normal case: auto-approval only ever considers `chain` and
+ * `handoff` sourced proposals, so a scheduler- or operator-sourced work-scan
+ * (the stall this loop exists to clear) never carries one.
+ */
+export const IDLE_APPROVABLE_OPEN_REASONS = new Set([
+  "auto_approval_ineligible:dispatch_recheck_deferred",
+]);
+
+/** True when a proposal's stored reason does not forbid an unattended approval. */
+export function idleProposalReasonApprovable(reason) {
+  if (reason === null || reason === undefined || reason === "") return true;
+  return IDLE_APPROVABLE_OPEN_REASONS.has(String(reason));
+}
+
+/**
+ * The db-free half of `chainRuntimeGuard` (auto-approval.mjs): is there a
+ * runtime policy at all, and is the day budget spent?
+ *
+ * The other half — the worker cap and the environment-failure circuit breaker
+ * — needs the runtime database, which this loop does not have (it speaks only
+ * to the control API, possibly across a host boundary). The worker cap is
+ * covered anyway: a tick only reaches an approval after observing zero runs in
+ * flight. The circuit breaker is not, which is why the reason allowlist above
+ * refuses any proposal auto-approval already declined; between the two, an
+ * `operator` approval from here can no longer buy what the unattended path
+ * refused on budget or policy grounds.
+ *
+ * @returns {null|"runtime_policy_unavailable"|"budget_exhausted"|"budget_check_failed"}
+ */
+export function idleApprovalGateReason({
+  root = reposRoot(),
+  runtimePolicy = undefined,
+  budgetCheck = budgetExhausted,
+} = {}) {
+  let policy = runtimePolicy;
+  if (policy === undefined) {
+    try {
+      const file = resolveConfigPath("policy", { root, warn: false });
+      policy = existsSync(file)
+        ? Bun.YAML.parse(readFileSync(file, "utf8"))
+        : null;
+      if (!policy || typeof policy !== "object") policy = null;
+    } catch {
+      policy = null;
+    }
+  }
+  if (!policy) return "runtime_policy_unavailable";
+  try {
+    if (budgetCheck(policy)) return "budget_exhausted";
+  } catch {
+    return "budget_check_failed";
+  }
+  return null;
+}
 
 /**
  * In-flight run count from `GET /status`'s `runs.byState`, or null when the
@@ -344,6 +437,8 @@ export function inFlightFromByState(byState) {
  * @param {Array|null} obs.proposals   open proposals, or null when unreadable
  * @param {number|null} obs.supply     dispatchable tickets, or null when unreadable
  * @param {number|null} obs.lastInjectAtMs
+ * @param {() => (string|null)} obs.approvalGate  budget/policy gate, consulted
+ *   only when a proposal is about to be approved (it reads the spend log).
  * @returns {{action: "skip"|"none"|"approve"|"inject", reason: string, proposalId?: string, inFlight: number|null, supply: number|null}}
  */
 export function idleWatchdogDecision({
@@ -355,6 +450,7 @@ export function idleWatchdogDecision({
   now = Date.now(),
   minInjectIntervalMs = IDLE_MIN_INJECT_INTERVAL_MS,
   approvableAgents = IDLE_APPROVABLE_AGENTS,
+  approvalGate = () => null,
 } = {}) {
   const base = { inFlight: inFlight ?? null, supply: supply ?? null };
   if (!serveOk) return { action: "skip", reason: "serve_unreachable", ...base };
@@ -373,13 +469,32 @@ export function idleWatchdogDecision({
         p.status === "open" &&
         p.decision === "run" &&
         !p.expired &&
-        approvableAgents.includes(p.agent),
+        approvableAgents.includes(p.agent) &&
+        // Never overturn an auto-approval refusal with an operator approval.
+        idleProposalReasonApprovable(p.reason),
     )
     // Oldest first: the proposal that has waited longest is the stall.
     .sort((a, b) =>
       String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")),
     );
-  if (approvable.length > 0)
+  if (approvable.length > 0) {
+    // The same gate unattended approval evaluates. Refusing here is a skip,
+    // not a fall-through to inject: injecting would only manufacture another
+    // proposal nobody is allowed to approve, at the cost of a scan.
+    let gate;
+    try {
+      gate = approvalGate();
+    } catch {
+      gate = "gate_check_failed";
+    }
+    if (gate)
+      return {
+        action: "skip",
+        reason: `budget_gate:${gate}`,
+        proposalId: approvable[0].id,
+        agent: approvable[0].agent,
+        ...base,
+      };
     return {
       action: "approve",
       reason: "open_dispatch_proposal",
@@ -387,6 +502,7 @@ export function idleWatchdogDecision({
       agent: approvable[0].agent,
       ...base,
     };
+  }
 
   if (supply === null || supply === undefined || !Number.isFinite(supply))
     return { action: "skip", reason: "supply_unreadable", ...base };
@@ -397,7 +513,39 @@ export function idleWatchdogDecision({
     now - lastInjectAtMs < minInjectIntervalMs
   )
     return { action: "none", reason: "inject_rate_limited", ...base };
+  // An injected work-scan spends too, so it answers to the same gate.
+  let injectGate;
+  try {
+    injectGate = approvalGate();
+  } catch {
+    injectGate = "gate_check_failed";
+  }
+  if (injectGate)
+    return { action: "skip", reason: `budget_gate:${injectGate}`, ...base };
   return { action: "inject", reason: "idle_with_supply", ...base };
+}
+
+/**
+ * Why this tick counts as a failure, or null when it does not. A budget gate
+ * refusing is the loop working; an unreadable factory is the loop blind.
+ */
+export function idleTickFailureCode(decision) {
+  if (decision?.error) return "effect_failed";
+  if (
+    decision?.action === "skip" &&
+    IDLE_READ_FAILURE_REASONS.has(decision.reason)
+  )
+    return decision.reason;
+  return null;
+}
+
+/** The alert line a run of consecutive failures writes. */
+export function formatIdleWatchdogAlert(
+  count,
+  code,
+  { now = Date.now() } = {},
+) {
+  return `${new Date(now).toISOString()} idle-watchdog ALERT repeated_failures=${count} code=${code}`;
 }
 
 /** The single log line a tick is allowed to write. */
@@ -446,11 +594,15 @@ export async function runIdleWatchdogTick({
   supply,
   approve,
   inject,
-  readLastInject = () => null,
-  writeLastInject = () => {},
+  approvalGate = idleApprovalGateReason,
+  readState = () => ({}),
+  writeState = () => {},
+  notify = null,
   log = () => {},
   now = () => Date.now(),
   minInjectIntervalMs = IDLE_MIN_INJECT_INTERVAL_MS,
+  failureAlertThreshold = IDLE_FAILURE_ALERT_THRESHOLD,
+  alertMinIntervalMs = IDLE_ALERT_MIN_INTERVAL_MS,
 } = {}) {
   const at = now();
   const safe = async (fn, fallback) => {
@@ -480,14 +632,19 @@ export async function runIdleWatchdogTick({
     Array.isArray(observed.proposals);
   const supplyCount = needsSupply ? await safe(supply, null) : null;
 
+  const state = (await safe(readState, {})) ?? {};
+
   const decision = idleWatchdogDecision({
     serveOk: up,
     inFlight: observed.inFlight,
     proposals: observed.proposals,
     supply: supplyCount,
-    lastInjectAtMs: await safe(readLastInject, null),
+    lastInjectAtMs: Number.isFinite(state.lastInjectAtMs)
+      ? state.lastInjectAtMs
+      : null,
     now: at,
     minInjectIntervalMs,
+    approvalGate,
   });
 
   let acted = false;
@@ -501,7 +658,7 @@ export async function runIdleWatchdogTick({
   } else if (decision.action === "inject") {
     try {
       await inject(idleWorkRequestEnvelope(repo, { now: at }));
-      await writeLastInject(at);
+      state.lastInjectAtMs = at;
       acted = true;
     } catch (err) {
       decision.error = err.message;
@@ -509,7 +666,46 @@ export async function runIdleWatchdogTick({
   }
 
   log(formatIdleWatchdogLine(decision, { now: at }));
-  return { decision, acted };
+
+  // A loop that cannot read the factory is silent by design — one skip line an
+  // interval into a log nobody tails. Three in a row is an outage (a stale or
+  // missing FACTORY_CONTROL_API_TOKEN 401s every call), so it says so out loud.
+  const failure = idleTickFailureCode(decision);
+  let alerted = false;
+  if (failure) {
+    const streak =
+      (Number.isFinite(state.failureStreak) ? state.failureStreak : 0) + 1;
+    state.failureStreak = streak;
+    state.lastFailureCode = failure;
+    if (streak >= failureAlertThreshold) {
+      log(formatIdleWatchdogAlert(streak, failure, { now: at }));
+      const lastAlert = Number.isFinite(state.lastAlertAtMs)
+        ? state.lastAlertAtMs
+        : null;
+      if (
+        typeof notify === "function" &&
+        (lastAlert === null || at - lastAlert >= alertMinIntervalMs)
+      ) {
+        const sent = await safe(
+          () =>
+            notify(
+              `BLOCKED idle-watchdog: ${streak} consecutive failed ticks (${failure}) — the idle loop cannot act`,
+            ),
+          false,
+        );
+        if (sent !== false) {
+          state.lastAlertAtMs = at;
+          alerted = true;
+        }
+      }
+    }
+  } else if (state.failureStreak) {
+    state.failureStreak = 0;
+    state.lastFailureCode = null;
+  }
+
+  await safe(() => writeState(state), undefined);
+  return { decision, acted, alerted, failureStreak: state.failureStreak ?? 0 };
 }
 
 /* --- default (live) observations and effects ---------------------------- */
@@ -545,7 +741,7 @@ export function liveIdleWatchdogDeps({
   repo = "factory",
   host = "127.0.0.1",
   port = 7381,
-  stateFile = path.join(homedir(), ".factory", "state", "idle-watchdog.json"),
+  stateFile = path.join(STATE_DIR, "idle-watchdog.json"),
   logFile = path.join(homedir(), ".factory", "logs", "idle-watchdog.log"),
 } = {}) {
   const api = (pathname, opts) => controlApi(pathname, { host, port, ...opts });
@@ -566,8 +762,24 @@ export function liveIdleWatchdogDeps({
     },
     inFlight: async () =>
       inFlightFromByState((await api("/status"))?.runs?.byState),
-    proposals: async () =>
-      (await api("/proposals?status=open"))?.proposals ?? null,
+    // `GET /proposals` returns newest-first pages, so a single default page
+    // hides the *oldest* open proposals — exactly the ones the loop wants.
+    // Page explicitly at the API's max limit and let the decision sort.
+    proposals: async () => {
+      const all = [];
+      let cursor = null;
+      for (let page = 0; page < IDLE_PROPOSAL_MAX_PAGES; page += 1) {
+        const query = new URLSearchParams({ status: "open", limit: "200" });
+        if (cursor) query.set("before", cursor);
+        const body = await api(`/proposals?${query}`);
+        const rows = body?.proposals;
+        if (!Array.isArray(rows)) return page === 0 ? null : all;
+        all.push(...rows);
+        cursor = body?.nextBefore ?? null;
+        if (!cursor) break;
+      }
+      return all;
+    },
     supply: async () => {
       const { fetchQueueSummaries, loadQueueConfig } =
         await import("../lib/queue-summary.mjs");
@@ -592,22 +804,32 @@ export function liveIdleWatchdogDeps({
         body: JSON.stringify(envelope),
         timeoutMs: 30000,
       }),
-    readLastInject: () => {
+    readState: () => {
       try {
-        return (
-          JSON.parse(readFileSync(stateFile, "utf8")).lastInjectAtMs ?? null
-        );
+        const parsed = JSON.parse(readFileSync(stateFile, "utf8"));
+        return parsed && typeof parsed === "object" ? parsed : {};
       } catch {
-        return null;
+        return {};
       }
     },
-    writeLastInject: (atMs) => {
+    writeState: (state) => {
       try {
         mkdirSync(path.dirname(stateFile), { recursive: true });
-        writeFileSync(stateFile, JSON.stringify({ lastInjectAtMs: atMs }));
+        writeFileSync(stateFile, JSON.stringify(state));
       } catch {
-        // A read-only state dir costs the rate limit, not the loop.
+        // A read-only state dir costs the rate limit and the alert
+        // throttle, not the loop.
       }
+    },
+    notify: (message) => {
+      if (!Bun.which("factory")) return false;
+      const result = Bun.spawnSync({
+        cmd: ["factory", "notify", message],
+        cwd: ROOT,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      return result.exitCode === 0;
     },
     log: (line) => {
       console.log(line);

@@ -32,6 +32,13 @@ jobs: []
 # long-running form. Decisions are logged one line per tick to
 # ~/.factory/logs/idle-watchdog.log. To disable: remove the job (or stop the
 # daemon) — nothing else in the runtime depends on it.
+#
+# It answers to config/policy.yaml like every other unattended path: with no
+# runtime policy on disk, or the day budget spent, a tick skips with
+# `reason=budget_gate:<code>` rather than approving as the operator. Three
+# consecutive unreadable/failed ticks log `idle-watchdog ALERT
+# repeated_failures=N` and send at most one `factory notify` an hour — that is
+# what a stale FACTORY_CONTROL_API_TOKEN looks like from here.
 
 # Runtime schedule overlay (optional). `event-runtime/schedules.json` defines
 # tracked kernel defaults; these ignored, instance-specific values are merged
