@@ -335,6 +335,13 @@ export function buildRunSpec(
       if (!payload?.repoPin) throw err;
     }
   }
+  // Hand the work scan the same security-dispatch verdict the dispatch gate
+  // will apply (WM-1060), so it stops pre-filtering security tickets the gate
+  // would now admit. Scoped to work-scan to keep every other agent's input —
+  // and thus its idempotency key — untouched.
+  if (mapping.agent?.startsWith("work-scan") && payload?.repo) {
+    payload = { ...payload, dispatchSecurity: policyDispatchSecurity() };
+  }
   const inputHash = hashJson(payload);
   const placement = def.placement ?? mapping.placement ?? undefined;
   const specEnvelope =
@@ -732,6 +739,28 @@ export function policyOwnedPathsCollision(root = reposRoot()) {
     return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
   } catch {
     return DEFAULT_OWNED_PATHS_COLLISION;
+  }
+}
+
+/**
+ * Whether a `type:security` ticket may enter the dispatch loop (WM-1060).
+ * `excluded` (the fail-closed default) keeps the historical behavior: only an
+ * operator-sourced dispatch may work a security ticket. `auto` lets the normal
+ * work loop dispatch them too — safe because the merge lane still refuses to
+ * merge any PR whose ticket holds a security flag (merge-plan §escalation), so
+ * a security ticket becomes a PR held for human merge, never an auto-merge. The
+ * `escalate_paths` sensitive-file gate is unaffected and still applies.
+ */
+export const DEFAULT_DISPATCH_SECURITY = "excluded";
+export function policyDispatchSecurity(root = reposRoot()) {
+  const file = resolveConfigPath("policy", { root });
+  if (!existsSync(file)) return DEFAULT_DISPATCH_SECURITY;
+  try {
+    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.dispatch
+      ?.security_tickets;
+    return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
+  } catch {
+    return DEFAULT_DISPATCH_SECURITY;
   }
 }
 
@@ -1205,10 +1234,19 @@ export function worktreeDispatchAutoEligibility(
   }
 
   evidence.checks.ticket_not_escalated = true;
+  const isSecurityTicket =
+    evidence.ticket.labels.includes("type:security") ||
+    evidence.ticket.labels.some((label) => /security/i.test(label));
+  // A security ticket may still dispatch when the operator sourced it OR when
+  // policy opts the repo into `dispatch.security_tickets: auto` (WM-1060). The
+  // merge lane refuses to merge a security PR (merge-plan §escalation), so this
+  // only ever produces a PR held for human merge — never an auto-merge — and
+  // the escalate_paths sensitive-file gate below still guards touched files.
+  evidence.checks.security_dispatch_mode = policyDispatchSecurity();
   if (
-    (evidence.ticket.labels.includes("type:security") ||
-      evidence.ticket.labels.some((label) => /security/i.test(label))) &&
-    !evidence.checks.operator_authorized
+    isSecurityTicket &&
+    !evidence.checks.operator_authorized &&
+    evidence.checks.security_dispatch_mode !== "auto"
   ) {
     return refusal("ticket_security", evidence);
   }

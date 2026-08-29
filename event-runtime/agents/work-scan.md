@@ -36,12 +36,17 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    - its labels include `ai:agent-ready`; and
    - its `assignee` field is `null`.
 
-   Exclude a ticket before ordering when its labels include `ai:escalated` or
-   `type:security` (or any other label containing `security`, case
-   insensitively). The dispatch planner must refuse those tickets, so including
-   them in a bounded batch can exhaust the scan and strand dispatchable work.
-   These excluded tickets are not candidates and must not appear in `plan`,
-   `deferred`, or `evidence.candidates`.
+   Exclude a ticket before ordering when its labels include `ai:escalated`.
+   Also exclude a ticket whose labels include `type:security` (or any other
+   label containing `security`, case insensitively) **unless**
+   `input.dispatchSecurity` equals `"auto"` — when it does, the dispatch planner
+   admits security tickets (the merge lane still holds their PRs for human
+   merge), so treat them as ordinary candidates. When `input.dispatchSecurity`
+   is absent or any other value, security tickets stay excluded because the
+   planner would refuse them, and including them in a bounded batch can exhaust
+   the scan and strand dispatchable work. Any ticket excluded here is not a
+   candidate and must not appear in `plan`, `deferred`, or
+   `evidence.candidates`.
 
    Apply this filter before ordering, cap checks, or path checks. `Blocked`,
    `Backlog`, `In Progress`, `In Review`, and `Done` are never candidates. Any

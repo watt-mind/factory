@@ -42,6 +42,11 @@
     "loop": { "type": "string", "minLength": 1 },
     "slot": { "type": "string", "minLength": 1 },
     "cadenceSeconds": { "type": "integer", "minimum": 1 },
-    "skippedSlots": { "type": "integer", "minimum": 0 }
+    "skippedSlots": { "type": "integer", "minimum": 0 },
+    "dispatchSecurity": {
+      "type": "string",
+      "enum": ["excluded", "auto"],
+      "description": "Filled by the planner (WM-1060) from dispatch.security_tickets policy: whether the scan may treat type:security tickets as candidates. Absent or 'excluded' keeps them pre-filtered; 'auto' admits them."
+    }
   }
 }

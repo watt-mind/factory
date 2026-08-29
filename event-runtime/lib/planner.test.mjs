@@ -947,6 +947,54 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  test("dispatch.security_tickets: auto admits a chain security dispatch, held for human merge (WM-1060)", () => {
+    const autoPolicy = "dispatch:\n  security_tickets: auto\n";
+    const securityDispatch = tierDispatch(["type:security"]);
+
+    // Default policy (key absent) still refuses a non-operator security dispatch.
+    withReposRoot(tierRepo, () => {
+      const direct = worktreeDispatchAutoEligibility(
+        { repo: "tiered", ticket: "WM-694" },
+        securityDispatch,
+      );
+      expect(direct.ok).toBe(false);
+      expect(direct.refusal.reason).toBe("ticket_security");
+      expect(direct.evidence.checks.security_dispatch_mode).toBe("excluded");
+    });
+
+    // With auto, the same non-operator (chain) dispatch is admitted.
+    withReposRoot(
+      tierRepo,
+      () => {
+        const admitted = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "WM-694" },
+          securityDispatch,
+        );
+        expect(admitted.ok).toBe(true);
+        expect(admitted.evidence.checks.security_dispatch_mode).toBe("auto");
+        expect(admitted.evidence.checks.operator_authorized).toBe(false);
+
+        const db = openDb(":memory:");
+        const ref = admit(db, {
+          type: "factory.dispatch.requested",
+          source: "chain",
+          eventId: "chain-security-auto",
+          correlationId: "chain-security-auto",
+          causationId: "run-parent",
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        expect(
+          planEvent(db, registry, ref, {
+            now: NOW,
+            policyVersion: "git:test",
+            dispatch: securityDispatch,
+          }).decision,
+        ).toBe("run");
+      },
+      autoPolicy,
+    );
+  });
+
   test("duplicate or unknown ticket tier labels refuse with typed evidence (WM-694)", () => {
     withReposRoot(tierRepo, () => {
       for (const labels of [["tier:light", "tier:standard"], ["tier:turbo"]]) {
