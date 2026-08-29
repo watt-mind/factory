@@ -1168,6 +1168,53 @@ function packRootFor(extensionRoot, rel) {
 }
 
 /**
+ * Read only the pack descriptors contributed by configured extensions.
+ *
+ * This is deliberately narrower than `loadExtensions`: it validates the
+ * allow-list, manifests, and realpath confinement needed to identify a pack,
+ * but does not validate pins, load a registry, import a module, or register a
+ * contribution. `update-pins --pack` uses it to repair a stale extension
+ * pack, which full loading must reject before it can import extension code.
+ *
+ * @param {{ root?: string, policy?: object, packRoots?: Array<object> }} [options]
+ * @returns {Array<{ kind: "fs", name: string, path: string }>}
+ */
+export function discoverExtensionPackRoots({
+  root = reposRoot(),
+  policy,
+  packRoots = [],
+} = {}) {
+  const { roots, anomalies } = loadExtensionRoots({ root, policy });
+  if (anomalies.length > 0) {
+    throw new ExtensionError(
+      `extension metadata discovery rejected configured roots: ${anomalies.join("; ")}`,
+    );
+  }
+
+  const discovered = [];
+  const names = new Set(packRoots.map((pack) => pack.name));
+  for (const { path: dir } of roots) {
+    const checked = validateExtensionManifest(dir, { root });
+    if (!checked.valid) {
+      throw new ExtensionError(
+        `extension metadata discovery rejected ${dir}: ${checked.errors.join("; ")}`,
+      );
+    }
+    for (const rel of checked.manifest.contributes?.packs ?? []) {
+      const pack = packRootFor(dir, rel);
+      if (names.has(pack.name)) {
+        throw new ExtensionError(
+          `extension metadata discovery: pack name "${pack.name}" is already configured (policy packs: or an earlier extension)`,
+        );
+      }
+      names.add(pack.name);
+      discovered.push(pack);
+    }
+  }
+  return discovered;
+}
+
+/**
  * Load every allow-listed extension: validate the manifest, prove its packs
  * load alongside everything accepted so far (a dry `loadRegistry`, so the
  * namespace/duplicate/pin/mutating rules of docs/kernel-and-packs.md apply

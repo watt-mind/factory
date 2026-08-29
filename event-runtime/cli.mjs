@@ -6,6 +6,8 @@ import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
 import { initPack } from "./lib/pack-init.mjs";
 import { validatePack } from "./lib/pack-validate.mjs";
+import { updateHarnessPins } from "./lib/pins.mjs";
+import { loadPackRoots, RegistryError, updatePins } from "./lib/registry.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
@@ -18,6 +20,8 @@ import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
 import {
   contributionCounts,
+  collectHarnessRoots,
+  discoverExtensionPackRoots,
   formatContributionCounts,
   loadExtensions,
   validateExtensionManifest,
@@ -361,6 +365,75 @@ export function initCommand(args = []) {
   return results;
 }
 
+const UPDATE_PINS_USAGE = "usage: update-pins [--pack NAME] [--check]";
+
+function parseUpdatePinsArgs(args = []) {
+  let pack;
+  let check = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--check") {
+      check = true;
+      continue;
+    }
+    if (arg === "--pack") {
+      const name = args[i + 1];
+      if (!name || name.startsWith("--")) throw new Error(UPDATE_PINS_USAGE);
+      pack = name;
+      i += 1;
+      continue;
+    }
+    throw new Error(UPDATE_PINS_USAGE);
+  }
+  return { pack, check };
+}
+
+/** CLI-only metadata repair; serve/work continue to use full loading. */
+export async function updatePinsCommand(args = []) {
+  const { pack, check } = parseUpdatePinsArgs(args);
+  try {
+    let descriptor;
+    if (pack !== undefined) {
+      const policyPacks = loadPackRoots();
+      const extensionPacks = discoverExtensionPackRoots({
+        packRoots: policyPacks,
+      });
+      descriptor = [...policyPacks, ...extensionPacks].find(
+        (candidate) => candidate.name === pack,
+      );
+      if (!descriptor)
+        throw new RegistryError(`unknown configured pack "${pack}"`);
+    }
+    const changed =
+      pack === undefined
+        ? await updatePins({ check })
+        : await updatePins({ pack: descriptor, check });
+    if (pack === undefined) {
+      const { roots, anomalies } = collectHarnessRoots({
+        root: FACTORY_ROOT,
+        builtin: path.join(FACTORY_ROOT, "shared"),
+      });
+      for (const anomaly of anomalies) console.error(`harness: ${anomaly}`);
+      changed.push(
+        ...updateHarnessPins({ roots, check }).map((name) => `harness:${name}`),
+      );
+    }
+    if (check && changed.length) {
+      throw new Error(
+        `pins stale: ${changed.join(", ")} — run: bun event-runtime/cli.mjs update-pins`,
+      );
+    }
+    console.log(
+      changed.length
+        ? `re-pinned: ${changed.join(", ")}`
+        : "pins already current",
+    );
+  } catch (err) {
+    console.error(`update-pins: ${err.message}`);
+    process.exitCode = 1;
+  }
+}
+
 export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === "init") return initCommand(args);
@@ -370,6 +443,7 @@ export async function dispatch(argv = process.argv.slice(2)) {
   if (command === "extensions") return extensionsCommand(args);
   if (command === "pack") return packCommand(args);
   if (command === "artifacts") return artifactsCommand(args);
+  if (command === "update-pins") return updatePinsCommand(args);
   if (!Object.hasOwn(COMMANDS, command)) {
     console.error(USAGE);
     process.exit(1);

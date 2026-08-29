@@ -27,6 +27,7 @@ import {
   applyConfigDefaults,
   collectHarnessRoots,
   contributionCounts,
+  discoverExtensionPackRoots,
   extensionSecretEnvVar,
   formatContributionCounts,
   getExtensionConfig,
@@ -120,6 +121,130 @@ function load(
     packRoots: [],
   }).then((result) => ({ ...result, adapterRegistry, hookRegistry }));
 }
+
+describe("extension pack metadata discovery (gh-857)", () => {
+  test("discovers path and package extension packs without importing adapters", () => {
+    const pathExtension = tempExtension();
+    const sentinel = path.join(tmpDir("event-extension-sentinel-"), "ran");
+    writeFileSync(
+      path.join(pathExtension, "adapters", "echo.mjs"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(sentinel)}, "ran"); export default {};`,
+    );
+    const pathPacks = discoverExtensionPackRoots({
+      policy: policyFor(pathExtension),
+    });
+    expect(pathPacks).toEqual([
+      {
+        kind: "fs",
+        name: "sample-ext",
+        path: path.join(pathExtension, "pack"),
+      },
+    ]);
+    expect(existsSync(sentinel)).toBe(false);
+
+    const { factoryRoot, name, installed } = sampleAsPackage();
+    const packagePacks = discoverExtensionPackRoots({
+      root: factoryRoot,
+      policy: { extensions: [{ package: name }] },
+    });
+    expect(packagePacks).toEqual([
+      {
+        kind: "fs",
+        name: "sample-ext",
+        path: path.join(realpathSync(installed), "pack"),
+      },
+    ]);
+  });
+
+  test("fails closed for invalid manifests and duplicate contributed pack names", () => {
+    const escaped = tempExtension((manifest) => {
+      manifest.contributes.packs = ["../outside"];
+    });
+    expect(() =>
+      discoverExtensionPackRoots({ policy: policyFor(escaped) }),
+    ).toThrow(/contributes\.packs\[0\].*escapes/);
+
+    const first = tempExtension();
+    const second = tempExtension();
+    expect(() =>
+      discoverExtensionPackRoots({ policy: policyFor(first, second) }),
+    ).toThrow(/pack name "sample-ext" is already configured/);
+    expect(() =>
+      discoverExtensionPackRoots({
+        policy: policyFor(first),
+        packRoots: [{ kind: "fs", name: "sample-ext", path: SAMPLE_PACK }],
+      }),
+    ).toThrow(/pack name "sample-ext" is already configured/);
+  });
+
+  test("update-pins repairs a stale extension pack without executing it", async () => {
+    const factoryRoot = tmpDir("event-extension-repair-root-");
+    const extension = tempExtension();
+    const sentinel = path.join(factoryRoot, "extension-imported");
+    writeFileSync(
+      path.join(extension, "adapters", "echo.mjs"),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(sentinel)}, "ran");
+export const SANDBOX_SUPPORT = "unsupported";
+export async function execute({ spec } = {}) {
+  return { ok: true, echoed: spec?.input ?? null };
+}
+`,
+    );
+    writeFileSync(
+      path.join(extension, "pack", "agents", "echo.md"),
+      "drifted extension prompt\n",
+    );
+    mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(factoryRoot, "config", "policy.yaml"),
+      `extensions:\n  - path: ${JSON.stringify(extension)}\n`,
+    );
+    const pins = path.join(extension, "pack", "pins.json");
+    const stalePins = readFileSync(pins, "utf8");
+    const policy = policyFor(extension);
+    const ordinaryLoad = () =>
+      loadExtensions({
+        root: factoryRoot,
+        policy,
+        adapterRegistry: createAdapterRegistry(),
+        hookRegistry: createHookRegistry(),
+        packRoots: [],
+      });
+    expect((await ordinaryLoad()).disabled[0].reason).toMatch(
+      /does not match pin/,
+    );
+
+    const run = (...args) =>
+      Bun.spawnSync({
+        cmd: [
+          process.execPath,
+          "event-runtime/cli.mjs",
+          "update-pins",
+          ...args,
+        ],
+        cwd: path.dirname(RUNTIME_ROOT),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_REPOS_ROOT: factoryRoot },
+      });
+    const checked = run("--pack", "sample-ext", "--check");
+    expect(checked.exitCode).not.toBe(0);
+    expect(checked.stderr.toString()).toContain("pins stale: sample-ext");
+    expect(readFileSync(pins, "utf8")).toBe(stalePins);
+    expect(existsSync(sentinel)).toBe(false);
+
+    const repaired = run("--pack", "sample-ext");
+    expect(repaired.exitCode).toBe(0);
+    expect(repaired.stdout.toString()).toContain("re-pinned: sample-ext");
+    expect(readFileSync(pins, "utf8")).not.toBe(stalePins);
+    expect(existsSync(sentinel)).toBe(false);
+
+    const loaded = await ordinaryLoad();
+    expect(loaded.anomalies).toEqual([]);
+    expect(loaded.extensions).toHaveLength(1);
+  });
+});
 
 describe("factory-extension.json schema", () => {
   test("accepts the decided manifest shape and rejects bad names/versions", () => {
