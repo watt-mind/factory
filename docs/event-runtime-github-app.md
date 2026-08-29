@@ -18,6 +18,18 @@ grant this complete permission set:
 | Repository   | Pull requests | Read-only      | Closing-PR references used by the duplicate-work claim guard    |
 | Organization | Projects      | Read and write | Projects v2 items and the `Status` field                        |
 
+Read the grant that an installation actually carries with the App JWT (no
+token is minted, nothing is written):
+
+```
+GET /app/installations/{installation_id}   ->  .permissions
+```
+
+The `watt-mind` installation was read this way on 2026-08-29 and already
+carries `issues: write` and `organization_projects: write`. No permission
+change was needed to fix the claim failure — see the note below on `GET
+/user`, which is not grantable to an installation at any permission level.
+
 Changing App permissions requires the organization owner to approve the new
 installation permissions. Re-mint the installation token after approval; an
 already-cached token retains its old grants until it expires or is replaced.
