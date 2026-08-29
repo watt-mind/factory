@@ -146,10 +146,7 @@ function check(
     ) {
       errors.push(`${path}: longer than maxLength ${s.maxLength}`);
     }
-    if (
-      hasOwn(s, "pattern") &&
-      typeof s.pattern === "string"
-    ) {
+    if (hasOwn(s, "pattern") && typeof s.pattern === "string") {
       let pattern: RegExp;
       try {
         pattern = new RegExp(s.pattern);

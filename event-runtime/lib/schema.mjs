@@ -133,10 +133,7 @@ function check(schema, value, path, errors) {
     ) {
       errors.push(`${path}: longer than maxLength ${schema.maxLength}`);
     }
-    if (
-      hasOwn(schema, "pattern") &&
-      typeof schema.pattern === "string"
-    ) {
+    if (hasOwn(schema, "pattern") && typeof schema.pattern === "string") {
       let pattern;
       try {
         pattern = new RegExp(schema.pattern);
