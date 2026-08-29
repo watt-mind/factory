@@ -301,6 +301,7 @@ export function itemView(row) {
     refs: parseObject(row.refs_json),
     source: row.source,
     createdAt: row.created_at,
+    expired: row.expired === 1,
     ackedAt: row.acked_at ?? null,
     resolvedAt: row.resolved_at ?? null,
     resolvedBy: row.resolved_by ?? null,
@@ -317,8 +318,26 @@ export function itemView(row) {
   };
 }
 
+/** Shared by inbox projections and the open-count query. */
+function inboxExpiredPredicate(item = "i") {
+  return `(${item}.kind = 'proposal_expired' OR EXISTS (
+    SELECT 1 FROM proposals p
+     WHERE p.id = json_extract(${item}.refs_json, '$.proposalId')
+       AND p.status = 'open'
+       AND p.ttl_seconds > 0
+       AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
+  ))`;
+}
+
 export function getInboxItem(db, id) {
-  return itemView(db.query("SELECT * FROM inbox_items WHERE id = ?").get(id));
+  return itemView(
+    db
+      .query(
+        `SELECT i.*, ${inboxExpiredPredicate("i")} AS expired
+         FROM inbox_items i WHERE i.id = ?`,
+      )
+      .get(id),
+  );
 }
 
 function supersedeInboxDecision(db, row, { title, body, refs, decision }) {
@@ -885,9 +904,10 @@ export function listInboxPage(
     : [limit + 1];
   const rows = db
     .query(
-      `SELECT *, rowid AS list_rowid FROM inbox_items
+      `SELECT i.*, i.rowid AS list_rowid, ${inboxExpiredPredicate("i")} AS expired
+       FROM inbox_items i
        WHERE ${where}${cursor}
-       ORDER BY created_at DESC, rowid DESC
+       ORDER BY i.created_at DESC, i.rowid DESC
        LIMIT ?`,
     )
     .all(...params);
@@ -1008,19 +1028,14 @@ export function resolveInboxItem(
 }
 
 export function inboxCounts(db) {
-  // The expiry predicate below must agree with `isExpiredInboxItem` in
-  // event-runtime/web/src/views/Inbox.tsx (badge vs. Open tab count).
+  // Use the same expiry predicate projected by `listInboxItems` and
+  // `getInboxItem`, so the badge and the Open tab count agree.
   const totals = db
     .query(
       `SELECT
        SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NULL
-                      AND NOT (i.kind = 'proposal_expired' OR EXISTS (
-                        SELECT 1 FROM proposals p
-                         WHERE p.id = json_extract(i.refs_json, '$.proposalId')
-                           AND p.status = 'open'
-                           AND p.ttl_seconds > 0
-                           AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
-                      )) THEN 1 ELSE 0 END) AS open,
+                      AND NOT ${inboxExpiredPredicate("i")}
+                      THEN 1 ELSE 0 END) AS open,
        SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NOT NULL THEN 1 ELSE 0 END) AS acked
      FROM inbox_items i`,
     )
