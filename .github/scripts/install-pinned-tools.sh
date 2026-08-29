@@ -11,6 +11,7 @@ readonly UV_VERSION='0.6.5'
 readonly UV_SHA256='8fc9895719a1291ecd193cb86f9282ff3649cef797d29eacc74c4f573aab1e2f'
 readonly ACTIONLINT_VERSION='1.7.7'
 readonly ACTIONLINT_SHA256='023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757'
+readonly CURL_DOWNLOAD_FLAGS=(-sSL --fail --retry 5 --retry-all-errors --retry-delay 2)
 
 if [ "$#" -eq 0 ]; then
   echo "usage: $0 <bun|gitleaks|uv|actionlint> [...]" >&2
@@ -20,6 +21,11 @@ fi
 temp_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 force_install="${FORCE_INSTALL:-0}"
 custom_prefix="${INSTALL_PREFIX:-}"
+
+download() {
+  local destination="$1" url="$2"
+  curl "${CURL_DOWNLOAD_FLAGS[@]}" -o "$destination" "$url"
+}
 
 install_bun() {
   local prefix archive extract_dir destination
@@ -32,7 +38,7 @@ install_bun() {
   archive="$temp_dir/bun-linux-x64.zip"
   extract_dir="$temp_dir/bun-linux-x64"
   rm -rf "$extract_dir"
-  curl -fsSL -o "$archive" "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip"
+  download "$archive" "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip"
   printf '%s  %s\n' "$BUN_SHA256" "$archive" | sha256sum -c -
   unzip -q "$archive" -d "$temp_dir"
   mkdir -p "$prefix/bin"
@@ -49,7 +55,7 @@ install_gitleaks() {
 
   archive="$temp_dir/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
   mkdir -p "$prefix/bin"
-  curl -fsSL -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+  download "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
   printf '%s  %s\n' "$GITLEAKS_SHA256" "$archive" | sha256sum -c -
   tar -xzf "$archive" -C "$prefix/bin" gitleaks
   chmod +x "$destination"
@@ -65,7 +71,7 @@ install_uv() {
   archive="$temp_dir/uv-x86_64-unknown-linux-gnu.tar.gz"
   extract_dir="$temp_dir/uv-x86_64-unknown-linux-gnu"
   rm -rf "$extract_dir"
-  curl -fsSL -o "$archive" "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+  download "$archive" "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
   printf '%s  %s\n' "$UV_SHA256" "$archive" | sha256sum -c -
   tar -xzf "$archive" -C "$temp_dir"
   mkdir -p "$prefix/bin"
@@ -82,7 +88,7 @@ install_actionlint() {
 
   archive="$temp_dir/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
   mkdir -p "$prefix/bin"
-  curl -fsSL -o "$archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+  download "$archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
   printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum -c -
   tar -xzf "$archive" -C "$prefix/bin" actionlint
   chmod +x "$destination"

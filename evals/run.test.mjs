@@ -138,7 +138,8 @@ describe("discovery", () => {
         "ticket-spec/green-but-empty",
         "ticket-spec/hidden-decision",
       ]);
-      expect(cases[0].skillSource).toBe(
+      expect(cases[0].candidateName).toBe("ticket-spec");
+      expect(cases[0].candidateSource).toBe(
         path.join(repoRoot, "shared", "skills", "ticket-spec", "SKILL.md"),
       );
       expect(cases[0].problem).toBeNull();
@@ -160,7 +161,7 @@ describe("discovery", () => {
       mkdirSync(emitted, { recursive: true });
       writeFileSync(path.join(emitted, "SKILL.md"), "# emitted\n");
       const [entry] = discoverCases({ evalsDir, repoRoot });
-      expect(entry.skillSource).toBe(path.join(emitted, "SKILL.md"));
+      expect(entry.candidateSource).toBe(path.join(emitted, "SKILL.md"));
       expect(entry.problem).toBeNull();
     }));
 
@@ -176,7 +177,7 @@ describe("discovery", () => {
       writeFileSync(agentPrompt, "# dispatch\n");
 
       const [entry] = discoverCases({ evalsDir, repoRoot });
-      expect(entry.skillSource).toBe(agentPrompt);
+      expect(entry.candidateSource).toBe(agentPrompt);
       expect(entry.problem).toBeNull();
     }));
 
@@ -191,7 +192,7 @@ describe("discovery", () => {
       writeFileSync(path.join(agentDir, "dispatch.md"), "# dispatch\n");
 
       const [entry] = discoverCases({ evalsDir, repoRoot });
-      expect(entry.skillSource).toBe(
+      expect(entry.candidateSource).toBe(
         path.join(repoRoot, "shared", "skills", "dispatch", "SKILL.md"),
       );
     }));
@@ -211,9 +212,16 @@ describe("discovery", () => {
         ]),
       );
       expect(problems["ticket-spec/no-expect"]).toBe("missing expect.md");
-      expect(problems["ghost-skill/orphan"]).toBe(
-        'no skill source for "ghost-skill" (looked in shared/skills/ghost-skill/SKILL.md, plugins/core/skills/ghost-skill/SKILL.md, event-runtime/agents/ghost-skill.md)',
+      expect(problems["ghost-skill/orphan"]).toContain(
+        'no source for "ghost-skill"',
       );
+      for (const lookedIn of [
+        "shared/skills/ghost-skill/SKILL.md",
+        "plugins/core/skills/ghost-skill/SKILL.md",
+        "event-runtime/agents/ghost-skill.md",
+      ]) {
+        expect(problems["ghost-skill/orphan"]).toContain(lookedIn);
+      }
     }));
 
   test("discovers the repo's own cases against the real skill tree", () => {

@@ -55,7 +55,7 @@ function message(error) {
  * `expect.md`. Both halves share the one per-case deadline, because a case
  * that spends its whole budget in the subject run has not been graded.
  *
- * @returns {Promise<{id: string, skill: string, case: string, status: "pass"|"fail", reason: string, durationMs: number, costUsd: number, skillSource: string|null}>}
+ * @returns {Promise<{id: string, candidateName: string, case: string, status: "pass"|"fail", reason: string, durationMs: number, costUsd: number, candidateSource: string|null}>}
  */
 export async function runCase({
   evalCase,
@@ -68,13 +68,13 @@ export async function runCase({
   const startedAt = now();
   const record = (status, reason, costUsd = 0) => ({
     id: evalCase.id,
-    skill: evalCase.skill,
+    candidateName: evalCase.candidateName,
     case: evalCase.name,
     status,
     reason,
     durationMs: Math.max(0, now() - startedAt),
     costUsd,
-    skillSource: evalCase.skillSource,
+    candidateSource: evalCase.candidateSource,
   });
 
   // A case the runner cannot even read is a hole in the net, never a pass.
@@ -181,13 +181,13 @@ export async function runSuite({
 function capped(evalCase, reason) {
   return {
     id: evalCase.id,
-    skill: evalCase.skill,
+    candidateName: evalCase.candidateName,
     case: evalCase.name,
     status: FAIL,
     reason,
     durationMs: 0,
     costUsd: 0,
-    skillSource: evalCase.skillSource,
+    candidateSource: evalCase.candidateSource,
   };
 }
 

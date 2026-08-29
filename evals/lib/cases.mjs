@@ -23,7 +23,7 @@ import path from "node:path";
  * Pinned event-runtime agents are the final fallback because their prompts
  * are not skills, but can still be exercised by the eval runner.
  */
-export function skillSourceCandidates(repoRoot, name) {
+export function candidateSourceCandidates(repoRoot, name) {
   return [
     path.join(repoRoot, "shared", "skills", name, "SKILL.md"),
     path.join(repoRoot, "plugins", "core", "skills", name, "SKILL.md"),
@@ -31,8 +31,8 @@ export function skillSourceCandidates(repoRoot, name) {
   ];
 }
 
-export function resolveSkillSource(repoRoot, skill) {
-  for (const candidate of skillSourceCandidates(repoRoot, skill)) {
+export function resolveCandidateSource(repoRoot, candidateName) {
+  for (const candidate of candidateSourceCandidates(repoRoot, candidateName)) {
     if (existsSync(candidate)) return candidate;
   }
   return null;
@@ -56,8 +56,8 @@ function dirEntries(dir) {
  * Discover cases under `<evalsDir>/cases`, optionally filtered to one skill.
  *
  * @param {{evalsDir: string, repoRoot: string, skill?: string|null}} options
- * @returns {Array<{id: string, skill: string, name: string, dir: string, inputPath: string, expectPath: string, skillSource: string|null, problem: string|null}>}
- *   sorted by skill then case name, so a results file and its comparison are
+ * @returns {Array<{id: string, candidateName: string, name: string, dir: string, inputPath: string, expectPath: string, candidateSource: string|null, problem: string|null}>}
+ *   sorted by candidate then case name, so a results file and its comparison are
  *   stable across runs.
  */
 export function discoverCases({ evalsDir, repoRoot, skill = null }) {
@@ -66,11 +66,11 @@ export function discoverCases({ evalsDir, repoRoot, skill = null }) {
     (name) => skill === null || name === skill,
   );
   const cases = [];
-  for (const skillName of skills) {
-    const skillDir = path.join(casesDir, skillName);
-    const skillSource = resolveSkillSource(repoRoot, skillName);
-    for (const caseName of dirEntries(skillDir)) {
-      const dir = path.join(skillDir, caseName);
+  for (const candidateName of skills) {
+    const candidateDir = path.join(casesDir, candidateName);
+    const candidateSource = resolveCandidateSource(repoRoot, candidateName);
+    for (const caseName of dirEntries(candidateDir)) {
+      const dir = path.join(candidateDir, caseName);
       const inputPath = path.join(dir, "input.md");
       const expectPath = path.join(dir, "expect.md");
       const missing = [
@@ -79,22 +79,22 @@ export function discoverCases({ evalsDir, repoRoot, skill = null }) {
       ].filter(Boolean);
       let problem = null;
       if (missing.length > 0) problem = `missing ${missing.join(" and ")}`;
-      else if (!skillSource) {
-        problem = `no skill source for "${skillName}" (looked in ${skillSourceCandidates(
+      else if (!candidateSource) {
+        problem = `no source for "${candidateName}" (looked in ${candidateSourceCandidates(
           repoRoot,
-          skillName,
+          candidateName,
         )
           .map((p) => path.relative(repoRoot, p))
           .join(", ")})`;
       }
       cases.push({
-        id: `${skillName}/${caseName}`,
-        skill: skillName,
+        id: `${candidateName}/${caseName}`,
+        candidateName,
         name: caseName,
         dir,
         inputPath,
         expectPath,
-        skillSource,
+        candidateSource,
         problem,
       });
     }

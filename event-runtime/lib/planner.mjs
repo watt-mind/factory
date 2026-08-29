@@ -1718,14 +1718,72 @@ function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
   return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
 }
 
+const WEBHOOK_MERGE_SCAN_ALREADY_LIVE = "webhook_merge_scan_already_live";
+const EXECUTING_MERGE_SCAN_STATES = new Set(["LEASED", "RUNNING", "VERIFYING"]);
+
+function hasQueuedWebhookMergeScan(db, runId) {
+  return Boolean(
+    db
+      .query(
+        `SELECT 1
+         FROM proposals
+         WHERE run_id = ?
+           AND decision = 'noop'
+           AND reason = ?
+         LIMIT 1`,
+      )
+      .get(runId, WEBHOOK_MERGE_SCAN_ALREADY_LIVE),
+  );
+}
+
+/**
+ * Re-admit the single webhook delivery retained behind each finished merge
+ * scan. The retained noop proposal is the durable queue marker: later burst
+ * deliveries have no proposal, so they cannot create extra trailing scans.
+ */
+function reAdmitQueuedWebhookMergeScans(db) {
+  const queued = db
+    .query(
+      `SELECT e.source, e.event_id
+       FROM events e
+       JOIN proposals p
+         ON p.event_source = e.source AND p.event_id = e.event_id
+       JOIN runs r ON r.run_id = p.run_id
+       WHERE e.source = 'github'
+         AND e.type = 'factory.merge.requested'
+         AND e.status = 'noop'
+         AND p.decision = 'noop'
+         AND p.reason = ?
+         AND r.state IN ('COMPLETED', 'REFUSED', 'FAILED', 'TIMED_OUT', 'CANCELLED')
+       ORDER BY p.created_at, p.rowid`,
+    )
+    .all(WEBHOOK_MERGE_SCAN_ALREADY_LIVE);
+  for (const event of queued) {
+    db.query(
+      `UPDATE events
+       SET status = 'admitted', last_plan_error = NULL
+       WHERE source = ? AND event_id = ? AND status = 'noop'`,
+    ).run(event.source, event.event_id);
+  }
+}
+
 /**
  * GitHub sends a delivery for each CI state change. Unlike an operator or
  * schedule request, those deliveries do not each deserve an auditable
- * proposal: one live repo-wide merge scan will read the current GitHub state
- * when it runs. Mark later deliveries as consumed without creating the noisy
- * noop proposals that otherwise flood the merge lane.
+ * proposal: a PROPOSED, APPROVED, or QUEUED scan will read current GitHub
+ * state when it executes, so later deliveries stay pure noops. Once the scan
+ * is LEASED, RUNNING, or VERIFYING, retain exactly one delivery as a
+ * TTL-backed noop proposal; planAdmittedEvents re-admits it after that scan
+ * reaches a terminal state. Further deliveries remain proposal-free noops.
  */
-function coalesceWebhookMergeRequest(db, event, envelope, agentRef) {
+function coalesceWebhookMergeRequest(
+  db,
+  event,
+  envelope,
+  agentRef,
+  at,
+  ttlSeconds,
+) {
   if (
     event.source !== "github" ||
     event.type !== "factory.merge.requested" ||
@@ -1738,7 +1796,13 @@ function coalesceWebhookMergeRequest(db, event, envelope, agentRef) {
   });
   if (!blockingRun) return null;
 
-  const reason = "webhook_merge_scan_already_live";
+  const reason = WEBHOOK_MERGE_SCAN_ALREADY_LIVE;
+  if (
+    EXECUTING_MERGE_SCAN_STATES.has(blockingRun.state) &&
+    !hasQueuedWebhookMergeScan(db, blockingRun.run_id)
+  ) {
+    return noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds);
+  }
   setEventStatus(db, event, "noop", reason);
   return { decision: "noop", runId: blockingRun.run_id, reason };
 }
@@ -1997,6 +2061,8 @@ export function planEvent(
       event,
       envelope,
       mapping.agent,
+      at,
+      ttlSeconds,
     );
     if (webhookMergeCoalesced) return webhookMergeCoalesced;
 
@@ -2453,6 +2519,7 @@ export function archiveDeadLetteredEvent(
  * @returns {{ planned: number, failed: number, deadLettered: number }}
  */
 export function planAdmittedEvents(db, registry, opts = {}) {
+  reAdmitQueuedWebhookMergeScans(db);
   const rows = db
     .query(
       `SELECT source, event_id, type FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
