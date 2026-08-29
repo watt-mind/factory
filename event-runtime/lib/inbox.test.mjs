@@ -1038,7 +1038,7 @@ describe("human inbox ledger (WM-285)", () => {
     ]);
   });
 
-  test("CI success and the proposal spawned by Ship auto-resolve their matching items", async () => {
+  test("CI success reads merge requests once and resolves only its matching CI RED item", async () => {
     const db = openDb(":memory:");
     createInboxItem(
       db,
@@ -1048,6 +1048,15 @@ describe("human inbox ledger (WM-285)", () => {
         refs: { repo: "factory", pr: "PR #607" },
       },
       { id: "ci-red", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "CI RED",
+        title: "different PR stays red",
+        refs: { repo: "factory", pr: "PR #608" },
+      },
+      { id: "ci-red-other", now: 1000 },
     );
     const successAt = new Date(2000).toISOString();
     const success = {
@@ -1111,11 +1120,33 @@ describe("human inbox ledger (WM-285)", () => {
        VALUES ('ship-proposal', 'operator', 'ship-event', 'run', 'ship-run', 'approved', ?, 1800)`,
     ).run(successAt);
 
-    expect(await reconcileInbox(db, { now: 3000 })).toEqual([
+    let mergeRequestedReads = 0;
+    const instrumented = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (
+              /SELECT admitted_at, subject, envelope_json FROM events\s+WHERE source = 'github'/s.test(
+                sql,
+              )
+            ) {
+              mergeRequestedReads += 1;
+            }
+            return target.query(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    expect(await reconcileInbox(instrumented, { now: 3000 })).toEqual([
       { id: "ci-red", resolvedBy: "auto:ci_green" },
       { id: "rc-ready", resolvedBy: "auto:ship_completed" },
     ]);
+    expect(mergeRequestedReads).toBe(1);
     expect(getInboxItem(db, "ci-red").refs.proposalId).toBe("rerun-proposal");
+    expect(getInboxItem(db, "ci-red-other").resolvedAt).toBeNull();
   });
 });
 
