@@ -3734,15 +3734,17 @@ export function releaseStalledWorkerLease(
           now: currentNow,
         });
       }
-      transition(db, {
-        runId: heldRunId,
-        to: "FAILED",
-        actor,
-        reason: failureReason,
-        attempt: run.attempts,
-        policyVersion,
-        now: currentNow,
-      });
+      if (run.state !== "VERIFYING") {
+        transition(db, {
+          runId: heldRunId,
+          to: "FAILED",
+          actor,
+          reason: failureReason,
+          attempt: run.attempts,
+          policyVersion,
+          now: currentNow,
+        });
+      }
     }
     db.query(
       `UPDATE workers SET state = 'stopped', current_run = NULL, stopped_at = ? WHERE worker_id = ?`,
