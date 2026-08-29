@@ -1068,7 +1068,7 @@ describe("worktree baseline verification (WM-334)", () => {
   test("handoff commands scrub instance FACTORY_* values and pin the worktree root", () => {
     const instanceRoot = tmpDir("evrt-handoff-instance-");
     const { dir, record } = worktreeWorkspace(
-      "printf 'repos=%s\\nroot=%s\\nhome=%s\\nport=%s\\n' \"$FACTORY_REPOS_ROOT\" \"${FACTORY_ROOT-unset}\" \"${FACTORY_EVENT_HOME-unset}\" \"${FACTORY_EVENT_PORT-unset}\"",
+      'printf \'repos=%s\\nroot=%s\\nhome=%s\\nport=%s\\n\' "$FACTORY_REPOS_ROOT" "${FACTORY_ROOT-unset}" "${FACTORY_EVENT_HOME-unset}" "${FACTORY_EVENT_PORT-unset}"',
       null,
     );
     const keys = [
@@ -1077,7 +1077,9 @@ describe("worktree baseline verification (WM-334)", () => {
       "FACTORY_EVENT_HOME",
       "FACTORY_EVENT_PORT",
     ];
-    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    const previous = Object.fromEntries(
+      keys.map((key) => [key, process.env[key]]),
+    );
     Object.assign(process.env, {
       FACTORY_REPOS_ROOT: instanceRoot,
       FACTORY_ROOT: instanceRoot,
