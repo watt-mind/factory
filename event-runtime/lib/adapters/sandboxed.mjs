@@ -41,7 +41,7 @@ import path from "node:path";
 import { runInSandbox } from "../sandbox/gondolin.mjs";
 import { normalizePolicy } from "../sandbox/policy.mjs";
 import { MODEL_ADAPTERS } from "../registry.mjs";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, workspacesRoot } from "../config.mjs";
 
 /**
  * Stable refusal code shared by the planner and worker. A workspace-only
@@ -62,9 +62,9 @@ const RAW_CREDENTIAL_PATH =
   /(?:^|\/)\.(?:aws|azure|claude|config\/gcloud|config\/gh|cursor|gnupg|kube|ssh)(?:\/|$)|(?:^|\/)(?:credentials|hosts\.yml|secrets\.env)(?:\/|$)|(?:^|\/)\.worktrees(?:\/|$)/;
 
 /** The only runtime-owned subtree that a sandboxed adapter may mount from HOME. */
-export const HOME_MOUNT_ALLOWLIST = Object.freeze([
-  ".factory/event-runtime/workspaces",
-]);
+export function HOME_MOUNT_ALLOWLIST(home = homedir()) {
+  return [path.relative(home, workspacesRoot())];
+}
 
 function pathContains(parent, child) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
@@ -90,7 +90,7 @@ function unsafeHostMountReason(hostPath) {
     return "names a raw credential store or sibling worktree";
   if (
     pathContains(home, resolved) &&
-    !HOME_MOUNT_ALLOWLIST.some((prefix) =>
+    !HOME_MOUNT_ALLOWLIST(home).some((prefix) =>
       pathContains(path.join(home, prefix), resolved),
     )
   ) {
