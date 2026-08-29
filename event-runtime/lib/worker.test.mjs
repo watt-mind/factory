@@ -200,12 +200,25 @@ function freshRoot() {
   return tmpDir("evrt-worker-");
 }
 
+/**
+ * A checkout root with no config/ at all, so every policy read from these
+ * tests normalizes to its fail-closed default.
+ *
+ * `bin/worktree-up.sh` copies the operator's real config/policy.yaml into every
+ * worktree, and the handoff verify gate runs the suite from the worktree root —
+ * so an operator stanza (`sandbox.workspace_only_fallback`) silently decided
+ * what `runOnce` did here, and the same commit passed in a clean checkout and
+ * failed in a provisioned worktree (#1285).
+ */
+const EMPTY_POLICY_ROOT = tmpDir("evrt-worker-empty-policy-");
+
 function opts(extra = {}) {
   return {
     owner: "w1",
     workspacesRoot: freshRoot(),
     now: T0,
     policyVersion: "test",
+    policyRoot: EMPTY_POLICY_ROOT,
     ...extra,
   };
 }
@@ -1287,10 +1300,25 @@ describe("worker", () => {
     };
     const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 5 }));
     expect(DYNAMIC_DEADLINE_ADAPTERS.has(spec.adapter)).toBe(true);
-    const liveMaxMinutes = policyMaxRunMinutes();
-    expect(liveMaxMinutes).toBeGreaterThan(0);
+    // The ceiling comes from the policy root runOnce is given. Reading the
+    // live one instead only agreed because both happened to reach the
+    // checkout's own config/policy.yaml, which a provisioned worktree carries
+    // and a clean checkout does not (#1285).
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(policyRoot, "config", "policy.yaml"),
+      "limits:\n  max_run_minutes: 7\n",
+    );
+    const liveMaxMinutes = policyMaxRunMinutes(policyRoot);
+    expect(liveMaxMinutes).toBe(7);
 
-    const summary = await runOnce(db, registry, { fake: recording }, opts());
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake: recording },
+      opts({ policyRoot }),
+    );
     expect(summary.terminalState).toBe("COMPLETED");
     expect(seen).toHaveLength(1);
     // The ceiling every policy-bounded extension can reach, and nothing beyond it.
@@ -1930,6 +1958,29 @@ describe("worker", () => {
       db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId),
     ).toBeNull();
     expect(db.query(`SELECT * FROM outbox`).all()).toHaveLength(0);
+  });
+
+  test("the suite's policy root is pinned, so a provisioned worktree's instance policy cannot decide a test (#1285)", () => {
+    // Seed a worktree-like checkout the way bin/worktree-up.sh does: a real,
+    // non-default config/policy.yaml beside the code under test.
+    const worktreeLike = tmpDir("evrt-worktree-like-");
+    mkdirSync(path.join(worktreeLike, "config"), { recursive: true });
+    writeFileSync(
+      path.join(worktreeLike, "config", "policy.yaml"),
+      "sandbox:\n  workspace_only_fallback:\n    mode: host\n    agents:\n      - factory-status-report\n",
+    );
+    // The fixture is genuinely non-default...
+    expect(policyWorkspaceOnlyFallback(worktreeLike)).toEqual({
+      mode: "host",
+      agents: ["factory-status-report"],
+    });
+    // ...and every runOnce in this file still reads the fail-closed default,
+    // whatever config/policy.yaml the checkout it runs from happens to hold.
+    expect(opts().policyRoot).toBe(EMPTY_POLICY_ROOT);
+    expect(
+      existsSync(path.join(EMPTY_POLICY_ROOT, "config", "policy.yaml")),
+    ).toBe(false);
+    expect(policyWorkspaceOnlyFallback(EMPTY_POLICY_ROOT)).toBeNull();
   });
 
   test("unknown adapter fails terminal", async () => {

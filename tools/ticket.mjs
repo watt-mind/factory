@@ -10,6 +10,7 @@
  *   bun tools/ticket.mjs get CLNT-616
  *   bun tools/ticket.mjs comments CLNT-616
  *   bun tools/ticket.mjs claim CLNT-616 --agent claude
+ *   bun tools/ticket.mjs unclaim CLNT-616
  *   bun tools/ticket.mjs comment CLNT-616 "verified: 42 tests pass"
  *   bun tools/ticket.mjs triage CLNT-616 --comment "Owned Paths need revision"
  *   bun tools/ticket.mjs answer CLNT-616 "Use the existing token cache"
@@ -65,6 +66,7 @@ import {
   claimLabels,
   appendIssueDetail,
 } from "../lib/control-plane/index.mjs";
+import { releaseLabels } from "../lib/control-plane/labels.mjs";
 import {
   parseOwnedPaths,
   ownedPathsClosureGaps,
@@ -570,6 +572,20 @@ const VERBS = {
         : `LOST RACE on ${key} — now assigned to ${result.assignee ?? "someone else"}; take the next ticket`,
     );
     if (!result.ok) process.exit(1);
+  },
+
+  async unclaim() {
+    const key = positional[0];
+    if (!key) throw new Error(`usage: unclaim <ISSUE-ID>`);
+    const cp = controlPlane();
+    const issue = await cp.getTicket(key);
+    const currentNames = (issue.labels ?? []).map((label) => label.name);
+    const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
+    await cp.transition(key, "Todo", { add, remove, unassign: true });
+    out(
+      { ok: true, identifier: key, state: "Todo" },
+      `unclaimed ${key} -> Todo`,
+    );
   },
 
   async comment() {
