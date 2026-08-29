@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -12,9 +13,59 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spliceFloor } from "../lib/floor.mjs";
+import {
+  configuredGithubSlug,
+  remoteGithubSlug,
+  resolveFloorCheckouts,
+} from "./emit.mjs";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const hadLocalReposConfig = existsSync(path.join(ROOT, "config", "repos.yaml"));
+
+test("GitHub slug helpers distinguish remotes from configured values", () => {
+  expect(remoteGithubSlug("git@github.com:Owner/Repository.git")).toBe(
+    "owner/repository",
+  );
+  expect(remoteGithubSlug("https://github.com/Owner/Repository")).toBe(
+    "owner/repository",
+  );
+  expect(remoteGithubSlug("https://github.com/Owner/Repository.git")).toBe(
+    "owner/repository",
+  );
+  expect(remoteGithubSlug("Owner/Repository")).toBeNull();
+  expect(remoteGithubSlug("https://gitlab.com/Owner/Repository")).toBeNull();
+
+  expect(configuredGithubSlug("Owner/Repository")).toBe("owner/repository");
+  expect(configuredGithubSlug("HTTPS://GITHUB.COM/Owner/Repository.git")).toBe(
+    "owner/repository",
+  );
+  expect(configuredGithubSlug("https://gitlab.com/Owner/Repository")).toBeNull();
+});
+
+test("floor checkout resolution prefers real paths before matching a slug", () => {
+  const runningRoot = mkdtempSync(path.join(tmpdir(), "emit-running-"));
+  const siblingRoot = mkdtempSync(path.join(tmpdir(), "emit-sibling-"));
+  const missingRoot = path.join(tmpdir(), "emit-missing-checkout");
+  try {
+    const repos = [
+      { name: "sibling", path: siblingRoot, github: "watt-mind/factory" },
+      { name: "missing", path: missingRoot, github: "watt-mind/factory" },
+      { name: "running", path: runningRoot, github: "watt-mind/factory" },
+    ];
+    const resolved = resolveFloorCheckouts({
+      runningRoot: realpathSync(runningRoot),
+      runningGithub: "watt-mind/factory",
+      repos,
+    });
+    expect(resolved.map((repo) => repo.isRunningRepo)).toEqual([false, true, true]);
+    expect(resolved[0].checkoutPath).toBe(siblingRoot);
+    expect(resolved[1].checkoutPath).toBe(realpathSync(runningRoot));
+    expect(resolved[2].checkoutPath).toBe(realpathSync(runningRoot));
+  } finally {
+    rmSync(runningRoot, { recursive: true, force: true });
+    rmSync(siblingRoot, { recursive: true, force: true });
+  }
+});
 
 test("emit purges orphaned commands, skills, and prompts from every output tree", () => {
   const orphaned = [
@@ -93,18 +144,17 @@ function makeEmitFixture() {
   return fixture;
 }
 
-test("floor check uses the running checkout for its matching repo", () => {
+test("floor check uses the running checkout when its configured path is missing", () => {
   const fixture = makeEmitFixture();
-  const staleFactory = mkdtempSync(path.join(tmpdir(), "emit-floor-factory-"));
   const staleSibling = mkdtempSync(path.join(tmpdir(), "emit-floor-sibling-"));
   const staleAgents =
     "<!-- FACTORY:FLOOR:BEGIN -->\nstale floor\n<!-- FACTORY:FLOOR:END -->\n";
 
   try {
     // The fixture is a current checkout of this repo (its AGENTS.md carries the
-    // floor emit just generated) whose origin names watt-mind/factory, while
-    // config points `factory` at a stale directory elsewhere — the worktree
-    // shape the slug match exists for. The sibling keeps its configured path.
+    // floor emit just generated) whose origin names watt-mind/factory. Its
+    // configured path is absent, which is the worktree shape the slug fallback
+    // supports. The sibling keeps its configured path.
     writeFileSync(
       path.join(fixture, "AGENTS.md"),
       spliceFloor(
@@ -119,11 +169,10 @@ test("floor check uses the running checkout for its matching repo", () => {
       const git = Bun.spawnSync({ cmd: ["git", ...args], cwd: fixture });
       expect(git.exitCode).toBe(0);
     }
-    writeFileSync(path.join(staleFactory, "AGENTS.md"), staleAgents);
     writeFileSync(path.join(staleSibling, "AGENTS.md"), staleAgents);
     writeFileSync(
       path.join(fixture, "config", "repos.yaml"),
-      `repos:\n  - name: factory\n    path: ${staleFactory}\n    github: watt-mind/factory\n  - name: sibling\n    path: ${staleSibling}\n    github: watt-mind/other-repo\n`,
+      `repos:\n  - name: factory\n    path: ${path.join(fixture, "missing-factory")}\n    github: watt-mind/factory\n  - name: sibling\n    path: ${staleSibling}\n    github: watt-mind/other-repo\n`,
     );
 
     const result = Bun.spawnSync({
@@ -150,7 +199,6 @@ test("floor check uses the running checkout for its matching repo", () => {
     );
   } finally {
     rmSync(fixture, { recursive: true, force: true });
-    rmSync(staleFactory, { recursive: true, force: true });
     rmSync(staleSibling, { recursive: true, force: true });
   }
 });
