@@ -21,16 +21,16 @@ It contains **160 environment-failure events across 48 runs** out of 4,136
 recorded runs (2026-08-17 through 2026-08-29). That broad label is not a
 containerisation signal:
 
-| Reason family | Events / runs | What it says | Would a per-repo image fix it? |
-| --- | ---: | --- | --- |
-| Missing artifact-store object | 152 / 46 | Runtime artifact availability | No |
-| Tracker rate limit | 8 / 2 | Control-plane quota | No |
-| Workspace provisioning (branch/lease/port/seed failures) | 50 / 48 | Worktree lifecycle coordination | No; it would need equivalent lifecycle coordination |
-| Missing `wasp` | 1 / 1 | A genuine absent toolchain | Potentially |
-| Missing `cashsaas/.env.server` | 6 / 6 | Node-local operator configuration | Only if secrets/config are deliberately brokered |
+| Reason family                                            | Events / runs | What it says                      | Would a per-repo image fix it?                      |
+| -------------------------------------------------------- | ------------: | --------------------------------- | --------------------------------------------------- |
+| Missing artifact-store object                            |      152 / 46 | Runtime artifact availability     | No                                                  |
+| Tracker rate limit                                       |         8 / 2 | Control-plane quota               | No                                                  |
+| Workspace provisioning (branch/lease/port/seed failures) |       50 / 48 | Worktree lifecycle coordination   | No; it would need equivalent lifecycle coordination |
+| Missing `wasp`                                           |         1 / 1 | A genuine absent toolchain        | Potentially                                         |
+| Missing `cashsaas/.env.server`                           |         6 / 6 | Node-local operator configuration | Only if secrets/config are deliberately brokered    |
 
 The environment-labelled rate is therefore 48 / 4,136 = **1.16%**, but the
-observed *toolchain* portion is only one run (0.02%); six local-config failures
+observed _toolchain_ portion is only one run (0.02%); six local-config failures
 are not safely solved by baking credentials into an image. `docs/friction-log.md`
 also records the material historical worktree cost as stale-cache compilation
 (F-4), now fixed, rather than missing tools.
@@ -54,20 +54,20 @@ runtime database under the worktree, and start/tear down its services. As
 databases. A container with a bind-mounted worktree still needs this lifecycle
 contract; otherwise it reintroduces cross-ticket database and port collisions.
 
-| Breakage / constraint | Evidence | Container consequence |
-| --- | --- | --- |
-| Worktree ports, DB, runtime home | `bin/worktree-up.sh:13-21`, `bin/worktree-common.sh` port reservations, `docs/architecture.md` §2.5 | Keep repo scripts or duplicate their lifecycle and ownership checks inside the container boundary. |
-| Fast host cloning | `docs/architecture.md` §2.6: APFS clonefile is effectively free when current | Image build/pull layers do not preserve this host warm-cache win; an image cache can become a second stale-template problem. |
+| Breakage / constraint                     | Evidence                                                                                             | Container consequence                                                                                                                                       |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worktree ports, DB, runtime home          | `bin/worktree-up.sh:13-21`, `bin/worktree-common.sh` port reservations, `docs/architecture.md` §2.5  | Keep repo scripts or duplicate their lifecycle and ownership checks inside the container boundary.                                                          |
+| Fast host cloning                         | `docs/architecture.md` §2.6: APFS clonefile is effectively free when current                         | Image build/pull layers do not preserve this host warm-cache win; an image cache can become a second stale-template problem.                                |
 | Harness subscription/OAuth authentication | `runners/run-agent.sh:140-170` deliberately unsets API keys so harnesses use subscription/login auth | A Linux image cannot assume the host login/session exists. Mounting it weakens the claimed isolation; copying keys changes billing and connector behaviour. |
-| Browser tooling | `config/mcp/claude.json` launches isolated headless Chrome through `npx chrome-devtools-mcp` | The container needs browser binaries, display/sandbox support, localhost routing to the worktree app, and a separate profile lifecycle. |
-| GitHub credentials | `bin/worktree-up.sh` uses `gh` to inspect PR state | The image must broker `gh` auth or mount the host credential store; either adds a credential boundary and refresh path. |
+| Browser tooling                           | `config/mcp/claude.json` launches isolated headless Chrome through `npx chrome-devtools-mcp`         | The container needs browser binaries, display/sandbox support, localhost routing to the worktree app, and a separate profile lifecycle.                     |
+| GitHub credentials                        | `bin/worktree-up.sh` uses `gh` to inspect PR state                                                   | The image must broker `gh` auth or mount the host credential store; either adds a credential boundary and refresh path.                                     |
 
 ## Two candidate shapes
 
-| Shape | Avoids | Does not avoid / new cost | Multi-node effect |
-| --- | --- | --- | --- |
-| **A. Per-repo image, bind-mounted ticket worktree** | Can pin Bun/Python/system packages and make a node's base toolchain reproducible. | Does **not** avoid worktree ports/DB/runtime-home coordination, APFS clonefile loss, host subscription auth, browser setup, or `gh` credential brokering. Needs image build, registry, CVE updates, and cache invalidation. | A new node can pull a declared image, but every image tag becomes a warm-cache analogue: it must be rebuilt and attested when lockfiles/toolchain pins change. |
-| **B. Declarative host environment (Nix, mise, or asdf), retain worktrees** | Pins/install-checks toolchains while retaining current APFS cloning, worktree scripts, host login, browser configuration, and `gh` auth. | Does not create a filesystem security boundary and still needs per-node installation/bootstrap. | Makes node onboarding cheaper by declaring prerequisites in the repo/node profile without introducing image distribution; the profile lock/update cadence still needs maintenance. |
+| Shape                                                                      | Avoids                                                                                                                                   | Does not avoid / new cost                                                                                                                                                                                                   | Multi-node effect                                                                                                                                                                  |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A. Per-repo image, bind-mounted ticket worktree**                        | Can pin Bun/Python/system packages and make a node's base toolchain reproducible.                                                        | Does **not** avoid worktree ports/DB/runtime-home coordination, APFS clonefile loss, host subscription auth, browser setup, or `gh` credential brokering. Needs image build, registry, CVE updates, and cache invalidation. | A new node can pull a declared image, but every image tag becomes a warm-cache analogue: it must be rebuilt and attested when lockfiles/toolchain pins change.                     |
+| **B. Declarative host environment (Nix, mise, or asdf), retain worktrees** | Pins/install-checks toolchains while retaining current APFS cloning, worktree scripts, host login, browser configuration, and `gh` auth. | Does not create a filesystem security boundary and still needs per-node installation/bootstrap.                                                                                                                             | Makes node onboarding cheaper by declaring prerequisites in the repo/node profile without introducing image distribution; the profile lock/update cadence still needs maintenance. |
 
 For this workload, B addresses the only measured missing-tool case with the
 smallest change. A is not rejected forever, but has no demonstrated net benefit
