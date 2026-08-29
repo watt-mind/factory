@@ -68,6 +68,7 @@ import {
 import { HEARTBEAT_STALE_MS, satisfiesPlacement } from "./workers.mjs";
 import {
   assertSandboxWorkspaceSupported,
+  confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
   PathViolation,
@@ -3162,17 +3163,33 @@ export async function executeClaimed(
       for (const entry of RUNTIME_ARTIFACTS) {
         let abs;
         try {
-          abs = safeJoin(workspaceDir, entry.path);
+          // Refusal artifacts bypass verifyCompleted's collection path, so
+          // repeat the shared canonical/regular-file preflight before the
+          // first host-side read or hash. Missing and guest-supplied links are
+          // best-effort omissions, just like absent runtime artifacts.
+          abs = confinedRegularFile(workspaceDir, entry.path);
         } catch (err) {
+          if (err?.code === "ENOENT") continue;
           if (!(err instanceof PathViolation)) throw err;
           continue;
         }
-        if (existsSync(abs)) {
-          collected.push({
+        try {
+          const collectedEntry = {
             kind: entry.kind,
             uri: `file://${abs}`,
             sha256: sha256Hex(readFileSync(abs)),
+          };
+          // The fixed runtime files live at the workspace root. The helper
+          // returned their canonical path, so dirname is canonical provenance
+          // for storeCollected's independent pre-copy confinement check.
+          Object.defineProperty(collectedEntry, "workspaceRoot", {
+            value: path.dirname(abs),
           });
+          collected.push(collectedEntry);
+        } catch (err) {
+          // The guest may unlink the artifact between the preflight and the
+          // read; that is the same best-effort omission as never writing it.
+          if (err?.code !== "ENOENT") throw err;
         }
       }
       const artifacts = storeCollected({
