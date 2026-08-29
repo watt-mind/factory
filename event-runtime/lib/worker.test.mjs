@@ -63,6 +63,7 @@ import {
   cancelRun,
   CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
+  claimedRetryFor,
   CODE_RELOAD_EXIT,
   codeStamp,
   codeStampFiles,
@@ -83,6 +84,7 @@ import {
   policyMaxRunMinutes,
   materializeRunHarness,
   reapExpiredLeases,
+  releaseStalledWorkerLease,
   releaseClaimLock,
   repositoryIsClean,
   repositoryStatus,
@@ -2335,6 +2337,52 @@ describe("worker", () => {
       { reason_code: "lease_expired" },
     ]);
     expect(claimNext(db, opts())).toBeNull();
+  });
+
+  test("releasing a stalled worker finalizes and marks a retry as a lease expiry", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ maxAttempts: 2 }));
+    const claim = claimNext(db, opts());
+    const staleAt = T0 - 90_001;
+    db.query(
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "w1",
+      "test-host",
+      1,
+      "{}",
+      "fake",
+      new Date(T0).toISOString(),
+      new Date(staleAt).toISOString(),
+      "busy",
+      spec.runId,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        db,
+        { workerId: "w1", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: spec.runId });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(
+      db
+        .query(
+          `SELECT terminal_state, reason_code, finished_at FROM attempts WHERE run_id = ? AND attempt = ?`,
+        )
+        .get(spec.runId, claim.attempt),
+    ).toEqual({
+      terminal_state: "FAILED",
+      reason_code: "lease_expired",
+      finished_at: new Date(T0).toISOString(),
+    });
+    expect(claimedRetryFor(db, spec.runId, claim.attempt + 1)).toEqual({
+      runId: spec.runId,
+      priorAttempt: claim.attempt,
+      reasonCode: "lease_expired",
+    });
   });
 
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {

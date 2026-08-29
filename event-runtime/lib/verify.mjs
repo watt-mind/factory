@@ -381,7 +381,9 @@ function matchesRedBaseline(baseline, verifyOutput) {
 
 const REPO_VERIFY_REASON_MAX_LINES = 40;
 const REPO_VERIFY_REASON_MAX_CHARS = 8 * 1024;
-const REPO_VERIFY_TEST_FAILURE_LINE = /\(fail\)|✗/i;
+// Anchored: a passing test whose *name* mentions "(fail)" must not be reported
+// as the failure (WM-918's own registry test says "reads bun (fail) and ✗").
+const REPO_VERIFY_TEST_FAILURE_LINE = /^\s*(?:\(fail\)|✗)/i;
 const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
 
 function boundedDiagnostic(lines) {

@@ -1,5 +1,5 @@
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-command-test-mjs";
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
@@ -9,7 +9,14 @@ import { loadModelTierMap, loadRegistry } from "../registry.mjs";
 import { validate } from "../schema.mjs";
 import { emitDueTicks } from "../schedules.mjs";
 import { preflight } from "../sandbox/gondolin.mjs";
-import { execute, resolveTemplate, SANDBOX_SUPPORT } from "./command.mjs";
+import {
+  BASE_INHERITED_ENV,
+  execute,
+  PUSH_CREDENTIAL_ENV,
+  resolveTemplate,
+  safeChildEnvironment,
+  SANDBOX_SUPPORT,
+} from "./command.mjs";
 import { SANDBOX_CONSOLE_FILE } from "./sandboxed.mjs";
 
 const def = (command) => ({ ref: "test-cmd@1", command });
@@ -61,6 +68,89 @@ describe("resolveTemplate", () => {
         factoryRoot: "/tmp/pwn",
       }),
     ).toEqual(["bun", REAPER_SCRIPT]);
+  });
+});
+
+describe("safeChildEnvironment", () => {
+  const originalEnv = { ...process.env };
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  test("inherits only the ambient baseline and pins FACTORY_ROOT", () => {
+    process.env.COMMAND_ADAPTER_AMBIENT_SECRET = "must-not-leak";
+    process.env.HOME = "/tmp/command-adapter-home";
+
+    const childEnv = safeChildEnvironment({
+      CUSTOM_COMMAND_SETTING: "allowed",
+      HOME: "/tmp/overridden-home",
+      FACTORY_ROOT: "/tmp/untrusted-root",
+    });
+
+    expect(childEnv.HOME).toBe("/tmp/overridden-home");
+    expect(childEnv.CUSTOM_COMMAND_SETTING).toBe("allowed");
+    expect(childEnv.FACTORY_ROOT).toBe(FACTORY_ROOT);
+    expect(childEnv.COMMAND_ADAPTER_AMBIENT_SECRET).toBeUndefined();
+    for (const key of Object.keys(originalEnv)) {
+      if (
+        !BASE_INHERITED_ENV.includes(key) &&
+        !PUSH_CREDENTIAL_ENV.includes(key) &&
+        key !== "FACTORY_ROOT"
+      ) {
+        expect(childEnv[key]).toBeUndefined();
+      }
+    }
+  });
+
+  test("strips provider credentials even when supplied as overrides", () => {
+    const providerKeys = [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_GENAI_API_KEY",
+      "MISTRAL_API_KEY",
+      "DEEPSEEK_API_KEY",
+      "GROQ_API_KEY",
+      "CLAUDECODE",
+      "CLAUDE_CODE_ENTRYPOINT",
+    ];
+    const childEnv = safeChildEnvironment(
+      Object.fromEntries(providerKeys.map((key) => [key, `secret-${key}`])),
+      { mutating: true },
+    );
+
+    for (const key of providerKeys) {
+      expect(childEnv[key]).toBeUndefined();
+    }
+  });
+
+  test("inherits push credentials only for explicit mutating definitions", () => {
+    for (const key of PUSH_CREDENTIAL_ENV) {
+      process.env[key] = `ambient-${key}`;
+    }
+
+    for (const opts of [{}, { mutating: false }, false]) {
+      const childEnv = safeChildEnvironment(
+        Object.fromEntries(
+          PUSH_CREDENTIAL_ENV.map((key) => [key, `override-${key}`]),
+        ),
+        opts,
+      );
+      for (const key of PUSH_CREDENTIAL_ENV) {
+        expect(childEnv[key]).toBeUndefined();
+      }
+    }
+
+    for (const opts of [{ mutating: true }, true]) {
+      const childEnv = safeChildEnvironment({ GH_TOKEN: "caller-token" }, opts);
+      for (const key of PUSH_CREDENTIAL_ENV) {
+        expect(childEnv[key]).toBe(
+          key === "GH_TOKEN" ? "caller-token" : `ambient-${key}`,
+        );
+      }
+    }
   });
 });
 
@@ -133,6 +223,84 @@ describe("execute", () => {
     );
     expect(result.artifact.command).toEqual(["test", "-f", REAPER_SCRIPT]);
     expect(result.artifact.command.join(" ")).not.toContain("/tmp/pwn");
+  });
+
+  test("does not leak worker or caller secrets to an unsandboxed child", async () => {
+    const workspaceDir = ws();
+    process.env.COMMAND_ADAPTER_AMBIENT_SECRET = "ambient-secret";
+    process.env.OPENAI_API_KEY = "ambient-provider-secret";
+    process.env.GH_TOKEN = "ambient-push-secret";
+    const inspectedKeys = [
+      "COMMAND_ADAPTER_AMBIENT_SECRET",
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GH_TOKEN",
+      "CUSTOM_COMMAND_SETTING",
+      "FACTORY_ROOT",
+    ];
+    const script = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(inspectedKeys)}.map((key) => [key, process.env[key] ?? null]))))`;
+
+    const outcome = await execute({
+      spec: spec({}),
+      def: { ...def(["bun", "-e", script]), mutating: false },
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        ANTHROPIC_API_KEY: "caller-provider-secret",
+        GH_TOKEN: "caller-push-secret",
+        CUSTOM_COMMAND_SETTING: "visible-setting",
+        FACTORY_ROOT: "/tmp/untrusted-root",
+      },
+    });
+
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    const result = JSON.parse(
+      readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+    );
+    const childEnv = JSON.parse(result.artifact.outputTail.trim());
+    expect(childEnv).toEqual({
+      COMMAND_ADAPTER_AMBIENT_SECRET: null,
+      OPENAI_API_KEY: null,
+      ANTHROPIC_API_KEY: null,
+      GH_TOKEN: null,
+      CUSTOM_COMMAND_SETTING: "visible-setting",
+      FACTORY_ROOT,
+    });
+  });
+
+  test("an unsandboxed child inherits the worker's runtime identity (#825)", async () => {
+    const workspaceDir = ws();
+    const identity = {
+      FACTORY_EVENT_HOME: "/tmp/command-adapter-runtime-home",
+      FACTORY_EVENT_SECRET: "worker-runtime-secret",
+      FACTORY_EVENT_PORT: "17381",
+      FACTORY_EVENT_ENV: "worktree-test",
+    };
+    const saved = Object.fromEntries(
+      Object.keys(identity).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, identity);
+    const script = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(identity))}.map((key) => [key, process.env[key] ?? null]))))`;
+
+    try {
+      const outcome = await execute({
+        spec: spec({}),
+        def: { ...def(["bun", "-e", script]), mutating: false },
+        workspaceDir,
+        timeoutMs: 5000,
+      });
+
+      expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+      const result = JSON.parse(
+        readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+      );
+      expect(JSON.parse(result.artifact.outputTail.trim())).toEqual(identity);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("writesResult leaves a command-authored result.json in place (WM-907)", async () => {
