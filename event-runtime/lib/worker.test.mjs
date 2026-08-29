@@ -2186,13 +2186,17 @@ describe("worker", () => {
     const light = makeSpec({
       agent: "dispatch@1",
       input: { repo: "factory", ticket: "WM-845" },
-      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      workspace: {
+        type: "worktree",
+        checkoutDir: "repo",
+        retainOnFailure: true,
+      },
       modelTier: "light",
       maxAttempts: 1,
     });
     for (const reasonCode of [
-      "verification_failed",
       "handoff_verification_failed",
+      "handoff_owned_paths_violation",
       "contract_violation",
       "agent_exit_1",
     ]) {
@@ -2208,12 +2212,18 @@ describe("worker", () => {
       "needs_human",
       "policy_denied:Bash",
       "cancelled",
+      // The acceptance criteria name `verification_failed`; nothing emits it.
+      // The real code is `handoff_verification_failed` (verify.mjs), so the
+      // invented spelling must not silently widen the predicate.
+      "verification_failed",
     ]) {
       expect(tierEscalationEligibility(light, reasonCode).eligible).toBe(false);
     }
     expect(
-      tierEscalationEligibility({ ...light, modelTier: "strong" }, "agent_exit_1")
-        .eligible,
+      tierEscalationEligibility(
+        { ...light, modelTier: "strong" },
+        "agent_exit_1",
+      ).eligible,
     ).toBe(false);
     expect(
       tierEscalationEligibility(
@@ -2269,12 +2279,17 @@ describe("worker", () => {
     });
     expect(first.continuation_run_id).toBe("run_tier_strong");
     expect(again.continuation_run_id).toBe("run_tier_strong");
-    expect(db.query(`SELECT COUNT(*) AS n FROM tier_escalations`).get().n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM tier_escalations`).get().n).toBe(
+      1,
+    );
     expect(runState(db, "run_tier_strong")).toBe("APPROVED");
-    expect(db.query(`SELECT * FROM runs WHERE run_id = 'run_tier_duplicate'`).get()).toBeNull();
+    expect(
+      db.query(`SELECT * FROM runs WHERE run_id = 'run_tier_duplicate'`).get(),
+    ).toBeNull();
     const continuation = JSON.parse(
-      db.query(`SELECT spec_json FROM runs WHERE run_id = 'run_tier_strong'`).get()
-        .spec_json,
+      db
+        .query(`SELECT spec_json FROM runs WHERE run_id = 'run_tier_strong'`)
+        .get().spec_json,
     );
     expect(continuation).toMatchObject({
       rootRunId: spec.runId,
@@ -3646,10 +3661,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
           fetchTicket: () =>
             readyDispatchTicket("WM-845", {
               labels: {
-                nodes: [
-                  { name: "ai:agent-ready" },
-                  { name: "tier:light" },
-                ],
+                nodes: [{ name: "ai:agent-ready" }, { name: "tier:light" }],
               },
             }),
           fetchViewer: () => ({ id: "factory" }),
@@ -3695,6 +3707,135 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         .split("\n")
         .filter((call) => call === "up WM-845"),
     ).toHaveLength(1);
+  });
+
+  test("only a durable escalation handoff authorises the operator bypass at execute time (GH-845)", async () => {
+    // Regression: an inherited spec field must never be an authorisation.
+    // approvalPolicy — dispatchEvidence included — is copied onto chain runs
+    // by stableChainApprovalPolicyForHash, so a chain descended from one
+    // operator dispatch would otherwise carry a permanent security bypass.
+    const laundered = openDb(":memory:");
+    const chainSpec = queueRun(
+      laundered,
+      makeDispatchSpec({
+        runId: "run_chain_launders_operator",
+        input: { repo: "wt-worker", ticket: "WM-847" },
+        approvalPolicy: {
+          source: "chain",
+          mode: "auto",
+          eventType: "factory.dispatch.requested",
+          escalation: {
+            rootRunId: "run_some_other_root",
+            failedRunId: "run_some_other_root",
+            operatorAuthorized: true,
+          },
+          dispatchEvidence: { checks: { operator_authorized: true } },
+        },
+      }),
+    );
+    linkEvent(laundered, chainSpec.runId, {
+      type: "factory.dispatch.requested",
+      source: "chain",
+    });
+    const launderedSummary = await runOnce(
+      laundered,
+      registry,
+      { fake: dispatchFakeAdapter },
+      opts({
+        dispatch: {
+          locksDir: tmpDir("evrt-gh845-chain-locks-"),
+          leasesDir: tmpDir("evrt-gh845-chain-leases-"),
+          fetchTicket: () =>
+            readyDispatchTicket("WM-847", {
+              labels: {
+                nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
+              },
+            }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          claimTicket: () => ({ ok: true }),
+        },
+      }),
+    );
+    expect(launderedSummary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "ticket_security",
+    });
+    laundered.close();
+
+    // The same bypass IS granted to a continuation the durable
+    // tier_escalations row authenticates, when the failed run it continues
+    // was operator-sourced.
+    const db = openDb(":memory:");
+    const failed = queueRun(
+      db,
+      makeDispatchSpec({
+        runId: "run_operator_security_light",
+        input: { repo: "wt-worker", ticket: "WM-848", modelTier: "light" },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, failed.runId, {
+      type: "factory.dispatch.requested",
+      source: "operator",
+    });
+    let ticket = readyDispatchTicket("WM-848", {
+      labels: {
+        nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
+      },
+    });
+    const dispatchOpts = {
+      locksDir: tmpDir("evrt-gh845-escalation-locks-"),
+      leasesDir: tmpDir("evrt-gh845-escalation-leases-"),
+      fetchTicket: () => ticket,
+      fetchViewer: () => ({ id: "factory" }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+      projectTierEscalation: () => true,
+    };
+    const failure = await runOnce(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      opts({ dispatch: dispatchOpts }),
+    );
+    expect(failure).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+    });
+    expect(runState(db, failure.escalatedRunId)).toBe("QUEUED");
+
+    // The continuation resumes the factory's own claim: assigned, In
+    // Progress, and still carrying the security label that only an operator
+    // dispatch may pass.
+    ticket = readyDispatchTicket("WM-848", {
+      state: { name: "In Progress" },
+      assignee: { id: "factory" },
+      labels: {
+        nodes: [{ name: "ai:in-progress" }, { name: "type:security" }],
+      },
+    });
+    const continued = await runOnce(
+      db,
+      registry,
+      { fake: dispatchFakeAdapter },
+      opts({ dispatch: dispatchOpts }),
+    );
+    expect(continued.runId).toBe(failure.escalatedRunId);
+    expect(continued.reasonCode).not.toBe("ticket_security");
+    expect(continued.terminalState).toBe("COMPLETED");
+    db.close();
   });
 
   test("resolves Linear credentials from env first, then the shared env file", () => {

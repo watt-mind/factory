@@ -565,11 +565,21 @@ function materializeWorktree({
     symlinkSync(worktreePath, path.join(workspaceDir, checkoutDir));
     // The marker is the filesystem ownership token. Move it only after the
     // continuation wrapper is complete, so a crash always leaves one owner
-    // able to delegate teardown to the repo script.
-    if (handoff.sourceWorkspacePath) {
-      rmSync(path.join(handoff.sourceWorkspacePath, WORKTREE_MARKER), {
-        force: true,
-      });
+    // able to delegate teardown to the repo script. Once ownership has moved,
+    // the failed run's wrapper is dead weight — dropping only its marker would
+    // leak one scratch directory per escalation. rmSync unlinks the wrapper's
+    // `checkout` symlink rather than following it, so the transferred worktree
+    // itself is untouched; guard the paths anyway.
+    const source = handoff.sourceWorkspacePath
+      ? path.resolve(handoff.sourceWorkspacePath)
+      : null;
+    if (
+      source &&
+      source !== path.resolve(workspaceDir) &&
+      source !== path.resolve(worktreePath)
+    ) {
+      rmSync(path.join(source, WORKTREE_MARKER), { force: true });
+      rmSync(source, { recursive: true, force: true });
     }
     return record;
   }

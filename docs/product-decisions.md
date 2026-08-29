@@ -187,6 +187,14 @@ attributable comment naming both run IDs. Projection failures are retained and
 retried. Existing trust, budget, capacity, Owned Paths, security, and sensitive
 path gates still run at continuation claim time.
 
+Escalation never widens authority. The `ai:escalated`/`type:security` operator
+bypass carries into a continuation only when the failed run's own originating
+event was operator-sourced AND the durable escalation record authenticates this
+run as that failed run's continuation. It is never read out of an inherited
+spec field: `approvalPolicy.dispatchEvidence` is copied onto chain runs, so
+trusting it would give every descendant of one operator dispatch a permanent
+bypass.
+
 ## Extension pack pin repair metadata boundary (gh-857)
 
 Decided 2026-08-25. `update-pins --pack <name>` may discover packs contributed

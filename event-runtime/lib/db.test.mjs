@@ -133,6 +133,32 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
   });
 
+  test("tier escalation handoffs reach schema 15 from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(15);
+    const fresh = openDb(freshFile());
+    expect(getSchemaVersion(fresh)).toBe(15);
+    fresh.close();
+
+    // #1230 (#1197) owns migration 14 and lands first; a database already at
+    // 14 must pick up 15 alone, and the guarded DDL must survive re-running.
+    const file = freshFile();
+    const at14 = new Database(file);
+    migrateDb(at14, { targetVersion: 13 });
+    at14.exec("PRAGMA user_version = 14;");
+    migrateDb(at14);
+    expect(getSchemaVersion(at14)).toBe(15);
+    migrateDb(at14);
+    expect(getSchemaVersion(at14)).toBe(15);
+    expect(
+      at14
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tier_escalations'`,
+        )
+        .get()?.name,
+    ).toBe("tier_escalations");
+    at14.close();
+  });
+
   test("tier escalation handoffs migrate with unique root and continuation ownership", () => {
     const db = openDb(freshFile());
     const columns = db

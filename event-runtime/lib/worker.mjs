@@ -44,11 +44,7 @@ import {
   MODEL_BACKED_ADAPTERS,
 } from "./adapters/sandboxed.mjs";
 import { isSandboxGuarded } from "./adapters/index.mjs";
-import {
-  createRun,
-  IllegalTransition,
-  transition,
-} from "./lifecycle.mjs";
+import { createRun, IllegalTransition, transition } from "./lifecycle.mjs";
 import {
   buildEscalatedContinuationSpec,
   HARNESS_KINDS,
@@ -761,11 +757,7 @@ const ENVIRONMENT_FAILURES = new Set([
 // The handoff gate (WM-718) catching the agent's own red is an agent error:
 // bounded by maxAttempts like any contract violation, never an environment
 // retry and never fatal — the ticket is already back in Todo + agent-ready.
-const AGENT_FAILURES = new Set([
-  "contract_violation",
-  "verification_failed",
-  ...HANDOFF_REASON_CODES,
-]);
+const AGENT_FAILURES = new Set(["contract_violation", ...HANDOFF_REASON_CODES]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
   "filesystem_confinement_unavailable",
@@ -798,17 +790,20 @@ export function classifyFailureCause(reasonCode) {
 /** Closed eligibility predicate; a continuation can never escalate again. */
 export function tierEscalationEligibility(spec, reasonCode) {
   const rootRunId = spec?.rootRunId ?? spec?.runId ?? null;
+  // The ticket's acceptance criteria name `verification_failed`; the code the
+  // runtime actually emits for that condition is `handoff_verification_failed`
+  // (verify.mjs HANDOFF_REASON_CODES). Match the emitted codes only — a
+  // reason code no producer writes is dead weight that reads as coverage.
   const eligibleReason =
-    reasonCode === "verification_failed" ||
-    reasonCode === "handoff_verification_failed" ||
+    HANDOFF_REASON_CODES.has(reasonCode) ||
     reasonCode === "contract_violation" ||
     String(reasonCode).startsWith("agent_exit_");
   const eligible = Boolean(
     spec?.agent === "dispatch@1" &&
-      spec?.workspace?.type === "worktree" &&
-      ["light", "standard"].includes(spec?.modelTier) &&
-      !spec?.escalatedFromRunId &&
-      eligibleReason,
+    spec?.workspace?.type === "worktree" &&
+    ["light", "standard"].includes(spec?.modelTier) &&
+    !spec?.escalatedFromRunId &&
+    eligibleReason,
   );
   return { eligible, rootRunId };
 }
@@ -1249,7 +1244,8 @@ export function reconcileTierEscalations(
       continuationRunId: row.continuation_run_id,
       fetchTicket,
     });
-    if (projected === false) throw new Error("tracker projection returned false");
+    if (projected === false)
+      throw new Error("tracker projection returned false");
   } catch (err) {
     db.query(
       `UPDATE tier_escalations
@@ -1330,8 +1326,7 @@ export function claimNext(
     now,
     policyVersion,
   });
-  if (!pendingEscalation.ok)
-    onTierEscalationProjectionError(pendingEscalation);
+  if (!pendingEscalation.ok) onTierEscalationProjectionError(pendingEscalation);
   // BEGIN IMMEDIATE, not the default deferred transaction: two workers must
   // not both read the same QUEUED row before either writes (OPS-233).
   return txImmediate(db, () => {
@@ -2869,11 +2864,24 @@ export async function executeClaimed(
             // Match the planner's operator-only bypass from the immutable
             // proposal that admitted this run. Never trust caller options here:
             // chain and schedule runs must keep the security/escalation gate.
+            //
+            // A spec field alone can never carry this authorisation: chain and
+            // schedule runs inherit approvalPolicy (dispatchEvidence included,
+            // via stableChainApprovalPolicyForHash) from the dispatch they
+            // descend from, so trusting `dispatchEvidence.checks
+            // .operator_authorized` would hand every descendant of one operator
+            // dispatch a permanent ai:escalated/security bypass. The escalation
+            // claim is only believed when the durable tier_escalations row read
+            // for THIS run authenticates it as the continuation of the exact
+            // failed run the spec names.
             operatorAuthorized:
               originatingEvent(db, runId)?.source === "operator" ||
-              spec.approvalPolicy?.escalation?.operatorAuthorized === true ||
-              spec.approvalPolicy?.dispatchEvidence?.checks
-                ?.operator_authorized === true,
+              (worktreeHandoff !== null &&
+                spec.approvalPolicy?.escalation?.operatorAuthorized === true &&
+                spec.approvalPolicy.escalation.failedRunId ===
+                  worktreeHandoff.failedRunId &&
+                spec.approvalPolicy.escalation.rootRunId ===
+                  worktreeHandoff.rootRunId),
           });
         }
       } catch (err) {
@@ -4123,15 +4131,18 @@ export function reapExpiredLeases(
 
 /** Claim and execute one run, or return a typed refusal/null without execution. */
 export async function runOnce(db, registry, adapters, opts = {}) {
-  const pending = reconcileTierEscalations(db, {
+  // claimNext already reconciles pending escalation projections and logs a
+  // failed one without abandoning the claim: a tracker outage on one
+  // escalation must never stall claiming of every other queued run. Forward
+  // the dispatch-scoped tracker hooks so it uses the same ones this call does.
+  const claim = claimNext(db, {
+    ...opts,
     projectTierEscalation:
-      opts.dispatch?.projectTierEscalation ?? defaultProjectTierEscalation,
-    fetchTicket: opts.dispatch?.fetchTicket,
-    now: opts.now ?? Date.now(),
-    policyVersion: opts.policyVersion,
+      opts.projectTierEscalation ??
+      opts.dispatch?.projectTierEscalation ??
+      defaultProjectTierEscalation,
+    fetchTicket: opts.fetchTicket ?? opts.dispatch?.fetchTicket,
   });
-  if (!pending.ok) return pending;
-  const claim = claimNext(db, opts);
   if (!claim || claim.refused) return claim;
   return executeClaimed(db, registry, adapters, claim, opts);
 }

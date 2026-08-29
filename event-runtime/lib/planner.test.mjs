@@ -1068,8 +1068,16 @@ describe("planEvent worktree gate (WM-108)", () => {
       runId: "run_light_failed",
       agent: "dispatch@1",
       input: { repo: "tiered", ticket: "WM-694", modelTier: "light" },
-      inputHash: hashJson({ repo: "tiered", ticket: "WM-694", modelTier: "light" }),
-      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      inputHash: hashJson({
+        repo: "tiered",
+        ticket: "WM-694",
+        modelTier: "light",
+      }),
+      workspace: {
+        type: "worktree",
+        checkoutDir: "repo",
+        retainOnFailure: true,
+      },
       adapter: "cursor",
       promptVersion: "git:test",
       policyVersion: "git:test",

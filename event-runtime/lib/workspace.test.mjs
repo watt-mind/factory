@@ -449,10 +449,14 @@ describe("worktree workspaces (WM-108)", () => {
     expect(calls().filter((call) => call.startsWith("up WM-845"))).toEqual(
       upCalls,
     );
-    expect(readFileSync(path.join(strong.dir, "repo", "useful-change"), "utf8")).toBe(
-      "retain me\n",
-    );
-    expect(existsSync(path.join(first.dir, ".worktree.json"))).toBe(false);
+    expect(
+      readFileSync(path.join(strong.dir, "repo", "useful-change"), "utf8"),
+    ).toBe("retain me\n");
+    // The failed run's wrapper is destroyed once ownership has moved, so an
+    // escalation does not leak one scratch directory per handoff. The
+    // transferred worktree itself survives.
+    expect(existsSync(first.dir)).toBe(false);
+    expect(existsSync(path.join(tree, "useful-change"))).toBe(true);
     expect(strong.worktree.transferred).toBe(true);
     expect(destroyWorkspace(strong.dir)).toBe(true);
   });

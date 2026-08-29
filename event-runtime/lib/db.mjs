@@ -426,7 +426,11 @@ export const MIGRATIONS = [
     },
   },
   {
-    version: 14,
+    // 15, not 14: #1230 (#1197) also introduces a migration 14 and lands
+    // first. Guarded/idempotent like the rest, and the runner applies any
+    // migration above the database's user_version, so a v13 or v14 database
+    // and a fresh one all converge on 15.
+    version: 15,
     name: "tier_escalations",
     up(db) {
       db.exec(`

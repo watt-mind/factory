@@ -450,13 +450,15 @@ export function buildEscalatedContinuationSpec(
       source: "handoff",
       mode: "auto",
       eventType: "factory.dispatch.requested",
+      // `operatorAuthorized` is decided by the caller from the ORIGINATING
+      // event source of the failed run. It is never read back out of the
+      // failed spec's own approvalPolicy: dispatchEvidence is inherited by
+      // chain runs, so sourcing it there would launder an operator bypass
+      // through any descendant of one operator dispatch.
       escalation: {
         rootRunId,
         failedRunId: failedSpec.runId,
-        operatorAuthorized:
-          operatorAuthorized === true ||
-          failedSpec.approvalPolicy?.dispatchEvidence?.checks
-            ?.operator_authorized === true,
+        operatorAuthorized: operatorAuthorized === true,
       },
       ...(failedSpec.approvalPolicy?.dispatchEvidence
         ? {
@@ -1154,12 +1156,12 @@ export function worktreeDispatchAutoEligibility(
 
   const canResumeEscalation = Boolean(
     escalatedContinuation?.failedRunId &&
-      escalatedContinuation?.continuationRunId &&
-      escalatedContinuation?.rootRunId &&
-      escalatedContinuation?.projectionState === "applied" &&
-      escalatedContinuation?.repo === payload?.repo &&
-      String(escalatedContinuation?.ticket) === String(payload?.ticket) &&
-      payload?.modelTier === "strong",
+    escalatedContinuation?.continuationRunId &&
+    escalatedContinuation?.rootRunId &&
+    escalatedContinuation?.projectionState === "applied" &&
+    escalatedContinuation?.repo === payload?.repo &&
+    String(escalatedContinuation?.ticket) === String(payload?.ticket) &&
+    payload?.modelTier === "strong",
   );
 
   let budgetReason;
@@ -1246,8 +1248,7 @@ export function worktreeDispatchAutoEligibility(
     resumingOwnClaim = true;
     if (canResumeEscalation) {
       evidence.checks.ticket_claim_escalation = true;
-      evidence.ticket.escalatedFromRunId =
-        escalatedContinuation.failedRunId;
+      evidence.ticket.escalatedFromRunId = escalatedContinuation.failedRunId;
       evidence.ticket.escalatedContinuationRunId =
         escalatedContinuation.continuationRunId;
     } else {
