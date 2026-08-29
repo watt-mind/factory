@@ -1,0 +1,393 @@
+{
+  "$comment": "Shared drift guard (#823) for event-runtime/lib/schema.mjs and its browser port event-runtime/web/src/lib/schema.ts. Both suites consume this matrix and must agree on `valid` for every case. `errorContains` holds substrings that BOTH validators must emit, so it must never include a message fragment that only one side produces (the backend appends the raw pattern to a pattern-mismatch message; the web port deliberately does not).",
+  "cases": [
+    {
+      "name": "conforming nested object",
+      "schema": {
+        "type": "object",
+        "required": ["name", "count"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "count": { "type": "integer", "minimum": 0 },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "value": { "name": "bj29", "count": 2, "tags": ["a"] },
+      "valid": true
+    },
+    {
+      "name": "deeply nested array of objects reports the failing path",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id"],
+              "properties": {
+                "id": { "type": "string" },
+                "attempts": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        }
+      },
+      "value": { "runs": [{ "id": "a", "attempts": 1 }, { "attempts": 0 }] },
+      "valid": false,
+      "errorContains": [
+        "$.runs[1]: missing required property \"id\"",
+        "$.runs[1].attempts: below minimum 1"
+      ]
+    },
+    {
+      "name": "missing required property",
+      "schema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      },
+      "value": {},
+      "valid": false,
+      "errorContains": ["$: missing required property \"name\""]
+    },
+    {
+      "name": "unknown object property",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string" } }
+      },
+      "value": { "name": "bj29", "extra": true },
+      "valid": false,
+      "errorContains": ["$: unknown property \"extra\""]
+    },
+    {
+      "name": "additionalProperties schema validates the extras",
+      "schema": {
+        "type": "object",
+        "additionalProperties": { "type": "integer" },
+        "properties": { "name": { "type": "string" } }
+      },
+      "value": { "name": "safe", "retries": "three" },
+      "valid": false,
+      "errorContains": ["$.retries: expected type integer, got string"]
+    },
+    {
+      "name": "empty schema accepts anything",
+      "schema": {},
+      "value": { "any": ["thing", 1, null] },
+      "valid": true
+    },
+    {
+      "name": "integer satisfies number",
+      "schema": { "type": "number" },
+      "value": 1,
+      "valid": true
+    },
+    {
+      "name": "fraction does not satisfy integer",
+      "schema": { "type": "integer" },
+      "value": 1.5,
+      "valid": false,
+      "errorContains": ["$: expected type integer, got number"]
+    },
+    {
+      "name": "nullable type array accepts null",
+      "schema": { "type": ["string", "null"] },
+      "value": null,
+      "valid": true
+    },
+    {
+      "name": "nullable type array accepts the non-null member",
+      "schema": { "type": ["string", "null"] },
+      "value": "ok",
+      "valid": true
+    },
+    {
+      "name": "nullable type array rejects an unlisted type",
+      "schema": { "type": ["string", "null"] },
+      "value": 7,
+      "valid": false,
+      "errorContains": ["$: expected type string|null, got integer"]
+    },
+    {
+      "name": "nullable string skips string keyword checks for null",
+      "schema": { "type": ["string", "null"], "minLength": 4 },
+      "value": null,
+      "valid": true
+    },
+    {
+      "name": "const match",
+      "schema": { "const": "factory.event/v1" },
+      "value": "factory.event/v1",
+      "valid": true
+    },
+    {
+      "name": "const mismatch",
+      "schema": { "const": "factory.event/v1" },
+      "value": "factory.event/v2",
+      "valid": false,
+      "errorContains": ["$: expected const \"factory.event/v1\""]
+    },
+    {
+      "name": "enum match",
+      "schema": { "enum": ["a", "b"] },
+      "value": "b",
+      "valid": true
+    },
+    {
+      "name": "enum mismatch",
+      "schema": { "enum": ["a", "b"] },
+      "value": "c",
+      "valid": false,
+      "errorContains": ["$: value not in enum [\"a\",\"b\"]"]
+    },
+    {
+      "name": "string length bounds satisfied",
+      "schema": { "type": "string", "minLength": 1, "maxLength": 3 },
+      "value": "ab",
+      "valid": true
+    },
+    {
+      "name": "shorter than minLength",
+      "schema": { "type": "string", "minLength": 2 },
+      "value": "a",
+      "valid": false,
+      "errorContains": ["$: shorter than minLength 2"]
+    },
+    {
+      "name": "longer than maxLength",
+      "schema": { "type": "string", "maxLength": 2 },
+      "value": "abc",
+      "valid": false,
+      "errorContains": ["$: longer than maxLength 2"]
+    },
+    {
+      "name": "pattern match",
+      "schema": { "type": "string", "pattern": "^run_" },
+      "value": "run_1",
+      "valid": true
+    },
+    {
+      "name": "pattern mismatch",
+      "schema": { "type": "string", "pattern": "^run_" },
+      "value": "prop_1",
+      "valid": false,
+      "errorContains": ["does not match pattern"]
+    },
+    {
+      "name": "unanchored pattern matches a substring",
+      "schema": { "type": "string", "pattern": "run" },
+      "value": "prefix-run-suffix",
+      "valid": true
+    },
+    {
+      "name": "malformed pattern fails closed instead of throwing",
+      "schema": { "type": "string", "pattern": "[" },
+      "value": "anything",
+      "valid": false,
+      "errorContains": ["$: invalid pattern"]
+    },
+    {
+      "name": "malformed pattern with an unterminated group fails closed",
+      "schema": { "type": "string", "pattern": "^(unclosed" },
+      "value": "unclosed",
+      "valid": false,
+      "errorContains": ["$: invalid pattern"]
+    },
+    {
+      "name": "malformed pattern nested under a property fails closed",
+      "schema": {
+        "type": "object",
+        "properties": { "sha": { "type": "string", "pattern": "(?<=" } }
+      },
+      "value": { "sha": "deadbeef" },
+      "valid": false,
+      "errorContains": ["$.sha: invalid pattern"]
+    },
+    {
+      "name": "malformed pattern is not reported for a non-string value",
+      "schema": { "pattern": "[" },
+      "value": 12,
+      "valid": true
+    },
+    {
+      "name": "array minItems",
+      "schema": { "type": "array", "minItems": 1 },
+      "value": [],
+      "valid": false,
+      "errorContains": ["$: fewer than minItems 1"]
+    },
+    {
+      "name": "array maxItems",
+      "schema": { "type": "array", "maxItems": 1 },
+      "value": ["a", "b"],
+      "valid": false,
+      "errorContains": ["$: more than maxItems 1"]
+    },
+    {
+      "name": "array item type mismatch reports the index",
+      "schema": { "type": "array", "items": { "type": "string" } },
+      "value": ["a", 2],
+      "valid": false,
+      "errorContains": ["$[1]: expected type string, got integer"]
+    },
+    {
+      "name": "numeric bounds satisfied",
+      "schema": { "type": "number", "minimum": 0, "maximum": 100 },
+      "value": 42,
+      "valid": true
+    },
+    {
+      "name": "above maximum",
+      "schema": { "type": "number", "minimum": 0, "maximum": 100 },
+      "value": 150,
+      "valid": false,
+      "errorContains": ["$: above maximum 100"]
+    },
+    {
+      "name": "below minimum",
+      "schema": { "type": "number", "minimum": 0 },
+      "value": -1,
+      "valid": false,
+      "errorContains": ["$: below minimum 0"]
+    },
+    {
+      "name": "valid uri format",
+      "schema": { "type": "string", "format": "uri" },
+      "value": "https://example.test/path",
+      "valid": true
+    },
+    {
+      "name": "invalid uri format",
+      "schema": { "type": "string", "format": "uri" },
+      "value": "not a url",
+      "valid": false,
+      "errorContains": ["$: format \"uri\" value is not a valid URI"]
+    },
+    {
+      "name": "valid duration format",
+      "schema": { "type": "string", "format": "duration" },
+      "value": "15ms",
+      "valid": true
+    },
+    {
+      "name": "invalid duration format",
+      "schema": { "type": "string", "format": "duration" },
+      "value": "quarter past",
+      "valid": false,
+      "errorContains": ["$: format \"duration\" must match"]
+    },
+    {
+      "name": "secret format carries no value constraint",
+      "schema": { "type": "string", "format": "secret" },
+      "value": "hunter2",
+      "valid": true
+    },
+    {
+      "name": "unknown format fails closed",
+      "schema": { "type": "string", "format": "uuid" },
+      "value": "123",
+      "valid": false,
+      "errorContains": [
+        "$: unsupported format \"uuid\" — contracts fail closed"
+      ]
+    },
+    {
+      "name": "non-string format fails closed",
+      "schema": { "type": "string", "format": 7 },
+      "value": "x",
+      "valid": false,
+      "errorContains": ["$: unsupported format 7 — contracts fail closed"]
+    },
+    {
+      "name": "unsupported keyword fails closed",
+      "schema": { "anyOf": [{ "type": "string" }] },
+      "value": "x",
+      "valid": false,
+      "errorContains": [
+        "$: unsupported schema keyword \"anyOf\" — contracts fail closed"
+      ]
+    },
+    {
+      "name": "unsupported keyword nested under a property fails closed",
+      "schema": {
+        "type": "object",
+        "properties": { "n": { "type": "integer", "multipleOf": 2 } }
+      },
+      "value": { "n": 3 },
+      "valid": false,
+      "errorContains": [
+        "$.n: unsupported schema keyword \"multipleOf\" — contracts fail closed"
+      ]
+    },
+    {
+      "name": "missing sub-schema is an error, not a pass",
+      "schema": { "type": "array", "items": null },
+      "value": ["a"],
+      "valid": false,
+      "errorContains": ["$[0]: schema is missing"]
+    },
+    {
+      "name": "array-valued schema is rejected",
+      "schema": { "type": "object", "properties": { "a": [] } },
+      "value": { "a": 1 },
+      "valid": false,
+      "errorContains": ["$.a: schema must be an object"]
+    },
+    {
+      "name": "prototype-named schema keyword fails closed",
+      "schema": { "__proto__": { "type": "string" } },
+      "value": "x",
+      "valid": false,
+      "errorContains": [
+        "$: unsupported schema keyword \"__proto__\" — contracts fail closed"
+      ]
+    },
+    {
+      "name": "prototype-named property is validated like any other",
+      "schema": {
+        "type": "object",
+        "properties": { "__proto__": { "type": "string" } }
+      },
+      "value": { "__proto__": 1 },
+      "valid": false,
+      "errorContains": ["$.__proto__: expected type string, got integer"]
+    },
+    {
+      "name": "inherited constructor key is not a declared property",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string" } }
+      },
+      "value": { "name": "a", "constructor": 1 },
+      "valid": false,
+      "errorContains": ["$: unknown property \"constructor\""]
+    },
+    {
+      "name": "inherited toString key is not a declared property",
+      "schema": {
+        "type": "object",
+        "additionalProperties": { "type": "integer" },
+        "properties": { "name": { "type": "string" } }
+      },
+      "value": { "name": "a", "toString": "nope" },
+      "valid": false,
+      "errorContains": ["$.toString: expected type integer, got string"]
+    },
+    {
+      "name": "inherited hasOwnProperty key does not satisfy required",
+      "schema": {
+        "type": "object",
+        "required": ["hasOwnProperty"],
+        "properties": { "hasOwnProperty": { "type": "string" } }
+      },
+      "value": {},
+      "valid": false,
+      "errorContains": ["$: missing required property \"hasOwnProperty\""]
+    }
+  ]
+}

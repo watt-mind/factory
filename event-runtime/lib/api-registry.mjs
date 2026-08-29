@@ -4,6 +4,7 @@ import { RepoError, resolvePromotionTarget, reposView } from "./repos.mjs";
 import {
   KIND_AGENT,
   KIND_EVENT_TYPE,
+  KIND_MODEL_TIER_CELL,
   OverlayError,
   applyPromotion,
   buildPromotionPreview,
@@ -13,12 +14,16 @@ import {
   listOverrideJournal,
   listOverrides,
   mergeAgentPatch,
+  modelTierCellKey,
+  modelTierCellResult,
+  modelTierConfigView,
   overlayForAgent,
   overlayForEventType,
   plannedDef,
   putOverride,
   validateAgentPatch,
   validateEventTypePatch,
+  validateModelTierCellPatch,
 } from "./runtime-overrides.mjs";
 
 export function agentsView(registry, { overrides = emptyOverrides() } = {}) {
@@ -129,6 +134,68 @@ export async function handleRegistryApiRoute({
   if (route === "GET /agents") {
     const overrides = db ? listOverrides(db) : emptyOverrides();
     return send(200, agentsView(registry, { overrides }));
+  }
+
+  const trackedModelTiers =
+    registry.trackedModelTiers ?? registry.modelTiers ?? {};
+
+  if (route === "GET /overrides/config") {
+    try {
+      return send(200, modelTierConfigView(db, trackedModelTiers));
+    } catch (err) {
+      return sendOverlayError(send, err);
+    }
+  }
+
+  const modelCellPath = url.pathname.match(
+    /^\/overrides\/config\/models\/([^/]+)\/([^/]+)$/,
+  );
+  if (modelCellPath && (req.method === "PUT" || req.method === "DELETE")) {
+    try {
+      let adapter;
+      let tier;
+      try {
+        adapter = decodeURIComponent(modelCellPath[1]);
+        tier = decodeURIComponent(modelCellPath[2]);
+      } catch {
+        throw new OverlayError(
+          422,
+          "model adapter and tier must use valid URL encoding",
+        );
+      }
+      // Validate URL vocabulary on DELETE too; an unknown cell is not an
+      // idempotent absence because it can never be a valid stored key.
+      validateModelTierCellPatch(adapter, tier, { model: "validation" });
+      const key = modelTierCellKey(adapter, tier);
+      if (req.method === "DELETE") {
+        const result = deleteOverride(db, {
+          kind: KIND_MODEL_TIER_CELL,
+          key,
+          actor,
+          now: nowMs,
+        });
+        return send(
+          200,
+          modelTierCellResult(db, trackedModelTiers, adapter, tier, result),
+        );
+      }
+      const parsed = parseJson(await readBody(req));
+      if (parsed.error) return send(422, { error: parsed.error });
+      const patch = validateModelTierCellPatch(adapter, tier, parsed.value);
+      putOverride(db, {
+        kind: KIND_MODEL_TIER_CELL,
+        key,
+        patch,
+        actor,
+        now: nowMs,
+      });
+      return send(
+        200,
+        modelTierCellResult(db, trackedModelTiers, adapter, tier),
+      );
+    } catch (err) {
+      return sendOverlayError(send, err);
+    }
   }
 
   // Overlay promotion preview (gh-860): read-only snapshot of the promotable

@@ -18,6 +18,8 @@ import type {
   MetricsBreakdownView,
   MetricsView,
   MetricsWindow,
+  ModelTierCellResult,
+  ModelTierConfig,
   OutboxRow,
   JanitorResult,
   Proposal,
@@ -70,6 +72,8 @@ export interface ConfigSection {
   entries: ConfigEntry[];
   /** Only on the `extensions` section. */
   extensions?: ConfigExtension[];
+  /** Only on the focused, editable Policy Models section. */
+  modelTierConfig?: ModelTierConfig;
 }
 export interface ConfigView {
   generatedAt: string;
@@ -281,6 +285,26 @@ async function call<T>(
 /** Every published config source, read-only and allow-listed by the server. */
 export const fetchConfig = () => call<ConfigView>("GET", "/config");
 
+export const fetchModelTierConfig = () =>
+  call<ModelTierConfig>("GET", "/overrides/config");
+
+export const putModelTierCell = (
+  adapter: string,
+  tier: string,
+  model: string,
+) =>
+  call<ModelTierCellResult>(
+    "PUT",
+    `/overrides/config/models/${encodeURIComponent(adapter)}/${encodeURIComponent(tier)}`,
+    { model },
+  );
+
+export const deleteModelTierCell = (adapter: string, tier: string) =>
+  call<ModelTierCellResult>(
+    "DELETE",
+    `/overrides/config/models/${encodeURIComponent(adapter)}/${encodeURIComponent(tier)}`,
+  );
+
 export function fetchArtifacts(filters?: {
   kind?: string;
   orphan?: boolean;
@@ -442,6 +466,9 @@ export const api = {
       "DELETE",
       `/overrides/agents/${encodeURIComponent(ref)}`,
     ),
+  modelTierConfig: fetchModelTierConfig,
+  putModelTierCell,
+  deleteModelTierCell,
   // Overlay promotion (gh-860): a read-only preview of which runtime overrides
   // can become tracked Git defaults, and the digest an apply must echo back.
   promotionPreview: () => call<PromotionPreview>("GET", "/promotion/preview"),
