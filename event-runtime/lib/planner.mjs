@@ -1199,12 +1199,11 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_trusted_author = trustedAuthor;
     if (!trustedAuthor) return refusal("ticket_untrusted_author", evidence);
 
-    // Absent pin (never labeled through a pin-aware path) is not itself a
-    // refusal — only a MISMATCHED pin proves the body changed since it was
-    // marked ready. Refusing on absence would strand every ticket labeled
-    // before this gate shipped.
+    // Verification Command is executable worker input, so an absent pin is
+    // not evidence. Legacy tickets must be re-labelled through the pin-aware
+    // path before dispatch rather than silently retaining a rollout bypass.
     const pinMatches =
-      !evidence.ticket.readyPinHash ||
+      Boolean(evidence.ticket.readyPinHash) &&
       evidence.ticket.readyPinHash === evidence.ticket.descriptionHash;
     evidence.checks.ticket_body_pin_matches = pinMatches;
     if (!pinMatches)

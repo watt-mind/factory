@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -15,12 +16,15 @@ import { getAgent, loadRegistry } from "./registry.mjs";
 import { execFileSync } from "node:child_process";
 import {
   ContractViolation,
+  HANDOFF_HOST_ENV,
+  HANDOFF_SANDBOX_SETUP,
   changedFilesSince,
   composeHandoffVerification,
   normalizeFailureOutput,
   outputTail,
   ownedPathsDeviations,
   policyOwnedPathsConformance,
+  runHandoffCommand,
   verifyResult,
 } from "./verify.mjs";
 
@@ -1313,6 +1317,70 @@ describe("evidence retention (OPS-206)", () => {
 });
 
 describe("handoff verification helpers (WM-718)", () => {
+  test("ticket commands get a credential-free environment and namespace/chroot confinement", () => {
+    const worktree = tmpDir("evrt-handoff-confined-");
+    const logPath = path.join(worktree, "handoff.log");
+    let invocation;
+    const spawn = (file, args, options) => {
+      invocation = { file, args, options };
+      writeSync(options.stdio[1], "confined command ran\n");
+      return { status: 0, error: null };
+    };
+
+    const obs = runHandoffCommand({
+      command: "bun test focused.test.mjs",
+      cwd: worktree,
+      workspaceRoot: worktree,
+      logPath,
+      timeoutMs: 1_000,
+      spawn,
+      runtimeBinaries: [
+        { name: "bun", executable: "/safe/toolchain/bun" },
+      ],
+    });
+
+    expect(obs.passed).toBe(true);
+    expect(obs.confinement).toContain("network namespace");
+    expect(invocation.file).toBe("/usr/bin/timeout");
+    expect(invocation.args).toEqual(
+      expect.arrayContaining([
+        "--signal=TERM",
+        "--kill-after=0.1s",
+        "/usr/bin/unshare",
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--mount",
+        "--pid",
+        "--fork",
+        "--kill-child=KILL",
+        HANDOFF_SANDBOX_SETUP,
+        realpathSync(worktree),
+        "/workspace",
+        "bun",
+        "/safe/toolchain/bun",
+        "bun test focused.test.mjs",
+      ]),
+    );
+    expect(HANDOFF_SANDBOX_SETUP).toContain("/usr/sbin/chroot");
+    expect(HANDOFF_SANDBOX_SETUP).toContain('mount --rbind "$workspace"');
+    expect(HANDOFF_SANDBOX_SETUP).toContain(
+      "mount -t proc proc \"$root/proc\"",
+    );
+    expect(invocation.options.env).toEqual(HANDOFF_HOST_ENV);
+    for (const credential of [
+      "LINEAR_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "SSH_AUTH_SOCK",
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "FACTORY_EXTENSION_SECRET",
+    ]) {
+      expect(invocation.options.env[credential]).toBeUndefined();
+    }
+  });
+
   test("outputTail keeps the last N non-empty lines, ANSI stripped", () => {
     const out = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join(
       "\n\n",

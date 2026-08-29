@@ -1229,17 +1229,21 @@ describe("planEvent worktree gate (WM-108)", () => {
       lastEditorAssociation = "OWNER",
       readyPinHash,
       description = "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
-    } = {}) => ({
-      identifier: "acme/widget#1",
-      state: { name: "Todo" },
-      assignee: null,
-      labels: [{ name: "ai:agent-ready" }],
-      description,
-      controlPlaneKind: "github",
-      authorAssociation,
-      lastEditorAssociation,
-      readyPinHash,
-    });
+    } = {}) => {
+      const ticket = {
+        identifier: "acme/widget#1",
+        state: { name: "Todo" },
+        assignee: null,
+        labels: [{ name: "ai:agent-ready" }],
+        description,
+        controlPlaneKind: "github",
+        authorAssociation,
+        lastEditorAssociation,
+        readyPinHash:
+          readyPinHash === undefined ? hashJson(description) : readyPinHash,
+      };
+      return ticket;
+    };
 
     const githubDispatch = (ticket) => ({
       countLeases: () => 0,
@@ -1334,14 +1338,15 @@ describe("planEvent worktree gate (WM-108)", () => {
       });
     });
 
-    test("no pin ever stamped (pre-rollout ticket) does not refuse — only a mismatch does", () => {
+    test("an absent ready pin fails closed", () => {
       withReposRoot(tierRepo, () => {
         const result = worktreeDispatchAutoEligibility(
           { repo: "tiered", ticket: "acme/widget#1" },
           githubDispatch(githubTicket({ readyPinHash: null })),
         );
-        expect(result.ok).toBe(true);
-        expect(result.evidence.checks.ticket_body_pin_matches).toBe(true);
+        expect(result.ok).toBe(false);
+        expect(result.refusal.reason).toBe("ticket_body_changed_since_ready");
+        expect(result.evidence.checks.ticket_body_pin_matches).toBe(false);
       });
     });
 
@@ -3229,15 +3234,18 @@ describe("GitHub dispatch candidate parsing (GH-974)", () => {
           budgetRefusal: () => null,
           fetchTicket: (ticket) => {
             reads.push(ticket);
+            const description =
+              "## Owned Paths\n- event-runtime/lib/planner.mjs\n";
             return {
               identifier: ticket,
               state: { name: "Todo" },
               assignee: null,
               labels: [{ name: "ai:agent-ready" }],
-              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+              description,
               controlPlaneKind: "github",
               authorAssociation: "MEMBER",
               lastEditorAssociation: "MEMBER",
+              readyPinHash: hashJson(description),
             };
           },
           fetchInFlight: () => [],

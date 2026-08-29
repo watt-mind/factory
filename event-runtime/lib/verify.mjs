@@ -14,10 +14,14 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
+  mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   realpathSync,
+  rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { globToRegExp } from "../../orchestrator/owned-paths.mjs";
@@ -111,6 +115,82 @@ export const DEFAULT_OWNED_PATHS_CONFORMANCE = "advisory";
 export const HANDOFF_COMMENT_HEADING =
   "## Handoff verification (worker-observed)";
 
+// Ticket text is executable at this boundary. Do not inherit the worker's
+// environment: it contains tracker, forge, provider and extension authority
+// that no repository check needs. The outer namespace setup gets an even
+// smaller environment than the command inside the chroot.
+export const HANDOFF_HOST_ENV = Object.freeze({
+  PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+  LANG: "C.UTF-8",
+});
+export const HANDOFF_GUEST_PATH =
+  "/opt/factory-bin:/usr/local/bin:/usr/bin:/bin";
+export const HANDOFF_RUNTIME_COMMANDS = Object.freeze([
+  "bun",
+  "uv",
+  "pnpm",
+]);
+
+/** Non-system package runners mounted as individual, read-only executables. */
+export function handoffRuntimeBinaries(which = (name) => Bun.which(name)) {
+  return HANDOFF_RUNTIME_COMMANDS.flatMap((name) => {
+    const executable = which(name);
+    return executable ? [{ name, executable: realpathSync(executable) }] : [];
+  });
+}
+
+/**
+ * Constant setup program for the handoff shell's Linux isolation boundary.
+ *
+ * - a user namespace grants mount/chroot authority without host root;
+ * - a network namespace starts with loopback down and no host interfaces;
+ * - a private mount namespace exposes only read-only /usr, selected package
+ *   runners, the intended worktree, ephemeral /tmp, proc and basic devices;
+ * - chroot makes host absolute paths and worktree symlink escapes unreachable.
+ */
+export const HANDOFF_SANDBOX_SETUP = String.raw`
+root=$1
+workspace=$2
+guest_cwd=$3
+shift 3
+mount --make-rprivate /
+mount -t tmpfs -o mode=0755,size=64m tmpfs "$root"
+mkdir -p "$root/usr" "$root/workspace" "$root/tmp" "$root/dev" \
+  "$root/proc" "$root/etc" "$root/home" "$root/opt/factory-bin"
+for link in bin lib lib64 sbin; do
+  target=$(readlink "/$link")
+  ln -s "$target" "$root/$link"
+done
+mount --rbind /usr "$root/usr"
+mount --make-rslave "$root/usr"
+mount -o remount,bind,ro "$root/usr"
+mount --rbind "$workspace" "$root/workspace"
+mount --make-rslave "$root/workspace"
+mount -t tmpfs -o mode=1777,size=256m tmpfs "$root/tmp"
+mount -t proc proc "$root/proc"
+for dev in null zero random urandom; do
+  touch "$root/dev/$dev"
+  mount --bind "/dev/$dev" "$root/dev/$dev"
+done
+while [ "$#" -gt 1 ]; do
+  name=$1
+  executable=$2
+  shift 2
+  touch "$root/opt/factory-bin/$name"
+  mount --bind "$executable" "$root/opt/factory-bin/$name"
+  mount -o remount,bind,ro "$root/opt/factory-bin/$name"
+done
+command=$1
+mkdir -p "$root/tmp/home"
+/usr/sbin/chroot "$root" /bin/bash -ceu '
+  cd "$1"
+  shift
+  exec /usr/bin/env -i \
+    HOME=/tmp/home TMPDIR=/tmp PATH=${HANDOFF_GUEST_PATH} LANG=C.UTF-8 \
+    FACTORY_ROOT=/workspace /bin/bash -c "$1"
+' bash "$guest_cwd" "$command"
+`;
+
 /** `dispatch.owned_paths_conformance` in config/policy.yaml: advisory (default) | strict. */
 export function policyOwnedPathsConformance(root = reposRoot()) {
   const file = resolveConfigPath("policy", { root });
@@ -142,24 +222,90 @@ export function outputTail(output, lines = HANDOFF_TAIL_LINES) {
  * Run one handoff command as ordinary code in the worktree, capturing the
  * whole output to `logPath` and returning an observation the worker can quote.
  */
-function runHandoffCommand({ command, cwd, logPath, timeoutMs }) {
+export function runHandoffCommand({
+  command,
+  cwd,
+  workspaceRoot = cwd,
+  logPath,
+  timeoutMs,
+  spawn = spawnSync,
+  runtimeBinaries = handoffRuntimeBinaries(),
+}) {
+  const root = realpathSync(workspaceRoot);
+  const commandCwd = realpathSync(cwd);
+  const relativeCwd = path.relative(root, commandCwd);
+  if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) {
+    throw new PathViolation(root, relativeCwd, "escapes handoff worktree");
+  }
+  const guestCwd = path.posix.join(
+    "/workspace",
+    ...relativeCwd.split(path.sep).filter(Boolean),
+  );
+  const sandboxParent = existsSync(path.dirname(logPath))
+    ? path.dirname(logPath)
+    : tmpdir();
+  const sandboxRoot = mkdtempSync(
+    path.join(sandboxParent, ".handoff-sandbox-"),
+  );
+  mkdirSync(sandboxRoot, { recursive: true });
   const fd = openSync(logPath, "w");
   let res;
+  const startedAt = Date.now();
   try {
-    res = spawnSync("/bin/bash", ["-c", command], {
-      cwd,
-      stdio: ["ignore", fd, fd],
-      timeout: timeoutMs,
-    });
+    const runtimeArgs = runtimeBinaries.flatMap(({ name, executable }) => [
+      name,
+      executable,
+    ]);
+    res = spawn(
+      "/usr/bin/timeout",
+      [
+        "--signal=TERM",
+        "--kill-after=0.1s",
+        `${timeoutMs / 1000}s`,
+        "/usr/bin/unshare",
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--mount",
+        "--pid",
+        "--fork",
+        "--kill-child=KILL",
+        "/bin/bash",
+        "-ceu",
+        HANDOFF_SANDBOX_SETUP,
+        "bash",
+        sandboxRoot,
+        root,
+        guestCwd,
+        ...runtimeArgs,
+        command,
+      ],
+      {
+        cwd: root,
+        env: HANDOFF_HOST_ENV,
+        stdio: ["ignore", fd, fd],
+        // GNU timeout owns the process group and escalates TERM→KILL. This
+        // outer ceiling catches timeout itself wedging during teardown.
+        timeout: timeoutMs + 5_000,
+      },
+    );
   } finally {
     closeSync(fd);
+    rmSync(sandboxRoot, { recursive: true, force: true });
   }
   const output = readFileSync(logPath, "utf8");
-  const timedOut = res.error?.code === "ETIMEDOUT";
+  const elapsedMs = Date.now() - startedAt;
+  const timedOut =
+    elapsedMs >= timeoutMs ||
+    res.error?.code === "ETIMEDOUT" ||
+    res.status === 124 ||
+    res.status === 137;
   const exitCode = timedOut ? null : (res.status ?? (res.error ? 1 : 0));
   return {
     command,
-    cwd,
+    cwd: commandCwd,
+    confinement: "user+mount+pid+network namespace; chroot; minimal env",
+    elapsedMs,
     exitCode,
     timedOut,
     passed: !timedOut && exitCode === 0,
@@ -994,6 +1140,7 @@ function verifyCompleted({
       const obs = runHandoffCommand({
         command: worktreeRecord.verify,
         cwd: worktreePath,
+        workspaceRoot: worktreePath,
         logPath: path.join(workspaceDir, ".verify.log"),
         timeoutMs: verifyTimeoutMs,
       });
@@ -1019,6 +1166,7 @@ function verifyCompleted({
       const obs = runHandoffCommand({
         command: ticketCommand,
         cwd: worktreePath,
+        workspaceRoot: worktreePath,
         logPath: path.join(workspaceDir, ".verify.ticket.log"),
         timeoutMs: verifyTimeoutMs,
       });
@@ -1051,6 +1199,7 @@ function verifyCompleted({
       const obs = runHandoffCommand({
         command: HANDOFF_WEB_BUILD_COMMAND,
         cwd: path.join(worktreePath, HANDOFF_WEB_BUILD_DIR),
+        workspaceRoot: worktreePath,
         logPath: path.join(workspaceDir, ".verify.web.log"),
         timeoutMs: verifyTimeoutMs,
       });

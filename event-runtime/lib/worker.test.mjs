@@ -91,6 +91,7 @@ import {
   retryRun,
   runLinearCli,
   runOnce,
+  ticketHandoffContext,
 } from "./worker.mjs";
 import {
   liveWorkerLeases,
@@ -5572,6 +5573,96 @@ describe("reload watcher (WM-213)", () => {
   });
 });
 
+describe("post-claim ticket command capture (GH-967)", () => {
+  const description =
+    "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n" +
+    "## Verification Command\n\n```bash\nbun test focused.test.mjs\n```\n";
+
+  test("a Linear description hash is pinned from admission through post-claim capture", () => {
+    const captured = ticketHandoffContext(
+      "WM-967",
+      () => ({ description }),
+      "factory",
+      { descriptionHash: hashJson(description) },
+    );
+    expect(captured).toMatchObject({
+      ok: true,
+      handoff: {
+        verificationCommand: "bun test focused.test.mjs",
+        descriptionHash: hashJson(description),
+      },
+    });
+
+    const changed = ticketHandoffContext(
+      "WM-967",
+      () => ({ description: description.replace("focused", "attacker") }),
+      "factory",
+      { descriptionHash: hashJson(description) },
+    );
+    expect(changed.ok).toBe(false);
+    expect(changed.reasonCode).toBe("ticket_body_changed_post_claim");
+    expect(changed.handoff).toBeUndefined();
+  });
+
+  test("GitHub trust and ready pin are revalidated on the same read that captures the command", () => {
+    let reads = 0;
+    const fetchTicket = () => {
+      reads += 1;
+      return {
+        description,
+        controlPlaneKind: "github",
+        authorAssociation: "OWNER",
+        lastEditorAssociation: "MEMBER",
+        readyPinHash: hashJson(description),
+      };
+    };
+    expect(
+      ticketHandoffContext("watt-mind/factory#967", fetchTicket, "factory", {
+        descriptionHash: hashJson(description),
+      }).ok,
+    ).toBe(true);
+    expect(reads).toBe(1);
+
+    for (const override of [
+      { lastEditorAssociation: "NONE" },
+      { readyPinHash: null },
+      { readyPinHash: hashJson("older body") },
+    ]) {
+      const rejected = ticketHandoffContext(
+        "watt-mind/factory#967",
+        () => ({
+          description,
+          controlPlaneKind: "github",
+          authorAssociation: "OWNER",
+          lastEditorAssociation: "MEMBER",
+          readyPinHash: hashJson(description),
+          ...override,
+        }),
+        "factory",
+        { descriptionHash: hashJson(description) },
+      );
+      expect(rejected.ok).toBe(false);
+      expect(rejected.handoff).toBeUndefined();
+    }
+  });
+
+  test("an unavailable post-claim read fails closed without a command", () => {
+    const result = ticketHandoffContext(
+      "WM-967",
+      () => {
+        throw new Error("tracker unavailable");
+      },
+      "factory",
+      { descriptionHash: hashJson(description) },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reasonCode: "ticket_post_claim_read_failed",
+    });
+    expect(result.handoff).toBeUndefined();
+  });
+});
+
 describe("handoff verification gate (WM-718)", () => {
   let factoryRoot;
   let repoDir;
@@ -5600,7 +5691,7 @@ describe("handoff verification gate (WM-718)", () => {
         "git config user.email factory@test && git config user.name factory",
         "mkdir -p src/feature event-runtime/web/src",
         "echo base > src/feature/base.txt",
-        `printf '%s\\n' '{"name":"web","private":true,"scripts":{"build":"echo web_built:$PWD >> ${repoDir}/web-builds.log"}}' > event-runtime/web/package.json`,
+        `printf '%s\\n' '{"name":"web","private":true,"scripts":{"build":"echo web_built:$PWD"}}' > event-runtime/web/package.json`,
         "echo 'export const x = 1;' > event-runtime/web/src/index.ts",
         "git add -A && git commit -qm base",
         "git update-ref refs/remotes/origin/develop HEAD",
@@ -5891,13 +5982,8 @@ describe("handoff verification gate (WM-718)", () => {
       adapter: agent({ files }),
     });
     expect(g.summary.terminalState).toBe("COMPLETED");
-    const builds = () =>
-      existsSync(path.join(repoDir, "web-builds.log"))
-        ? readFileSync(path.join(repoDir, "web-builds.log"), "utf8")
-        : "";
-    expect(builds()).toContain(
-      "web_built:" +
-        path.join(realpathSync(wtRoot), "WM-7184", "event-runtime/web"),
+    expect(g.summary.handoff.webBuild.tail).toContain(
+      "web_built:/workspace/event-runtime/web",
     );
     const result = JSON.parse(
       g.db
@@ -5942,7 +6028,7 @@ describe("handoff verification gate (WM-718)", () => {
       }),
     });
     expect(s.summary.terminalState).toBe("COMPLETED");
-    expect(builds()).not.toContain("WM-7186");
+    expect(s.summary.handoff.webBuild).toBeNull();
     expect(s.calls.comments[0].body).toContain("- Web build: skipped");
   });
 
