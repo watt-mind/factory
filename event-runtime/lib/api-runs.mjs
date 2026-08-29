@@ -281,6 +281,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     .trim()
     .toUpperCase();
   if (!TICKET_ID.test(ticket)) return null;
+  const nowMs = options.nowMs ?? Date.now();
 
   const events = new Set();
   const proposals = new Set();
@@ -299,67 +300,84 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     for (const row of rows) into.set(key(row), row);
   };
   const placeholders = (values) => [...values].map(() => "?").join(", ");
+  // Stay well under SQLite's bind-variable cap (999 on older builds) when a
+  // ticket's component grows large; each chunk is one bounded query.
+  const chunked = (values, size = 400) => {
+    const list = [...values];
+    const chunks = [];
+    for (let i = 0; i < list.length; i += size)
+      chunks.push(list.slice(i, i + size));
+    return chunks;
+  };
 
   const addEvents = (keys) => {
     const pairs = [...keys]
       .filter((key) => !eventRows.has(key))
       .map((key) => key.split("\0"));
-    if (!pairs.length) return;
-    const where = pairs.map(() => "(source = ? AND event_id = ?)").join(" OR ");
-    addRows(
-      db
-        .query(`SELECT *, rowid AS list_rowid FROM events WHERE ${where}`)
-        .all(...pairs.flat()),
-      eventRows,
-      eventKey,
-    );
+    for (const chunk of chunked(pairs)) {
+      const where = chunk
+        .map(() => "(source = ? AND event_id = ?)")
+        .join(" OR ");
+      addRows(
+        db
+          .query(`SELECT *, rowid AS list_rowid FROM events WHERE ${where}`)
+          .all(...chunk.flat()),
+        eventRows,
+        eventKey,
+      );
+    }
   };
   const addRuns = (ids) => {
     const missing = [...ids].filter((id) => !runRows.has(id));
-    if (!missing.length) return;
-    addRows(
-      db
-        .query(`SELECT * FROM runs WHERE run_id IN (${placeholders(missing)})`)
-        .all(...missing),
-      runRows,
-      (row) => row.run_id,
-    );
+    for (const chunk of chunked(missing)) {
+      addRows(
+        db
+          .query(`SELECT * FROM runs WHERE run_id IN (${placeholders(chunk)})`)
+          .all(...chunk),
+        runRows,
+        (row) => row.run_id,
+      );
+    }
   };
   const addResults = (ids) => {
     const missing = [...ids].filter((id) => !resultRows.has(id));
-    if (!missing.length) return;
-    addRows(
-      db
-        .query(
-          `SELECT * FROM results WHERE run_id IN (${placeholders(missing)})`,
-        )
-        .all(...missing),
-      resultRows,
-      (row) => `${row.run_id}\0${row.attempt}`,
-    );
+    for (const chunk of chunked(missing)) {
+      addRows(
+        db
+          .query(
+            `SELECT * FROM results WHERE run_id IN (${placeholders(chunk)})`,
+          )
+          .all(...chunk),
+        resultRows,
+        (row) => `${row.run_id}\0${row.attempt}`,
+      );
+    }
   };
   const addProposals = (eventKeys, runIds) => {
-    const clauses = [];
-    const params = [];
-    for (const key of eventKeys) {
-      const [source, id] = key.split("\0");
-      clauses.push("(event_source = ? AND event_id = ?)");
-      params.push(source, id);
+    const byKey = (row) => row.id;
+    for (const chunk of chunked(eventKeys)) {
+      const where = chunk
+        .map(() => "(event_source = ? AND event_id = ?)")
+        .join(" OR ");
+      addRows(
+        db
+          .query(`SELECT *, rowid AS list_rowid FROM proposals WHERE ${where}`)
+          .all(...chunk.flatMap((key) => key.split("\0"))),
+        proposalRows,
+        byKey,
+      );
     }
-    if (runIds.size) {
-      clauses.push(`run_id IN (${placeholders(runIds)})`);
-      params.push(...runIds);
+    for (const chunk of chunked(runIds)) {
+      addRows(
+        db
+          .query(
+            `SELECT *, rowid AS list_rowid FROM proposals WHERE run_id IN (${placeholders(chunk)})`,
+          )
+          .all(...chunk),
+        proposalRows,
+        byKey,
+      );
     }
-    if (!clauses.length) return;
-    addRows(
-      db
-        .query(
-          `SELECT *, rowid AS list_rowid FROM proposals WHERE ${clauses.join(" OR ")}`,
-        )
-        .all(...params),
-      proposalRows,
-      (row) => row.id,
-    );
   };
 
   addRows(
@@ -456,8 +474,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
       collectPrRefs(result, prRefs);
   }
   if (prRefs.numbers.size || prRefs.urls.size) {
+    // The prefilters compare UPPER(json), so the patterns must be uppercased
+    // too; hasPrRef below still matches the parsed, exact references.
     const prLike = [...prRefs.urls, ...prRefs.numbers].map(
-      (reference) => `%${reference}%`,
+      (reference) => `%${String(reference).toUpperCase()}%`,
     );
     const where = prLike.map(() => "UPPER(spec_json) LIKE ?").join(" OR ");
     addRows(
@@ -544,7 +564,18 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
       (a, b) =>
         b.created_at.localeCompare(a.created_at) || b.list_rowid - a.list_rowid,
     )
-    .map((row) => proposalView({ ...row, spec: parseObject(row.spec_json) }));
+    .map((row) => {
+      const expiresAt =
+        Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
+      return proposalView({
+        ...row,
+        expired:
+          row.status === "open" &&
+          Number.isFinite(expiresAt) &&
+          expiresAt < nowMs,
+        spec: row.spec_json ? JSON.parse(row.spec_json) : null,
+      });
+    });
   const matchedRuns = [...runs]
     .map((runId) => runView(db, runId, options))
     .filter(Boolean)

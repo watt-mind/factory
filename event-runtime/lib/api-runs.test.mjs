@@ -747,6 +747,65 @@ describe("ticket journey join (WM-595)", () => {
       s.close();
     }
   });
+
+  test("journey proposals keep TTL expiry and null spec", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-expiry",
+          payload: { ticket: "WM-1328" },
+        }),
+      );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, spec_json, spec_hash, status, reason, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-expired",
+          "linear",
+          "ticket-expiry",
+          "human_needed",
+          JSON.stringify({ input: { repo: "factory", ticket: "WM-1328" } }),
+          "sha256:prop-expired",
+          "open",
+          "needs a human",
+          "2026-01-01T10:00:00.000Z",
+          60,
+        );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-no-spec",
+          "linear",
+          "ticket-expiry",
+          "noop",
+          "open",
+          "2026-01-01T10:00:00.000Z",
+          3600,
+        );
+      const nowMs = Date.parse("2026-01-01T10:30:00.000Z");
+      const journey = ticketJourneyView(s.db, "WM-1328", { nowMs });
+      const byId = Object.fromEntries(
+        journey.proposals.map((proposal) => [proposal.id, proposal]),
+      );
+      expect(byId["prop-expired"].expired).toBe(true);
+      expect(byId["prop-expired"].status).toBe("open");
+      expect(byId["prop-no-spec"].expired).toBe(false);
+      expect(byId["prop-no-spec"].spec).toBeNull();
+      expect(
+        ticketJourneyView(s.db, "WM-1328", {
+          nowMs: Date.parse("2026-01-01T10:00:30.000Z"),
+        }).proposals.find((proposal) => proposal.id === "prop-expired").expired,
+      ).toBe(false);
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("recent-ticket index (WM-821)", () => {
