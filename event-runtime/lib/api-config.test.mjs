@@ -229,6 +229,45 @@ describe("GET /config view", () => {
     db.close();
   });
 
+  test("keeps the config inventory available when a model-tier cell is corrupt", async () => {
+    const { server, port, db, close } = await makeServer({
+      configRoot: fixtureRoot(),
+    });
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:strong",
+      patch: { model: "runtime-strong" },
+      actor: "operator",
+    });
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      KIND_MODEL_TIER_CELL,
+      "pi:standard",
+      JSON.stringify({ model: "" }),
+      new Date(0).toISOString(),
+      "test",
+    );
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/config`);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const section = body.sections.find((item) => item.id === "policy-models");
+      expect(section.modelTierConfig.runtime.pi.strong).toBe("runtime-strong");
+      expect(section.modelTierConfig.problems).toEqual([
+        {
+          key: "pi:standard",
+          error: expect.stringContaining("model must be a non-empty string"),
+        },
+      ]);
+      expect(body.sections.map((item) => item.id)).toContain("registry");
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
   test("uses explicit allow-lists and publishes node env keys, never values", () => {
     const view = configView({
       root: fixtureRoot(),

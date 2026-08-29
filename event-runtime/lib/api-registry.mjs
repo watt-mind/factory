@@ -1,6 +1,16 @@
 /** Agent and repository registry endpoints. */
-import { getArtifactView, resolveModel } from "./registry.mjs";
-import { RepoError, resolvePromotionTarget, reposView } from "./repos.mjs";
+import {
+  RegistryError,
+  getArtifactView,
+  loadModelTierMap,
+  resolveModel,
+} from "./registry.mjs";
+import {
+  RepoError,
+  reposRoot,
+  resolvePromotionTarget,
+  reposView,
+} from "./repos.mjs";
 import {
   KIND_AGENT,
   KIND_EVENT_TYPE,
@@ -113,6 +123,12 @@ export function agentsView(registry, { overrides = emptyOverrides() } = {}) {
 function sendOverlayError(send, err) {
   if (err instanceof OverlayError)
     return send(err.status, { error: err.message });
+  // The tracked model map is reread from disk per request; a corrupt
+  // policy.yaml is an operator-fixable 500, not an uncaught handler throw.
+  if (err instanceof RegistryError)
+    return send(500, {
+      error: `tracked policy.yaml is unreadable: ${err.message}`,
+    });
   throw err;
 }
 
@@ -136,11 +152,12 @@ export async function handleRegistryApiRoute({
     return send(200, agentsView(registry, { overrides }));
   }
 
-  const trackedModelTiers =
-    registry.trackedModelTiers ?? registry.modelTiers ?? {};
-
   if (route === "GET /overrides/config") {
     try {
+      // The tracked map is hot-reloadable policy input. The registry keeps its
+      // startup snapshot for execution, while both configuration endpoints
+      // read this disk source so their operator-facing views cannot drift.
+      const trackedModelTiers = loadModelTierMap({ root: reposRoot() });
       return send(200, modelTierConfigView(db, trackedModelTiers));
     } catch (err) {
       return sendOverlayError(send, err);
@@ -152,6 +169,7 @@ export async function handleRegistryApiRoute({
   );
   if (modelCellPath && (req.method === "PUT" || req.method === "DELETE")) {
     try {
+      const trackedModelTiers = loadModelTierMap({ root: reposRoot() });
       let adapter;
       let tier;
       try {
