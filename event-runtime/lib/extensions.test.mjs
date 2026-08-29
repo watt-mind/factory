@@ -195,9 +195,9 @@ describe("extension pack metadata discovery (gh-857)", () => {
       /contributes\.packs\[0\].*escapes/,
     );
     // A request for the healthy pack is not blocked by the broken sibling.
-    expect(discoverExtensionPackRoots({ policy, name: "healthy-ext" })).toEqual([
-      { kind: "fs", name: "healthy-ext", path: path.join(healthy, "pack") },
-    ]);
+    expect(discoverExtensionPackRoots({ policy, name: "healthy-ext" })).toEqual(
+      [{ kind: "fs", name: "healthy-ext", path: path.join(healthy, "pack") }],
+    );
     // A miss surfaces the collected errors so the operator sees why.
     expect(() =>
       discoverExtensionPackRoots({ policy, name: "missing-ext" }),
