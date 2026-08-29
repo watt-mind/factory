@@ -139,9 +139,22 @@ export function parseSections(raw) {
 /**
  * runtime.db opened READ-ONLY on purpose. `openDb()` would migrate and set
  * pragmas — writes, from a command whose whole contract is that it does none.
+ *
+ * A read-only connection cannot build the WAL index (`-shm`). After an unclean
+ * shutdown the database can be left with a `-wal` but no `-shm`; a strict
+ * read-only open of that state fails with a bare `unable to open database file`.
+ * We detect it up front and report an actionable reason instead — never falling
+ * back to an immutable snapshot, which could silently omit committed WAL frames
+ * and so return a stale read as if it were current (see #1114). We do not create
+ * the `-shm` ourselves: this verb writes nothing to the runtime directory.
  */
 export function openRuntimeDb(file = dbPath()) {
   if (!existsSync(file)) throw new Error(`no runtime database at ${file}`);
+  if (existsSync(`${file}-wal`) && !existsSync(`${file}-shm`))
+    throw new Error(
+      "runtime database was not shut down cleanly (WAL present without its index); " +
+        "start the event runtime or run any runtime writer once, then retry",
+    );
   return new Database(file, { readonly: true });
 }
 

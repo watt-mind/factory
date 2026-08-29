@@ -1,5 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +16,7 @@ import {
   WRITE_OPS,
   formatAsk,
   gatherAsk,
+  openRuntimeDb,
   parseSections,
 } from "./ask.mjs";
 
@@ -408,6 +415,75 @@ test("runtime-database sections fail independently of the tracker", async () => 
   expect(doc.spend.today.runs).toBe(1);
   expect(doc.spend.errors[0]).toMatchObject({ source: "runtime.db" });
   expect(formatAsk(doc)).toContain("partial — runtime.db");
+});
+
+/**
+ * An on-disk runtime.db left with a `-wal` but no `-shm` — the state after an
+ * unclean shutdown. A read-only connection cannot build the missing WAL index,
+ * so `openRuntimeDb` must classify this before opening SQLite rather than fail
+ * with a bare "unable to open database file".
+ */
+function seedUncleanDbHome() {
+  const home = mkdtempSync(path.join(tmpdir(), "gh1114-home-"));
+  temps.push(home);
+  const file = path.join(home, "runtime.db");
+  // A real, valid main database; close it so no live handle holds sidecars.
+  openDb(file).close();
+  rmSync(`${file}-shm`, { force: true });
+  rmSync(`${file}-wal`, { force: true });
+  // Recreate only the WAL sidecar: WAL present, index absent.
+  writeFileSync(`${file}-wal`, Buffer.alloc(32));
+  return { home, file };
+}
+
+test("openRuntimeDb reports an unclean WAL shutdown without touching the db", () => {
+  const { file } = seedUncleanDbHome();
+
+  expect(() => openRuntimeDb(file)).toThrow(/not shut down cleanly/);
+  expect(() => openRuntimeDb(file)).toThrow(
+    /start the event runtime or run any runtime writer once/,
+  );
+  // The guard must not create the index it refused to build.
+  expect(existsSync(`${file}-shm`)).toBe(false);
+  expect(existsSync(`${file}-wal`)).toBe(true);
+});
+
+test("gatherAsk carries the unclean-shutdown reason into runtime sections", async () => {
+  const plane = seedPlane();
+  const { home, file } = seedUncleanDbHome();
+  const savedHome = process.env.FACTORY_EVENT_HOME;
+  process.env.FACTORY_EVENT_HOME = home;
+  try {
+    // db: undefined → gatherAsk opens the runtime db itself, hitting the guard.
+    const doc = await gatherAsk(
+      askArgs({ controlPlaneFor: () => plane, db: undefined }),
+    );
+
+    for (const name of ["recent", "noop"]) {
+      expect(doc[name].error).toContain("not shut down cleanly");
+      expect(doc[name].rows).toEqual([]);
+    }
+    const runtimeSpend = doc.spend.errors.find(
+      (e) => e.source === "runtime.db",
+    );
+    expect(runtimeSpend?.error).toContain("not shut down cleanly");
+
+    // Unaffected sections still return real data, and spend keeps transcripts.
+    expect(doc.queue.error).toBeNull();
+    expect(doc.queue.rows.length).toBe(1);
+    expect(doc.spend.error).toBeNull();
+    expect(doc.spend.today.runs).toBe(1);
+
+    const text = formatAsk(doc);
+    expect(text).toContain("unavailable — runtime database was not shut down");
+    expect(text).toContain("partial — runtime.db");
+
+    // Reading it must never fabricate the WAL index (no immutable fallback).
+    expect(existsSync(`${file}-shm`)).toBe(false);
+  } finally {
+    if (savedHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+    else process.env.FACTORY_EVENT_HOME = savedHome;
+  }
 });
 
 test("--section returns only the named sections", async () => {
