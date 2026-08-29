@@ -1572,7 +1572,16 @@ function liveRunForInput(
     .query(
       `SELECT run_id, state FROM runs
      WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
-       AND (? = 1 OR state <> 'FAILED')
+       AND (
+         state <> 'FAILED'
+         OR (
+           ? = 1
+           AND (
+             json_extract(spec_json, '$.maxAttempts') IS NULL
+             OR attempts < json_extract(spec_json, '$.maxAttempts')
+           )
+         )
+       )
        AND json_extract(spec_json, '$.agent') GLOB ?
        AND json_extract(spec_json, '$.input.repo') = ?
        AND (? IS NULL OR json_extract(spec_json, '$.input.ticket') = ?)
@@ -1820,8 +1829,12 @@ export function planEvent(
       const blockingDispatch = liveRunForInput(db, mapping.agent, {
         repo: envelope.payload.repo,
         ticket: envelope.payload.ticket,
-        // FAILED dispatches remain retryable and retain their worktree; a new
-        // run for the same ticket would still collide with that owner.
+        // A still-retryable FAILED dispatch retains its worktree; a new run for
+        // the same ticket would collide with that owner, so it keeps blocking.
+        // An attempts-exhausted FAILED dispatch (WM-1066) is never retried and
+        // its worktree is reaped, so liveRunForInput excludes it — otherwise the
+        // dead run wedges the ticket forever and work-scan re-dispatch NOOPs
+        // with same_ticket_worktree_held behind a run that will never move.
         includeFailed: true,
       });
       if (blockingDispatch) {

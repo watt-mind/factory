@@ -709,6 +709,68 @@ describe("planEvent", () => {
     ).toBe("run");
   });
 
+  test("an attempts-exhausted FAILED dispatch stops wedging a fresh dispatch for the same ticket (WM-1066)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("dispatch@1", {
+      ...registry.agents.get("dispatch@1"),
+      // Keep the focus on the ledger block; the worktree eligibility gate and
+      // its Linear/lease reads are irrelevant to what liveRunForInput decides.
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const dispatch = (eventId) => ({
+      eventId,
+      type: "factory.dispatch.requested",
+      source: "operator",
+      correlationId: eventId,
+      causationId: null,
+      payload: { repo: "factory", ticket: "WM-1066" },
+    });
+
+    const firstRef = admit(db, dispatch("dispatch-dead-1"));
+    const first = planEvent(db, synthetic, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(first.decision).toBe("run");
+
+    // Drive the run to FAILED — the dead dispatch that used to hold this
+    // ticket's worktree forever.
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    // While the attempt budget is not yet spent the worktree is still owned and
+    // the run is genuinely retryable, so a fresh dispatch MUST keep NOOPing.
+    const retryableRef = admit(db, dispatch("dispatch-while-retryable"));
+    expect(
+      planEvent(db, synthetic, retryableRef, {
+        now: NOW + 1000,
+        policyVersion: "git:test",
+      }),
+    ).toMatchObject({
+      decision: "noop",
+      reason: `ticket_dispatch_already_live:${first.runId}:same_ticket_worktree_held`,
+    });
+
+    // Exhaust the attempt budget (maxAttempts is 1). The dead run will never
+    // retry and the reaper reclaims its worktree, so it must stop blocking a
+    // fresh work-scan re-dispatch instead of wedging the ticket.
+    db.query(`UPDATE runs SET attempts = ? WHERE run_id = ?`).run(
+      1,
+      first.runId,
+    );
+
+    const freshRef = admit(db, dispatch("dispatch-fresh-work-scan"));
+    const fresh = planEvent(db, synthetic, freshRef, {
+      now: NOW + 2000,
+      policyVersion: "git:test",
+    });
+    expect(fresh.decision).toBe("run");
+    expect(fresh.reason ?? "").not.toContain("same_ticket_worktree_held");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+  });
+
   test("unregistered event type → human_needed", () => {
     const db = openDb(":memory:");
     const ref = admit(db, { type: "totally.unknown.type" });

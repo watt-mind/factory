@@ -164,6 +164,8 @@ import {
 import { spawnSync } from "node:child_process";
 import { memoryControlPlane } from "../lib/control-plane/memory.mjs";
 import { runReaper } from "./reaper.mjs";
+import { Database } from "bun:sqlite";
+import { reapDeadDispatchWorktrees, ticketHasLiveRun } from "./reaper.mjs";
 
 describe("reclaim label computation (WM-14)", () => {
   test("restores ai:agent-ready when returning In Progress ticket to Todo", () => {
@@ -610,5 +612,265 @@ describe("WIP preservation (WM-12)", () => {
     expect(status.stdout.trim()).toBe("");
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("dead-dispatch worktree reaper (WM-1066)", () => {
+  const DB_FILE = "/runtime/factory.db";
+  const repos = () =>
+    new Map([
+      [
+        "factory",
+        {
+          name: "factory",
+          path: "/repo/factory",
+          worktreeRoot: "/wt/factory",
+          worktreeDown: "bin/worktree-down.sh",
+        },
+      ],
+    ]);
+
+  function ledgerWith(runs) {
+    const db = new Database(":memory:");
+    db.run(
+      `CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        idempotency_key TEXT,
+        spec_json TEXT,
+        spec_hash TEXT,
+        state TEXT,
+        attempts INTEGER,
+        created_at TEXT,
+        updated_at TEXT
+      )`,
+    );
+    const insert = db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const r of runs) {
+      const spec = {
+        input: { repo: r.repo, ticket: r.ticket },
+        workspace: { type: r.workspace ?? "worktree" },
+        maxAttempts: r.maxAttempts ?? 1,
+      };
+      insert.run(
+        r.runId,
+        `${r.runId}-key`,
+        JSON.stringify(spec),
+        "hash",
+        r.state,
+        r.attempts ?? 0,
+        "2026-08-29T00:00:00Z",
+        "2026-08-29T00:00:00Z",
+      );
+    }
+    return db;
+  }
+
+  function reapWith(db, args, overrides = {}) {
+    const spawned = [];
+    const logs = [];
+    const promise = reapDeadDispatchWorktrees(args, {
+      repos: repos(),
+      databasePath: DB_FILE,
+      openDatabase: () => db,
+      fileExists: (p) => p === DB_FILE || p === "/wt/factory/WM-1066",
+      spawn: (cmd, argv, opts) => {
+        spawned.push({ cmd, argv, opts });
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      log: (...parts) => logs.push(parts.join(" ")),
+      ...overrides,
+    });
+    return { promise, spawned, logs };
+  }
+
+  test("tears down the stale worktree of an attempts-exhausted FAILED dispatch", async () => {
+    const db = ledgerWith([
+      {
+        runId: "run_dead",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+    ]);
+    const { promise, spawned } = reapWith(db, parseArgs(["--apply"]));
+    const totals = await promise;
+    expect(totals.cleaned).toBe(1);
+    expect(totals.failed).toBe(0);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].cmd).toBe("/bin/bash");
+    expect(spawned[0].argv).toEqual([
+      "/repo/factory/bin/worktree-down.sh",
+      "WM-1066",
+    ]);
+    // Never --force: a dirty or unpushed tree must refuse, not be nuked.
+    expect(spawned[0].argv).not.toContain("--force");
+    expect(spawned[0].opts.cwd).toBe("/repo/factory");
+  });
+
+  test("dry run reports the reclaimable worktree without spawning teardown", async () => {
+    const db = ledgerWith([
+      {
+        runId: "run_dead",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+    ]);
+    const { promise, spawned, logs } = reapWith(db, parseArgs([]));
+    const totals = await promise;
+    expect(totals.considered).toBe(1);
+    expect(totals.cleaned).toBe(0);
+    expect(spawned).toHaveLength(0);
+    expect(logs.join("\n")).toContain("STALE factory/WM-1066");
+  });
+
+  test("a still-retryable FAILED dispatch keeps its worktree (not attempts-exhausted)", async () => {
+    const db = ledgerWith([
+      {
+        runId: "run_retryable",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 0,
+        maxAttempts: 1,
+      },
+    ]);
+    const { promise, spawned } = reapWith(db, parseArgs(["--apply"]));
+    const totals = await promise;
+    expect(totals.considered).toBe(0);
+    expect(totals.cleaned).toBe(0);
+    expect(spawned).toHaveLength(0);
+  });
+
+  test("a live run for the same ticket holds the worktree", async () => {
+    const db = ledgerWith([
+      {
+        runId: "run_dead",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+      {
+        runId: "run_live",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "RUNNING",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+    ]);
+    const { promise, spawned, logs } = reapWith(db, parseArgs(["--apply"]));
+    const totals = await promise;
+    expect(totals.held).toBe(1);
+    expect(totals.cleaned).toBe(0);
+    expect(spawned).toHaveLength(0);
+    expect(logs.join("\n")).toContain("a live run still owns");
+  });
+
+  test("an open pull request protects the worktree and lookup failure fails closed", async () => {
+    const db = ledgerWith([
+      {
+        runId: "run_dead",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+    ]);
+    const held = reapWith(db, parseArgs(["--apply"]), {
+      hasOpenPullRequest: async () => true,
+    });
+    const heldTotals = await held.promise;
+    expect(heldTotals.held).toBe(1);
+    expect(heldTotals.cleaned).toBe(0);
+    expect(held.spawned).toHaveLength(0);
+
+    const db2 = ledgerWith([
+      {
+        runId: "run_dead",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+    ]);
+    const failing = reapWith(db2, parseArgs(["--apply"]), {
+      hasOpenPullRequest: async () => {
+        throw new Error("forge unavailable");
+      },
+    });
+    const failingTotals = await failing.promise;
+    expect(failingTotals.failed).toBe(1);
+    expect(failingTotals.cleaned).toBe(0);
+    expect(failing.spawned).toHaveLength(0);
+    expect(failing.logs.join("\n")).toContain(
+      "failed closed: forge unavailable",
+    );
+  });
+
+  test("no runtime ledger on disk is a safe no-op", async () => {
+    const db = ledgerWith([]);
+    let spawned = 0;
+    const totals = await reapDeadDispatchWorktrees(parseArgs(["--apply"]), {
+      repos: repos(),
+      databasePath: DB_FILE,
+      openDatabase: () => db,
+      fileExists: () => false,
+      spawn: () => {
+        spawned += 1;
+        return { status: 0 };
+      },
+      log: () => {},
+    });
+    expect(totals).toEqual({
+      considered: 0,
+      cleaned: 0,
+      held: 0,
+      failed: 0,
+    });
+    expect(spawned).toBe(0);
+  });
+
+  test("ticketHasLiveRun ignores the exhausted dead run but sees a queued sibling", () => {
+    const db = ledgerWith([
+      {
+        runId: "run_dead",
+        repo: "factory",
+        ticket: "WM-1066",
+        state: "FAILED",
+        attempts: 1,
+        maxAttempts: 1,
+      },
+    ]);
+    expect(ticketHasLiveRun(db, "factory", "WM-1066")).toBe(false);
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "run_queued",
+      "run_queued-key",
+      JSON.stringify({
+        input: { repo: "factory", ticket: "WM-1066" },
+        workspace: { type: "worktree" },
+        maxAttempts: 1,
+      }),
+      "hash",
+      "QUEUED",
+      0,
+      "2026-08-29T00:00:00Z",
+      "2026-08-29T00:00:00Z",
+    );
+    expect(ticketHasLiveRun(db, "factory", "WM-1066")).toBe(true);
   });
 });

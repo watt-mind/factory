@@ -33,11 +33,15 @@ import {
   readdirSync,
   statSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import { dbPath } from "../event-runtime/lib/config.mjs";
+import { ticketSlug } from "../lib/ticket-slug.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -659,6 +663,180 @@ export async function runReaper(
   return totals;
 }
 
+/**
+ * Selects dead dispatch runs whose per-ticket worktree is safe to reclaim: a
+ * FAILED run that has spent its whole attempt budget (so it will never retry)
+ * and whose workspace is a worktree. Exported so the selection stays testable
+ * without a live runtime ledger.
+ *
+ * This is the runtime half of WM-1066. The planner already excludes such a run
+ * from the `same_ticket_worktree_held` block so a fresh dispatch can proceed;
+ * this reclaims the stale tree it left behind so provisioning finds no stale
+ * checkout and no operator `retry --force` is needed.
+ */
+export const DEAD_DISPATCH_WORKTREE_SQL = `
+  SELECT run_id AS runId,
+         json_extract(spec_json, '$.input.repo')   AS repo,
+         json_extract(spec_json, '$.input.ticket') AS ticket
+    FROM runs
+   WHERE state = 'FAILED'
+     AND json_extract(spec_json, '$.workspace.type') = 'worktree'
+     AND json_extract(spec_json, '$.maxAttempts') IS NOT NULL
+     AND attempts >= json_extract(spec_json, '$.maxAttempts')
+     AND json_extract(spec_json, '$.input.repo') IS NOT NULL
+     AND json_extract(spec_json, '$.input.ticket') IS NOT NULL
+   ORDER BY run_id ASC`;
+
+/**
+ * True when a repo/ticket still has a live run besides the dead one — someone
+ * may be actively holding the worktree, so it must be left alone. A
+ * still-retryable FAILED sibling counts as live; an attempts-exhausted one does
+ * not (mirrors the planner's liveRunForInput exclusion exactly).
+ */
+export function ticketHasLiveRun(db, repo, ticket) {
+  const row = db
+    .query(
+      `SELECT 1 FROM runs
+        WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+          AND (
+            state <> 'FAILED'
+            OR json_extract(spec_json, '$.maxAttempts') IS NULL
+            OR attempts < json_extract(spec_json, '$.maxAttempts')
+          )
+          AND json_extract(spec_json, '$.input.repo') = ?
+          AND json_extract(spec_json, '$.input.ticket') = ?
+        LIMIT 1`,
+    )
+    .get(repo, ticket);
+  return Boolean(row);
+}
+
+/**
+ * Reclaim worktrees stranded by dead (attempts-exhausted FAILED) dispatch runs.
+ *
+ * Teardown is delegated to the repo's own `worktree_down`, NEVER with --force:
+ * a dirty or unpushed tree refuses and stays visible to the janitor, exactly
+ * like the runtime's own completion teardown (WM-108). A worktree whose ticket
+ * still has an open pull request is left alone (mirrors janitor WM-17), and the
+ * pull-request lookup fails closed — a lookup error keeps the tree, never tears
+ * it down blind.
+ *
+ * Dependencies are injectable so selection and teardown can be tested without a
+ * live runtime database, a real filesystem, or spawning bash.
+ */
+export async function reapDeadDispatchWorktrees(
+  args,
+  {
+    repos = loadRepos(),
+    databasePath = dbPath(),
+    openDatabase = (file) => new Database(file, { readonly: true }),
+    fileExists = existsSync,
+    spawn = spawnSync,
+    hasOpenPullRequest = null,
+    log = (...values) => console.log(...values),
+  } = {},
+) {
+  const totals = { considered: 0, cleaned: 0, held: 0, failed: 0 };
+  if (!fileExists(databasePath)) return totals;
+
+  let db;
+  try {
+    db = openDatabase(databasePath);
+  } catch (err) {
+    totals.failed += 1;
+    log(
+      `  ! dead-dispatch worktree reap: ledger unreadable: ${err.message || err}`,
+    );
+    return totals;
+  }
+
+  try {
+    const seen = new Set();
+    for (const { runId, repo: repoName, ticket } of db
+      .query(DEAD_DISPATCH_WORKTREE_SQL)
+      .all()) {
+      const key = `${repoName} ${ticket}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const repo = repos.get(repoName);
+      if (!repo?.worktreeRoot || !repo?.worktreeDown || !repo?.path) {
+        // The repo declares no worktree lifecycle — never ours to reclaim.
+        continue;
+      }
+      let slug;
+      try {
+        slug = ticketSlug(ticket);
+      } catch {
+        // An unsluggable ticket never had a deterministic worktree path.
+        continue;
+      }
+      const worktreePath = path.join(repo.worktreeRoot, slug);
+      if (!fileExists(worktreePath)) continue; // already clean
+
+      if (ticketHasLiveRun(db, repoName, ticket)) {
+        totals.held += 1;
+        log(
+          `  hold  ${repoName}/${ticket}: a live run still owns ${worktreePath}`,
+        );
+        continue;
+      }
+
+      totals.considered += 1;
+      log(
+        `  STALE ${repoName}/${ticket} worktree at ${worktreePath} (dead dispatch ${runId})`,
+      );
+
+      if (hasOpenPullRequest) {
+        let open;
+        try {
+          open = await hasOpenPullRequest(repoName, ticket);
+        } catch (err) {
+          totals.failed += 1;
+          log(
+            `        ! pull-request lookup failed closed: ${err.message || err}`,
+          );
+          continue;
+        }
+        if (open) {
+          totals.held += 1;
+          log(`        (open pull request — not touching it)`);
+          continue;
+        }
+      }
+
+      if (!args.apply) continue;
+
+      const downPath = path.isAbsolute(repo.worktreeDown)
+        ? repo.worktreeDown
+        : path.join(repo.path, repo.worktreeDown);
+      const result = spawn("/bin/bash", [downPath, ticket], {
+        cwd: repo.path,
+        encoding: "utf8",
+      });
+      if (result.error || result.status !== 0) {
+        totals.failed += 1;
+        const detail = String(
+          result.stderr ||
+            result.stdout ||
+            result.error?.message ||
+            `exit ${result.status}`,
+        )
+          .trim()
+          .slice(0, 200);
+        log(`        ! worktree_down refused/failed: ${detail}`);
+        continue;
+      }
+      totals.cleaned += 1;
+      log(`        -> worktree reclaimed`);
+    }
+  } finally {
+    db.close?.();
+  }
+
+  return totals;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -682,7 +860,34 @@ Options:
   console.log(
     `=== Stale-claim reaper [${mode}] threshold=${args.minutes}min${args.team ? ` team=${args.team}` : ""} ===\n`,
   );
-  return runReaper(args);
+  const totals = await runReaper(args);
+
+  // Runtime half of WM-1066: reclaim worktrees stranded by dead dispatch runs
+  // so a fresh dispatch is not wedged behind a checkout no one will ever reuse.
+  // Best-effort and isolated — a failure here must never mask the claim reap
+  // above. The open-PR lookup reuses each repo's control plane and fails closed.
+  const planeCache = new Map();
+  const planeFor = (repoName) => {
+    if (!planeCache.has(repoName))
+      planeCache.set(repoName, loadControlPlane({ repoName }));
+    return planeCache.get(repoName);
+  };
+  try {
+    console.log(`\n=== Dead-dispatch worktree reap [${mode}] ===\n`);
+    const worktreeTotals = await reapDeadDispatchWorktrees(args, {
+      hasOpenPullRequest: (repoName, ticket) =>
+        planeFor(repoName).hasOpenPullRequest(ticket),
+    });
+    console.log(
+      `\n=== Worktrees ${args.apply ? "reclaimed" : "reclaimable"}: ${
+        args.apply ? worktreeTotals.cleaned : worktreeTotals.considered
+      } | Held: ${worktreeTotals.held} | Failures: ${worktreeTotals.failed} ===`,
+    );
+  } catch (err) {
+    console.error(`Dead-dispatch worktree reap failed: ${err.message || err}`);
+  }
+
+  return totals;
 }
 
 if (import.meta.main || process.argv[1]?.endsWith("reaper.mjs")) {
