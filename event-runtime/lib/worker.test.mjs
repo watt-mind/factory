@@ -3120,9 +3120,7 @@ describe("worker", () => {
       [releasedDb, releasedSpec],
       [reapedDb, reapedSpec],
     ]) {
-      db.query(`UPDATE runs SET attempts = 1 WHERE run_id = ?`).run(
-        spec.runId,
-      );
+      db.query(`UPDATE runs SET attempts = 1 WHERE run_id = ?`).run(spec.runId);
       db.query(
         `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -3140,15 +3138,17 @@ describe("worker", () => {
       );
     }
 
-    const releasedClaim = claimNext(
-      releasedDb,
-      opts({ owner: "w-release" }),
-    );
+    const releasedClaim = claimNext(releasedDb, opts({ owner: "w-release" }));
     const reapedClaim = claimNext(reapedDb, opts({ owner: "reaper" }));
     expect(releasedClaim.attempt).toBe(2);
     expect(reapedClaim.attempt).toBe(2);
     const afterExpiry = T0 + (releasedSpec.timeoutSeconds + 120) * 1000 + 1;
-    insertStalledWorker(releasedDb, "w-release", releasedSpec.runId, afterExpiry);
+    insertStalledWorker(
+      releasedDb,
+      "w-release",
+      releasedSpec.runId,
+      afterExpiry,
+    );
 
     expect(
       releaseStalledWorkerLease(
@@ -3182,21 +3182,26 @@ describe("worker", () => {
     const reapedDb = openDb(":memory:");
     const releasedSpec = queueRun(
       releasedDb,
-      makeSpec({ runId: "run_stalled_release_retry", maxEnvironmentRetries: 1 }),
+      makeSpec({
+        runId: "run_stalled_release_retry",
+        maxEnvironmentRetries: 1,
+      }),
     );
     const reapedSpec = queueRun(
       reapedDb,
       makeSpec({ runId: "run_stalled_reap_retry", maxEnvironmentRetries: 1 }),
     );
-    const releasedClaim = claimNext(
-      releasedDb,
-      opts({ owner: "w-release" }),
-    );
+    const releasedClaim = claimNext(releasedDb, opts({ owner: "w-release" }));
     const reapedClaim = claimNext(reapedDb, opts({ owner: "reaper" }));
     expect(releasedClaim.attempt).toBe(1);
     expect(reapedClaim.attempt).toBe(1);
     const afterExpiry = T0 + (releasedSpec.timeoutSeconds + 120) * 1000 + 1;
-    insertStalledWorker(releasedDb, "w-release", releasedSpec.runId, afterExpiry);
+    insertStalledWorker(
+      releasedDb,
+      "w-release",
+      releasedSpec.runId,
+      afterExpiry,
+    );
 
     expect(
       releaseStalledWorkerLease(
