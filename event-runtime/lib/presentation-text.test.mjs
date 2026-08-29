@@ -69,4 +69,22 @@ Repo <https://github.com/watt-mind/factory>`);
       "another long value",
     );
   });
+
+  test("uses the target as the label when a link has no label", () => {
+    expect(
+      renderText({
+        blocks: [
+          {
+            type: "links",
+            items: [
+              { url: "https://example.test/runs/1" },
+              { issue: "WM-1289" },
+            ],
+          },
+        ],
+      }),
+    ).toBe(
+      "https://example.test/runs/1 <https://example.test/runs/1>\nWM-1289 <WM-1289>",
+    );
+  });
 });

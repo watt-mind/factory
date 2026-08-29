@@ -2,6 +2,8 @@
 /** Event-runtime CLI argument routing and command dispatch. */
 import path from "node:path";
 import { COMMANDS } from "./cli/commands.mjs";
+import { inspect as inspectCommand } from "./cli/inspect.mjs";
+import { withClient } from "./cli/shared.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
 import { initPack } from "./lib/pack-init.mjs";
@@ -367,21 +369,24 @@ export function initCommand(args = []) {
 export async function inspectWithPresentation(args) {
   const lines = [];
   const originalLog = console.log;
+  let detail = null;
   console.log = (...values) => lines.push(values.join(" "));
   try {
-    await COMMANDS.inspect(args);
+    if (!args[0]) {
+      await COMMANDS.inspect(args);
+    } else {
+      await withClient(async (client) => {
+        // Fetch the run once and hand the same detail to both renderers. The
+        // presentation is optional garnish, so it must not make inspect pay
+        // for a second GET /runs/:id.
+        detail = await client.run(args[0]);
+        await inspectCommand({ ...client, run: async () => detail }, args[0]);
+      });
+    }
   } finally {
     console.log = originalLog;
   }
 
-  let detail = null;
-  if (args[0]) {
-    try {
-      detail = await callControl("GET", `/runs/${encodeURIComponent(args[0])}`);
-    } catch {
-      // Inspect already produced the useful ground truth; presentation is garnish.
-    }
-  }
   const extra = [];
   if (detail?.result?.presentation) {
     try {

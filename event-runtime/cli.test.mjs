@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { COMMAND_NAMES } from "./cli/commands.mjs";
-import { runCli } from "./cli/test-helpers.mjs";
+import { CLI, freePort, runCli } from "./cli/test-helpers.mjs";
 
 const EXPECTED_COMMANDS = [
   "serve",
@@ -81,5 +81,66 @@ describe("cli routing", () => {
 
   test("registered command set is unchanged", () => {
     expect(COMMAND_NAMES).toEqual(EXPECTED_COMMANDS);
+  });
+
+  test("inspect fetches run detail once when adding presentation", async () => {
+    let runRequests = 0;
+    const detail = {
+      run: {
+        runId: "run-1289",
+        state: "COMPLETED",
+        attempts: 1,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:01:00.000Z",
+        spec: {
+          agent: "worker",
+          adapter: "fake",
+          outputContract: "factory.agent-result/v1",
+          maxAttempts: 1,
+        },
+      },
+      workspace: "/tmp/run-1289",
+      lifecycle: [],
+      result: {
+        terminalState: "COMPLETED",
+        presentation: {
+          schemaVersion: "factory.presentation/v1",
+          blocks: [{ type: "heading", text: "cached presentation" }],
+        },
+      },
+    };
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/runs/run-1289") {
+          runRequests++;
+          return Response.json(detail);
+        }
+        if (pathname === "/agents") return Response.json({ agents: [] });
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "inspect", "run-1289"], {
+        env: {
+          ...process.env,
+          FACTORY_EVENT_PORT: String(server.port),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status).toBe(0);
+      expect(`${stdout}${stderr}`).toContain("# cached presentation");
+    } finally {
+      server.stop(true);
+    }
+
+    expect(runRequests).toBe(1);
   });
 });

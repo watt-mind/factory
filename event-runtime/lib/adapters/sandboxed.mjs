@@ -41,7 +41,7 @@ import path from "node:path";
 import { runInSandbox } from "../sandbox/gondolin.mjs";
 import { normalizePolicy } from "../sandbox/policy.mjs";
 import { MODEL_ADAPTERS } from "../registry.mjs";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, workspacesRoot } from "../config.mjs";
 
 /**
  * Stable refusal code shared by the planner and worker. A workspace-only
@@ -61,10 +61,30 @@ const MODEL_BACKED_ADAPTER_SET = new Set(MODEL_BACKED_ADAPTERS);
 const RAW_CREDENTIAL_PATH =
   /(?:^|\/)\.(?:aws|azure|claude|config\/gcloud|config\/gh|cursor|gnupg|kube|ssh)(?:\/|$)|(?:^|\/)(?:credentials|hosts\.yml|secrets\.env)(?:\/|$)|(?:^|\/)\.worktrees(?:\/|$)/;
 
-/** The only runtime-owned subtree that a sandboxed adapter may mount from HOME. */
-export const HOME_MOUNT_ALLOWLIST = Object.freeze([
-  ".factory/event-runtime/workspaces",
-]);
+/** Default workspaces subtree under the operator home when no runtime home is configured. */
+const DEFAULT_HOME_WORKSPACES = path.join(
+  ".factory",
+  "event-runtime",
+  "workspaces",
+);
+
+/**
+ * The only runtime-owned subtree that a sandboxed adapter may mount from HOME.
+ *
+ * Derived from the configured runtime home so a relocated FACTORY_EVENT_HOME
+ * keeps its workspaces mountable. `workspacesRoot()` throws under test/CI when
+ * FACTORY_EVENT_HOME is unset (config.mjs `runtimeHome`); this guard must
+ * never raise from inside an admission decision, so that case falls back to
+ * the literal default subtree relative to `home`, which keeps the check
+ * fail-closed: an undeclared runtime home admits nothing outside it.
+ */
+export function HOME_MOUNT_ALLOWLIST(home = homedir()) {
+  try {
+    return [path.relative(home, workspacesRoot())];
+  } catch {
+    return [DEFAULT_HOME_WORKSPACES];
+  }
+}
 
 function pathContains(parent, child) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
@@ -90,7 +110,7 @@ function unsafeHostMountReason(hostPath) {
     return "names a raw credential store or sibling worktree";
   if (
     pathContains(home, resolved) &&
-    !HOME_MOUNT_ALLOWLIST.some((prefix) =>
+    !HOME_MOUNT_ALLOWLIST(home).some((prefix) =>
       pathContains(path.join(home, prefix), resolved),
     )
   ) {
