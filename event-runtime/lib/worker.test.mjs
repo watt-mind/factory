@@ -67,6 +67,7 @@ import {
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
   defaultReturnHandoffTicket,
+  defaultUnclaimTicket,
   dispatchLockPath,
   DYNAMIC_DEADLINE_ADAPTERS,
   executeClaimed,
@@ -5849,6 +5850,120 @@ describe("defaultReturnHandoffTicket (WM-718 F2)", () => {
     });
     expect(result).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// `defaultUnclaimTicket` is the worker's NOT_CLAIMED release: when a dispatch
+// run never reached handoff (the claim was lost, or the run failed while the
+// ticket still sat In Progress), the slot has to go back on the board. The
+// bug this guards (WM-1024) was that dropping `ai:in-progress` and stopping
+// left the ticket `Todo`/unassigned but WITHOUT `ai:agent-ready` — the board
+// read Todo, yet the dispatch predicate (Todo + ai:agent-ready + unassigned)
+// never matched again, so nothing redispatched it. These drive the real
+// function through injected `fetchTicket`/`runCli` seams, never mocking it.
+describe("defaultUnclaimTicket (NOT_CLAIMED release)", () => {
+  test("restores Todo + ai:agent-ready, strips ai:in-progress and the stale agent label", () => {
+    const calls = [];
+    const result = defaultUnclaimTicket({
+      repo: "factory",
+      ticket: "WM-9001",
+      why: "ticket_claim_lost",
+      fetchTicket: () => ({
+        state: { name: "In Progress" },
+        labels: {
+          nodes: [{ name: "ai:in-progress" }, { name: "agent:claude-code" }],
+        },
+      }),
+      runCli: (args) => (calls.push(args), ""),
+    });
+    expect(result).toBe(true);
+    // The state move re-adds ai:agent-ready (so the ticket is dispatchable
+    // again), unassigns, and strips the lifecycle + stale agent labels.
+    expect(calls[0]).toEqual([
+      "state",
+      "WM-9001",
+      "Todo",
+      "--unassign",
+      "--add",
+      "ai:agent-ready",
+      "--remove",
+      "ai:in-progress",
+      "--remove",
+      "ai:blocked",
+      "--remove",
+      "agent:claude-code",
+    ]);
+    // ...and a comment records the release and its cause.
+    const comment = calls.find((c) => c[0] === "comment");
+    expect(comment).toBeDefined();
+    expect(comment[2]).toContain("released back to Todo + ai:agent-ready");
+    expect(comment[2]).toContain("ticket_claim_lost");
+  });
+
+  test("folds an absolute log path down to ~ in the release comment", () => {
+    const calls = [];
+    defaultUnclaimTicket({
+      repo: "factory",
+      ticket: "WM-9001",
+      why: "agent_exit_1",
+      log: `${homedir()}/.factory/runs/run-9001.log`,
+      fetchTicket: () => ({
+        state: { name: "In Progress" },
+        labels: { nodes: [{ name: "ai:in-progress" }] },
+      }),
+      runCli: (args) => (calls.push(args), ""),
+    });
+    const comment = calls.find((c) => c[0] === "comment");
+    expect(comment[2]).toContain("~/.factory/runs/run-9001.log");
+    expect(comment[2]).not.toContain(homedir());
+  });
+
+  test("is a no-op when the ticket is no longer In Progress", () => {
+    const calls = [];
+    const result = defaultUnclaimTicket({
+      repo: "factory",
+      ticket: "WM-9001",
+      why: "ticket_claim_lost",
+      fetchTicket: () => ({
+        state: { name: "Todo" },
+        labels: { nodes: [{ name: "ai:agent-ready" }] },
+      }),
+      runCli: (args) => (calls.push(args), ""),
+    });
+    expect(result).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("is a no-op when In Progress but the ai:in-progress label is already gone", () => {
+    const calls = [];
+    const result = defaultUnclaimTicket({
+      repo: "factory",
+      ticket: "WM-9001",
+      why: "ticket_claim_lost",
+      fetchTicket: () => ({
+        state: { name: "In Progress" },
+        labels: { nodes: [{ name: "agent:claude-code" }] },
+      }),
+      runCli: (args) => (calls.push(args), ""),
+    });
+    expect(result).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("swallows a mutation failure and reports false rather than throwing", () => {
+    const result = defaultUnclaimTicket({
+      repo: "factory",
+      ticket: "WM-9001",
+      why: "ticket_claim_lost",
+      fetchTicket: () => ({
+        state: { name: "In Progress" },
+        labels: { nodes: [{ name: "ai:in-progress" }] },
+      }),
+      runCli: () => {
+        throw new Error("linear: rate limited");
+      },
+    });
+    expect(result).toBe(false);
   });
 });
 
