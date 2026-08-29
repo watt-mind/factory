@@ -315,7 +315,26 @@ describe("schedule trigger metadata (WM-259)", () => {
   });
 
   test("Ship uses the existing schedule route and correlates its proposal to RC READY", async () => {
+    // Client ship loops (ship-bj29) live in the instance overlay, not the
+    // public kernel's schedules.json (#1052). Supply an explicit ship-bj29
+    // fixture so this exercises the ship route hermetically instead of
+    // depending on a client loop being tracked in the kernel registry.
+    const shipRegistry = {
+      ...registry,
+      schedules: {
+        "ship-bj29": {
+          every: "7d",
+          eventType: "factory.ship.requested",
+          payload: { repo: "bj29" },
+          catchUp: "none",
+          singleton: true,
+          approval: "watched",
+          enabled: false,
+        },
+      },
+    };
     const s = await makeServer({
+      registry: shipRegistry,
       now: () => Date.parse("2026-08-18T12:00:00Z"),
     });
     try {
