@@ -41,6 +41,8 @@ repos:
     #
     # Constraints are validated at load: a range that is not semver (`latest`,
     # a typo) is a config error rather than a gate that silently passes.
+    # The single canonical wildcard "*" means the executable must exist; any parsed version passes.
+    # Other wildcard spellings are rejected because some only look constrained.
     #
     # Keep an example's floors genuinely low. This file is a LIVE fallback when
     # config/repos.yaml is absent, so a tight floor here would make the factory

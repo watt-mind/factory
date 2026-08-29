@@ -472,6 +472,27 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 16,
+    name: "inbox_proposal_id",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(inbox_items)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("proposal_id")) {
+        db.exec(`ALTER TABLE inbox_items ADD COLUMN proposal_id TEXT;`);
+      }
+      db.exec(`
+        UPDATE inbox_items
+           SET proposal_id = json_extract(refs_json, '$.proposalId');
+        CREATE INDEX IF NOT EXISTS idx_inbox_items_proposal_id
+          ON inbox_items (proposal_id);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
