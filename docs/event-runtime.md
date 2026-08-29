@@ -220,7 +220,7 @@ The LLM appears only inside `execute`.
 
 ## 5. Versioned contracts
 
-Besides the three below, `factory.decision-request/v1` and `factory.decision-response/v1` (`event-runtime/schemas/`, validated by `lib/decision.mjs`) define a bounded human question — 1–6 options with runtime effects plus gated fields from a closed widget vocabulary — and its hash-bound answer; a refused agent-result may carry a request as `decision` (docs/event-runtime-inbox.md §2–§4).
+Besides the three below, `factory.decision-request/v1` and `factory.decision-response/v1` (`event-runtime/schemas/`, validated by `lib/decision.mjs`) define a bounded human question — 1–6 options with runtime effects plus gated fields from a closed widget vocabulary — and its hash-bound answer; a refused agent-result may carry a request as `decision` (docs/event-runtime-inbox.md §2–§4). `factory.presentation/v1` (`event-runtime/schemas/`, validated by `lib/presentation.mjs`) is an optional view-only block document an agent may emit beside its `artifact`, its `$ref` values resolving into the accepted artifact; verification is tolerant — an invalid one is dropped to `presentationErrors` and the run still completes (docs/event-runtime-artifact-views.md §3).
 
 ### 5.1 Event envelope
 

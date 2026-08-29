@@ -1,0 +1,203 @@
+{
+  "artifact": {
+    "summary": "58 issues in Triage; 14 can be made agent-ready today",
+    "recommendation": "DISPATCH",
+    "evidence": { "issuesSeen": 58, "readyToday": 14 },
+    "plan": [
+      { "issueId": "WM-101" },
+      { "issueId": "WM-102" },
+      { "issueId": "WM-103" },
+      { "issueId": "WM-201" },
+      { "issueId": "WM-104" },
+      { "issueId": "WM-105" },
+      { "issueId": "WM-106" },
+      { "issueId": "WM-312" },
+      { "issueId": "WM-108" },
+      { "issueId": "WM-109" },
+      { "issueId": "WM-110" },
+      { "issueId": "WM-118" },
+      { "issueId": "WM-112" },
+      { "issueId": "WM-113" },
+      { "issueId": "WM-114" },
+      { "issueId": "WM-115" },
+      { "issueId": "WM-116" },
+      { "issueId": "WM-117" },
+      { "issueId": "WM-119" },
+      { "issueId": "WM-336" }
+    ]
+  },
+  "cases": [
+    {
+      "name": "valid-full-document",
+      "valid": true,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "heading",
+            "text": "58 issues in Triage; 14 can be made agent-ready today"
+          },
+          {
+            "type": "markdown",
+            "text": "Most of the backlog is under-specified rather than wrong."
+          },
+          {
+            "type": "keyvalue",
+            "items": [
+              {
+                "label": "Recommendation",
+                "value": { "$ref": "/recommendation" },
+                "format": "state"
+              },
+              {
+                "label": "Issues seen",
+                "value": { "$ref": "/evidence/issuesSeen" },
+                "format": "count"
+              },
+              { "label": "Note", "value": "computed by hand" }
+            ]
+          },
+          {
+            "type": "list",
+            "label": "Needs a human",
+            "items": [
+              {
+                "text": "WM-312 — production infra; incompatible deploy paths",
+                "ref": "/plan/7",
+                "tone": "warn"
+              },
+              {
+                "text": "WM-336 — tool allowlist; wants a security owner",
+                "ref": "/plan/19",
+                "tone": "warn"
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "label": "Duplicates",
+            "columns": ["Issue", "Duplicate of"],
+            "rows": [
+              [{ "$ref": "/plan/3/issueId" }, "WM-201"],
+              [{ "$ref": "/plan/11/issueId" }, "WM-118"]
+            ]
+          },
+          { "type": "badge", "text": "DISPATCH", "tone": "ok" },
+          {
+            "type": "code",
+            "language": "json",
+            "text": "{ \"ok\": true }"
+          },
+          {
+            "type": "section",
+            "label": "Method",
+            "collapsed": true,
+            "blocks": [{ "type": "markdown", "text": "How this was computed." }]
+          },
+          {
+            "type": "links",
+            "items": [
+              {
+                "label": "Repo",
+                "issue": null,
+                "url": "https://github.com/watt-mind/factory"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unresolved-ref-in-keyvalue",
+      "valid": false,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "keyvalue",
+            "items": [{ "label": "Missing", "value": { "$ref": "/nope/here" } }]
+          }
+        ]
+      },
+      "errors": ["$ref \"/nope/here\" does not resolve"]
+    },
+    {
+      "name": "unresolved-list-ref-pointer",
+      "valid": false,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "list",
+            "items": [{ "text": "a claim", "ref": "/plan/999" }]
+          }
+        ]
+      },
+      "errors": ["ref \"/plan/999\" does not resolve"]
+    },
+    {
+      "name": "links-item-two-targets",
+      "valid": false,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "links",
+            "items": [
+              {
+                "label": "Both",
+                "issue": "WM-1",
+                "url": "https://example.com"
+              }
+            ]
+          }
+        ]
+      },
+      "errors": ["exactly one non-null target"]
+    },
+    {
+      "name": "section-nested-too-deep",
+      "valid": false,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "section",
+            "label": "outer",
+            "blocks": [
+              {
+                "type": "section",
+                "label": "inner",
+                "blocks": [{ "type": "markdown", "text": "one level too deep" }]
+              }
+            ]
+          }
+        ]
+      },
+      "errors": ["not in enum"]
+    },
+    {
+      "name": "heading-too-long",
+      "valid": false,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [
+          {
+            "type": "heading",
+            "text": "This heading is deliberately far longer than one hundred and twenty characters so that the lib bound on heading text length is exercised."
+          }
+        ]
+      },
+      "errors": ["heading text is"]
+    },
+    {
+      "name": "wrong-key-for-type",
+      "valid": false,
+      "presentation": {
+        "schemaVersion": "factory.presentation/v1",
+        "blocks": [{ "type": "heading", "text": "hi", "label": "nope" }]
+      },
+      "errors": ["\"label\" is not a key of type=heading"]
+    }
+  ]
+}

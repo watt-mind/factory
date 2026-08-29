@@ -1,0 +1,333 @@
+{
+  "title": "factory.presentation/v1 — an optional agent-emitted block document beside the artifact (docs/event-runtime-artifact-views.md §3.1)",
+  "description": "Layer B: a bounded, view-only block document an agent may emit in result.json alongside its artifact. A value (keyvalue value, table cell, links target) is a scalar/null literal or { \"$ref\": <RFC 6901 pointer into the artifact> }; a list item may cite the artifact through a bare pointer `ref`. The bounds, per-type key applicability, one-level section nesting, exactly-one-links-target rule, serialised size, and $ref resolution that this deliberately small schema subset (lib/schema.mjs, no conditional keywords) cannot express are enforced by lib/presentation.mjs — the same split lib/artifact-view.mjs and lib/decision.mjs use. format/tone reuse the factory.artifact-view/v1 vocabularies verbatim. additionalProperties: false throughout.",
+  "type": "object",
+  "required": ["schemaVersion", "blocks"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "factory.presentation/v1" },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "enum": [
+              "heading",
+              "markdown",
+              "keyvalue",
+              "table",
+              "list",
+              "badge",
+              "code",
+              "section",
+              "links"
+            ]
+          },
+          "text": { "type": "string" },
+          "language": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "collapsed": { "type": "boolean" },
+          "columns": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+          },
+          "rows": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": ["string", "number", "boolean", "null", "object"],
+                "required": ["$ref"],
+                "additionalProperties": false,
+                "properties": { "$ref": { "type": "string", "minLength": 1 } }
+              }
+            }
+          },
+          "formats": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "enum": [
+                "issue",
+                "pr",
+                "url",
+                "sha",
+                "repo",
+                "run",
+                "duration",
+                "datetime",
+                "state",
+                "bytes",
+                "count"
+              ]
+            }
+          },
+          "tone": { "type": ["string", "object"] },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+                "value": {
+                  "type": ["string", "number", "boolean", "null", "object"],
+                  "required": ["$ref"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "$ref": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "format": {
+                  "enum": [
+                    "issue",
+                    "pr",
+                    "url",
+                    "sha",
+                    "repo",
+                    "run",
+                    "duration",
+                    "datetime",
+                    "state",
+                    "bytes",
+                    "count"
+                  ]
+                },
+                "tone": { "enum": ["ok", "warn", "error", "muted", "neutral"] },
+                "text": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                "ref": { "type": "string", "minLength": 1 },
+                "issue": {
+                  "type": ["string", "number", "boolean", "null", "object"],
+                  "required": ["$ref"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "$ref": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "pr": {
+                  "type": ["string", "number", "boolean", "null", "object"],
+                  "required": ["$ref"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "$ref": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "run": {
+                  "type": ["string", "number", "boolean", "null", "object"],
+                  "required": ["$ref"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "$ref": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "url": {
+                  "type": ["string", "number", "boolean", "null", "object"],
+                  "required": ["$ref"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "$ref": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          },
+          "blocks": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "enum": [
+                    "heading",
+                    "markdown",
+                    "keyvalue",
+                    "table",
+                    "list",
+                    "badge",
+                    "code",
+                    "links"
+                  ]
+                },
+                "text": { "type": "string" },
+                "language": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 40
+                },
+                "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+                "columns": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 6,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "rows": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "array",
+                    "maxItems": 6,
+                    "items": {
+                      "type": ["string", "number", "boolean", "null", "object"],
+                      "required": ["$ref"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "$ref": { "type": "string", "minLength": 1 }
+                      }
+                    }
+                  }
+                },
+                "formats": {
+                  "type": "array",
+                  "maxItems": 6,
+                  "items": {
+                    "enum": [
+                      "issue",
+                      "pr",
+                      "url",
+                      "sha",
+                      "repo",
+                      "run",
+                      "duration",
+                      "datetime",
+                      "state",
+                      "bytes",
+                      "count"
+                    ]
+                  }
+                },
+                "tone": { "type": ["string", "object"] },
+                "items": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "label": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 120
+                      },
+                      "value": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "null",
+                          "object"
+                        ],
+                        "required": ["$ref"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "$ref": { "type": "string", "minLength": 1 }
+                        }
+                      },
+                      "format": {
+                        "enum": [
+                          "issue",
+                          "pr",
+                          "url",
+                          "sha",
+                          "repo",
+                          "run",
+                          "duration",
+                          "datetime",
+                          "state",
+                          "bytes",
+                          "count"
+                        ]
+                      },
+                      "tone": {
+                        "enum": ["ok", "warn", "error", "muted", "neutral"]
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2048
+                      },
+                      "ref": { "type": "string", "minLength": 1 },
+                      "issue": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "null",
+                          "object"
+                        ],
+                        "required": ["$ref"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "$ref": { "type": "string", "minLength": 1 }
+                        }
+                      },
+                      "pr": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "null",
+                          "object"
+                        ],
+                        "required": ["$ref"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "$ref": { "type": "string", "minLength": 1 }
+                        }
+                      },
+                      "run": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "null",
+                          "object"
+                        ],
+                        "required": ["$ref"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "$ref": { "type": "string", "minLength": 1 }
+                        }
+                      },
+                      "url": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "null",
+                          "object"
+                        ],
+                        "required": ["$ref"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "$ref": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

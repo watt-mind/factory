@@ -19,6 +19,7 @@ import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
 import { validateDecisionRequest } from "./decision.mjs";
 import { processResultMemos } from "./memos.mjs";
+import { validatePresentation } from "./presentation.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 import { confinedRegularFile, PathViolation } from "./workspace.mjs";
@@ -533,6 +534,20 @@ function verifyRefused({ spec, def, candidate, attempt }) {
     context.artifact = candidate.artifact;
     context.artifactHash = hashJson(candidate.artifact);
     checks.push("hash_recomputed");
+  }
+
+  // Presentation is tolerant on the ask (§3.3): a valid one rides on the
+  // result, an invalid one is dropped with its errors — a refusal is never
+  // failed by a malformed summary. Resolved against the accepted artifact, or
+  // {} when the refusal carries none. Not in the artifact hash or the receipt.
+  if (candidate.presentation !== undefined) {
+    const check = validatePresentation(
+      candidate.presentation,
+      candidate.artifact ?? {},
+    );
+    if (check.valid) context.presentation = candidate.presentation;
+    else context.presentationErrors = check.errors;
+    checks.push("presentation_validated");
   }
 
   const { evidence, evidenceSetHash } = retainedEvidence(candidate);
@@ -1120,6 +1135,22 @@ function verifyCompleted({
 
   const { evidence, evidenceSetHash } = retainedEvidence(candidate);
 
+  // Presentation is tolerant on the ask (§3.3): a valid one rides on the run
+  // result, an invalid one is dropped with its errors — a completed run whose
+  // artifact passed is never failed by a malformed summary. Resolved against
+  // the accepted artifact, and excluded from artifactHash and the receipt.
+  const presentationContext = {};
+  const presentationChecks = [];
+  if (candidate.presentation !== undefined) {
+    const check = validatePresentation(
+      candidate.presentation,
+      candidate.artifact,
+    );
+    if (check.valid) presentationContext.presentation = candidate.presentation;
+    else presentationContext.presentationErrors = check.errors;
+    presentationChecks.push("presentation_validated");
+  }
+
   const result = {
     schemaVersion: "factory.run-result/v1",
     runId: spec.runId,
@@ -1131,6 +1162,7 @@ function verifyCompleted({
     artifactHash,
     ...(evidence !== undefined ? { evidence } : {}),
     evidenceSetHash,
+    ...presentationContext,
     verification: {
       status: "passed",
       checks: [
@@ -1143,6 +1175,7 @@ function verifyCompleted({
           ? ["evidence_recomputed"]
           : []),
         ...handoffChecks,
+        ...presentationChecks,
         ...memoOutcome.checks,
       ],
     },

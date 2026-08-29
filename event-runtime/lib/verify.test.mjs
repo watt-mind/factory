@@ -511,6 +511,132 @@ describe("verifyResult", () => {
     }
   });
 
+  test("completed with a valid presentation → kept on the result, hash unchanged, run completes", () => {
+    const presentation = {
+      schemaVersion: "factory.presentation/v1",
+      blocks: [
+        { type: "heading", text: "Status report" },
+        {
+          type: "keyvalue",
+          items: [
+            {
+              label: "Action",
+              value: { $ref: "/recommendedAction" },
+              format: "state",
+            },
+          ],
+        },
+      ],
+    };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+      presentation,
+    });
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+    expect(out.kind).toBe("completed");
+    expect(out.result.presentation).toEqual(presentation);
+    expect(out.result.presentationErrors).toBeUndefined();
+    // presentation is view-only: not in the artifact hash or the receipt.
+    expect(out.result.artifactHash).toBe(hashJson(VALID_ARTIFACT));
+    expect(out.receipt.artifactHash).toBe(hashJson(VALID_ARTIFACT));
+    expect(out.receipt.presentation).toBeUndefined();
+    expect(out.result.verification.checks).toContain("presentation_validated");
+  });
+
+  test("completed with an invalid presentation → dropped with errors, still completed, hash unchanged", () => {
+    const bad = {
+      schemaVersion: "factory.presentation/v1",
+      blocks: [
+        {
+          type: "keyvalue",
+          items: [{ label: "x", value: { $ref: "/no/such/path" } }],
+        },
+      ],
+    };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+      presentation: bad,
+    });
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+    expect(out.kind).toBe("completed");
+    expect(out.result.terminalState).toBe("completed");
+    expect(out.result.presentation).toBeUndefined();
+    expect(out.result.presentationErrors).toBeArray();
+    expect(out.result.presentationErrors[0]).toContain("/no/such/path");
+    // a malformed summary must not change the artifact hash vs no presentation
+    expect(out.result.artifactHash).toBe(hashJson(VALID_ARTIFACT));
+    expect(out.receipt.artifactHash).toBe(hashJson(VALID_ARTIFACT));
+  });
+
+  test("refused with a presentation → validated against the accepted artifact (or {})", () => {
+    const presentation = {
+      schemaVersion: "factory.presentation/v1",
+      blocks: [{ type: "heading", text: "Why I stopped" }],
+    };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      presentation,
+    });
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+    expect(out.kind).toBe("refused");
+    expect(out.result.presentation).toEqual(presentation);
+    expect(out.result.presentationErrors).toBeUndefined();
+    expect(out.result.verification.checks).toContain("presentation_validated");
+  });
+
+  test("refused with a presentation whose $ref needs the artifact → dropped when no artifact", () => {
+    const presentation = {
+      schemaVersion: "factory.presentation/v1",
+      blocks: [
+        {
+          type: "keyvalue",
+          items: [{ label: "x", value: { $ref: "/anything" } }],
+        },
+      ],
+    };
+    const dir = makeWorkspace({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "refused",
+      reasonCode: "needs_human",
+      presentation,
+    });
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+    });
+    expect(out.kind).toBe("refused");
+    expect(out.result.presentation).toBeUndefined();
+    expect(out.result.presentationErrors).toBeArray();
+    expect(out.result.presentationErrors[0]).toContain("/anything");
+  });
+
   test("refused with an unknown reasonCode → ContractViolation", () => {
     const dir = makeWorkspace({
       schemaVersion: "factory.agent-result/v1",
