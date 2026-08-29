@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { COMMAND_NAMES } from "./cli/commands.mjs";
+import { renderInspect } from "./cli/inspect.mjs";
 import { CLI, freePort, runCli } from "./cli/test-helpers.mjs";
 
 const EXPECTED_COMMANDS = [
@@ -142,5 +143,69 @@ describe("cli routing", () => {
     }
 
     expect(runRequests).toBe(1);
+  });
+
+  test("inspect without presentation matches the shared detail renderer", async () => {
+    const detail = {
+      run: {
+        runId: "run-1301",
+        state: "COMPLETED",
+        attempts: 1,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:01:00.000Z",
+        spec: {
+          agent: "worker",
+          adapter: "fake",
+          outputContract: "factory.agent-result/v1",
+          maxAttempts: 1,
+        },
+      },
+      workspace: "/tmp/run-1301",
+      lifecycle: [],
+      result: { terminalState: "COMPLETED" },
+    };
+    const lines = [];
+    const originalLog = console.log;
+    console.log = (...values) => lines.push(values.join(" "));
+    try {
+      await renderInspect(detail, {});
+    } finally {
+      console.log = originalLog;
+    }
+
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        if (new URL(request.url).pathname === "/runs/run-1301")
+          return Response.json(detail);
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "inspect", "run-1301"], {
+        env: {
+          ...process.env,
+          FACTORY_EVENT_PORT: String(server.port),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stdout] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+      ]);
+      expect(status).toBe(0);
+      expect(stdout.trimEnd().split("\n")).toEqual(
+        lines.flatMap((line) => line.split("\n")),
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("inspect without a run ID reports usage", () => {
+    const result = runCli(["inspect"]);
+    expect(result.status).not.toBe(0);
+    expect(result.all).toContain("usage: inspect <run-id>");
   });
 });

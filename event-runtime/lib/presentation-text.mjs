@@ -113,7 +113,11 @@ function renderBlock(block, width) {
             item[candidate] !== undefined && item[candidate] !== null,
         );
         const target = key ? text(item[key]) : "—";
-        return `${item.label ?? target} <${target}>`;
+        const label =
+          typeof item.label === "string" && item.label.trim()
+            ? item.label
+            : target;
+        return `${label} <${target}>`;
       });
     default:
       return [];

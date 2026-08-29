@@ -20,7 +20,11 @@ async function viewFor(client, agentRef) {
 }
 
 export async function inspect(client, runId) {
-  const view = await client.run(runId);
+  return renderInspect(await client.run(runId), client);
+}
+
+/** Render one already-fetched run detail for every inspect entry point. */
+export async function renderInspect(view, client) {
   const { run } = view;
   console.log(`run        ${run.runId}`);
   console.log(

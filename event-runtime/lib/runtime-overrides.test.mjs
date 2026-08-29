@@ -20,8 +20,10 @@ import {
   mergeAgentPatch,
   modelTierCellKey,
   modelTierConfigView,
+  modelTierConfigViewTolerant,
   plannedDef,
   putOverride,
+  runtimeModelTierCellsTolerant,
   validateAgentPatch,
   validateEventTypePatch,
   validateModelTierCellPatch,
@@ -394,6 +396,39 @@ describe("policy model-tier cell overrides (gh-859)", () => {
     );
     expect(() => applyModelTierCellOverrides(db, tracked)).toThrow(
       /invalid stored modelTierCell row.*unknown model adapter.*delete or correct/,
+    );
+    db.close();
+  });
+
+  test("tolerant model-tier reads report malformed rows and retain valid cells", () => {
+    const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:strong",
+      patch: { model: "runtime-strong" },
+    });
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      KIND_MODEL_TIER_CELL,
+      "pi:standard",
+      JSON.stringify({ model: "runtime-standard", extra: true }),
+      new Date(0).toISOString(),
+      "test",
+    );
+
+    expect(runtimeModelTierCellsTolerant(db)).toEqual({
+      cells: { pi: { strong: "runtime-strong" } },
+      problems: [
+        {
+          key: "pi:standard",
+          error: expect.stringContaining("accepts exactly one field: model"),
+        },
+      ],
+    });
+    expect(modelTierConfigViewTolerant(db, tracked).effective.pi.strong).toBe(
+      "runtime-strong",
     );
     db.close();
   });

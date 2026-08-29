@@ -79,12 +79,14 @@ Repo <https://github.com/watt-mind/factory>`);
             items: [
               { url: "https://example.test/runs/1" },
               { issue: "WM-1289" },
+              { label: "", url: "https://example.test/runs/2" },
+              { label: "  \t", url: "https://example.test/runs/3" },
             ],
           },
         ],
       }),
     ).toBe(
-      "https://example.test/runs/1 <https://example.test/runs/1>\nWM-1289 <WM-1289>",
+      "https://example.test/runs/1 <https://example.test/runs/1>\nWM-1289 <WM-1289>\nhttps://example.test/runs/2 <https://example.test/runs/2>\nhttps://example.test/runs/3 <https://example.test/runs/3>",
     );
   });
 });

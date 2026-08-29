@@ -6,7 +6,7 @@ import { loadedExtensions, maskExtensionSecrets } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
 import { loadNodesConfig, nodesConfigPath } from "./workers-remote.mjs";
 import { loadModelTierMap } from "./registry.mjs";
-import { modelTierConfigView } from "./runtime-overrides.mjs";
+import { modelTierConfigViewTolerant } from "./runtime-overrides.mjs";
 
 const POLICY_KEYS = [
   "packs",
@@ -283,7 +283,10 @@ export function configView({
   extensions = loadedExtensions(),
 } = {}) {
   const policy = readYaml(resolveConfigPath("policy", { root }));
-  const policyModels = modelTierConfigView(db, loadModelTierMap({ root }));
+  const policyModels = modelTierConfigViewTolerant(
+    db,
+    loadModelTierMap({ root }),
+  );
   const schedule = readYaml(resolveConfigPath("schedule", { root }));
   const nodesFile = nodesConfigPath(root);
   const loadedAt = registryLoadedAt ?? new Date(now).toISOString();
