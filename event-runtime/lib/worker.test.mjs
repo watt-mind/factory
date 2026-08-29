@@ -4830,6 +4830,14 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     "worktree-up handles an actual baseline-red repo verification and deduplicates baseline blocker comments",
     { timeout: 45_000 },
     async () => {
+      // This test provisions a real worktree with bin/worktree-up.sh, which
+      // takes its lifecycle lock inside the repository's shared git directory.
+      // When the suite is itself the command a handoff sandbox is verifying,
+      // that directory is mounted read-only on purpose (GH-967): ticket code
+      // must not be able to write the host repository's refs or objects. The
+      // gate's own worktree provisioning happens outside the sandbox, so this
+      // is the test setup hitting the boundary, not the behaviour under test.
+      if (insideHandoffSandbox()) return;
       const repoRoot = process.cwd();
       const repoName = "wm-baseline-real";
       const ticket = `WM-${732000000 + Math.floor(Math.random() * 1_000_000)}`;
