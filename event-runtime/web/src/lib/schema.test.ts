@@ -7,16 +7,13 @@ interface SharedCase {
   schema: unknown;
   value: unknown;
   valid: boolean;
-  errorContains?: string[];
+  errors: string[];
 }
 
 const sharedCases = (
   JSON.parse(
     readFileSync(
-      new URL(
-        "../../../lib/fixtures/schema-validation-cases.json",
-        import.meta.url,
-      ),
+      new URL("./fixtures/schema-validation-cases.json", import.meta.url),
       "utf8",
     ),
   ) as { cases: SharedCase[] }
@@ -35,9 +32,7 @@ describe("shared fixture schema-validation-cases.json", () => {
     expect(result.valid, `${c.name}: ${result.errors.join("; ")}`).toBe(
       c.valid,
     );
-    for (const substring of c.errorContains ?? []) {
-      expect(result.errors.join("\n"), c.name).toContain(substring);
-    }
+    expect(result.errors, c.name).toEqual(c.errors);
   });
 });
 

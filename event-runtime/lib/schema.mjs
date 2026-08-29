@@ -142,7 +142,7 @@ function check(schema, value, path, errors) {
         return;
       }
       if (!pattern.test(value)) {
-        errors.push(`${path}: does not match pattern ${schema.pattern}`);
+        errors.push(`${path}: does not match pattern`);
       }
     }
     if (schema.format === "uri" && !URL.canParse(value)) {
