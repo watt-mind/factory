@@ -1035,7 +1035,7 @@ describe("worktree baseline verification (WM-334)", () => {
 
   test("a multi-line verification failure retains the failing test name and full log", () => {
     const { dir, record } = worktreeWorkspace(
-      "printf 'suite start\\n(fail) totals > rejects an invalid total\\nRan 2045 tests across 150 files.\\n'; printf 'error: expected 400, received 200\\n' >&2; exit 1",
+      "printf 'suite start\\n(pass) parser > reads bun (fail) and ✗ lines\\n(fail) totals > rejects an invalid total\\nRan 2045 tests across 150 files.\\n'; printf 'error: expected 400, received 200\\n' >&2; exit 1",
       null,
     );
     try {
@@ -1054,6 +1054,8 @@ describe("worktree baseline verification (WM-334)", () => {
         "(fail) totals > rejects an invalid total",
       );
       expect(err.violations[0]).toContain("error: expected 400, received 200");
+      // A passing test whose name contains "(fail)" is not a failure marker.
+      expect(err.violations[0]).not.toContain("(pass) parser");
     }
 
     const verifyLog = readFileSync(path.join(dir, ".verify.log"), "utf8");

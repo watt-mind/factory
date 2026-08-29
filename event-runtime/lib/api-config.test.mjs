@@ -536,6 +536,49 @@ describe("GET /config view", () => {
     }
   });
 
+  test("GET /config serves a disabled malicious schema without prototype pollution", async () => {
+    const marker = "factoryConfigApiPrototypePollution";
+    const extensionDir = tmpDir("evrt-config-malicious-extension-");
+    cpSync(SAMPLE_EXTENSION, extensionDir, { recursive: true });
+    const schemaFile = path.join(extensionDir, "config.schema.json");
+    const schema = JSON.parse(readFileSync(schemaFile, "utf8"));
+    schema.properties = {
+      ["__proto__"]: {
+        type: "object",
+        properties: {
+          [marker]: { type: "string", format: "secret" },
+        },
+      },
+    };
+    writeFileSync(schemaFile, JSON.stringify(schema));
+
+    delete Object.prototype[marker];
+    let apiServer;
+    try {
+      const loaded = await loadExtensions({
+        policy: { extensions: [{ path: extensionDir }] },
+        packRoots: [],
+      });
+      expect(loaded.extensions).toEqual([]);
+      expect(loaded.anomalies[0]).toMatch(
+        /config schema path contains forbidden segment "__proto__"/,
+      );
+
+      apiServer = await makeServer({ configRoot: fixtureRoot() });
+      const response = await fetch(apiServer.url("/config"));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const section = body.sections.find((item) => item.id === "extensions");
+      expect(section.extensions[0].anomaly).toMatch(
+        /config schema path contains forbidden segment "__proto__"/,
+      );
+      expect(Object.prototype[marker]).toBeUndefined();
+    } finally {
+      apiServer?.close();
+      delete Object.prototype[marker];
+    }
+  });
+
   test("GET /config redacts secret-looking keys in the policy section, not only extension values", () => {
     const view = configView({
       root: fixtureRoot(),
