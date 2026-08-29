@@ -26,6 +26,8 @@ import type {
   JanitorResult,
   JournalView,
   LifecycleEvent,
+  ModelTierCellResult,
+  ModelTierConfig,
   OutboxRow,
   Proposal,
   RepoItem,
@@ -419,6 +421,44 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
     schedules: mock(async (): Promise<{ schedules: any[] }> => ({
       schedules: [],
     })),
+    modelTierConfig: mock(async (): Promise<ModelTierConfig> => ({
+      adapters: ["claude", "pi", "agy", "cursor"],
+      tiers: ["strong", "standard", "light"],
+      tracked: {
+        claude: { strong: "opus", standard: "sonnet", light: "haiku" },
+      },
+      runtime: {},
+      effective: {
+        claude: { strong: "opus", standard: "sonnet", light: "haiku" },
+      },
+    })),
+    putModelTierCell: mock(
+      async (
+        adapter: string,
+        tier: string,
+        model: string,
+      ): Promise<ModelTierCellResult> => ({
+        adapter,
+        tier,
+        trackedModel: null,
+        runtimeModel: model,
+        effectiveModel: model,
+        source: "runtime",
+        restartRequired: true,
+      }),
+    ),
+    deleteModelTierCell: mock(
+      async (adapter: string, tier: string): Promise<ModelTierCellResult> => ({
+        adapter,
+        tier,
+        trackedModel: null,
+        runtimeModel: null,
+        effectiveModel: null,
+        source: "tracked",
+        restartRequired: true,
+        deleted: true,
+      }),
+    ),
     triggerSchedule: mock(async (_loop: string, _prNumbers?: number[]) => ({
       admitted: true,
       duplicate: false,
