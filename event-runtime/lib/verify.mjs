@@ -347,6 +347,14 @@ export class SandboxUnavailable extends Error {
   }
 }
 
+/**
+ * #1214 scrubbed `FACTORY_*` out of the inherited handoff environment and
+ * pinned `FACTORY_REPOS_ROOT` at the worktree. The sandbox subsumes the scrub
+ * — `env -i` in the chroot and the explicit map in the nested pass-through
+ * inherit nothing at all, dropping every non-FACTORY credential too — so only
+ * the pin needs carrying, and both paths set it (see HANDOFF_SANDBOX_SETUP).
+ */
+
 /** `dispatch.owned_paths_conformance` in config/policy.yaml: advisory (default) | strict. */
 export function policyOwnedPathsConformance(root = reposRoot()) {
   const file = resolveConfigPath("policy", { root });
@@ -377,11 +385,14 @@ export function outputTail(output, lines = HANDOFF_TAIL_LINES) {
 /**
  * Run one handoff command as ordinary code in the worktree, capturing the
  * whole output to `logPath` and returning an observation the worker can quote.
+ * `cwd` is where the command runs (may be a subdirectory such as the web
+ * package); `worktreePath` is always the worktree root and is what
+ * FACTORY_REPOS_ROOT is pinned to.
  */
 export function runHandoffCommand({
   command,
   cwd,
-  workspaceRoot = cwd,
+  worktreePath = cwd,
   logPath,
   timeoutMs,
   spawn = spawnSync,
@@ -390,7 +401,7 @@ export function runHandoffCommand({
   sandboxAvailable = () => handoffSandboxAvailable({ nested }),
 }) {
   if (!sandboxAvailable()) throw new SandboxUnavailable();
-  const root = realpathSync(workspaceRoot);
+  const root = realpathSync(worktreePath);
   const commandCwd = realpathSync(cwd);
   const relativeCwd = path.relative(root, commandCwd);
   if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) {
@@ -428,6 +439,11 @@ export function runHandoffCommand({
           ],
           {
             cwd: commandCwd,
+            // Stricter than #1214's FACTORY_* scrub, which the outer
+            // boundary already subsumes: nothing is inherited at all, so no
+            // forge/tracker/provider credential can reach the command even if
+            // the enclosing guest ever gains one. The repos-root pin (#1214)
+            // is carried explicitly.
             env: {
               ...HANDOFF_HOST_ENV,
               HOME: process.env.HOME ?? "/tmp/home",
@@ -1350,7 +1366,7 @@ function verifyCompleted({
       const obs = runHandoffStep({
         command: worktreeRecord.verify,
         cwd: worktreePath,
-        workspaceRoot: worktreePath,
+        worktreePath,
         logPath: path.join(workspaceDir, ".verify.log"),
         timeoutMs: verifyTimeoutMs,
       });
@@ -1376,7 +1392,7 @@ function verifyCompleted({
       const obs = runHandoffStep({
         command: ticketCommand,
         cwd: worktreePath,
-        workspaceRoot: worktreePath,
+        worktreePath,
         logPath: path.join(workspaceDir, ".verify.ticket.log"),
         timeoutMs: verifyTimeoutMs,
       });
@@ -1409,7 +1425,7 @@ function verifyCompleted({
       const obs = runHandoffStep({
         command: HANDOFF_WEB_BUILD_COMMAND,
         cwd: path.join(worktreePath, HANDOFF_WEB_BUILD_DIR),
-        workspaceRoot: worktreePath,
+        worktreePath,
         logPath: path.join(workspaceDir, ".verify.web.log"),
         timeoutMs: verifyTimeoutMs,
       });

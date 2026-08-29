@@ -16,6 +16,8 @@ import {
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
+import { resolveRefs } from "./lib/presentation.mjs";
+import { renderText } from "./lib/presentation-text.mjs";
 import {
   contributionCounts,
   formatContributionCounts,
@@ -361,6 +363,60 @@ export function initCommand(args = []) {
   return results;
 }
 
+/** Add optional Layer B text to the split inspect command, before its artifact. */
+export async function inspectWithPresentation(args) {
+  const lines = [];
+  const originalLog = console.log;
+  console.log = (...values) => lines.push(values.join(" "));
+  try {
+    await COMMANDS.inspect(args);
+  } finally {
+    console.log = originalLog;
+  }
+
+  let detail = null;
+  if (args[0]) {
+    try {
+      detail = await callControl("GET", `/runs/${encodeURIComponent(args[0])}`);
+    } catch {
+      // Inspect already produced the useful ground truth; presentation is garnish.
+    }
+  }
+  const extra = [];
+  if (detail?.result?.presentation) {
+    try {
+      const rendered = renderText(
+        resolveRefs(detail.result.presentation, detail.result.artifact ?? {}),
+        { width: Math.max(20, Number(process.stdout.columns ?? 80) - 2) },
+      );
+      extra.push("  presentation");
+      for (const line of rendered.split("\n")) extra.push(`  ${line}`);
+    } catch (error) {
+      // Garnish must never mask the buffered inspect output.
+      console.warn(
+        `warning: presentation not rendered: ${error?.message ?? error}`,
+      );
+    }
+  } else if (detail?.result?.presentationErrors?.length) {
+    const errors = detail.result.presentationErrors;
+    extra.push(`  the agent's summary was dropped: ${errors.length} errors`);
+    for (const error of errors) extra.push(`    - ${error}`);
+  }
+
+  if (extra.length > 0) {
+    const artifactAt = lines.findIndex((line) => /^ {2}artifact /.test(line));
+    const resultAt = lines.findIndex((line) => line.trim() === "result");
+    const at =
+      artifactAt >= 0
+        ? artifactAt
+        : resultAt >= 0
+          ? resultAt + 1
+          : lines.length;
+    lines.splice(at, 0, ...extra);
+  }
+  for (const line of lines) originalLog(line);
+}
+
 export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === "init") return initCommand(args);
@@ -370,6 +426,7 @@ export async function dispatch(argv = process.argv.slice(2)) {
   if (command === "extensions") return extensionsCommand(args);
   if (command === "pack") return packCommand(args);
   if (command === "artifacts") return artifactsCommand(args);
+  if (command === "inspect") return inspectWithPresentation(args);
   if (!Object.hasOwn(COMMANDS, command)) {
     console.error(USAGE);
     process.exit(1);
