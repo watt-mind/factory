@@ -10,6 +10,10 @@ Factory CI uses a hybrid runner strategy designed for public open-source operati
 
 Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
 
+### Runner host dependencies
+
+Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-latest` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
+
 ## Fork PR sandboxing & dual routing
 
 In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-latest` to determine the execution lane based on the event context:
