@@ -872,6 +872,36 @@ function eligible(
   );
 }
 
+/**
+ * Bound the per-pass cost of a proposal backlog. The dispatch eligibility gate
+ * reads the per-repo in-flight list (`fetchInFlight`, a slow control-plane read)
+ * for every open dispatch proposal, so a backlog turned each planning pass into
+ * O(open-proposals × read-latency) — stalling the serve loop and letting fresh
+ * chain dispatch proposals expire before they were ever approved (#1064).
+ *
+ * Memoize that read by repo for the life of one pass so it is fetched at most
+ * once per repo, never once-per-proposal. The wrapper is transparent otherwise:
+ * every other option (including the `linearRateLimitedUntil` deferral that
+ * dispatchSafe writes back) stays on the same object across the pass. A dispatch
+ * bag without a `fetchInFlight` (the common non-dispatch pass) is returned
+ * unchanged.
+ */
+function withPassInFlightCache(dispatch) {
+  const base = dispatch?.fetchInFlight;
+  if (typeof base !== "function") return dispatch;
+  const byRepo = new Map();
+  return {
+    ...dispatch,
+    fetchInFlight(repoConfig) {
+      const key = repoConfig?.name ?? repoConfig?.team ?? repoConfig ?? "";
+      if (byRepo.has(key)) return byRepo.get(key);
+      const value = base(repoConfig);
+      byRepo.set(key, value);
+      return value;
+    },
+  };
+}
+
 function noteOpenReason(db, id, reason) {
   db.query(
     `UPDATE proposals SET reason = ? WHERE id = ? AND status = 'open'`,
@@ -938,6 +968,9 @@ async function runPass(
     const approved = [];
     const open = [];
     const errors = [];
+    // One in-flight read per repo for the whole pass, shared across every
+    // proposal's eligibility recheck (#1064).
+    const passDispatch = withPassInFlightCache(dispatch);
     let rows;
     try {
       rows = db
@@ -970,7 +1003,7 @@ async function runPass(
           try {
             reason = eligible(db, row, registry, policy, {
               dispatchEligibility,
-              dispatch,
+              dispatch: passDispatch,
               now,
               hooks,
               hookTimeoutMs,

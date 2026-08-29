@@ -1829,4 +1829,36 @@ describe("chain auto approval (WM-357)", () => {
       "auto_approval_ineligible:dispatch_recheck_failed:linear_read_failed: HTTP 503 upstream",
     );
   });
+
+  test("a backlog of dispatch proposals for one repo reads in-flight at most once per pass (#1064)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 6 }, (_, i) =>
+      dispatchSeed(db, `backlog-${i}`, { ticket: `WM-70${i}` }),
+    );
+    // The eligibility gate reads the per-repo in-flight list on every dispatch
+    // proposal; the pass must collapse that to one read for the shared repo.
+    let inFlightReads = 0;
+    const fetchInFlight = () => {
+      inFlightReads += 1;
+      return [];
+    };
+    const dispatchEligibility = (payload, dispatch) => {
+      dispatch.fetchInFlight({ name: payload.repo });
+      return {
+        ok: true,
+        evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+      };
+    };
+
+    const result = await auto(db, {
+      dispatchEligibility,
+      dispatch: { fetchInFlight },
+      runtimeGuard: () => null,
+    });
+
+    expect(result.approved.map((row) => row.proposalId).sort()).toEqual(
+      backlog.map((row) => row.id).sort(),
+    );
+    expect(inFlightReads).toBe(1);
+  });
 });
