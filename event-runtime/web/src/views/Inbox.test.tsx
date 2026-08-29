@@ -445,6 +445,7 @@ describe("Inbox view", () => {
     expect(view.queryByText("Expired by kind")).toBeNull();
     expect(view.queryByText("Expired by proposal")).toBeNull();
     expect(view.getByRole("tab", { name: /Open/ }).textContent).toContain("1");
+    expect(view.getByRole("tab", { name: /All/ }).textContent).toContain("1");
 
     fireEvent.click(view.getByRole("button", { name: "Expired (2)" }));
     await waitFor(() => view.getByText("Expired by kind"));

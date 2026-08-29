@@ -407,7 +407,11 @@ export function proposalTtlLabel(
   return `${minutes}m left`;
 }
 
-/** Expired items stay available in the Open tab, but are not actionable by default. */
+/**
+ * Expired items stay available in the Open tab, but are not actionable by default.
+ * Must agree with the `open` count predicate in `inboxCounts` (event-runtime/lib/inbox.mjs)
+ * so the sidebar badge and the Open tab count match.
+ */
 export function isExpiredInboxItem(
   item: InboxItem,
   proposalsById: Map<string, Proposal>,
@@ -776,8 +780,10 @@ export function Inbox({
       open: 0,
       acked: 0,
       resolved: 0,
-      all: items.length,
+      all: 0,
     };
+    // Expired open items live behind the Expired chip, so every tab count
+    // excludes them and open + acked + resolved === all.
     for (const it of items) {
       if (
         itemStatus(it) === "open" &&
@@ -786,6 +792,7 @@ export function Inbox({
         continue;
       }
       c[itemStatus(it)] += 1;
+      c.all += 1;
     }
     return c;
   }, [items, now, proposalsById]);
@@ -794,10 +801,9 @@ export function Inbox({
     () =>
       items.filter((item) => {
         if (!matchesTab(item, tab)) return false;
-        if (tab !== "open") return true;
-        return (
-          isExpiredInboxItem(item, proposalsById, now) === expiredOnly
-        );
+        if (itemStatus(item) !== "open") return true;
+        const expired = isExpiredInboxItem(item, proposalsById, now);
+        return tab === "open" ? expired === expiredOnly : !expired;
       }),
     [expiredOnly, items, now, proposalsById, tab],
   );

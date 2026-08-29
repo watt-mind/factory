@@ -1008,6 +1008,8 @@ export function resolveInboxItem(
 }
 
 export function inboxCounts(db) {
+  // The expiry predicate below must agree with `isExpiredInboxItem` in
+  // event-runtime/web/src/views/Inbox.tsx (badge vs. Open tab count).
   const totals = db
     .query(
       `SELECT
