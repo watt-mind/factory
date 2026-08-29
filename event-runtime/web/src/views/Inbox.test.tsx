@@ -414,6 +414,45 @@ describe("Inbox view", () => {
     expect(view.queryByText("CI RED")).toBeNull();
   });
 
+  test("hides expired open items by default and shows only them from the Expired chip", async () => {
+    ledger = [
+      item({ id: "active", kind: "BLOCKED", title: "Active decision" }),
+      item({
+        id: "expired-kind",
+        kind: "proposal_expired",
+        title: "Expired by kind",
+      }),
+      item({
+        id: "expired-proposal",
+        kind: "decision_needed",
+        title: "Expired by proposal",
+        refs: { proposalId: "expired-proposal-id" },
+      }),
+    ];
+    api.proposals = mock(async () => ({
+      proposals: [
+        {
+          id: "expired-proposal-id",
+          status: "open",
+          created_at: new Date(Date.now() - 61_000).toISOString(),
+          ttl_seconds: 60,
+        } as Proposal,
+      ],
+    }));
+
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("Active decision"));
+    expect(view.queryByText("Expired by kind")).toBeNull();
+    expect(view.queryByText("Expired by proposal")).toBeNull();
+    expect(view.getByRole("tab", { name: /Open/ }).textContent).toContain("1");
+    expect(view.getByRole("tab", { name: /All/ }).textContent).toContain("1");
+
+    fireEvent.click(view.getByRole("button", { name: "Expired (2)" }));
+    await waitFor(() => view.getByText("Expired by kind"));
+    expect(view.getByText("Expired by proposal")).toBeTruthy();
+    expect(view.queryByText("Active decision")).toBeNull();
+  });
+
   test("proposal rows show a live right-aligned TTL and hide it without one", async () => {
     ledger = [
       item({

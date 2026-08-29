@@ -364,6 +364,8 @@ mutating: false
 
 A definition is admitted only when its adapter can prove the required
 capabilities. Adapter support is a contract, not a hopeful command-line flag.
+Adapters execute only the registry-verified `promptText` snapshot and refuse
+definitions without it; `promptPath` is provenance, not executable prompt source.
 
 **Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
 `factory.artifact-view/v1` document beside the definition annotates pointers
@@ -1127,6 +1129,15 @@ What that buys, verified by real-VM tests in
   upstreams. A placeholder sent anywhere else stays a meaningless string. A
   secret scoped to a host the allowlist does not permit is a policy error, not
   a no-op.
+
+Sandbox runtime mounts are read-only but remain a host-data boundary. Mount
+admission therefore denies every path inside the operator home by default,
+including a path reached by resolving a symlink. The sole explicit exception
+is `$HOME/.factory/event-runtime/workspaces` and its descendants: those are
+runtime-owned disposable workspaces. Raw credential-store denials still take
+precedence over that home rule, so an allow-list entry can never admit a
+credential path. Widening this list is a security review decision, not policy
+configuration.
 
 The result contract is identical to the host path — same `result.json`, same
 artifacts, same exit-code semantics — so verification and receipts cannot tell

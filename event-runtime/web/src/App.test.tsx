@@ -221,6 +221,20 @@ describe("cold query rendering (WM-266)", () => {
 });
 
 describe("sidebar navigation accessibility", () => {
+  test("does not render an Inbox badge or title count when the status excludes expired items", async () => {
+    currentStatus = {
+      ...STATUS,
+      inbox: { open: 0, acked: 2, byKind: { proposal_expired: 2 } },
+    };
+    const { sidebar, queryClient } = renderApp();
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["status"])?.status).toBe("success");
+    });
+    const inbox = sidebar.getByRole("button", { name: "Inbox" });
+    expect(inbox.hasAttribute("aria-describedby")).toBe(false);
+    expect(document.title).toBe("factory · Overview");
+  });
+
   test("detail routes keep their parent navigation entry current", () => {
     expect(navIsCurrent("runs", "run")).toBe(true);
     expect(navIsCurrent("tickets", "prs")).toBe(true);

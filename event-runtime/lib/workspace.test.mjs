@@ -428,6 +428,39 @@ describe("worktree workspaces (WM-108)", () => {
     expect(destroyWorkspace(dir)).toBe(true);
   });
 
+  test("tier escalation handoff reuses the exact checkout without a second bring-up", () => {
+    const first = make("wtrepo", "WM-845", "run_light");
+    const tree = path.join(wtRoot, "WM-845");
+    writeFileSync(path.join(tree, "useful-change"), "retain me\n");
+    const upCalls = calls().filter((call) => call.startsWith("up WM-845"));
+
+    const strong = make("wtrepo", "WM-845", "run_strong", {
+      worktreeHandoff: {
+        rootRunId: "run_light",
+        failedRunId: "run_light",
+        continuationRunId: "run_strong",
+        repo: "wtrepo",
+        ticket: "WM-845",
+        workspacePath: tree,
+        sourceWorkspacePath: first.dir,
+        projectionState: "applied",
+      },
+    });
+    expect(calls().filter((call) => call.startsWith("up WM-845"))).toEqual(
+      upCalls,
+    );
+    expect(
+      readFileSync(path.join(strong.dir, "repo", "useful-change"), "utf8"),
+    ).toBe("retain me\n");
+    // The failed run's wrapper is destroyed once ownership has moved, so an
+    // escalation does not leak one scratch directory per handoff. The
+    // transferred worktree itself survives.
+    expect(existsSync(first.dir)).toBe(false);
+    expect(existsSync(path.join(tree, "useful-change"))).toBe(true);
+    expect(strong.worktree.transferred).toBe(true);
+    expect(destroyWorkspace(strong.dir)).toBe(true);
+  });
+
   test("a refusing worktree_down retains everything, with a filtered reason and raw evidence", () => {
     const { dir } = make("refusing-down", "WM-4", "run_wt4");
     expect(destroyWorkspace(dir, { retain: true })).toBe(false);

@@ -1,3 +1,6 @@
+// Side effect: pins FACTORY_EVENT_HOME to a temp dir before any spawned CLI
+// (merge-apply.mjs) can resolve the operator's live runtime home.
+import "./test-helpers.mjs";
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";

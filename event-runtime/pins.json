@@ -20,7 +20,7 @@
       "commands/factory-ticket.md": "sha256:0e9e4b8f5bfc33a11ecc9103a9845af88431e1560f1917a74b70ceb8ce3b0c28",
       "commands/factory-triage.md": "sha256:20d538ca3c7358b22ea2f263fa1ec8b75affbf222e58c77989b43d34750c0ff1",
       "commands/factory-unblock.md": "sha256:496bffc002afea8eca9d6c1b80f38c6732eb2163f3e41f6d04f0357c4e2905cb",
-      "commands/factory-work.md": "sha256:e617db40b00227ed180884bbe005f57a264f3d5dbae48bb9743777ef7b092693",
+      "commands/factory-work.md": "sha256:2f57b4797a81726bb9f16ccb330e65cc4c9629fe6a8f9f39ab353d404831c301",
       "floor.md": "sha256:b24b46d2e4766a288e056d525d9286bfca21dbe9ae837f820e5fb98f00f95460",
       "skills/factory-handoff/SKILL.md": "sha256:c6e452e33a8101cd4fdca70f650c52b626688a5555826039ebfac26847de8fd9",
       "skills/ticket-spec/SKILL.md": "sha256:6cd7e613072a1f4bd360389b62f3482432cbeb167b1e34b27b4a6099d4685b23"

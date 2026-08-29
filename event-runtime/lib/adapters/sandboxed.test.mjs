@@ -9,14 +9,24 @@ import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapte
  * behaviour is proven in pi.test.mjs behind `preflight()`.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import { SandboxExecutionError } from "../sandbox/gondolin.mjs";
+import { preflight, SandboxExecutionError } from "../sandbox/gondolin.mjs";
 import { builtinAdapters } from "./index.mjs";
 import {
   GUEST_BINARIES,
   GUEST_HOME,
   GUEST_PATH,
+  GUEST_XDG_ROOT,
+  FILESYSTEM_CONFINEMENT_REASON,
+  filesystemConfinementRefusal,
   guestBinary,
   guestEnvironment,
   refuseSandbox,
@@ -31,6 +41,13 @@ const ws = () => tmpDir("evrt-sandboxed-");
 const sandboxDef = (extra = {}) => ({
   ref: "sandboxed@1",
   sandbox: { provider: "gondolin", allowedHosts: [] },
+  ...extra,
+});
+
+const confinedDef = (extra = {}) => ({
+  ref: "confined@1",
+  mutating: false,
+  capabilities: { filesystem: "workspace-only", services: [] },
   ...extra,
 });
 
@@ -67,6 +84,186 @@ describe("sandboxRequested / refuseSandbox", () => {
   });
 });
 
+describe("workspace-only model admission (#962)", () => {
+  test("unsupported model adapters fail closed with one typed reason", () => {
+    for (const adapter of ["agy", "claude", "cursor", "hermes"]) {
+      expect(filesystemConfinementRefusal(adapter, confinedDef())).toEqual({
+        code: FILESYSTEM_CONFINEMENT_REASON,
+        detail: expect.stringContaining(
+          `adapter "${adapter}" has no enforced workspace-only guest path`,
+        ),
+      });
+    }
+  });
+
+  test("pi is admitted only with a valid Gondolin policy and read-only runtime mounts", () => {
+    const runtimeAssets = ws();
+    expect(filesystemConfinementRefusal("pi", confinedDef())).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("requires an explicit sandbox policy"),
+    });
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({ sandbox: { provider: "invalid" } }),
+      ),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("sandbox policy is not enforceable"),
+    });
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({
+          sandbox: {
+            provider: "gondolin",
+            mounts: { "/opt/tools": { path: runtimeAssets } },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("must be read-only"),
+    });
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({
+          sandbox: {
+            provider: "gondolin",
+            mounts: {
+              "/opt/tools": { path: runtimeAssets, readonly: true },
+            },
+          },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({ sandbox: { provider: "gondolin" } }),
+        { sandboxSupport: "unsupported" },
+      ),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining('SANDBOX_SUPPORT="unsupported"'),
+    });
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({
+          sandbox: {
+            provider: "gondolin",
+            mounts: {
+              "/opt/auth": {
+                path: "/home/operator/.config/gh",
+                readonly: true,
+              },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("raw credential store"),
+    });
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({
+          sandbox: {
+            provider: "gondolin",
+            mounts: {
+              "/opt/home": {
+                path: "/home/operator",
+                readonly: true,
+              },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("broad host user home"),
+    });
+
+    const aliasRoot = ws();
+    const homeAlias = path.join(aliasRoot, "runtime-assets");
+    symlinkSync(homedir(), homeAlias);
+    expect(
+      filesystemConfinementRefusal(
+        "pi",
+        confinedDef({
+          sandbox: {
+            provider: "gondolin",
+            mounts: {
+              "/opt/tools": { path: homeAlias, readonly: true },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("resolves to"),
+    });
+  });
+
+  test("runtime mounts deny operator-home data except the workspace allow-list", () => {
+    const home = ws();
+    const program = String.raw`
+      import { mkdirSync, symlinkSync } from "node:fs";
+      import path from "node:path";
+      import { filesystemConfinementRefusal } from "./sandboxed.mjs";
+
+      const mountRefusal = (hostPath) =>
+        filesystemConfinementRefusal("pi", {
+          ref: "confined@1",
+          mutating: false,
+          capabilities: { filesystem: "workspace-only", services: [] },
+          sandbox: {
+            provider: "gondolin",
+            mounts: { "/opt/tools": { path: hostPath, readonly: true } },
+          },
+        });
+      const home = process.env.HOME;
+      const configPath = path.join(home, ".config", "sometool");
+      const localPath = path.join(home, ".local", "share", "x");
+      const workspacePath = path.join(home, ".factory", "event-runtime", "workspaces", "run-x");
+      const rawCredentialPath = path.join(home, ".config", "gh");
+      mkdirSync(configPath, { recursive: true });
+      mkdirSync(localPath, { recursive: true });
+      mkdirSync(workspacePath, { recursive: true });
+      mkdirSync(rawCredentialPath, { recursive: true });
+      const requireReason = (hostPath, reason) => {
+        if (!mountRefusal(hostPath)?.detail.includes(reason)) throw new Error(hostPath + " did not report " + reason);
+      };
+      requireReason(configPath, "lies inside the operator home");
+      requireReason(localPath, "lies inside the operator home");
+      if (mountRefusal(path.dirname(workspacePath)) !== null) throw new Error("workspace root was refused");
+      if (mountRefusal(workspacePath) !== null) throw new Error("workspace descendant was refused");
+      requireReason(rawCredentialPath, "raw credential store");
+      const alias = path.join(process.env.ALIAS_ROOT, "config-alias");
+      symlinkSync(configPath, alias);
+      requireReason(alias, "resolves to");
+      requireReason(alias, "lies inside the operator home");
+    `;
+    const child = Bun.spawnSync({
+      cmd: [process.execPath, "--eval", program],
+      cwd: import.meta.dir,
+      env: { ...process.env, HOME: home, ALIAS_ROOT: ws() },
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(0);
+  });
+
+  test("non-model adapters and mutating definitions retain their existing semantics", () => {
+    expect(filesystemConfinementRefusal("fake", confinedDef())).toBeNull();
+    expect(
+      filesystemConfinementRefusal("claude", confinedDef({ mutating: true })),
+    ).toBeNull();
+  });
+});
+
 describe("guest environment and binaries", () => {
   test("guestEnvironment is built from constants plus locale — the caller's env is not a source", () => {
     const env = guestEnvironment(
@@ -83,10 +280,37 @@ describe("guest environment and binaries", () => {
       HOME: GUEST_HOME,
       PATH: GUEST_PATH,
       TERM: "dumb",
+      XDG_CONFIG_HOME: `${GUEST_XDG_ROOT}/config`,
+      XDG_CACHE_HOME: `${GUEST_XDG_ROOT}/cache`,
+      XDG_DATA_HOME: `${GUEST_XDG_ROOT}/data`,
+      XDG_RUNTIME_DIR: `${GUEST_XDG_ROOT}/run`,
       LANG: "en_US.UTF-8",
       PI_OFFLINE: "1",
     });
     expect(GUEST_PATH.split(":")).toContain("/usr/local/bin");
+  });
+
+  test("adapter additions cannot override disposable HOME/XDG or guest command paths", () => {
+    const env = guestEnvironment({
+      HOME: "/home/operator",
+      PATH: "/host/bin",
+      XDG_CONFIG_HOME: "/home/operator/.config",
+      XDG_CACHE_HOME: "/home/operator/.cache",
+      XDG_DATA_HOME: "/home/operator/.local/share",
+      XDG_RUNTIME_DIR: "/run/user/1000",
+      TERM: "xterm-host",
+      PI_OFFLINE: "1",
+    });
+    expect(env).toMatchObject({
+      HOME: GUEST_HOME,
+      PATH: GUEST_PATH,
+      TERM: "dumb",
+      XDG_CONFIG_HOME: `${GUEST_XDG_ROOT}/config`,
+      XDG_CACHE_HOME: `${GUEST_XDG_ROOT}/cache`,
+      XDG_DATA_HOME: `${GUEST_XDG_ROOT}/data`,
+      XDG_RUNTIME_DIR: `${GUEST_XDG_ROOT}/run`,
+      PI_OFFLINE: "1",
+    });
   });
 
   test("guestBinary defaults to the image contract path and honours an absolute per-definition override", () => {
@@ -288,6 +512,73 @@ describe("runSandboxed", () => {
   });
 });
 
+describe("real guest filesystem confinement (#962)", () => {
+  const report = preflight();
+  const itVM = report.available ? test : test.skip;
+  if (!report.available) {
+    console.warn(
+      `[GH-962] skipping real-VM absolute-path confinement test — ${report.reason}`,
+    );
+  }
+
+  itVM(
+    "sandboxed pi cannot read or write host absolute paths outside its workspace",
+    async () => {
+      const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const hostSecret = `/tmp/factory-host-secret-${nonce}`;
+      const hostEscape = `/tmp/factory-host-escape-${nonce}`;
+      const workspaceDir = ws();
+      writeFileSync(hostSecret, "raw-host-credential\n", { mode: 0o600 });
+      rmSync(hostEscape, { force: true });
+
+      try {
+        const outcome = await runSandboxed({
+          adapter: "pi",
+          def: confinedDef({
+            sandbox: { provider: "gondolin", allowedHosts: [] },
+          }),
+          workspaceDir,
+          argv: [
+            "/bin/sh",
+            "-c",
+            [
+              'if cat "$0" >/dev/null 2>&1; then read_result=ESCAPED; else read_result=blocked; fi',
+              'if printf guest-write > "$1" 2>/dev/null; then write_result=guest-only; else write_result=blocked; fi',
+              'printf \'%s %s\\n\' "$read_result" "$write_result" > ./absolute-path-results',
+            ].join("\n"),
+            hostSecret,
+            hostEscape,
+          ],
+          env: guestEnvironment(
+            {},
+            {
+              HOME: "/home/operator",
+              GITHUB_TOKEN: "ghp-host-only",
+              CURSOR_API_KEY: "cursor-host-only",
+              SSH_AUTH_SOCK: "/tmp/host-agent.sock",
+            },
+          ),
+          timeoutMs: 120_000,
+        });
+
+        expect(outcome).toMatchObject({ exitCode: 0, timedOut: false });
+        expect(
+          readFileSync(
+            path.join(workspaceDir, "absolute-path-results"),
+            "utf8",
+          ),
+        ).toMatch(/^blocked (guest-only|blocked)\n$/);
+        expect(readFileSync(hostSecret, "utf8")).toBe("raw-host-credential\n");
+        expect(existsSync(hostEscape)).toBe(false);
+      } finally {
+        rmSync(hostSecret, { force: true });
+        rmSync(hostEscape, { force: true });
+      }
+    },
+    180_000,
+  );
+});
+
 /**
  * The conformance sweep. Every adapter module in this directory is loaded and
  * handed a sandboxed definition; the only acceptable outcomes are (a) it
@@ -339,6 +630,7 @@ describe("every adapter decides about def.sandbox (WM-313 conformance)", () => {
       const def = {
         ref: `${name}-sandboxed@1`,
         promptPath,
+        promptText: "conformance prompt",
         mutating: false,
         // command adapter shape; ignored by the others
         command: ["/bin/true"],
@@ -389,7 +681,11 @@ describe("pi sandbox prompt staging", () => {
       execute({
         spec: { agent: "pi-invalid-binary@1" },
         def: {
-          ...sandboxDef({ ref: "pi-invalid-binary@1", promptPath }),
+          ...sandboxDef({
+            ref: "pi-invalid-binary@1",
+            promptPath,
+            promptText: "prompt",
+          }),
           sandbox: {
             provider: "gondolin",
             allowedHosts: [],
@@ -418,7 +714,11 @@ describe("pi sandbox prompt staging", () => {
       execute({
         spec: { agent: "pi-invalid-policy@1" },
         def: {
-          ...sandboxDef({ ref: "pi-invalid-policy@1", promptPath }),
+          ...sandboxDef({
+            ref: "pi-invalid-policy@1",
+            promptPath,
+            promptText: "prompt",
+          }),
           sandbox: { provider: "invalid", allowedHosts: [] },
         },
         workspaceDir,

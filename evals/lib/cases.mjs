@@ -17,14 +17,17 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 /**
- * Where a skill's prompt lives, most authoritative first. `shared/` is the
+ * Where a case prompt lives, most authoritative first. `shared/` is the
  * source of truth; `plugins/core/` is emitted from it (`bun build/emit.mjs`)
  * and is the fallback for a checkout where only the emitted tree is present.
+ * Pinned event-runtime agents are the final fallback because their prompts
+ * are not skills, but can still be exercised by the eval runner.
  */
-export function skillSourceCandidates(repoRoot, skill) {
+export function skillSourceCandidates(repoRoot, name) {
   return [
-    path.join(repoRoot, "shared", "skills", skill, "SKILL.md"),
-    path.join(repoRoot, "plugins", "core", "skills", skill, "SKILL.md"),
+    path.join(repoRoot, "shared", "skills", name, "SKILL.md"),
+    path.join(repoRoot, "plugins", "core", "skills", name, "SKILL.md"),
+    path.join(repoRoot, "event-runtime", "agents", `${name}.md`),
   ];
 }
 

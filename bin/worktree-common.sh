@@ -208,6 +208,31 @@ provision_instance_local_configs() { # <checkout> [primary-checkout]
     mkdir -p "$checkout/config"
     cp -f "$source" "$destination"
   done
+
+  # Seed the graphify knowledge graph (#1228). graphify-out/ is gitignored and
+  # expensive to rebuild, so a fresh worktree borrows the primary checkout's copy.
+  # Best-effort by design: it must never fail provisioning, it copies into a
+  # temp dir and renames so a half-copied tree is never observed, and it
+  # hardlinks (cp -Rl) when the filesystem allows, falling back to a plain copy.
+  # Opt out with FACTORY_PROVISION_GRAPHIFY=0. Only seeds when the target
+  # ignores graphify-out/ so a tracked copy is never shadowed.
+  [[ "${FACTORY_PROVISION_GRAPHIFY:-1}" == "0" ]] && return 0
+  local graph_src="$primary/graphify-out" graph_dst="$checkout/graphify-out"
+  [[ -d "$graph_src" && ! -e "$graph_dst" ]] || return 0
+  [[ "$(normalize_path "$graph_src")" != "$(normalize_path "$graph_dst")" ]] || return 0
+  if git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && ! git -C "$checkout" check-ignore -q -- "graphify-out/"; then
+    return 0
+  fi
+  local graph_tmp="$graph_dst.tmp.$$"
+  rm -rf "$graph_tmp"
+  if { cp -Rl "$graph_src" "$graph_tmp" 2>/dev/null || { rm -rf "$graph_tmp"; cp -R "$graph_src" "$graph_tmp"; }; } \
+    && mv "$graph_tmp" "$graph_dst"; then
+    :
+  else
+    rm -rf "$graph_tmp"
+    warn "graphify-out seed skipped: could not copy $graph_src to $graph_dst"
+  fi
 }
 
 [[ "$PORT_BASE" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_BASE must be numeric (got '$PORT_BASE')"

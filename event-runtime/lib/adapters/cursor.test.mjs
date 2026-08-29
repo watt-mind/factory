@@ -376,6 +376,13 @@ if (behavior === "normal") {
   process.exit(0);
 }
 
+if (behavior === "large_transcript") {
+  process.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] },
+  }) + "\\n", () => process.exit(0));
+}
+
 if (behavior === "exit_code") {
   process.exit(parseInt(process.env.FACTORY_TEST_EXIT_CODE || "1", 10));
 }
@@ -455,6 +462,7 @@ if (behavior === "emit_error_tool_result") {
   const defaultDef = {
     ref: "test-cursor-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
   };
   const defaultSpec = {
@@ -498,16 +506,43 @@ if (behavior === "emit_error_tool_result") {
     }
   }
 
-  test("executes stub binary in workspaceDir, passes CURSOR_API_KEY, prompt on argv, captures transcript + trace", async () => {
+  test("refuses a definition without verified promptText before launching Cursor", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      execute({
+        spec: defaultSpec,
+        def: unverifiedDef,
+        workspaceDir,
+        timeoutMs: 5000,
+        env: {
+          PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+          FACTORY_TEST_BEHAVIOR: "normal",
+          FACTORY_TEST_RECORD_FILE: recordFile,
+        },
+      }),
+    ).rejects.toThrow(
+      "cursor: definition test-cursor-agent@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
+  test("executes the verified prompt snapshot after its path changes and captures trace", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: { ...defaultSpec, model: "composer-2.5" },
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
-      timeoutMs: 5000,
+      // The stub still has to spawn and flush a real child; stretch its
+      // liveness ceiling when concurrent CI runs report shared-host load.
+      timeoutMs: loadAdjustedTimeout(5_000),
       env: {
         PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
         CURSOR_API_KEY: "sk-must-be-passed",
@@ -555,6 +590,31 @@ if (behavior === "emit_error_tool_result") {
     expect(usageEvent.payload.durationMs).toBe(1200);
     expect(usageEvent.payload.costUSD).toBeNull();
     expect(usageEvent.payload.usage).toEqual({});
+  });
+
+  test("waits for a large transcript to flush before resolving", async () => {
+    const workspaceDir = ws();
+
+    await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: loadAdjustedTimeout(5_000),
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+    });
+
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(transcript.length).toBeGreaterThan(1024 * 1024);
+    expect(transcript.endsWith("\n")).toBe(true);
+    expect(transcript.split("\n").filter(Boolean).map(JSON.parse)).toHaveLength(
+      1,
+    );
   });
 
   test("nonzero exit code propagates and timedOut is false", async () => {
