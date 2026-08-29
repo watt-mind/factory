@@ -782,10 +782,7 @@ function setAt(obj, keyPath, value) {
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
     if (!isPrototypeSafeRecord(node)) return;
-    if (
-      !Object.hasOwn(node, key) ||
-      !isPrototypeSafeRecord(node[key])
-    ) {
+    if (!Object.hasOwn(node, key) || !isPrototypeSafeRecord(node[key])) {
       Object.defineProperty(node, key, {
         value: {},
         writable: true,
