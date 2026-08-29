@@ -14,6 +14,10 @@ import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
 import { tick } from "../cli/serve.mjs";
+// Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
+// temp home for this whole file, so default-home lookups (artifactsRoot(),
+// dbPath()) never reach the operator's real ~/.factory (OPS-425).
+import { realFactorySnapshot } from "../test-helpers.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
@@ -509,6 +513,8 @@ describe("multi-emit chain resolution (WM-119)", () => {
   });
 
   test("production-shaped resolved history keeps a no-planning tick and health responsive", async () => {
+    const realHomeBefore = realFactorySnapshot();
+    expect(process.env.FACTORY_EVENT_HOME).toBeDefined();
     const db = openDb(":memory:");
     const perfRegistry = {
       ...registry,
@@ -607,6 +613,9 @@ describe("multi-emit chain resolution (WM-119)", () => {
       expect(tickMs).toBeLessThan(200);
       // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
       expect(healthP95).toBeLessThan(500);
+      // The production-shaped benchmark must never touch the operator's real
+      // ~/.factory/event-runtime/runtime.db (no default-home openDb/migration).
+      expect(realFactorySnapshot().dbMtime).toBe(realHomeBefore.dbMtime);
 
       childEventLookups = 0;
       expect(resolveChains(instrumented, perfRegistry)).toEqual({
