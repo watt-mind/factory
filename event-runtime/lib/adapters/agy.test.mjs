@@ -434,7 +434,11 @@ describe("execute with fake binary", () => {
     const body = lines
       .map((l) => `echo ${JSON.stringify(JSON.stringify(l))}`)
       .join("\n");
-    writeFileSync(fakeAgy, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
+    writeFileSync(
+      fakeAgy,
+      `#!/usr/bin/env bash\nif [[ -n "\${FACTORY_TEST_ARGV_FILE:-}" ]]; then printf '%s\\n' "$@" > "$FACTORY_TEST_ARGV_FILE"; fi\n${body}\n`,
+      { mode: 0o755 },
+    );
     return fakeAgy;
   }
 
@@ -459,14 +463,18 @@ describe("execute with fake binary", () => {
     ]);
 
     const promptFile = path.join(tmp, "prompt.md");
-    writeFileSync(promptFile, "Do task");
+    writeFileSync(promptFile, "mutable replacement");
+    const argvFile = path.join(tmp, "argv.txt");
 
     const traces = [];
     const res = await execute({
       spec: { model: "gemini-3.7-flash" },
-      def: { promptPath: promptFile },
+      def: { promptPath: promptFile, promptText: "Do task" },
       workspaceDir: tmp,
-      env: { PATH: `${binDir}:${process.env.PATH}` },
+      env: {
+        PATH: `${binDir}:${process.env.PATH}`,
+        FACTORY_TEST_ARGV_FILE: argvFile,
+      },
       onTrace: (kind, payload) => traces.push({ kind, payload }),
     });
 
@@ -482,6 +490,8 @@ describe("execute with fake binary", () => {
     expect(traces[1].payload.toolUseId).toBe("3");
     expect(traces[2].payload.text).toBe("Listed the workspace.");
     expect(res.usage).toEqual({ input: 10, output: 20, turns: 2 });
+    expect(readFileSync(argvFile, "utf8")).toContain(`Do task${PROMPT_SUFFIX}`);
+    expect(readFileSync(argvFile, "utf8")).not.toContain("mutable replacement");
     expect(existsSync(path.join(tmp, ".transcript.json"))).toBe(true);
   });
 
@@ -512,7 +522,7 @@ describe("execute with fake binary", () => {
     const traces = [];
     await execute({
       spec: {},
-      def: { promptPath: promptFile },
+      def: { promptPath: promptFile, promptText: "Do task" },
       workspaceDir: tmp,
       env: { PATH: `${binDir}:${process.env.PATH}` },
       onTrace: (kind, payload) => traces.push({ kind, payload }),
@@ -547,7 +557,7 @@ describe("execute with fake binary", () => {
     const attempted = [];
     const res = await execute({
       spec: {},
-      def: { promptPath: promptFile },
+      def: { promptPath: promptFile, promptText: "Do task" },
       workspaceDir: tmp,
       env: { PATH: `${binDir}:${process.env.PATH}` },
       onTrace: (kind) => {
