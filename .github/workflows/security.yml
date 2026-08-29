@@ -89,10 +89,12 @@ jobs:
             # Pinned release download (WM-950)
             tag="v8.24.0"
             ver="${tag#v}"
+            archive="$RUNNER_TEMP/gitleaks_${ver}_linux_x64.tar.gz"
             mkdir -p "$HOME/.local/bin"
-            curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            curl -fsSL -o "$archive" \
               "https://github.com/gitleaks/gitleaks/releases/download/${tag}/gitleaks_${ver}_linux_x64.tar.gz"
-            tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$HOME/.local/bin" gitleaks
+            echo "cb49b7de5ee986510fe8666ca0273a6cc15eb82571f2f14832c9e8920751f3a4  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$HOME/.local/bin" gitleaks
             chmod +x "$HOME/.local/bin/gitleaks"
             echo "bin=$HOME/.local/bin/gitleaks" >> "$GITHUB_OUTPUT"
           fi
@@ -143,13 +145,22 @@ jobs:
           git log -1 --oneline
 
       # uv is on the runner host per code-security.md §4 tier 2b; only install
-      # (from astral.sh, not codeload) if it is missing.
+      # a checksum-pinned release archive if it is missing.
       - name: Setup uv (no action download)
         shell: bash
         run: |
           set -euo pipefail
           if ! command -v uvx >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uvx" ]; then
-            curl -LsSf https://astral.sh/uv/install.sh | sh
+            version="0.6.5"
+            archive="$RUNNER_TEMP/uv-x86_64-unknown-linux-gnu.tar.gz"
+            extract_dir="$RUNNER_TEMP/uv-x86_64-unknown-linux-gnu"
+            mkdir -p "$HOME/.local/bin"
+            rm -rf "$extract_dir"
+            curl -fsSL -o "$archive" \
+              "https://github.com/astral-sh/uv/releases/download/${version}/uv-x86_64-unknown-linux-gnu.tar.gz"
+            echo "8fc9895719a1291ecd193cb86f9282ff3649cef797d29eacc74c4f573aab1e2f  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$RUNNER_TEMP"
+            install -m 0755 "$extract_dir/uv" "$extract_dir/uvx" "$HOME/.local/bin/"
           fi
           # $GITHUB_PATH only takes effect starting the *next* step, not this
           # one — resolve the binary directly here rather than relying on PATH.
@@ -190,8 +201,14 @@ jobs:
         run: |
           set -euo pipefail
           if ! command -v actionlint >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/actionlint" ]; then
+            version="1.7.7"
+            archive="$RUNNER_TEMP/actionlint_${version}_linux_amd64.tar.gz"
             mkdir -p "$HOME/.local/bin"
-            bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7 "$HOME/.local/bin"
+            curl -fsSL -o "$archive" \
+              "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+            echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$HOME/.local/bin" actionlint
+            chmod +x "$HOME/.local/bin/actionlint"
           fi
           # $GITHUB_PATH only takes effect starting the *next* step, not this
           # one — resolve the binary directly here rather than relying on PATH.

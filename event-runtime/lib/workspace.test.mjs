@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -18,6 +19,7 @@ import {
   WorktreeSandboxUnsupportedError,
   WorktreeError,
   MEMOS_JSON_NOTICE,
+  confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
   detectWorktreeOwnershipConflict,
@@ -51,6 +53,51 @@ describe("safeJoin", () => {
     expect(() => safeJoin(ws, "")).toThrow(PathViolation);
     expect(() => safeJoin(ws, undefined)).toThrow(PathViolation);
     expect(() => safeJoin(ws, ".")).toThrow(PathViolation);
+  });
+
+  test("canonicalizes a workspace reached through a symlinked ancestor", () => {
+    const realParent = tmpRoot();
+    const realWorkspace = path.join(realParent, "workspace");
+    mkdirSync(realWorkspace);
+    writeFileSync(path.join(realWorkspace, ".transcript.json"), "{}\n");
+
+    const aliasBase = tmpRoot();
+    const aliasParent = path.join(aliasBase, "alias");
+    symlinkSync(realParent, aliasParent, "dir");
+    const aliasedWorkspace = path.join(aliasParent, "workspace");
+
+    const expected = realpathSync(path.join(realWorkspace, ".transcript.json"));
+    expect(safeJoin(aliasedWorkspace, ".transcript.json")).toBe(expected);
+    expect(confinedRegularFile(aliasedWorkspace, ".transcript.json")).toBe(
+      expected,
+    );
+  });
+
+  test("reports a missing workspace root as PathViolation, not ENOENT", () => {
+    const gone = path.join(tmpRoot(), "destroyed-workspace");
+    let caught;
+    try {
+      safeJoin(gone, ".transcript.json");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PathViolation);
+    expect(caught.code).toBeUndefined();
+    expect(caught.detail).toBe("workspace root not resolvable");
+    expect(() => confinedRegularFile(gone, ".transcript.json")).toThrow(
+      PathViolation,
+    );
+  });
+
+  test("keeps symlink escapes closed below a canonicalized workspace", () => {
+    const workspace = tmpRoot();
+    const outside = tmpRoot();
+    writeFileSync(path.join(outside, "secret.txt"), "secret\n");
+    symlinkSync(outside, path.join(workspace, "outside"), "dir");
+
+    expect(() => confinedRegularFile(workspace, "outside/secret.txt")).toThrow(
+      PathViolation,
+    );
   });
 });
 

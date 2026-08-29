@@ -1,5 +1,5 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-test-mjs";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 /**
@@ -27,8 +27,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
+const realReadFileSync = nodeFs.readFileSync;
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -37,6 +40,7 @@ import {
 } from "./adapters/claude.mjs";
 import * as fake from "./adapters/fake.mjs";
 import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
+import { createAdapterRegistry } from "./adapters/index.mjs";
 import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -60,6 +64,7 @@ import {
   cancelRun,
   CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
+  claimedRetryFor,
   CODE_RELOAD_EXIT,
   codeStamp,
   codeStampFiles,
@@ -81,6 +86,7 @@ import {
   policyMaxRunMinutes,
   materializeRunHarness,
   reapExpiredLeases,
+  releaseStalledWorkerLease,
   releaseClaimLock,
   repositoryIsClean,
   repositoryStatus,
@@ -874,6 +880,99 @@ describe("worker", () => {
     expect(parsed.artifacts[1].sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  test("refusal omits a runtime artifact unlinked between preflight and read", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+    // Simulate the guest deleting .transcript.json after confinement passed
+    // but before the host read it: the read itself reports ENOENT.
+    const readSpy = spyOn(nodeFs, "readFileSync").mockImplementation(
+      (file, ...rest) => {
+        if (String(file).endsWith(".transcript.json")) {
+          rmSync(file, { force: true });
+        }
+        return realReadFileSync(file, ...rest);
+      },
+    );
+    try {
+      const summary = await runOnce(db, registry, adapters, opts());
+      expect(summary).toMatchObject({
+        terminalState: "REFUSED",
+        reasonCode: "needs_human",
+      });
+      const parsed = JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      );
+      expect(parsed.artifacts).toEqual([]);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  for (const artifact of [
+    { kind: "transcript", path: ".transcript.json" },
+    { kind: "sandbox-console", path: ".sandbox-console.log" },
+  ]) {
+    for (const linkType of ["absolute", "relative"]) {
+      test(`refusal omits ${artifact.kind} replaced by a ${linkType} final symlink before reading or storing it`, async () => {
+        const db = openDb(":memory:");
+        const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+        const artifactStore = freshRoot();
+        const outsideDir = freshRoot();
+        const secretBytes = `host bytes for ${artifact.kind} ${linkType}\n`;
+        const outsideFile = path.join(outsideDir, "host-secret.txt");
+        writeFileSync(outsideFile, secretBytes, "utf8");
+        // A non-privileged worker cannot open this target. The refusal must
+        // still complete because confinement rejects the link before read.
+        chmodSync(outsideFile, 0);
+        const secretHash = createHash("sha256")
+          .update(secretBytes)
+          .digest("hex");
+        const symlinkedArtifactAdapter = {
+          async execute(args) {
+            const outcome = await fake.execute(args);
+            const runtimePath = path.join(args.workspaceDir, artifact.path);
+            rmSync(runtimePath, { force: true });
+            const target =
+              linkType === "absolute"
+                ? outsideFile
+                : path.relative(args.workspaceDir, outsideFile);
+            symlinkSync(target, runtimePath);
+            return outcome;
+          },
+        };
+
+        const summary = await runOnce(
+          db,
+          registry,
+          { fake: symlinkedArtifactAdapter },
+          opts({ artifactStore }),
+        );
+
+        expect(summary).toMatchObject({
+          terminalState: "REFUSED",
+          reasonCode: "needs_human",
+        });
+        const parsed = JSON.parse(
+          db
+            .query(`SELECT result_json FROM results WHERE run_id = ?`)
+            .get(spec.runId).result_json,
+        );
+        expect(parsed.artifacts.map((entry) => entry.kind)).not.toContain(
+          artifact.kind,
+        );
+        if (artifact.kind === "sandbox-console") {
+          expect(parsed.artifacts.map((entry) => entry.kind)).toEqual([
+            "transcript",
+          ]);
+          expect(existsSync(new URL(parsed.artifacts[0].uri))).toBe(true);
+        }
+        expect(existsSync(path.join(artifactStore, secretHash))).toBe(false);
+      });
+    }
+  }
+
   test("needs_human preserves a valid authored ask, while an invalid ask falls back with its errors", async () => {
     const authored = {
       schemaVersion: "factory.decision-request/v1",
@@ -1484,7 +1583,25 @@ describe("worker", () => {
 
   test("attempt 2 resumes the prior harness session and stale attempt 1 remains fenced", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const resumeRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    resumeRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      // This test owns resume/fencing, not workspace-only admission.
+      capabilities: { filesystem: "read-only", services: ["tracker:read"] },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        maxAttempts: 2,
+        defHash: computeDefHash(
+          resumeRegistry.agents.get("factory-status-report@1"),
+        ),
+      }),
+    );
     const o = opts();
     const stale = claimNext(db, o);
     const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
@@ -1516,7 +1633,7 @@ describe("worker", () => {
     };
     const done = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: resumeAdapter },
       fresh,
       { ...o, now: afterExpiry },
@@ -1530,7 +1647,7 @@ describe("worker", () => {
 
     const zombie = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: resumeAdapter },
       stale,
       { ...o, now: afterExpiry },
@@ -1546,7 +1663,25 @@ describe("worker", () => {
 
   test("attempt 2 cold-starts cleanly when the prior transcript has no resumable session", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const resumeRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    resumeRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      // This test owns resume extraction, not workspace-only admission.
+      capabilities: { filesystem: "read-only", services: ["tracker:read"] },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        maxAttempts: 2,
+        defHash: computeDefHash(
+          resumeRegistry.agents.get("factory-status-report@1"),
+        ),
+      }),
+    );
     const o = opts();
     claimNext(db, o);
     const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
@@ -1584,7 +1719,7 @@ describe("worker", () => {
     };
     const done = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: coldAdapter },
       fresh,
       { ...o, now: afterExpiry },
@@ -1792,6 +1927,90 @@ describe("worker", () => {
     const summary = await runOnce(db, registry, adapters, opts());
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("unknown_adapter");
+  });
+
+  test("workspace-only model execution is refused before workspace creation or adapter spawn (#962)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        defHash: computeDefHash(getAgent(registry, "factory-status-report@1")),
+      }),
+    );
+    const workspacesRoot = freshRoot();
+    let executed = false;
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        claude: {
+          SANDBOX_SUPPORT: "unsupported",
+          async execute() {
+            executed = true;
+            throw new Error("model adapter must not spawn");
+          },
+        },
+      },
+    }).toMap();
+
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({ workspacesRoot }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "filesystem_confinement_unavailable",
+    });
+    expect(executed).toBe(false);
+    expect(readdirSync(workspacesRoot)).toEqual([]);
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ).verification,
+    ).toEqual({ status: "passed", checks: ["filesystem_confinement"] });
+  });
+
+  test("legacy non-mutating model specs without a definition pin fail closed before using the live definition (#962)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "hermes" }));
+    const workspacesRoot = freshRoot();
+    let executed = false;
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        hermes: {
+          SANDBOX_SUPPORT: "unsupported",
+          async execute() {
+            executed = true;
+          },
+        },
+      },
+    }).toMap();
+
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({ workspacesRoot }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "agent_definition_mismatch",
+    });
+    expect(executed).toBe(false);
+    expect(readdirSync(workspacesRoot)).toEqual([]);
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ).verification.checks,
+    ).toEqual(["def_hash_missing"]);
   });
 
   test("cancelRun on a QUEUED run → CANCELLED; on a terminal run → IllegalTransition", () => {
@@ -2443,6 +2662,52 @@ describe("worker", () => {
       { reason_code: "lease_expired" },
     ]);
     expect(claimNext(db, opts())).toBeNull();
+  });
+
+  test("releasing a stalled worker finalizes and marks a retry as a lease expiry", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ maxAttempts: 2 }));
+    const claim = claimNext(db, opts());
+    const staleAt = T0 - 90_001;
+    db.query(
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "w1",
+      "test-host",
+      1,
+      "{}",
+      "fake",
+      new Date(T0).toISOString(),
+      new Date(staleAt).toISOString(),
+      "busy",
+      spec.runId,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        db,
+        { workerId: "w1", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: spec.runId });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(
+      db
+        .query(
+          `SELECT terminal_state, reason_code, finished_at FROM attempts WHERE run_id = ? AND attempt = ?`,
+        )
+        .get(spec.runId, claim.attempt),
+    ).toEqual({
+      terminal_state: "FAILED",
+      reason_code: "lease_expired",
+      finished_at: new Date(T0).toISOString(),
+    });
+    expect(claimedRetryFor(db, spec.runId, claim.attempt + 1)).toEqual({
+      runId: spec.runId,
+      priorAttempt: claim.attempt,
+      reasonCode: "lease_expired",
+    });
   });
 
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {

@@ -376,6 +376,13 @@ export function buildRunSpec(
     // otherwise identical planner inputs nondeterministic.
     defHash: computeDefHash(def),
     capabilities: def.capabilities.services,
+    // Pin workspace-only intent into new RunSpecs so the worker's execution
+    // backstop does not depend solely on a mutable live definition. Legacy
+    // model specs without defHash are refused by the worker instead.
+    ...(def.mutating === false &&
+    def.capabilities.filesystem === "workspace-only"
+      ? { filesystem: "workspace-only" }
+      : {}),
     // Declared repo scope (WM-64) rides in the spec so the proposal the
     // operator approves names it, same as capabilities.
     ...(def.repos ? { repos: def.repos } : {}),
