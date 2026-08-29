@@ -5,6 +5,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -29,8 +31,7 @@ import { computeDefHash } from "./receipts.mjs";
 import { updateHarnessPins } from "./pins.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
-function tempRegistry() {
-  const root = tmpDir("event-registry-");
+function tempRegistry(root = tmpDir("event-registry-")) {
   for (const dir of ["agents", "schemas"]) {
     cpSync(path.join(RUNTIME_ROOT, dir), path.join(root, dir), {
       recursive: true,
@@ -64,8 +65,11 @@ function samplePack(
   return { kind: "fs", name, path: root, namespace };
 }
 
-function tempPack({ name = "sample", namespace = "sample" } = {}) {
-  const root = tmpDir("event-pack-");
+function tempPack({
+  name = "sample",
+  namespace = "sample",
+  root = tmpDir("event-pack-"),
+} = {}) {
   cpSync(SAMPLE_PACK_ROOT, root, { recursive: true });
   writeFileSync(
     path.join(root, "pack.json"),
@@ -550,6 +554,9 @@ describe("registry", () => {
     expect(def.promptPath).toBe(
       path.join(SAMPLE_PACK_ROOT, "agents", "echo.md"),
     );
+    expect(def.promptText).toBe(
+      readFileSync(path.join(SAMPLE_PACK_ROOT, "agents", "echo.md"), "utf8"),
+    );
     expect(def.pins).toEqual(
       JSON.parse(
         readFileSync(path.join(SAMPLE_PACK_ROOT, "pins.json"), "utf8"),
@@ -570,6 +577,89 @@ describe("registry", () => {
       "event-runtime",
       "sample",
     ]);
+  });
+
+  test("filesystem packs reject lexical and symlink resource escapes, including pin generation", async () => {
+    const lexicalContainer = tmpDir("event-pack-lexical-");
+    const lexical = tempPack({ root: path.join(lexicalContainer, "pack") });
+    const lexicalDefFile = path.join(lexical.path, "agents", "echo.json");
+    const lexicalDef = JSON.parse(readFileSync(lexicalDefFile, "utf8"));
+    const outsideRel = "../outside.md";
+    const outsideFile = path.join(lexicalContainer, "outside.md");
+    writeFileSync(outsideFile, "definition-controlled host bytes\n");
+    lexicalDef.prompt = outsideRel;
+    writeFileSync(lexicalDefFile, JSON.stringify(lexicalDef));
+    const lexicalPins = JSON.parse(
+      readFileSync(path.join(lexical.path, "pins.json"), "utf8"),
+    );
+    lexicalPins[outsideRel] = hashBytes(readFileSync(outsideFile));
+    writeFileSync(
+      path.join(lexical.path, "pins.json"),
+      JSON.stringify(lexicalPins),
+    );
+
+    expect(() => loadRegistry({ packRoots: [lexical] })).toThrow(
+      /resource resolves outside pack root/,
+    );
+    await expect(updatePins({ pack: lexical })).rejects.toThrow(
+      /resource resolves outside pack root/,
+    );
+
+    const symlinkContainer = tmpDir("event-pack-symlink-");
+    const symlinked = tempPack({ root: path.join(symlinkContainer, "pack") });
+    const prompt = path.join(symlinked.path, "agents", "echo.md");
+    const outsidePrompt = path.join(symlinkContainer, "outside.md");
+    writeFileSync(outsidePrompt, readFileSync(prompt));
+    unlinkSync(prompt);
+    symlinkSync(outsidePrompt, prompt);
+
+    expect(() => loadRegistry({ packRoots: [symlinked] })).toThrow(
+      /resource resolves outside canonical pack root/,
+    );
+    await expect(updatePins({ pack: symlinked })).rejects.toThrow(
+      /resource resolves outside canonical pack root/,
+    );
+
+    const builtInContainer = tmpDir("event-registry-lexical-");
+    const builtInRoot = tempRegistry(
+      path.join(builtInContainer, "event-runtime"),
+    );
+    const builtInDefFile = path.join(
+      builtInRoot,
+      "agents",
+      "factory-status-report.json",
+    );
+    const builtInDef = JSON.parse(readFileSync(builtInDefFile, "utf8"));
+    builtInDef.prompt = "../outside.md";
+    writeFileSync(builtInDefFile, JSON.stringify(builtInDef));
+    writeFileSync(path.join(builtInContainer, "outside.md"), "outside\n");
+    await expect(updatePins({ root: builtInRoot })).rejects.toThrow(
+      /resource resolves outside pack root/,
+    );
+  });
+
+  test("filesystem pack artifact views cannot escape through symlinks", () => {
+    const container = tmpDir("event-pack-view-symlink-");
+    const pack = tempPack({ root: path.join(container, "pack") });
+    const outsideView = path.join(container, "outside.view.json");
+    writeFileSync(outsideView, "{}\n");
+    symlinkSync(outsideView, path.join(pack.path, "agents", "echo.view.json"));
+    expect(() => loadRegistry({ packRoots: [pack] })).toThrow(
+      /resource resolves outside canonical pack root/,
+    );
+  });
+
+  test("loaded definitions retain the verified prompt snapshot after filesystem replacement", () => {
+    const pack = tempPack();
+    const registry = loadRegistry({ packRoots: [pack] });
+    const def = getAgent(registry, "sample/echo@1");
+    const verified = def.promptText;
+    writeFileSync(def.promptPath, "replacement after registry load\n");
+    expect(def.promptText).toBe(verified);
+    expect(def.promptText).not.toContain("replacement after registry load");
+    expect(Object.getOwnPropertyDescriptor(def, "promptText")?.writable).toBe(
+      false,
+    );
   });
 
   test("merged validation accepts a loader with no filesystem access", () => {

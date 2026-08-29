@@ -37,7 +37,7 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
-import { handleRegistryApiRoute } from "./api-registry.mjs";
+import { agentsView, handleRegistryApiRoute } from "./api-registry.mjs";
 import { KIND_EVENT_TYPE, putOverride } from "./runtime-overrides.mjs";
 
 const makeServer = async (...args) => {
@@ -76,6 +76,20 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
     } finally {
       server.close();
     }
+  });
+
+  test("GET /agents publishes the verified prompt snapshot, not the mutable path", () => {
+    const isolated = loadRegistry();
+    const def = isolated.agents.get("factory-status-report@1");
+    const mutablePath = path.join(tmpDir("evrt-api-prompt-"), "prompt.md");
+    writeFileSync(mutablePath, "replacement after registry load\n");
+    def.promptPath = mutablePath;
+
+    const published = agentsView(isolated).agents.find(
+      (candidate) => candidate.ref === def.ref,
+    );
+    expect(published.prompt).toBe(def.promptText);
+    expect(published.prompt).not.toContain("replacement after registry load");
   });
 
   test("GET /repos serves the repos.yaml registry, dispatch mode included (OPS-299)", async () => {
