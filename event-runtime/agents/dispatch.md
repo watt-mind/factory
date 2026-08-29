@@ -64,9 +64,9 @@ new ticket.
    output; never weaken a test to get green. For the factory repo, the
    configured gate ends with `bun run format:check` after the unit and emit
    checks; run `bun run format` before verification when needed so Prettier
-   cannot turn a handoff green locally but red in CI. **The worker verifies the handoff
-   mechanically after you return:** it re-runs the repo's declared verify
-   command and the ticket's exact
+   cannot turn a handoff green locally but red in CI.
+   **The worker verifies the handoff mechanically after you return:** it
+   re-runs the repo's declared verify command and the ticket's exact
    `Verification Command`, runs `cd event-runtime/web && bun run build` when
    your diff touches `event-runtime/web/src/**`, and diffs
    `origin/<base>..HEAD` against the ticket's Owned Paths. A non-zero exit

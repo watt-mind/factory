@@ -308,7 +308,7 @@ describe("registry", () => {
     // checks; dispatch.json is re-pinned. Prompt text only — no schema,
     // contract, route, capability, or model tier changed.
     const expected =
-      "sha256:c4b4d2eebf6e2a69a69018c9cad13d877c8b6f487d924ee936129bdd933e4647";
+      "sha256:9478df60d64bd504a50935c322760df759dc0055dd3b781f06a0a7165f1c6172";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -556,7 +556,7 @@ describe("registry", () => {
     // check, so its prompt pin legitimately moved; `pack` remains
     // non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:4476b2f37992c75814f4e8896f0332242c37885c9fcf94a5b7103d44797fe854",
+      "sha256:64692fdaf524fb0e54e8d2156bcf9a3bfe3356c663ce6a7b83910a9043b6314e",
     );
   });
 
