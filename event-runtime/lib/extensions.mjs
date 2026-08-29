@@ -763,9 +763,8 @@ export function collectSecretFields(schema, path = []) {
 
 function collectSecretFieldsUnchecked(
   schema,
-  path = [],
-  schemaPath = "$",
-  dynamicLocation = null,
+  path,
+  { schemaPath = "$", dynamicLocation = null } = {},
 ) {
   if (!isPlainObject(schema)) return [];
   if (schema.format === "secret") {
@@ -789,8 +788,7 @@ function collectSecretFieldsUnchecked(
         ...collectSecretFieldsUnchecked(
           sub,
           [...path, key],
-          `${schemaPath}.${key}`,
-          dynamicLocation,
+          { schemaPath: `${schemaPath}.${key}`, dynamicLocation },
         ),
       );
     }
@@ -800,8 +798,10 @@ function collectSecretFieldsUnchecked(
       ...collectSecretFieldsUnchecked(
         schema.items,
         path,
-        `${schemaPath}[]`,
-        dynamicLocation ?? `schema.items at ${schemaPath}`,
+        {
+          schemaPath: `${schemaPath}[]`,
+          dynamicLocation: dynamicLocation ?? `schema.items at ${schemaPath}`,
+        },
       ),
     );
   }
@@ -810,8 +810,11 @@ function collectSecretFieldsUnchecked(
       ...collectSecretFieldsUnchecked(
         schema.additionalProperties,
         path,
-        `${schemaPath}.*`,
-        dynamicLocation ?? `schema.additionalProperties at ${schemaPath}`,
+        {
+          schemaPath: `${schemaPath}.*`,
+          dynamicLocation:
+            dynamicLocation ?? `schema.additionalProperties at ${schemaPath}`,
+        },
       ),
     );
   }
