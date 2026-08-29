@@ -59,11 +59,11 @@ The environment file must be readable by the dedicated account and must load the
 FACTORY_EVENT_URL=http://127.0.0.1:7381
 FACTORY_DASHBOARD_URL=https://factory.whale-pike.ts.net
 FACTORY_REPOS_ROOT=/opt/factory/current
-# When the runtime's existing control API bearer gate is enabled:
+# Mandatory for every non-intake control API route:
 FACTORY_CONTROL_API_TOKEN=...
 ```
 
-Do not echo the environment, enable shell tracing, place either secret in `authorized_keys`, or copy them to clients. `POST /events` continues to authenticate with the event HMAC; the optional control API token is sent only on the broker's read-only receipt-enrichment requests.
+Do not echo the environment, enable shell tracing, place either secret in `authorized_keys`, or copy them to clients. `POST /events` continues to authenticate with the event HMAC; the mandatory control API token is sent only on the broker's read-only receipt-enrichment requests. If the token is absent, those control API reads fail closed with `control_api_token_unset`; there is no loopback-trust fallback.
 
 Install the client's **public** key for the dedicated account using a forced command. Replace the example Tailscale address and key with deployment-local values:
 
@@ -101,4 +101,4 @@ Remove or comment out the dedicated `authorized_keys` entry first; this stops ne
 
 ## Out of scope
 
-This feature does not introduce or configure bearer auth; it only interoperates with the runtime's existing `FACTORY_CONTROL_API_TOKEN` gate when that token is already enabled. It does not add direct remote `/replay` access, public `/events` access, production keys, or a second dispatch policy.
+This feature does not introduce or configure bearer auth; it interoperates with the runtime's mandatory `FACTORY_CONTROL_API_TOKEN` gate. It does not add direct remote `/replay` access, public `/events` access, production keys, or a second dispatch policy.

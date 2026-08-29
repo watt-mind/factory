@@ -31,9 +31,18 @@ function reservePort() {
   return port;
 }
 
-function requestProxy(method, pathname, body) {
+function requestProxy(
+  method,
+  pathname,
+  body,
+  extraHeaders = {},
+  port = webPort,
+) {
   return new Promise((resolve, reject) => {
-    const headers = { "x-proxy-test": `${method.toLowerCase()}-marker` };
+    const headers = {
+      "x-proxy-test": `${method.toLowerCase()}-marker`,
+      ...extraHeaders,
+    };
     if (body !== undefined) {
       headers["content-type"] = "text/plain";
       headers["content-length"] = String(Buffer.byteLength(body));
@@ -42,7 +51,7 @@ function requestProxy(method, pathname, body) {
     const req = http.request(
       {
         hostname: "127.0.0.1",
-        port: webPort,
+        port,
         method,
         path: `/api${pathname}`,
         headers,
@@ -82,6 +91,8 @@ beforeAll(async () => {
       ...process.env,
       FACTORY_EVENT_PORT: String(apiPort),
       FACTORY_EVENT_WEB_PORT: String(webPort),
+      FACTORY_EVENT_WEB_ALLOWED_HOSTS: "",
+      FACTORY_CONTROL_API_TOKEN: "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -234,5 +245,131 @@ describe("allowed hosts (WM-973)", () => {
       headers: { origin: `http://127.0.0.1:${webPort}` },
     });
     expect(res.status).not.toBe(403);
+  });
+});
+
+describe("tailnet write authentication", () => {
+  test("non-loopback writes require the browser bearer and replace it upstream", async () => {
+    const token = "tailnet-control-token";
+    const tailHost = "runner.example.ts.net";
+    const isolatedApiPort = reservePort();
+    const isolatedWebPort = reservePort();
+    const upstream = [];
+    const isolatedApi = Bun.serve({
+      hostname: "127.0.0.1",
+      port: isolatedApiPort,
+      async fetch(req) {
+        upstream.push({
+          method: req.method,
+          authorization: req.headers.get("authorization"),
+          body: await req.text(),
+        });
+        return new Response("forwarded", { status: 200 });
+      },
+    });
+    const isolatedProxy = Bun.spawn(["bun", path.join(WEB_DIR, "serve.mjs")], {
+      cwd: WEB_DIR,
+      env: {
+        ...process.env,
+        FACTORY_EVENT_PORT: String(isolatedApiPort),
+        FACTORY_EVENT_WEB_PORT: String(isolatedWebPort),
+        FACTORY_EVENT_WEB_ALLOWED_HOSTS: tailHost,
+        FACTORY_CONTROL_API_TOKEN: token,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      const startup = await isolatedProxy.stdout.getReader().read();
+      expect(new TextDecoder().decode(startup.value)).toContain(
+        `http://127.0.0.1:${isolatedWebPort}`,
+      );
+
+      const missing = await requestProxy(
+        "POST",
+        "/inbox/x/decide",
+        "{}",
+        { host: tailHost },
+        isolatedWebPort,
+      );
+      expect(missing.status).toBe(401);
+      expect(JSON.parse(missing.body)).toEqual({ error: "unauthorized" });
+      expect(upstream).toHaveLength(0);
+
+      const wrong = await requestProxy(
+        "POST",
+        "/inbox/x/decide",
+        "{}",
+        { host: tailHost, authorization: "Bearer wrong" },
+        isolatedWebPort,
+      );
+      expect(wrong.status).toBe(401);
+      expect(upstream).toHaveLength(0);
+
+      const accepted = await requestProxy(
+        "POST",
+        "/inbox/x/decide",
+        "{}",
+        { host: tailHost, authorization: `Bearer ${token}` },
+        isolatedWebPort,
+      );
+      expect(accepted.status).toBe(200);
+      expect(upstream.at(-1)).toEqual({
+        method: "POST",
+        authorization: `Bearer ${token}`,
+        body: "{}",
+      });
+
+      const readable = await requestProxy(
+        "GET",
+        "/status",
+        undefined,
+        { host: tailHost },
+        isolatedWebPort,
+      );
+      expect(readable.status).toBe(200);
+      expect(upstream.at(-1)).toEqual({
+        method: "GET",
+        authorization: `Bearer ${token}`,
+        body: "",
+      });
+    } finally {
+      isolatedProxy.kill();
+      await isolatedProxy.exited;
+      isolatedApi.stop(true);
+    }
+  });
+
+  test("allowed hosts with no configured token fail writes closed from loopback", async () => {
+    const isolatedWebPort = reservePort();
+    const isolatedProxy = Bun.spawn(["bun", path.join(WEB_DIR, "serve.mjs")], {
+      cwd: WEB_DIR,
+      env: {
+        ...process.env,
+        FACTORY_EVENT_PORT: String(reservePort()),
+        FACTORY_EVENT_WEB_PORT: String(isolatedWebPort),
+        FACTORY_EVENT_WEB_ALLOWED_HOSTS: "runner.example.ts.net",
+        FACTORY_CONTROL_API_TOKEN: "",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      await isolatedProxy.stdout.getReader().read();
+      const response = await requestProxy(
+        "POST",
+        "/inbox/x/decide",
+        "{}",
+        {},
+        isolatedWebPort,
+      );
+      expect(response.status).toBe(503);
+      expect(JSON.parse(response.body)).toEqual({
+        error: "control_api_token_unset",
+      });
+    } finally {
+      isolatedProxy.kill();
+      await isolatedProxy.exited;
+    }
   });
 });

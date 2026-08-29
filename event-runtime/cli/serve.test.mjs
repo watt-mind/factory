@@ -103,6 +103,43 @@ describe("serve command", () => {
     expect(health.ok).toBe(true);
   });
 
+  test("serve clearly warns when FACTORY_CONTROL_API_TOKEN is unset", async () => {
+    const home = tmpDir("evrt-serve-no-token-");
+    const port = freePort();
+    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
+      env: {
+        ...process.env,
+        FACTORY_EVENT_HOME: home,
+        FACTORY_CONTROL_API_TOKEN: "",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout.on("data", (b) => {
+      out += b;
+    });
+    child.stderr.on("data", (b) => {
+      out += b;
+    });
+    const box = {
+      child,
+      get out() {
+        return out;
+      },
+    };
+    try {
+      expect(
+        await waitFor(box, "FACTORY_CONTROL_API_TOKEN is unset", 8000),
+      ).toBe(true);
+      expect(out).toContain(
+        "all non-intake control API routes will return 503",
+      );
+    } finally {
+      child.kill("SIGTERM");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+  });
+
   test("a busy port is named, not a silent exit 1 (WM-1037)", async () => {
     const home = tmpDir("evrt-busy-port-");
     const port = freePort();

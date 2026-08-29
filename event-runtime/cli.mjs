@@ -18,6 +18,7 @@ import {
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
+import { unauthorizedMessage } from "./lib/client.mjs";
 import { resolveRefs } from "./lib/presentation.mjs";
 import { renderText } from "./lib/presentation-text.mjs";
 import {
@@ -73,15 +74,22 @@ function controlUrl(pathname) {
 }
 
 async function callControl(method, pathname, body) {
+  const token = process.env.FACTORY_CONTROL_API_TOKEN || null;
   const res = await fetch(controlUrl(pathname), {
     method,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const payload = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error(
-      payload?.message ?? payload?.error ?? `HTTP ${res.status}`,
+      res.status === 401 ||
+        (res.status === 503 && payload?.error === "control_api_token_unset")
+        ? unauthorizedMessage(Boolean(token))
+        : (payload?.message ?? payload?.error ?? `HTTP ${res.status}`),
     );
     err.status = res.status;
     throw err;

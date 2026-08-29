@@ -134,6 +134,41 @@ export interface RepoItem extends BaseRepoItem {
 
 type CachedResponse = { etag: string; body: unknown };
 const responseCache = new Map<string, CachedResponse>();
+const CONTROL_TOKEN_KEY = "factory.controlApiToken";
+
+function suppliedControlToken(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const url = new URL(window.location.href);
+  let token = url.searchParams.get("token");
+  let changed = false;
+  if (token !== null) {
+    url.searchParams.delete("token");
+    changed = true;
+  }
+
+  const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  const queryAt = hash.indexOf("?");
+  if (queryAt >= 0) {
+    const route = hash.slice(0, queryAt);
+    const params = new URLSearchParams(hash.slice(queryAt + 1));
+    if (params.has("token")) {
+      token ??= params.get("token");
+      params.delete("token");
+      const query = params.toString();
+      url.hash = `#${route}${query ? `?${query}` : ""}`;
+      changed = true;
+    }
+  }
+
+  if (token !== null) {
+    const trimmed = token.trim();
+    if (trimmed) sessionStorage.setItem(CONTROL_TOKEN_KEY, trimmed);
+    else sessionStorage.removeItem(CONTROL_TOKEN_KEY);
+  }
+  if (changed) window.history.replaceState(null, "", url);
+  return sessionStorage.getItem(CONTROL_TOKEN_KEY);
+}
 
 export type RunListFilters = {
   state?: string;
@@ -243,6 +278,10 @@ async function call<T>(
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
+  const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
+  const suppliedToken = suppliedControlToken();
+  const controlToken = mutating ? suppliedToken : null;
+  if (controlToken) headers.authorization = `Bearer ${controlToken}`;
   if (cached) headers["if-none-match"] = cached.etag;
   const res = await fetch(url, {
     method,
@@ -265,10 +304,12 @@ async function call<T>(
   }
   if (!res.ok) {
     const message =
-      json?.error ??
-      (Array.isArray(json?.errors)
-        ? json.errors.join("; ")
-        : `HTTP ${res.status}`);
+      res.status === 401 && mutating
+        ? "control API token required — reopen this dashboard with a credentialed link"
+        : (json?.error ??
+          (Array.isArray(json?.errors)
+            ? json.errors.join("; ")
+            : `HTTP ${res.status}`));
     throw new ApiError(message, res.status);
   }
   if (cacheKey) {

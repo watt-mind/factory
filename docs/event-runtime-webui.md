@@ -1545,9 +1545,25 @@ scheme or port) in the environment that starts `bin/live-stack.sh`:
 
 ```sh
 export FACTORY_EVENT_WEB_ALLOWED_HOSTS=runner.whale-pike.ts.net
+export FACTORY_CONTROL_API_TOKEN=... # mandatory when allowed hosts are set
 ```
 
 The `/api/*` proxy presents itself as loopback upstream (rewrites `Host`,
 drops `Origin`), so the control API's own loopback/rebinding guard
 (`api.mjs`) is unchanged — the web layer enforces the same defense against
-unlisted Hosts and cross-site Origins before anything is served.
+unlisted Hosts and cross-site Origins before anything is served. The control
+API token is mandatory: without it all non-intake API routes fail closed, and
+when allowed hosts are configured the web proxy also returns 503 for writes.
+
+Read-only dashboard requests stay credential-free on the tailnet. For a
+mutating action, supply the operator token once in the route fragment (for
+example
+`https://runner.whale-pike.ts.net/#/inbox?token=...`). Because fragments are
+not sent in HTTP requests, this avoids exposing the token to proxy access logs.
+The web app immediately removes it from the visible URL and keeps it only in
+`sessionStorage`, so closing the tab clears it; it is never written to
+`localStorage` or logged by the app. A top-level `?token=...` URL parameter is
+also accepted for compatibility, but the fragment form is preferred. A missing
+or rejected token is surfaced as “control API token required”. The proxy
+validates the browser bearer on non-loopback writes, then replaces it with its
+own upstream bearer rather than forwarding client-supplied authorization.
