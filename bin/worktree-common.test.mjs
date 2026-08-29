@@ -7,7 +7,6 @@ import {
   mkdirSync,
   writeFileSync,
   renameSync,
-  realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -259,29 +258,85 @@ test("provision_instance_local_configs copies ignored local config and skips abs
   }
 });
 
-test("provision_instance_local_configs copies graphify-out when ignored", () => {
+function graphifyFixture() {
   const source = mkdtempSync(path.join(tmpdir(), "graphify-source-"));
   const checkout = mkdtempSync(path.join(tmpdir(), "graphify-checkout-"));
+  mkdirSync(path.join(source, "graphify-out"), { recursive: true });
+  writeFileSync(
+    path.join(source, "graphify-out", "graph.json"),
+    '{"nodes": []}\n',
+  );
+  mkdirSync(path.join(checkout, "config"), { recursive: true });
+  return {
+    source,
+    checkout,
+    cleanup() {
+      rmSync(source, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    },
+  };
+}
+
+test("provision_instance_local_configs seeds graphify-out when the target ignores it (#1228)", () => {
+  const f = graphifyFixture();
   try {
-    mkdirSync(path.join(source, "graphify-out"), { recursive: true });
-    mkdirSync(path.join(checkout, "config"), { recursive: true });
     writeFileSync(
-      path.join(checkout, ".gitignore"),
+      path.join(f.checkout, ".gitignore"),
       "config/repos.yaml\nconfig/policy.yaml\ngraphify-out/\n",
     );
-    writeFileSync(path.join(source, "graphify-out", "graph.json"), '{"nodes": []}\n');
     const r = sh(
       [
-        `git -C "${checkout}" init -q`,
-        `provision_instance_local_configs "${checkout}" "${source}"`,
-        `test "$(cat "${checkout}/graphify-out/graph.json")" = '{"nodes": []}'`,
-        `git -C "${checkout}" check-ignore -q "graphify-out/"`,
+        `git -C "${f.checkout}" init -q`,
+        `provision_instance_local_configs "${f.checkout}" "${f.source}"`,
+        `test "$(cat "${f.checkout}/graphify-out/graph.json")" = '{"nodes": []}'`,
+        `test ! -e "${f.checkout}/graphify-out.tmp."*`,
+        `git -C "${f.checkout}" check-ignore -q "graphify-out/"`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("graphify-out seed skipped");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("provision_instance_local_configs does not seed graphify-out when the target tracks it (#1228)", () => {
+  const f = graphifyFixture();
+  try {
+    writeFileSync(
+      path.join(f.checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\n",
+    );
+    const r = sh(
+      [
+        `git -C "${f.checkout}" init -q`,
+        `provision_instance_local_configs "${f.checkout}" "${f.source}"`,
+        `test ! -e "${f.checkout}/graphify-out"`,
       ].join("\n"),
     );
     expect(r.status).toBe(0);
   } finally {
-    rmSync(source, { recursive: true, force: true });
-    rmSync(checkout, { recursive: true, force: true });
+    f.cleanup();
+  }
+});
+
+test("provision_instance_local_configs skips the graphify-out seed under FACTORY_PROVISION_GRAPHIFY=0 (#1228)", () => {
+  const f = graphifyFixture();
+  try {
+    writeFileSync(
+      path.join(f.checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\ngraphify-out/\n",
+    );
+    const r = sh(
+      [
+        `git -C "${f.checkout}" init -q`,
+        `FACTORY_PROVISION_GRAPHIFY=0 provision_instance_local_configs "${f.checkout}" "${f.source}"`,
+        `test ! -e "${f.checkout}/graphify-out"`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    f.cleanup();
   }
 });
 
@@ -333,9 +388,7 @@ test("provision_instance_local_configs silently skips a source without local fil
 });
 
 test("normalize_path is portable and accepts a missing final component", () => {
-  const root = realpathSync(
-    mkdtempSync(path.join(tmpdir(), "gh-937-normalize-")),
-  );
+  const root = mkdtempSync(path.join(tmpdir(), "gh-937-normalize-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
   try {
     mkdirSync(path.join(root, "existing"));
