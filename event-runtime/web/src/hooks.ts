@@ -23,7 +23,7 @@ export const modal = { depth: 0 };
 
 const HIDDEN_REFETCH_INTERVAL = 15_000;
 
-function pollingOptions(visibleInterval: number) {
+export function pollingOptions(visibleInterval: number) {
   return {
     refetchInterval: () =>
       typeof document !== "undefined" && document.hidden
