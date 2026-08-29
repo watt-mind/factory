@@ -487,11 +487,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
         ],
       },
     });
-    seedChainChild(
-      db,
-      "run-partial-fanout",
-      "chain-run-partial-fanout-WM-301",
-    );
+    seedChainChild(db, "run-partial-fanout", "chain-run-partial-fanout-WM-301");
 
     expect(resolveChains(db, registry)).toEqual({
       emitted: 2,
@@ -586,9 +582,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
     try {
       const healthRequests = Array.from({ length: 20 }, async () => {
         const started = performance.now();
-        const response = await fetch(
-          `http://127.0.0.1:${server.port}/health`,
-        );
+        const response = await fetch(`http://127.0.0.1:${server.port}/health`);
         expect(response.status).toBe(200);
         return performance.now() - started;
       });
@@ -611,6 +605,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
       );
       expect(childEventLookups).toBe(1); // one bulk lookup, never 2,000
       expect(tickMs).toBeLessThan(200);
+      // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
       expect(healthP95).toBeLessThan(500);
 
       childEventLookups = 0;
