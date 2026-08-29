@@ -3563,6 +3563,56 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     });
   });
 
+  // WM-115 / #1252: a partial `dispatch` override used to disable the demo
+  // stub wholesale, so the seams the caller left out — notably the WM-718
+  // handoff comment — fell through to the real tracker CLI. A fake-adapter run
+  // then spawned `bun tools/linear.mjs comment` per run: real Linear writes
+  // from the test suite, and a wall-clock dependency that timed the burst test
+  // out on CI. Shim `bun` on PATH and assert nothing reaches the tracker CLI.
+  test("a partial dispatch override still never reaches the tracker CLI under the fake adapter", async () => {
+    const shimDir = tmpDir("evrt-bun-shim-");
+    const spawnLog = path.join(shimDir, "spawned.log");
+    writeFileSync(
+      path.join(shimDir, "bun"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(spawnLog)}\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${previousPath}`;
+    try {
+      const db = openDb(":memory:");
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-742" } }),
+      );
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({
+          dispatch: {
+            locksDir: tmpDir("evrt-lock-partial-"),
+            fetchTicket: (ticket) => readyDispatchTicket(ticket),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => ({ ok: true }),
+          },
+        }),
+      );
+      expect(summary).toMatchObject({
+        terminalState: "COMPLETED",
+        reasonCode: "ok",
+      });
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      const spawned = existsSync(spawnLog)
+        ? readFileSync(spawnLog, "utf8")
+        : "";
+      expect(spawned).not.toContain("linear.mjs");
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
   test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
     const lockDir = tmpDir("evrt-lock-");
     const lockFile = dispatchLockPath("wt-worker", lockDir);
