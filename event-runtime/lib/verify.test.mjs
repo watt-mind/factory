@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -15,12 +16,20 @@ import { getAgent, loadRegistry } from "./registry.mjs";
 import { execFileSync } from "node:child_process";
 import {
   ContractViolation,
+  HANDOFF_HOST_ENV,
+  HANDOFF_SANDBOX_SETUP,
+  SandboxUnavailable,
   changedFilesSince,
   composeHandoffVerification,
   normalizeFailureOutput,
   outputTail,
   ownedPathsDeviations,
+  HANDOFF_SANDBOX_MARKER,
+  handoffGitMounts,
+  handoffSandboxAvailable,
+  insideHandoffSandbox,
   policyOwnedPathsConformance,
+  runHandoffCommand,
   verifyResult,
 } from "./verify.mjs";
 
@@ -1097,7 +1106,13 @@ describe("worktree baseline verification (WM-334)", () => {
       });
       expect(out.kind).toBe("completed");
       const observed = out.handoff.repoVerify.output;
-      expect(observed).toContain(`repos=${record.path}`);
+      // The worktree is mounted at /workspace in the sandbox (#967); the pin
+      // still names the worktree root, in the coordinates the command sees.
+      // When this suite is itself running inside a sandbox the boundary does
+      // not nest and the command keeps the real paths.
+      expect(observed).toContain(
+        `repos=${insideHandoffSandbox() ? realpathSync(record.path) : "/workspace"}`,
+      );
       expect(observed).toContain("root=unset");
       expect(observed).toContain("home=unset");
       expect(observed).toContain("port=unset");
@@ -1158,9 +1173,12 @@ describe("worktree baseline verification (WM-334)", () => {
       expect(out.kind).toBe("completed");
       expect(out.result.verification.checks).toContain("web_build_passed");
       const observed = out.handoff.webBuild.output;
-      expect(observed).toContain(`cwd=${webDir}`);
-      expect(observed).toContain(`repos=${repo}`);
-      expect(observed).not.toContain(`repos=${webDir}`);
+      const guestRoot = insideHandoffSandbox()
+        ? realpathSync(repo)
+        : "/workspace";
+      expect(observed).toContain(`cwd=${guestRoot}/event-runtime/web`);
+      expect(observed).toContain(`repos=${guestRoot}\n`);
+      expect(observed).not.toContain(`repos=${guestRoot}/event-runtime/web`);
       expect(observed).toContain("root=unset");
       expect(observed).toContain("timeout=unset");
       expect(observed).not.toContain(instanceRoot);
@@ -1422,6 +1440,287 @@ describe("evidence retention (OPS-206)", () => {
 });
 
 describe("handoff verification helpers (WM-718)", () => {
+  test("ticket commands get a credential-free environment and namespace/chroot confinement", () => {
+    const worktree = tmpDir("evrt-handoff-confined-");
+    const logPath = path.join(worktree, "handoff.log");
+    let invocation;
+    const spawn = (file, args, options) => {
+      invocation = { file, args, options };
+      writeSync(options.stdio[1], "confined command ran\n");
+      return { status: 0, error: null };
+    };
+
+    const obs = runHandoffCommand({
+      command: "bun test focused.test.mjs",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath,
+      timeoutMs: 1_000,
+      spawn,
+      nested: false,
+      sandboxAvailable: () => true,
+      runtimeBinaries: [{ name: "bun", executable: "/safe/toolchain/bun" }],
+    });
+
+    expect(obs.passed).toBe(true);
+    expect(obs.confinement).toContain("network namespace");
+    expect(invocation.file).toBe("/usr/bin/timeout");
+    expect(invocation.args).toEqual(
+      expect.arrayContaining([
+        "--signal=TERM",
+        "--kill-after=0.1s",
+        "/usr/bin/unshare",
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--mount",
+        "--pid",
+        "--fork",
+        "--kill-child=KILL",
+        HANDOFF_SANDBOX_SETUP,
+        realpathSync(worktree),
+        "/workspace",
+        "bun",
+        "/safe/toolchain/bun",
+        "bun test focused.test.mjs",
+      ]),
+    );
+    expect(HANDOFF_SANDBOX_SETUP).toContain("/usr/sbin/chroot");
+    expect(HANDOFF_SANDBOX_SETUP).toContain('mount --rbind "$workspace"');
+    expect(HANDOFF_SANDBOX_SETUP).toContain('mount -t proc proc "$root/proc"');
+    expect(invocation.options.env).toEqual(HANDOFF_HOST_ENV);
+    // GH-967: FACTORY_ROOT (which reposRoot() only reads as a fallback, and
+    // which config.mjs derives from its own location anyway) is gone; the
+    // repos-root pin #1214 established is re-established in guest
+    // coordinates, at the mounted worktree.
+    expect(HANDOFF_SANDBOX_SETUP).not.toContain("FACTORY_ROOT=");
+    expect(HANDOFF_SANDBOX_SETUP).toContain("FACTORY_REPOS_ROOT=/workspace");
+    for (const credential of [
+      "LINEAR_API_KEY",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "SSH_AUTH_SOCK",
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "FACTORY_EXTENSION_SECRET",
+    ]) {
+      expect(invocation.options.env[credential]).toBeUndefined();
+    }
+  });
+
+  test("an unavailable sandbox refuses distinctly instead of running unconfined", () => {
+    const worktree = tmpDir("evrt-handoff-nosandbox-");
+    expect(() =>
+      runHandoffCommand({
+        command: "true",
+        cwd: worktree,
+        worktreePath: worktree,
+        logPath: path.join(worktree, "handoff.log"),
+        timeoutMs: 1_000,
+        spawn: () => {
+          throw new Error("must not spawn without a sandbox");
+        },
+        nested: false,
+        sandboxAvailable: () => false,
+      }),
+    ).toThrow(SandboxUnavailable);
+    // The probe itself answers from a spawn, never from a guess.
+    expect(
+      handoffSandboxAvailable({
+        spawn: () => ({ status: 0, error: null }),
+        cache: false,
+        nested: false,
+      }),
+    ).toBe(true);
+    expect(
+      handoffSandboxAvailable({
+        spawn: () => ({ status: 1, error: null }),
+        cache: false,
+        nested: false,
+      }),
+    ).toBe(false);
+    expect(
+      handoffSandboxAvailable({
+        spawn: () => ({ status: null, error: new Error("ENOENT") }),
+        cache: false,
+        nested: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("only timeout's own verdict counts as a timeout", () => {
+    const worktree = tmpDir("evrt-handoff-timeout-");
+    let seq = 0;
+    const run = (result, timeoutMs = 0) =>
+      runHandoffCommand({
+        command: "flaky",
+        cwd: worktree,
+        worktreePath: worktree,
+        logPath: path.join(worktree, `handoff-${seq++}.log`),
+        timeoutMs,
+        nested: false,
+        spawn: (_file, _args, options) => {
+          writeSync(options.stdio[1], "output the reviewer needs\n");
+          return result;
+        },
+        sandboxAvailable: () => true,
+        runtimeBinaries: [],
+      });
+
+    // Elapsed >= budget is not evidence: a fast command on a slow host, or a
+    // 137 the suite itself exited with, is a real red with real output.
+    const killed = run({ status: 137, error: null });
+    expect(killed.timedOut).toBe(false);
+    expect(killed.exitCode).toBe(137);
+    expect(killed.tail).toContain("output the reviewer needs");
+
+    expect(run({ status: 124, error: null }).timedOut).toBe(true);
+    // `timeout`'s own --kill-after escalation can take `timeout` with it.
+    expect(run({ status: null, signal: "SIGKILL", error: null }).timedOut).toBe(
+      true,
+    );
+    expect(run({ status: null, error: { code: "ETIMEDOUT" } }).timedOut).toBe(
+      true,
+    );
+    // ...but a SIGKILL nowhere near the budget is somebody else's kill.
+    expect(
+      run({ status: null, signal: "SIGKILL", error: null }, 600_000).timedOut,
+    ).toBe(false);
+  });
+
+  test("a git worktree's gitdir and the shared repo .git are reachable in the sandbox", () => {
+    const base = realpathSync(tmpDir("evrt-handoff-git-"));
+    const repo = path.join(base, "repo");
+    mkdirSync(repo);
+    const git = (...args) =>
+      execFileSync("git", args, {
+        cwd: repo,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t",
+        },
+      });
+    git("init", "-q", "-b", "develop");
+    writeFileSync(path.join(repo, "base.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    const worktree = path.join(base, "wt");
+    git("worktree", "add", "-q", "--detach", worktree);
+
+    // A linked worktree's `.git` is a FILE pointing at an absolute host path.
+    const mounts = handoffGitMounts(worktree);
+    expect(mounts[0]).toEqual({
+      path: path.join(repo, ".git", "worktrees", "wt"),
+      mode: "rw",
+    });
+    expect(mounts[1]).toEqual({ path: path.join(repo, ".git"), mode: "ro" });
+    // A plain checkout keeps its .git inside the bound workspace: no mounts.
+    expect(handoffGitMounts(repo)).toEqual([]);
+
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
+    const obs = runHandoffCommand({
+      command: "git status --porcelain=v1 && git log --oneline -1",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(base, "handoff.log"),
+      timeoutMs: 60_000,
+    });
+    expect(obs.output).toContain("base");
+    expect(obs.exitCode).toBe(0);
+    expect(obs.passed).toBe(true);
+  });
+
+  test("the guest env carries only the worktree repos-root pin (GH-1214)", () => {
+    // Skipped when this suite is itself running inside a handoff sandbox: the
+    // boundary cannot nest, so there is no guest env to inspect.
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
+    const worktree = realpathSync(tmpDir("evrt-handoff-env-"));
+    const obs = runHandoffCommand({
+      command: "env | sort",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(worktree, "handoff.log"),
+      timeoutMs: 60_000,
+    });
+    expect(obs.passed).toBe(true);
+    // reposRoot() resolves inside the sandbox to the verified worktree, never
+    // to the worker's factory root — which is not mounted at all.
+    expect(obs.output).toContain("FACTORY_REPOS_ROOT=/workspace");
+    const factoryVars = obs.output
+      .split("\n")
+      .filter((line) => line.startsWith("FACTORY_"))
+      .sort();
+    // The marker is the only other FACTORY_* the guest sees: the boundary
+    // cannot nest (CLONE_NEWUSER is EPERM under chroot), so a handoff gate
+    // running inside the sandbox passes commands through instead of refusing.
+    expect(factoryVars).toEqual([
+      `${HANDOFF_SANDBOX_MARKER}=1`,
+      "FACTORY_REPOS_ROOT=/workspace",
+    ]);
+    expect(insideHandoffSandbox({ [HANDOFF_SANDBOX_MARKER]: "1" })).toBe(true);
+    expect(insideHandoffSandbox({})).toBe(false);
+  });
+
+  test("inside the sandbox the command is passed through, not re-sandboxed", () => {
+    const worktree = realpathSync(tmpDir("evrt-handoff-nested-"));
+    {
+      let invocation;
+      const obs = runHandoffCommand({
+        nested: true,
+        command: "bun test focused.test.mjs",
+        cwd: worktree,
+        worktreePath: worktree,
+        logPath: path.join(worktree, "handoff.log"),
+        timeoutMs: 1_000,
+        spawn: (file, args, options) => {
+          invocation = { file, args, options };
+          writeSync(options.stdio[1], "passed through\n");
+          return { status: 0, error: null };
+        },
+        runtimeBinaries: [],
+      });
+      expect(obs.passed).toBe(true);
+      expect(obs.confinement).toContain("inherited handoff sandbox");
+      expect(invocation.args).not.toContain("/usr/bin/unshare");
+      expect(invocation.args).toEqual([
+        "--signal=TERM",
+        "--kill-after=0.1s",
+        "1s",
+        "/bin/bash",
+        "-c",
+        "bun test focused.test.mjs",
+      ]);
+      // Still confined to the worktree, still pinned, still credential-free.
+      expect(invocation.options.cwd).toBe(worktree);
+      expect(invocation.options.env.FACTORY_REPOS_ROOT).toBe(worktree);
+      expect(invocation.options.env.GITHUB_TOKEN).toBeUndefined();
+      expect(invocation.options.env.LINEAR_API_KEY).toBeUndefined();
+    }
+  });
+
+  test("the sandbox has a working loopback and no host network", () => {
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
+    const worktree = realpathSync(tmpDir("evrt-handoff-loopback-"));
+    const obs = runHandoffCommand({
+      // Bind + connect on 127.0.0.1: what 10+ suites in this repo do.
+      command:
+        "exec 3<>/dev/tcp/127.0.0.1/1 || true; ip -o link show lo; ip -o link | wc -l",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(worktree, "handoff.log"),
+      timeoutMs: 60_000,
+    });
+    expect(obs.output).toContain("lo: <LOOPBACK,UP");
+    // Loopback is the ONLY interface: the namespace still has no host network.
+    expect(obs.output.trim().split("\n").pop().trim()).toBe("1");
+  });
+
   test("outputTail keeps the last N non-empty lines, ANSI stripped", () => {
     const out = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join(
       "\n\n",

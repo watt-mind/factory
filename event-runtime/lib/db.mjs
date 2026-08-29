@@ -425,6 +425,25 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 14,
+    name: "chain_resolution_indexes",
+    up(db) {
+      const columns = db
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name);
+      if (!columns.includes("chain_resolved_at")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN chain_resolved_at TEXT;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_causation
+          ON events (causation_id, source);
+        CREATE INDEX IF NOT EXISTS idx_runs_chain_unresolved
+          ON runs (state, chain_resolved_at);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

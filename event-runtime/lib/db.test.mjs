@@ -132,7 +132,56 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     const db = openDb(file);
     expect(getSchemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
     assertSchema(db);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get()?.sql,
+    ).toContain("events (causation_id, source)");
     db.close();
+  });
+
+  test("chain lookup indexes migrate idempotently onto an existing v13 database", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    migrateDb(db, { targetVersion: 13 });
+    expect(getSchemaVersion(db)).toBe(13);
+    expect(
+      db
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get(),
+    ).toBeNull();
+    db.close();
+
+    const migrated = openDb(file);
+    expect(getSchemaVersion(migrated)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(
+      migrated
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get()?.sql,
+    ).toContain("events (causation_id, source)");
+    expect(
+      migrated
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("chain_resolved_at");
+
+    // Re-running the idempotent DDL is safe and preserves the index.
+    MIGRATIONS.find((entry) => entry.version === 14).up(migrated);
+    expect(
+      migrated
+        .query(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get().n,
+    ).toBe(1);
+    migrated.close();
   });
 
   test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {
