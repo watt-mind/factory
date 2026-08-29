@@ -240,6 +240,7 @@ try {
     console.error(`seed: ${err.message}`);
     process.exit(1);
   }
+  throw err;
 }
 
 // Guard: never seed a real-adapter runtime. The adapter lands in each spec at

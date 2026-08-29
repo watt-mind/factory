@@ -52,6 +52,7 @@ try {
     console.error(`verify: ${err.message}`);
     process.exit(1);
   }
+  throw err;
 }
 check("GET /health reports ok: true", health.ok === true);
 check("runtime is in fake adapter mode", health.env?.adapter === "fake");
