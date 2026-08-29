@@ -2298,9 +2298,7 @@ export async function executeClaimed(
       MODEL_BACKED_ADAPTERS.includes(adapterKey) &&
       isSandboxGuarded(selectedAdapter);
     const missingModelDefinitionPin =
-      def?.mutating === false &&
-      modelRuntimeSelected &&
-      !spec.defHash;
+      def?.mutating === false && modelRuntimeSelected && !spec.defHash;
     if (missingModelDefinitionPin || (def && !verifyDefHash(spec, def))) {
       const refusedRes = refuseTerminal(
         "agent_definition_mismatch",

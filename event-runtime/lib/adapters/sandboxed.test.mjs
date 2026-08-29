@@ -211,10 +211,7 @@ describe("workspace-only model admission (#962)", () => {
   test("non-model adapters and mutating definitions retain their existing semantics", () => {
     expect(filesystemConfinementRefusal("fake", confinedDef())).toBeNull();
     expect(
-      filesystemConfinementRefusal(
-        "claude",
-        confinedDef({ mutating: true }),
-      ),
+      filesystemConfinementRefusal("claude", confinedDef({ mutating: true })),
     ).toBeNull();
   });
 });
@@ -499,17 +496,20 @@ describe("real guest filesystem confinement (#962)", () => {
             [
               'if cat "$0" >/dev/null 2>&1; then read_result=ESCAPED; else read_result=blocked; fi',
               'if printf guest-write > "$1" 2>/dev/null; then write_result=guest-only; else write_result=blocked; fi',
-              "printf '%s %s\\n' \"$read_result\" \"$write_result\" > ./absolute-path-results",
+              'printf \'%s %s\\n\' "$read_result" "$write_result" > ./absolute-path-results',
             ].join("\n"),
             hostSecret,
             hostEscape,
           ],
-          env: guestEnvironment({}, {
-            HOME: "/home/operator",
-            GITHUB_TOKEN: "ghp-host-only",
-            CURSOR_API_KEY: "cursor-host-only",
-            SSH_AUTH_SOCK: "/tmp/host-agent.sock",
-          }),
+          env: guestEnvironment(
+            {},
+            {
+              HOME: "/home/operator",
+              GITHUB_TOKEN: "ghp-host-only",
+              CURSOR_API_KEY: "cursor-host-only",
+              SSH_AUTH_SOCK: "/tmp/host-agent.sock",
+            },
+          ),
           timeoutMs: 120_000,
         });
 
@@ -520,9 +520,7 @@ describe("real guest filesystem confinement (#962)", () => {
             "utf8",
           ),
         ).toMatch(/^blocked (guest-only|blocked)\n$/);
-        expect(readFileSync(hostSecret, "utf8")).toBe(
-          "raw-host-credential\n",
-        );
+        expect(readFileSync(hostSecret, "utf8")).toBe("raw-host-credential\n");
         expect(existsSync(hostEscape)).toBe(false);
       } finally {
         rmSync(hostSecret, { force: true });

@@ -1931,9 +1931,7 @@ describe("worker", () => {
       db,
       makeSpec({
         adapter: "claude",
-        defHash: computeDefHash(
-          getAgent(registry, "factory-status-report@1"),
-        ),
+        defHash: computeDefHash(getAgent(registry, "factory-status-report@1")),
       }),
     );
     const workspacesRoot = freshRoot();
@@ -1966,9 +1964,9 @@ describe("worker", () => {
     expect(runState(db, spec.runId)).toBe("REFUSED");
     expect(
       JSON.parse(
-        db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(
-          spec.runId,
-        ).result_json,
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
       ).verification,
     ).toEqual({ status: "passed", checks: ["filesystem_confinement"] });
   });
@@ -2004,9 +2002,9 @@ describe("worker", () => {
     expect(readdirSync(workspacesRoot)).toEqual([]);
     expect(
       JSON.parse(
-        db.query(`SELECT result_json FROM results WHERE run_id = ?`).get(
-          spec.runId,
-        ).result_json,
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
       ).verification.checks,
     ).toEqual(["def_hash_missing"]);
   });
