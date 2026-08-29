@@ -15,6 +15,8 @@ import {
   resetExtensionSecretsCache,
 } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
+import { openDb } from "./db.mjs";
+import { KIND_MODEL_TIER_CELL, putOverride } from "./runtime-overrides.mjs";
 
 const SAMPLE_EXTENSION = path.join(
   RUNTIME_ROOT,
@@ -153,6 +155,7 @@ describe("GET /config view", () => {
     expect(view.sections.map((section) => section.id)).toEqual([
       "repos",
       "policy",
+      "policy-models",
       "nodes",
       "schedule",
       "registry",
@@ -161,6 +164,7 @@ describe("GET /config view", () => {
     expect(view.sections.map((section) => section.reload)).toEqual([
       "hot",
       "hot",
+      "restart",
       "cli-only",
       "cli-only",
       "restart",
@@ -186,13 +190,43 @@ describe("GET /config view", () => {
     expect(policy.entries.find((entry) => entry.key === "workers").reload).toBe(
       "hot",
     );
-    expect(policy.entries.find((entry) => entry.key === "models").reload).toBe(
-      "restart",
+    expect(policy.entries.some((entry) => entry.key === "models")).toBe(false);
+    const models = view.sections.find(
+      (section) => section.id === "policy-models",
     );
+    expect(models.modelTierConfig.tracked.pi.standard).toBe("pi/model");
+    expect(models.modelTierConfig.effective.pi.standard).toBe("pi/model");
     const eventType = view.sections
       .find((section) => section.id === "registry")
       .entries.find((entry) => entry.key.includes("factory.triage.requested"));
     expect(eventType.value).toBe("pi");
+  });
+
+  test("Policy Models exposes only tracked/runtime/effective model cells", () => {
+    const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:standard",
+      patch: { model: "runtime/model" },
+      actor: "operator",
+    });
+    const view = configView({
+      db,
+      root: fixtureRoot(),
+      registry: registry(),
+      repos: () => new Map(),
+      policyVersion: "git:test",
+      now: 0,
+    });
+    const section = view.sections.find((item) => item.id === "policy-models");
+    expect(section.modelTierConfig.tracked.pi.standard).toBe("pi/model");
+    expect(section.modelTierConfig.runtime.pi.standard).toBe("runtime/model");
+    expect(section.modelTierConfig.effective.pi.standard).toBe("runtime/model");
+    const wire = JSON.stringify(section);
+    expect(wire).not.toContain("workers");
+    expect(wire).not.toContain("never-publish-this");
+    expect(wire).not.toContain("leaked-notify-token");
+    db.close();
   });
 
   test("uses explicit allow-lists and publishes node env keys, never values", () => {

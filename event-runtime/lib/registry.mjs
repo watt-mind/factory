@@ -568,6 +568,44 @@ export const DEFAULT_MODEL = "default";
 export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
 
 /**
+ * Compose independently persisted runtime tier cells over the tracked policy
+ * map. Both inputs are validated against the same closed adapter/tier
+ * vocabularies as loadModelTierMap so a corrupt stored row cannot silently
+ * add policy surface at startup.
+ */
+export function composeModelTierMap(tracked = {}, runtime = {}) {
+  const effective = Object.fromEntries(
+    Object.entries(tracked).map(([adapter, tiers]) => [adapter, { ...tiers }]),
+  );
+  for (const [adapter, tiers] of Object.entries(runtime)) {
+    if (!MODEL_ADAPTERS.has(adapter)) {
+      throw new RegistryError(
+        `runtime model-tier override has unknown adapter ${JSON.stringify(adapter)} (expected one of ${[...MODEL_ADAPTERS].join(", ")})`,
+      );
+    }
+    if (typeof tiers !== "object" || tiers === null || Array.isArray(tiers)) {
+      throw new RegistryError(
+        `runtime model-tier override for ${adapter} must map tiers to model values`,
+      );
+    }
+    for (const [tier, model] of Object.entries(tiers)) {
+      if (!MODEL_TIERS.includes(tier)) {
+        throw new RegistryError(
+          `runtime model-tier override ${adapter}.${tier} has unknown tier (expected ${MODEL_TIERS.join(", ")})`,
+        );
+      }
+      if (typeof model !== "string" || model.trim() === "") {
+        throw new RegistryError(
+          `runtime model-tier override ${adapter}.${tier} must be a non-empty model value`,
+        );
+      }
+      effective[adapter] = { ...(effective[adapter] ?? {}), [tier]: model };
+    }
+  }
+  return effective;
+}
+
+/**
  * Read the `models:` tier map from config/policy.yaml (same root rule as
  * repos.yaml: the running factory checkout, FACTORY_REPOS_ROOT to override).
  * Shape is validated fail-closed — an unknown tier key or a non-string value
@@ -988,6 +1026,7 @@ export function loadRegistry({
   panelRoots = [],
   harnessRoots = [],
   modelTiers = loadModelTierMap(),
+  trackedModelTiers = modelTiers,
   loaderFor = defaultLoaderFor,
   scheduleConfigPath = resolveConfigPath("schedule", {
     root: path.dirname(root),
@@ -1412,6 +1451,7 @@ export function loadRegistry({
     kernelSchedules,
     scheduleSources: effectiveScheduleSources,
     modelTiers,
+    trackedModelTiers,
     harnessRoots,
   };
 }

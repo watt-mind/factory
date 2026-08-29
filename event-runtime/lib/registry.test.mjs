@@ -18,6 +18,7 @@ import {
   RegistryError,
   agentDefinitionFile,
   createFsPackLoader,
+  composeModelTierMap,
   getAgent,
   getArtifactView,
   getEventType,
@@ -1332,6 +1333,24 @@ describe("registry", () => {
     expect(() =>
       resolveModel({ ref: "x@1", model_tier: "light" }, "claude", {}),
     ).toThrow(RegistryError);
+  });
+
+  test("runtime model-tier cells compose over tracked policy and drive resolveModel (gh-859)", () => {
+    const tracked = {
+      pi: { strong: "tracked-strong", standard: "tracked-standard" },
+    };
+    const effective = composeModelTierMap(tracked, {
+      pi: { standard: "runtime-standard" },
+    });
+    expect(tracked.pi.standard).toBe("tracked-standard");
+    expect(effective.pi.strong).toBe("tracked-strong");
+    expect(effective.pi.standard).toBe("runtime-standard");
+    expect(
+      resolveModel({ ref: "cell@1", model_tier: "standard" }, "pi", effective),
+    ).toBe("runtime-standard");
+    expect(() => composeModelTierMap(tracked, { pi: { turbo: "x" } })).toThrow(
+      /unknown tier/,
+    );
   });
 
   test("loadModelTierMap: reads policy.yaml, validates shape fail-closed, tolerates absence (WM-135)", () => {

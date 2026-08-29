@@ -1,12 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchConfig,
+  deleteModelTierCell,
+  putModelTierCell,
+  ApiError,
   type ConfigEntry,
   type ConfigExtension,
   type ConfigReload,
   type ConfigSection,
 } from "../api";
+import type { ModelTierConfig } from "../types";
 import { FilterInput } from "../components/ui";
 import {
   SchemaForm,
@@ -159,6 +163,25 @@ function extensionHaystack(ext: ConfigExtension): string {
   ].join("\n");
 }
 
+function policyModelHaystack(
+  section: ConfigSection,
+  entry: ConfigEntry,
+): string {
+  const config = section.modelTierConfig;
+  if (!config) return "";
+  const split = entry.key.lastIndexOf(".");
+  if (split < 1) return "";
+  const adapter = entry.key.slice(0, split);
+  const tier = entry.key.slice(split + 1);
+  const runtime = config.runtime[adapter]?.[tier] ?? null;
+  return [
+    config.tracked[adapter]?.[tier] ?? "",
+    runtime ?? "",
+    config.effective[adapter]?.[tier] ?? "",
+    runtime === null ? "tracked" : "runtime",
+  ].join("\n");
+}
+
 function ContributionChips({ ext }: { ext: ConfigExtension }) {
   const counts = contributionsOf(ext);
   if (!counts) return null;
@@ -263,6 +286,185 @@ function ExtensionRow({
   );
 }
 
+function PolicyModelsSection({
+  config,
+  visibleKeys,
+}: {
+  config: ModelTierConfig;
+  visibleKeys: Set<string>;
+}) {
+  const queryClient = useQueryClient();
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [pendingCells, setPendingCells] = useState<
+    Record<string, "save" | "reset">
+  >({});
+  const [feedback, setFeedback] = useState<{
+    tone: "ok" | "error";
+    text: string;
+  } | null>(null);
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["config"] });
+  const setPending = (key: string, operation: "save" | "reset") =>
+    setPendingCells((current) => ({ ...current, [key]: operation }));
+  const clearPending = (key: string) =>
+    setPendingCells((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  const save = useMutation({
+    mutationFn: ({
+      adapter,
+      tier,
+      model,
+    }: {
+      adapter: string;
+      tier: string;
+      model: string;
+    }) => putModelTierCell(adapter, tier, model),
+    onMutate: (cell) => setPending(`${cell.adapter}:${cell.tier}`, "save"),
+    onSuccess: async (_result, cell) => {
+      setFeedback({
+        tone: "ok",
+        text: `${cell.adapter} ${cell.tier} saved. Restart serve to apply it.`,
+      });
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[`${cell.adapter}:${cell.tier}`];
+        return next;
+      });
+      await refresh();
+    },
+    onError: (error) =>
+      setFeedback({
+        tone: "error",
+        text: error instanceof ApiError ? error.message : "Model save failed.",
+      }),
+    onSettled: (_result, _error, cell) =>
+      clearPending(`${cell.adapter}:${cell.tier}`),
+  });
+  const reset = useMutation({
+    mutationFn: ({ adapter, tier }: { adapter: string; tier: string }) =>
+      deleteModelTierCell(adapter, tier),
+    onMutate: (cell) => setPending(`${cell.adapter}:${cell.tier}`, "reset"),
+    onSuccess: async (_result, cell) => {
+      setFeedback({
+        tone: "ok",
+        text: `${cell.adapter} ${cell.tier} reset to tracked policy. Restart serve to apply it.`,
+      });
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[`${cell.adapter}:${cell.tier}`];
+        return next;
+      });
+      await refresh();
+    },
+    onError: (error) =>
+      setFeedback({
+        tone: "error",
+        text: error instanceof ApiError ? error.message : "Model reset failed.",
+      }),
+    onSettled: (_result, _error, cell) =>
+      clearPending(`${cell.adapter}:${cell.tier}`),
+  });
+
+  return (
+    <div>
+      <div
+        role="note"
+        className="border-b border-(--border) bg-(--surface-1) px-3 py-2.5 text-[12px] text-(--text-dim)"
+      >
+        Runtime model changes persist immediately but take effect only after
+        restarting serve. Each adapter and tier is stored independently.
+      </div>
+      {feedback && (
+        <div
+          role={feedback.tone === "error" ? "alert" : "status"}
+          className={`border-b border-(--border) px-3 py-2 text-[12px] ${feedback.tone === "error" ? "text-(--hue-err)" : "text-(--hue-ok)"}`}
+        >
+          {feedback.text}
+        </div>
+      )}
+      {config.adapters.flatMap((adapter) =>
+        config.tiers
+          .filter((tier) => visibleKeys.has(`${adapter}.${tier}`))
+          .map((tier) => {
+            const key = `${adapter}:${tier}`;
+            const tracked = config.tracked[adapter]?.[tier] ?? null;
+            const runtime = config.runtime[adapter]?.[tier] ?? null;
+            const effective = config.effective[adapter]?.[tier] ?? null;
+            const model = drafts[key] ?? effective ?? "";
+            const savePending = pendingCells[key] === "save";
+            const resetPending = pendingCells[key] === "reset";
+            return (
+              <div
+                key={key}
+                className="grid min-w-0 gap-2 border-b border-(--border) px-3 py-3 last:border-b-0 lg:grid-cols-[6rem_7rem_minmax(9rem,1fr)_minmax(9rem,1fr)_5rem_minmax(10rem,1fr)_auto]"
+              >
+                <div className="mono text-[12px] font-medium">{adapter}</div>
+                <div className="mono text-[12px] text-(--text-dim)">{tier}</div>
+                <div className="min-w-0 text-[11px] text-(--text-faint)">
+                  tracked
+                  <div className="mono mt-0.5 break-all text-[12px] text-(--text-dim)">
+                    {tracked ?? EMPTY}
+                  </div>
+                </div>
+                <div className="min-w-0 text-[11px] text-(--text-faint)">
+                  effective
+                  <div className="mono mt-0.5 break-all text-[12px] text-(--text-dim)">
+                    {effective ?? EMPTY}
+                  </div>
+                </div>
+                <div className="text-[11px] text-(--text-faint)">
+                  source
+                  <div className="mono mt-0.5 text-[12px] text-(--text-dim)">
+                    {runtime === null ? "tracked" : "runtime"}
+                  </div>
+                </div>
+                <label className="min-w-0 text-[11px] text-(--text-faint)">
+                  edit model
+                  <input
+                    aria-label={`${adapter} ${tier} model`}
+                    className="mono mt-0.5 w-full rounded border border-(--border) bg-(--surface-1) px-2 py-1 text-[12px] text-(--text)"
+                    value={model}
+                    disabled={savePending || resetPending}
+                    onChange={(event) =>
+                      setDrafts((current) => ({
+                        ...current,
+                        [key]: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <div className="flex items-end gap-1.5">
+                  <button
+                    type="button"
+                    disabled={
+                      model.trim() === "" || savePending || resetPending
+                    }
+                    aria-label={`Save ${adapter} ${tier} model`}
+                    onClick={() => save.mutate({ adapter, tier, model })}
+                    className="rounded border border-(--border) px-2 py-1 text-[12px] disabled:opacity-50"
+                  >
+                    {savePending ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={runtime === null || savePending || resetPending}
+                    aria-label={`Reset ${adapter} ${tier} model`}
+                    onClick={() => reset.mutate({ adapter, tier })}
+                    className="rounded border border-(--border) px-2 py-1 text-[12px] disabled:opacity-50"
+                  >
+                    {resetPending ? "Resetting…" : "Reset"}
+                  </button>
+                </div>
+              </div>
+            );
+          }),
+      )}
+    </div>
+  );
+}
+
 /** One read-only inventory for every factory configuration source (WM-704). */
 export function Settings({
   focusSectionId,
@@ -302,7 +504,9 @@ export function Settings({
               const ext = section.extensions?.find(
                 (item) => extensionKey(item) === entry.key,
               );
-              const extra = ext ? extensionHaystack(ext) : "";
+              const extra = ext
+                ? extensionHaystack(ext)
+                : policyModelHaystack(section, entry);
               return `${entry.key}\n${displayValue(entry.value)}\n${extra}`
                 .toLowerCase()
                 .includes(needle);
@@ -319,8 +523,8 @@ export function Settings({
           <div>
             <h1 className="display text-lg font-semibold">Settings</h1>
             <p className="mt-1 text-[12px] text-(--text-faint)">
-              Read-only configuration inventory. Changes still happen in source
-              files.
+              Configuration inventory. Policy model cells can be overlaid for
+              this runtime; other changes still happen in source files.
             </p>
           </div>
           <FilterInput
@@ -411,6 +615,14 @@ export function Settings({
                     </span>
                   </div>
                   <div className="min-w-0 overflow-hidden rounded-md border border-(--border) bg-(--surface-0)">
+                    {section.modelTierConfig ? (
+                      <PolicyModelsSection
+                        config={section.modelTierConfig}
+                        visibleKeys={
+                          new Set(section.entries.map((entry) => entry.key))
+                        }
+                      />
+                    ) : null}
                     {section.extensions && section.extensions.length === 0 && (
                       <div className="px-3 py-2.5 text-xs text-(--text-faint)">
                         No extensions enabled — add them under{" "}
@@ -418,27 +630,28 @@ export function Settings({
                         policy.yaml.
                       </div>
                     )}
-                    {section.extensions
-                      ? section.extensions
-                          .filter((ext) =>
-                            section.entries.some(
-                              (entry) => entry.key === extensionKey(ext),
-                            ),
-                          )
-                          .map((ext) => (
-                            <ExtensionRow
-                              key={`${extensionKey(ext)}:${ext.path}`}
+                    {!section.modelTierConfig &&
+                      (section.extensions
+                        ? section.extensions
+                            .filter((ext) =>
+                              section.entries.some(
+                                (entry) => entry.key === extensionKey(ext),
+                              ),
+                            )
+                            .map((ext) => (
+                              <ExtensionRow
+                                key={`${extensionKey(ext)}:${ext.path}`}
+                                section={section}
+                                ext={ext}
+                              />
+                            ))
+                        : section.entries.map((entry) => (
+                            <SettingsRow
+                              key={entry.key}
                               section={section}
-                              ext={ext}
+                              entry={entry}
                             />
-                          ))
-                      : section.entries.map((entry) => (
-                          <SettingsRow
-                            key={entry.key}
-                            section={section}
-                            entry={entry}
-                          />
-                        ))}
+                          )))}
                   </div>
                 </section>
               ))

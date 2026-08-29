@@ -38,7 +38,11 @@ import {
 } from "./api-test-helpers.mjs";
 import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
 import { agentsView, handleRegistryApiRoute } from "./api-registry.mjs";
-import { KIND_EVENT_TYPE, putOverride } from "./runtime-overrides.mjs";
+import {
+  KIND_EVENT_TYPE,
+  listOverrideJournal,
+  putOverride,
+} from "./runtime-overrides.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -466,6 +470,122 @@ describe("runtime overlay API (WM-887)", () => {
       expect(def.declaredModelTier).toBe("standard");
       expect(def.modelTier).toBe("light");
       expect(def.eventTypes[0].resolvedModel).toBe("openai-codex/gpt-5.6-luna");
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
+  test("policy model cells update independently, report restart semantics, and delete to tracked", async () => {
+    const { server, port, close, db } = await makeServer();
+    const endpoint = (adapter, tier) =>
+      `http://127.0.0.1:${port}/overrides/config/models/${adapter}/${tier}`;
+    try {
+      const before = registry.modelTiers.pi.standard;
+      const first = await fetch(endpoint("pi", "standard"), {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "runtime-pi-standard" }),
+      });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toMatchObject({
+        adapter: "pi",
+        tier: "standard",
+        trackedModel: before,
+        runtimeModel: "runtime-pi-standard",
+        effectiveModel: "runtime-pi-standard",
+        source: "runtime",
+        restartRequired: true,
+      });
+      expect(
+        (
+          await fetch(endpoint("claude", "light"), {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: "runtime-claude-light" }),
+          })
+        ).status,
+      ).toBe(200);
+
+      const focused = await (
+        await fetch(`http://127.0.0.1:${port}/overrides/config`)
+      ).json();
+      expect(focused.runtime.pi.standard).toBe("runtime-pi-standard");
+      expect(focused.runtime.claude.light).toBe("runtime-claude-light");
+      expect(focused.effective.pi.strong).toBe(
+        registry.trackedModelTiers.pi.strong,
+      );
+      expect(Object.keys(focused).sort()).toEqual([
+        "adapters",
+        "effective",
+        "runtime",
+        "tiers",
+        "tracked",
+      ]);
+      // Persistence does not mutate the running registry snapshot.
+      expect(registry.modelTiers.pi.standard).toBe(before);
+
+      const journal = listOverrideJournal(db).filter(
+        (row) => row.kind === "modelTierCell",
+      );
+      expect(journal).toHaveLength(2);
+      expect(journal.map((row) => row.key).sort()).toEqual([
+        "claude:light",
+        "pi:standard",
+      ]);
+      expect(journal.every((row) => row.actor === "operator")).toBe(true);
+
+      const removed = await fetch(endpoint("pi", "standard"), {
+        method: "DELETE",
+      });
+      expect(await removed.json()).toMatchObject({
+        deleted: true,
+        effectiveModel: before,
+        source: "tracked",
+        restartRequired: true,
+      });
+      const absent = await fetch(endpoint("pi", "standard"), {
+        method: "DELETE",
+      });
+      expect(await absent.json()).toMatchObject({
+        deleted: false,
+        effectiveModel: before,
+        restartRequired: true,
+      });
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
+  test("policy model cell endpoints reject invalid adapter, tier, and model patches", async () => {
+    const { server, port, close } = await makeServer();
+    try {
+      const cases = [
+        ["unknown/standard", { model: "x" }],
+        ["pi/turbo", { model: "x" }],
+        ["pi/standard", { model: "" }],
+        ["pi/standard", { model: "x", extra: true }],
+      ];
+      for (const [pathPart, body] of cases) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/overrides/config/models/${pathPart}`,
+          {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        expect(response.status).toBe(422);
+      }
+      const malformed = await fetch(
+        `http://127.0.0.1:${port}/overrides/config/models/%E0%A4%A/standard`,
+        { method: "DELETE" },
+      );
+      expect(malformed.status).toBe(422);
+      expect(await malformed.json()).toEqual({
+        error: "model adapter and tier must use valid URL encoding",
+      });
     } finally {
       close();
       server.close();
