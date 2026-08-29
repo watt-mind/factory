@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   TICKET_SUPPLY_CACHE_TTL_MS,
   clearLinearSupplyCache,
@@ -7,6 +7,16 @@ import {
   setLinearSupplyBudget,
   setLinearSupplyGql,
 } from "./linear.mjs";
+
+// Pin a healthy budget by default so loadLinearSupply() exercises its GraphQL
+// path deterministically. readBudget() otherwise falls back to the on-disk
+// Linear budget of whatever host runs the suite (the self-hosted CI runner's
+// real budget is often exhausted), which would non-deterministically short
+// these tests to `linear_budget_exhausted`. The budget-exhaustion case is
+// still exercised: its test injects `{ remaining: 0 }` explicitly.
+beforeEach(() => {
+  setLinearSupplyBudget({ remaining: 2000, limit: 2500 });
+});
 
 afterEach(() => {
   clearLinearSupplyCache();

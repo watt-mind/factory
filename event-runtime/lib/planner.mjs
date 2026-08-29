@@ -73,6 +73,7 @@ import {
 import { validate } from "./schema.mjs";
 import { inFlightRunsForAgent } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
+import { computeDefHash } from "./receipts.mjs";
 import {
   autoApproveChains,
   buildChainApprovalPolicy,
@@ -366,6 +367,14 @@ export function buildRunSpec(
     promptVersion: policyVersion,
     policyVersion,
     outputContract: def.output_contract,
+    // Attested definition pin (WM-1056): the content sha256 of the registered
+    // agent definition, computed with the same helper the worker's claim-time
+    // verifyDefHash and the receipt seam use. Pinned at plan time so a proposal
+    // that crosses a registry reload is compared against the exact def it was
+    // planned against. Computed from `def`, NOT `planned`, so per-ticket
+    // model/model-tier overrides never redefine the attested definition or make
+    // otherwise identical planner inputs nondeterministic.
+    defHash: computeDefHash(def),
     capabilities: def.capabilities.services,
     // Declared repo scope (WM-64) rides in the spec so the proposal the
     // operator approves names it, same as capabilities.
