@@ -1136,17 +1136,22 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     const lock = await holdWriteLock(s.db.filename, 75);
     const startedAt = Date.now();
     const approved = await s.client.approve(waiting.id);
+    const elapsedMs = Date.now() - startedAt;
     expect(approved).toEqual({ approved: true, runId: waiting.runId });
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    // The lock is held for 75 ms; a lower bound proves the approval actually
+    // waited on it instead of racing past a lock that was never taken.
+    expect(elapsedMs).toBeGreaterThanOrEqual(50);
+    expect(elapsedMs).toBeLessThan(2_000);
     expect(await lock.exited).toBe(0);
     expect(await s.client.cancel(waiting.runId, "test cleanup")).toEqual({
       cancelled: true,
     });
 
     const timedOut = await planned("approve-busy-timeout");
-    s.db.exec("PRAGMA busy_timeout = 10;");
-    const timeoutLock = await holdWriteLock(s.db.filename, 75);
+    let timeoutLock;
     try {
+      s.db.exec("PRAGMA busy_timeout = 10;");
+      timeoutLock = await holdWriteLock(s.db.filename, 75);
       const err = await rejection(s.client.approve(timedOut.id));
       expect(err.status).toBe(503);
       expect(err.message).toBe("db_busy");
@@ -1154,7 +1159,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     } finally {
       s.db.exec("PRAGMA busy_timeout = 5000;");
     }
-    expect(await timeoutLock.exited).toBe(0);
+    expect(await timeoutLock?.exited).toBe(0);
   });
 
   test("reject an open proposal → run CANCELLED", async () => {
