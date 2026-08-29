@@ -30,6 +30,7 @@ import {
   usageFromUpdate,
 } from "./acp.mjs";
 import { createAdapterRegistry, validateAdapterContract } from "./index.mjs";
+import { PROMPT_SUFFIX } from "./claude.mjs";
 import { SandboxUnsupportedError } from "./sandboxed.mjs";
 import {
   processOwnerWatchdogSource,
@@ -267,6 +268,12 @@ rl.on("line", (line) => {
     return;
   }
   if (msg.method === "session/prompt") {
+    if (process.env.ACP_FAKE_PROMPT_RECORD) {
+      writeFileSync(
+        process.env.ACP_FAKE_PROMPT_RECORD,
+        msg.params?.prompt?.[0]?.text ?? "",
+      );
+    }
     currentPromptId = msg.id;
     handlePrompt(msg.params.sessionId).catch((err) => {
       send({
@@ -311,6 +318,7 @@ const ws = () => realpathSync(tmpDir("ws-", tmpBase));
 const defaultDef = {
   ref: "test-acp@1",
   promptPath,
+  promptText: "You are a test agent.",
   mutating: false,
 };
 const mutatingDef = { ...defaultDef, mutating: true };
@@ -599,14 +607,19 @@ describe("permission policy", () => {
 });
 
 describe("execute against a fake ACP agent", () => {
-  test("session lifecycle, update folding, usage, result.json, subscription env stripped", async () => {
+  test("session lifecycle uses the verified prompt snapshot after its path changes", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const promptRecord = path.join(workspaceDir, "prompt.txt");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
     const usageSeen = [];
     const outcome = await run(workspaceDir, {
+      def: { ...defaultDef, promptPath: replacedPrompt },
       env: {
         ACP_FAKE_RECORD: recordFile,
+        ACP_FAKE_PROMPT_RECORD: promptRecord,
         ANTHROPIC_API_KEY: "sk-must-strip",
         CLAUDECODE: "1",
       },
@@ -620,6 +633,9 @@ describe("execute against a fake ACP agent", () => {
     expect(record.cwd).toBe(workspaceDir);
     expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(record.env.CLAUDECODE).toBeUndefined();
+    expect(readFileSync(promptRecord, "utf8")).toBe(
+      `You are a test agent.${PROMPT_SUFFIX}`,
+    );
     expect(existsSync(path.join(workspaceDir, "result.json"))).toBe(true);
     expect(
       readFileSync(path.join(workspaceDir, ".transcript.json"), "utf8"),

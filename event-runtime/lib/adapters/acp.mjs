@@ -478,7 +478,8 @@ export async function execute({
 }) {
   refuseSandbox("acp", def, SANDBOX_DEFERRAL_REASON);
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt =
+    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
   const acpConfig = resolveAcpConfig({ spec, def, config });
   const childEnv = safeChildEnvironment({ ...acpConfig.env, ...env }, def);
   const resolved = resolveAcpCommand(acpConfig, {
