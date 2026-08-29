@@ -1,6 +1,13 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-registry-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { format as prettierFormat, resolveConfig } from "prettier";
 import { canonicalJson, hashBytes } from "./canonical.mjs";
@@ -25,14 +32,29 @@ import { updateHarnessPins } from "./pins.mjs";
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry() {
   const root = tmpDir("event-registry-");
-  for (const dir of ["agents", "schemas"]) {
-    cpSync(path.join(RUNTIME_ROOT, dir), path.join(root, dir), {
-      recursive: true,
-    });
+  cpSync(path.join(WATTMIND_PACK_ROOT, "agents"), path.join(root, "agents"), {
+    recursive: true,
+  });
+  cpSync(path.join(WATTMIND_PACK_ROOT, "schemas"), path.join(root, "schemas"), {
+    recursive: true,
+  });
+  for (const name of ["factory.event.v1.json", "factory.agent-result.v1.json"]) {
+    cpSync(
+      path.join(RUNTIME_ROOT, "schemas", name),
+      path.join(root, "schemas", name),
+    );
   }
   cpSync(
-    path.join(RUNTIME_ROOT, "event-types.json"),
+    path.join(WATTMIND_PACK_ROOT, "event-types.json"),
     path.join(root, "event-types.json"),
+  );
+  cpSync(
+    path.join(WATTMIND_PACK_ROOT, "edges.json"),
+    path.join(root, "edges.json"),
+  );
+  cpSync(
+    path.join(WATTMIND_PACK_ROOT, "schedules.json"),
+    path.join(root, "schedules.json"),
   );
   return root;
 }
@@ -48,6 +70,11 @@ const SAMPLE_PACK_ROOT = path.join(
   "test-support",
   "packs",
   "sample",
+);
+const WATTMIND_PACK_ROOT = path.join(
+  path.dirname(RUNTIME_ROOT),
+  "packs",
+  "wattmind",
 );
 
 function samplePack(
@@ -133,7 +160,7 @@ describe("registry", () => {
     );
     expect(packRelative.file).toBe("agents/factory-status-report.json");
     expect(packRelative.absSource).toBe(
-      path.join(RUNTIME_ROOT, "agents", "factory-status-report.json"),
+      path.join(WATTMIND_PACK_ROOT, "agents", "factory-status-report.json"),
     );
     // Given the repo root, the path is what a full checkout carries.
     const repoRelative = agentDefinitionFile(
@@ -144,7 +171,7 @@ describe("registry", () => {
       },
     );
     expect(repoRelative.file).toBe(
-      "event-runtime/agents/factory-status-report.json",
+      "packs/wattmind/agents/factory-status-report.json",
     );
     expect(() => agentDefinitionFile(registry, "no-such@9")).toThrow(
       RegistryError,
@@ -153,7 +180,7 @@ describe("registry", () => {
 
   test("work-scan scopes every queue and inflight ticket read to its input repo", () => {
     const prompt = readFileSync(
-      path.join(RUNTIME_ROOT, "agents", "work-scan.md"),
+      path.join(WATTMIND_PACK_ROOT, "agents", "work-scan.md"),
       "utf8",
     );
     const ticketReads = [
@@ -264,6 +291,53 @@ describe("registry", () => {
     const expected =
       "sha256:9c8b4dc211772cfbe7645fd99dcac98a644ce5aa3170c8f91f12815309f4d7bd";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
+  });
+
+  test("the no-builtins wattmind pack is definition- and receipt-equivalent to the legacy root", () => {
+    const legacy = loadRegistry({
+      builtins: true,
+      packRoots: [],
+    });
+    const extracted = loadRegistry({
+      builtins: false,
+      packRoots: [
+        {
+          kind: "fs",
+          name: "wattmind",
+          path: WATTMIND_PACK_ROOT,
+          namespace: "",
+        },
+      ],
+    });
+
+    expect([...extracted.agents.keys()]).toEqual([...legacy.agents.keys()]);
+    expect(
+      Object.fromEntries(
+        [...extracted.agents].map(([ref, def]) => [ref, computeDefHash(def)]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        [...legacy.agents].map(([ref, def]) => [ref, computeDefHash(def)]),
+      ),
+    );
+    expect(extracted.eventTypes).toEqual(legacy.eventTypes);
+    expect(extracted.edges).toEqual(legacy.edges);
+    expect(extracted.kernelSchedules).toEqual(legacy.kernelSchedules);
+    expect(extracted.schemas).toEqual(legacy.schemas);
+    expect(extracted.packs.map((pack) => pack.name)).toEqual(["wattmind"]);
+  });
+
+  test("organization definitions are emitted only into packs/wattmind", () => {
+    expect(existsSync(path.join(WATTMIND_PACK_ROOT, "pack.json"))).toBe(true);
+    expect(readdirSync(path.join(WATTMIND_PACK_ROOT, "agents"))).not.toEqual(
+      [],
+    );
+    expect(existsSync(path.join(RUNTIME_ROOT, "event-types.json"))).toBe(
+      false,
+    );
+    expect(existsSync(path.join(RUNTIME_ROOT, "edges.json"))).toBe(false);
+    expect(existsSync(path.join(RUNTIME_ROOT, "schedules.json"))).toBe(false);
+    expect(existsSync(path.join(RUNTIME_ROOT, "agents"))).toBe(false);
   });
 
   test("local schedule overlay changes enabled, cadence, payload, and source without changing the kernel digest", () => {
@@ -825,7 +899,7 @@ describe("registry", () => {
     // assertion mirrors what `prettier --check` would decide.
     const prettierOptions = {
       ...(await resolveConfig(
-        path.join(RUNTIME_ROOT, "agents", "dispatch.json"),
+        path.join(WATTMIND_PACK_ROOT, "agents", "dispatch.json"),
       )),
       filepath: defFile,
     };

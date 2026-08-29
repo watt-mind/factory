@@ -20,6 +20,13 @@ import { contractViewRel, validateArtifactView } from "./artifact-view.mjs";
 import { PANELS_DIR, loadPanelDir, mergePanels } from "./panel-view.mjs";
 import { HarnessPinError, verifyHarnessPins } from "./pins.mjs";
 
+/** Tracked organization definitions; kernel envelope schemas stay in event-runtime/. */
+export const WATTMIND_PACK_ROOT = path.join(
+  path.dirname(RUNTIME_ROOT),
+  "packs",
+  "wattmind",
+);
+
 export class RegistryError extends Error {
   constructor(message) {
     super(message);
@@ -213,14 +220,9 @@ function policyFile(root) {
   return resolveConfigPath("policy", { root });
 }
 
-/**
- * Read the explicit filesystem-pack allowlist. No directory discovery is ever
- * performed: an absent block is the empty list, and malformed entries fail
- * before any pack content is read.
- */
-export function loadPackRoots({ root = reposRoot() } = {}) {
+function readPolicy(root) {
   const file = policyFile(root);
-  if (!existsSync(file)) return [];
+  if (!existsSync(file)) return { file, parsed: {} };
   let parsed;
   try {
     parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
@@ -229,6 +231,38 @@ export function loadPackRoots({ root = reposRoot() } = {}) {
       `${file}: unparseable policy.yaml — ${err.message}`,
     );
   }
+  if (parsed !== null && parsed !== undefined && !isPlainObject(parsed)) {
+    throw new RegistryError(`${file}: policy.yaml must be an object`);
+  }
+  return { file, parsed: parsed ?? {} };
+}
+
+/** Whether the organization-definition root is loaded as the compatibility built-in. */
+export function loadRegistrySettings({ root = reposRoot() } = {}) {
+  const { file, parsed } = readPolicy(root);
+  const registry = parsed.registry;
+  if (registry === undefined || registry === null) return { builtins: true };
+  if (!isPlainObject(registry)) {
+    throw new RegistryError(`${file}: "registry" must be an object`);
+  }
+  for (const key of Object.keys(registry)) {
+    if (key !== "builtins") {
+      throw new RegistryError(`${file}: registry: unknown field "${key}"`);
+    }
+  }
+  if (registry.builtins !== undefined && typeof registry.builtins !== "boolean") {
+    throw new RegistryError(`${file}: registry.builtins must be a boolean`);
+  }
+  return { builtins: registry.builtins ?? true };
+}
+
+/**
+ * Read the explicit filesystem-pack allowlist. No directory discovery is ever
+ * performed: an absent block is the empty list, and malformed entries fail
+ * before any pack content is read.
+ */
+export function loadPackRoots({ root = reposRoot() } = {}) {
+  const { file, parsed } = readPolicy(root);
   const configured = parsed?.packs;
   if (configured === undefined || configured === null) return [];
   if (!Array.isArray(configured))
@@ -253,16 +287,16 @@ export function loadPackRoots({ root = reposRoot() } = {}) {
     if (typeof entry.path !== "string" || entry.path.trim() === "") {
       throw new RegistryError(`${at}.path must be a non-empty string`);
     }
-    if (!path.isAbsolute(entry.path)) {
-      throw new RegistryError(`${at}.path must be an absolute path`);
-    }
     if (entry.namespace !== undefined && typeof entry.namespace !== "string") {
       throw new RegistryError(`${at}.namespace must be a string when present`);
     }
     return {
       kind: "fs",
       name: entry.name,
-      path: path.resolve(entry.path),
+      // Tracked examples use checkout-relative pack paths; operator policy may
+      // still use an absolute vendor path. Both remain explicit allow-list
+      // entries — there is no directory discovery.
+      path: path.resolve(root, entry.path),
       ...(entry.namespace !== undefined ? { namespace: entry.namespace } : {}),
     };
   });
@@ -611,9 +645,9 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     if (def[field] === undefined)
       throw new RegistryError(`${source}: missing "${field}"`);
   }
-  if (!builtIn && def.mutating === true) {
+  if (!builtIn && pack.namespace !== "" && def.mutating === true) {
     throw new RegistryError(
-      `${source}: config-listed pack "${pack.name}" may not declare mutating: true (WM-468 decision 4; non-bare packs are read-only)`,
+      `${source}: config-listed namespaced pack "${pack.name}" may not declare mutating: true (WM-468 decision 4; only the bare-namespace owner may mutate)`,
     );
   }
   // §14 enforcement path: a mutating definition is admitted only when it is
@@ -933,6 +967,8 @@ export function validateMemosDeclaration(memos, { source, inputSchema } = {}) {
 export function loadRegistry({
   root = RUNTIME_ROOT,
   packRoots,
+  builtins,
+  builtinDefinitionsRoot,
   panelRoots = [],
   harnessRoots = [],
   modelTiers = loadModelTierMap(),
@@ -942,9 +978,21 @@ export function loadRegistry({
     warn: false,
   }),
 } = {}) {
+  const isRuntimeRoot = path.resolve(root) === path.resolve(RUNTIME_ROOT);
+  const includeBuiltins =
+    builtins ?? (isRuntimeRoot ? loadRegistrySettings().builtins : true);
+  if (typeof includeBuiltins !== "boolean") {
+    throw new RegistryError("builtins must be a boolean");
+  }
+  const definitionsRoot = path.resolve(
+    builtinDefinitionsRoot ??
+      (isRuntimeRoot && existsSync(WATTMIND_PACK_ROOT)
+        ? WATTMIND_PACK_ROOT
+        : root),
+  );
   const configured =
     packRoots ??
-    (path.resolve(root) === path.resolve(RUNTIME_ROOT) ? loadPackRoots() : []);
+    (isRuntimeRoot ? loadPackRoots() : []);
   if (!Array.isArray(configured))
     throw new RegistryError("packRoots must be an array");
   if (typeof loaderFor !== "function")
@@ -967,12 +1015,13 @@ export function loadRegistry({
   const builtIn = {
     kind: "fs",
     name: "event-runtime",
-    path: path.resolve(root),
+    path: definitionsRoot,
     root: path.resolve(root),
     namespace: "",
+    builtIn: true,
   };
   const packs = [
-    builtIn,
+    ...(includeBuiltins ? [builtIn] : []),
     ...configured.map((pack) =>
       pack.kind === "fs" ? configuredPack(pack) : injectedPack(pack),
     ),
@@ -998,8 +1047,8 @@ export function loadRegistry({
   const edgeSources = nullDict();
   const scheduleSources = nullDict();
 
-  for (const [index, pack] of packs.entries()) {
-    const builtInPack = index === 0;
+  for (const pack of packs) {
+    const builtInPack = pack.builtIn === true;
     const loader = assertLoader(
       loaderFor(pack, { builtIn: builtInPack }),
       pack,
@@ -1478,14 +1527,21 @@ export async function updatePins({
   }
 
   const changed = [];
-  const agentsDir = path.join(root, "agents");
+  const definitionsRoot =
+    path.resolve(root) === path.resolve(RUNTIME_ROOT) &&
+    existsSync(WATTMIND_PACK_ROOT)
+      ? WATTMIND_PACK_ROOT
+      : root;
+  const agentsDir = path.join(definitionsRoot, "agents");
   for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
     const file = path.join(agentsDir, name);
     const def = readJson(file);
     const pins = {};
     for (const field of PINNED_FIELDS) {
       if (!def[field]) continue;
-      pins[def[field]] = hashBytes(readFileSync(path.join(root, def[field])));
+      pins[def[field]] = hashBytes(
+        readFileSync(path.join(definitionsRoot, def[field])),
+      );
     }
     if (JSON.stringify(def.pins) !== JSON.stringify(pins)) {
       if (!check) {
@@ -1496,6 +1552,29 @@ export async function updatePins({
         );
       }
       changed.push(name);
+    }
+  }
+
+  // The compatibility built-in consumes the inline pins above; the same
+  // bytes, when loaded as the explicitly configured wattmind pack, consume
+  // its root pins.json. Keep both representations current from the paved-road
+  // bare command so extraction cannot leave one mode stale.
+  if (definitionsRoot === WATTMIND_PACK_ROOT) {
+    const pins = {};
+    for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
+      const def = readJson(path.join(agentsDir, name));
+      for (const field of PINNED_FIELDS) {
+        if (!def[field]) continue;
+        pins[def[field]] = hashBytes(
+          readFileSync(path.join(definitionsRoot, def[field])),
+        );
+      }
+    }
+    const pinsFile = path.join(definitionsRoot, "pins.json");
+    const serialized = `${JSON.stringify(pins, null, 2)}\n`;
+    if (!existsSync(pinsFile) || readFileSync(pinsFile, "utf8") !== serialized) {
+      if (!check) writeFileSync(pinsFile, serialized, "utf8");
+      changed.push("wattmind");
     }
   }
   return changed;
