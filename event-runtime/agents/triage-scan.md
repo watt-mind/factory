@@ -219,7 +219,7 @@ Worked example, based on the contract sample:
     "blocks": [
       {
         "type": "heading",
-        "text": "58 issues in Triage; 14 can be made agent-ready today"
+        "text": "The backlog has a concrete path forward"
       },
       {
         "type": "keyvalue",
@@ -228,11 +228,6 @@ Worked example, based on the contract sample:
             "label": "Recommendation",
             "value": { "$ref": "/recommendation" },
             "format": "state"
-          },
-          {
-            "label": "Issues seen",
-            "value": { "$ref": "/evidence/issuesSeen" },
-            "format": "count"
           }
         ]
       },
@@ -241,8 +236,8 @@ Worked example, based on the contract sample:
         "label": "Needs a human",
         "items": [
           {
-            "text": "WM-312 — production infra; incompatible deploy paths",
-            "ref": "/plan/7",
+            "text": "The first plan item needs operator attention",
+            "ref": "/plan/0",
             "tone": "warn"
           }
         ]

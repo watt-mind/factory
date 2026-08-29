@@ -46,22 +46,30 @@ function tableLines(block, width) {
       Math.max(...rows.map((row) => String(row[column] ?? "").length)),
     ),
   );
-  const crop = (value, column) => {
+  const wrap = (value, column) => {
     const raw = String(value ?? "");
     const limit = widths[column];
-    return raw.length <= limit
-      ? raw
-      : `${raw.slice(0, Math.max(1, limit - 1))}…`;
+    if (!raw) return [""];
+    const chunks = [];
+    for (let start = 0; start < raw.length; start += limit) {
+      chunks.push(raw.slice(start, start + limit));
+    }
+    return chunks;
   };
-  const line = (row) =>
-    row
-      .map((cell, column) => crop(cell, column).padEnd(widths[column]))
-      .join(" | ")
-      .trimEnd();
+  const lines = (row) => {
+    const cells = row.map(wrap);
+    const height = Math.max(...cells.map((cell) => cell.length));
+    return Array.from({ length: height }, (_, physicalRow) =>
+      cells
+        .map((cell, column) => (cell[physicalRow] ?? "").padEnd(widths[column]))
+        .join(" | ")
+        .trimEnd(),
+    );
+  };
   return [
-    line(block.columns),
+    ...lines(block.columns),
     widths.map((n) => "-".repeat(n)).join("-+-"),
-    ...block.rows.map((row) => line(row.map(text))),
+    ...block.rows.flatMap((row) => lines(row.map(text))),
   ];
 }
 

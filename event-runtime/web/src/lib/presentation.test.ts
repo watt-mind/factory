@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+// The server contract is JavaScript and intentionally has no web-facing types.
+// @ts-expect-error compare this browser port directly with the canonical module.
+import { validatePresentation as validateServerPresentation } from "../../../lib/presentation.mjs";
 import type { Presentation } from "../types";
 import { resolveRefs, validatePresentation } from "./presentation";
 
@@ -18,10 +21,18 @@ const fixture = JSON.parse(
 describe("browser presentation port", () => {
   test("agrees with every server fixture verdict", () => {
     for (const entry of fixture.cases) {
-      expect(
-        validatePresentation(entry.presentation, fixture.artifact).valid,
-        entry.name,
-      ).toBe(entry.valid);
+      const server = validateServerPresentation(
+        entry.presentation,
+        fixture.artifact,
+      );
+      const browser = validatePresentation(
+        entry.presentation,
+        fixture.artifact,
+      );
+      expect(browser.valid, entry.name).toBe(server.valid);
+      expect(browser.valid, `${entry.name} fixture expectation`).toBe(
+        entry.valid,
+      );
     }
   });
 
@@ -37,5 +48,30 @@ describe("browser presentation port", () => {
       value: "DISPATCH",
       ref: "/recommendation",
     });
+  });
+
+  test("rejects schema bounds before malformed blocks reach React", () => {
+    const invalid = {
+      schemaVersion: "factory.presentation/v1",
+      blocks: [
+        {
+          type: "section",
+          label: "",
+          blocks: [
+            {
+              type: "code",
+              text: "ok",
+              language: "x".repeat(41),
+            },
+          ],
+        },
+      ],
+    };
+    const result = validatePresentation(invalid, fixture.artifact);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("label"))).toBe(true);
+    expect(result.errors.some((error) => error.includes("language"))).toBe(
+      true,
+    );
   });
 });

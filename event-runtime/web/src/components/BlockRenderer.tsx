@@ -1,11 +1,12 @@
 import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { hashPath, hashProject, withProject } from "../hash";
 import {
   formatValue,
   TONE_HUES,
   toneFor,
   type Formatted,
 } from "../lib/artifactView";
-import { resolveRefs } from "../lib/presentation";
+import { resolveRefs, validatePresentation } from "../lib/presentation";
 import type {
   ArtifactFormat,
   ArtifactTone,
@@ -69,10 +70,31 @@ const unwrapped = (value: unknown): unknown =>
   sourceOf(value) ? (value as { value: unknown }).value : value;
 
 function runHref(runId: string): string {
-  return `#/runs/${encodeURIComponent(runId)}`;
+  return `#/${withProject(hashPath("runs", runId), hashProject(window.location.hash))}`;
 }
 
-function FormattedValue({ value }: { value: Formatted }) {
+function TonePill({ text, tone }: { text: string; tone: ArtifactTone }) {
+  const hue = TONE_HUES[tone];
+  return (
+    <span
+      className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
+      style={{
+        color: hue,
+        background: `color-mix(in oklch, ${hue} 12%, transparent)`,
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+function FormattedValue({
+  value,
+  tone,
+}: {
+  value: Formatted;
+  tone?: ArtifactTone;
+}) {
   switch (value.kind) {
     case "empty":
       return <span className="text-(--text-faint)">—</span>;
@@ -96,7 +118,7 @@ function FormattedValue({ value }: { value: Formatted }) {
         <JumpLink
           href={href}
           title={`Open ${value.chip} ${value.id}`}
-          className="rounded border border-(--border) bg-(--surface-1) px-1.5 py-0.5 text-(--accent)"
+          className="mono text-(--accent) hover:underline"
         >
           {value.text}
         </JumpLink>
@@ -105,8 +127,13 @@ function FormattedValue({ value }: { value: Formatted }) {
     case "json":
       return <JsonBlock value={value.value} />;
     case "text":
+      if (tone && tone !== "muted")
+        return <TonePill text={value.text} tone={tone} />;
       return (
-        <span className={value.mono ? "mono" : undefined} title={value.title}>
+        <span
+          className={`${value.mono ? "mono" : ""} ${tone === "muted" ? "text-(--text-faint)" : ""}`}
+          title={value.title}
+        >
           {value.text}
         </span>
       );
@@ -126,7 +153,10 @@ function Value({
 }) {
   const source = sourceOf(value);
   const body = (
-    <FormattedValue value={formatValue(unwrapped(value), format, { github })} />
+    <FormattedValue
+      value={formatValue(unwrapped(value), format, { github })}
+      tone={tone}
+    />
   );
   return (
     <span
@@ -376,6 +406,10 @@ export function PresentationPanel({
   artifact: unknown;
 }) {
   const [raw, setRawState] = useState(loadRaw);
+  const validation = useMemo(
+    () => validatePresentation(presentation, artifact),
+    [presentation, artifact],
+  );
   const setRaw = (next: boolean) => {
     setRawState(next);
     try {
@@ -384,6 +418,28 @@ export function PresentationPanel({
       /* local preference is best effort */
     }
   };
+  if (!validation.valid)
+    return (
+      <div
+        role="status"
+        className="rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] text-(--hue-warn)"
+      >
+        <div>
+          the agent&apos;s summary was dropped: {validation.errors.length}{" "}
+          errors
+        </div>
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[11px] text-(--text-dim)">
+            presentation errors
+          </summary>
+          <ul className="mono m-0 list-disc space-y-1 pl-5 text-[11px] text-(--text-dim)">
+            {validation.errors.map((error, index) => (
+              <li key={index}>{error}</li>
+            ))}
+          </ul>
+        </details>
+      </div>
+    );
   if (raw)
     return (
       <div>

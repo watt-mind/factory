@@ -72,3 +72,31 @@ test("presentation owns an independent raw toggle", () => {
   expect(view.container.querySelector("[data-presentation-view]")).toBeNull();
   expect(view.getByText("View")).toBeTruthy();
 });
+
+test("rejects a malformed client document without throwing", () => {
+  const view = render(
+    <PresentationPanel
+      presentation={
+        {
+          schemaVersion: "factory.presentation/v1",
+          blocks: [{ type: "list", items: "not-an-array" }],
+        } as unknown as Presentation
+      }
+      artifact={artifact}
+    />,
+  );
+  expect(
+    view.getByText("the agent's summary was dropped: 1 errors"),
+  ).toBeTruthy();
+  expect(view.queryByText("Raw")).toBeNull();
+});
+
+test("run chips preserve the active project context", () => {
+  window.location.hash = "#/runs?project=factory";
+  const view = render(
+    <BlockRenderer presentation={presentation} artifact={artifact} />,
+  );
+  expect(
+    view.getByText("run_12345678").closest("a")?.getAttribute("href"),
+  ).toBe("#/runs/run_1234567890?project=factory");
+});

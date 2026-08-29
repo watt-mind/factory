@@ -66,6 +66,21 @@ const scalarOrRef = (value: unknown): boolean =>
   ref(value);
 const bytes = (value: string): number => new TextEncoder().encode(value).length;
 
+function stringField(
+  value: unknown,
+  at: string,
+  errors: string[],
+  { min = 0, max = Infinity }: { min?: number; max?: number } = {},
+): value is string {
+  if (typeof value !== "string") {
+    errors.push(`${at}: expected string`);
+    return false;
+  }
+  if (value.length < min) errors.push(`${at}: shorter than ${min}`);
+  if (value.length > max) errors.push(`${at}: longer than ${max}`);
+  return true;
+}
+
 function keys(
   value: Record<string, unknown>,
   allowed: string[],
@@ -90,22 +105,35 @@ function checkValue(
     errors.push(`${at}: expected scalar, null, or $ref`);
     return;
   }
-  if (ref(value) && resolvePointer(artifact, value.$ref) === undefined)
-    errors.push(`${at}: $ref "${value.$ref}" does not resolve in the artifact`);
+  if (ref(value)) {
+    if (value.$ref.length === 0) errors.push(`${at}.$ref: shorter than 1`);
+    else if (resolvePointer(artifact, value.$ref) === undefined)
+      errors.push(
+        `${at}: $ref "${value.$ref}" does not resolve in the artifact`,
+      );
+  }
 }
 
-function checkTone(value: unknown, at: string, errors: string[]) {
+function checkTone(
+  value: unknown,
+  at: string,
+  errors: string[],
+  nested = false,
+) {
   if (typeof value === "string") {
     if (!TONES.includes(value as ArtifactTone))
       errors.push(`${at}: invalid tone`);
     return;
   }
   if (!object(value)) {
-    errors.push(`${at}: invalid tone map`);
+    // The server's deliberately small schema constrains the outer value to an
+    // object but does not constrain nested leaves. Keep parity with its
+    // defensive recursion: only string leaves can be invalid tones.
+    if (!nested) errors.push(`${at}: invalid tone map`);
     return;
   }
   for (const [key, child] of Object.entries(value))
-    checkTone(child, `${at}.${key}`, errors);
+    checkTone(child, `${at}.${key}`, errors, true);
 }
 
 function checkBlock(
@@ -126,27 +154,31 @@ function checkBlock(
   const type = value.type;
   const textBlock = (limit: number, byteLimit = false) => {
     keys(value, ["type", "text"], ["text"], at, errors);
-    if (typeof value.text !== "string")
-      errors.push(`${at}.text: expected string`);
-    else if ((byteLimit ? bytes(value.text) : value.text.length) > limit)
+    if (
+      stringField(value.text, `${at}.text`, errors) &&
+      (byteLimit ? bytes(value.text) : value.text.length) > limit
+    )
       errors.push(`${at}: ${type} text is over ${limit}`);
   };
   if (type === "heading") return textBlock(LIMITS.heading);
   if (type === "markdown") return textBlock(LIMITS.markdown, true);
   if (type === "code") {
     keys(value, ["type", "text", "language"], ["text"], at, errors);
-    if (typeof value.text !== "string")
-      errors.push(`${at}.text: expected string`);
-    else if (bytes(value.text) > LIMITS.code)
+    if (
+      stringField(value.text, `${at}.text`, errors) &&
+      bytes(value.text) > LIMITS.code
+    )
       errors.push(`${at}: code text is over ${LIMITS.code}`);
-    if (value.language !== undefined && typeof value.language !== "string")
-      errors.push(`${at}.language: expected string`);
+    if (value.language !== undefined)
+      stringField(value.language, `${at}.language`, errors, {
+        min: 1,
+        max: 40,
+      });
     return;
   }
   if (type === "badge") {
     keys(value, ["type", "text", "tone"], ["text", "tone"], at, errors);
-    if (typeof value.text !== "string")
-      errors.push(`${at}.text: expected string`);
+    stringField(value.text, `${at}.text`, errors);
     if (!TONES.includes(value.tone as ArtifactTone))
       errors.push(`${at}.tone: invalid tone`);
     return;
@@ -155,6 +187,11 @@ function checkBlock(
     const allowed =
       type === "list" ? ["type", "label", "items"] : ["type", "items"];
     keys(value, allowed, ["items"], at, errors);
+    if (type === "list" && value.label !== undefined)
+      stringField(value.label, `${at}.label`, errors, {
+        min: 1,
+        max: 120,
+      });
     if (!Array.isArray(value.items)) {
       errors.push(`${at}.items: expected array`);
       return;
@@ -172,8 +209,10 @@ function checkBlock(
           itemAt,
           errors,
         );
-        if (typeof item.label !== "string")
-          errors.push(`${itemAt}.label: expected string`);
+        stringField(item.label, `${itemAt}.label`, errors, {
+          min: 1,
+          max: 120,
+        });
         if (own(item, "value"))
           checkValue(item.value, `${itemAt}.value`, artifact, errors);
         if (
@@ -188,12 +227,15 @@ function checkBlock(
           errors.push(`${itemAt}.tone: invalid tone`);
       } else if (type === "list") {
         keys(item, ["text", "ref", "tone"], ["text"], itemAt, errors);
-        if (typeof item.text !== "string")
-          errors.push(`${itemAt}.text: expected string`);
+        stringField(item.text, `${itemAt}.text`, errors, {
+          min: 1,
+          max: 2048,
+        });
         if (item.ref !== undefined) {
-          if (typeof item.ref !== "string")
-            errors.push(`${itemAt}.ref: expected string`);
-          else if (resolvePointer(artifact, item.ref) === undefined)
+          if (
+            stringField(item.ref, `${itemAt}.ref`, errors, { min: 1 }) &&
+            resolvePointer(artifact, item.ref) === undefined
+          )
             errors.push(
               `${itemAt}: ref "${item.ref}" does not resolve in the artifact`,
             );
@@ -205,6 +247,11 @@ function checkBlock(
           errors.push(`${itemAt}.tone: invalid tone`);
       } else {
         keys(item, ["label", "issue", "pr", "run", "url"], [], itemAt, errors);
+        if (item.label !== undefined)
+          stringField(item.label, `${itemAt}.label`, errors, {
+            min: 1,
+            max: 120,
+          });
         const targets = ["issue", "pr", "run", "url"].filter(
           (key) => own(item, key) && item[key] !== null,
         );
@@ -227,14 +274,24 @@ function checkBlock(
       at,
       errors,
     );
+    if (value.label !== undefined)
+      stringField(value.label, `${at}.label`, errors, {
+        min: 1,
+        max: 120,
+      });
     if (
       !Array.isArray(value.columns) ||
       value.columns.length < 1 ||
       value.columns.length > LIMITS.columns
     )
       errors.push(`${at}.columns: expected 1-${LIMITS.columns} columns`);
-    else if (value.columns.some((column) => typeof column !== "string"))
-      errors.push(`${at}.columns: expected strings`);
+    else
+      value.columns.forEach((column, index) =>
+        stringField(column, `${at}.columns[${index}]`, errors, {
+          min: 1,
+          max: 120,
+        }),
+      );
     if (!Array.isArray(value.rows))
       return errors.push(`${at}.rows: expected array`);
     if (value.rows.length > LIMITS.rows)
@@ -276,8 +333,10 @@ function checkBlock(
       errors,
     );
     if (depth > 0) errors.push(`${at}: section nesting exceeds one level`);
-    if (typeof value.label !== "string")
-      errors.push(`${at}.label: expected string`);
+    stringField(value.label, `${at}.label`, errors, {
+      min: 1,
+      max: 120,
+    });
     if (value.collapsed !== undefined && typeof value.collapsed !== "boolean")
       errors.push(`${at}.collapsed: expected boolean`);
     if (!Array.isArray(value.blocks))
