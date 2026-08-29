@@ -113,25 +113,20 @@ export const HANDOFF_COMMENT_HEADING =
 
 /**
  * Handoff commands inspect the candidate worktree, never the worker's live
- * runtime. Keep this as a wildcard instead of enumerating today's instance
- * variables: a new FACTORY_* path or endpoint must be scrubbed by default.
- * #967 shares this seam for its credential-specific handoff sanitisation.
+ * runtime. The scrub is a `FACTORY_*` wildcard, not an enumeration of today's
+ * instance variables: a new FACTORY_* path or endpoint is dropped by default,
+ * and so is FACTORY_REPO_VERIFY_TIMEOUT_MS (the parent already applied it as
+ * the spawn timeout). #967 shares this seam for its credential-specific
+ * handoff sanitisation.
  */
-export const HANDOFF_FACTORY_ENV_DENYLIST = Object.freeze(["FACTORY_*"]);
-
 function handoffEnvironment(worktreePath) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (
-      HANDOFF_FACTORY_ENV_DENYLIST.some(
-        (pattern) => pattern === "FACTORY_*" && key.startsWith("FACTORY_"),
-      )
-    ) {
-      delete env[key];
-    }
+    if (key.startsWith("FACTORY_")) delete env[key];
   }
   // reposRoot() is the one Factory setting handoff commands need. Pin it
-  // after scrubbing so the command always resolves files in this worktree.
+  // after scrubbing so the command always resolves files in this worktree,
+  // whatever directory the command itself runs from.
   env.FACTORY_REPOS_ROOT = worktreePath;
   return env;
 }
@@ -166,14 +161,17 @@ export function outputTail(output, lines = HANDOFF_TAIL_LINES) {
 /**
  * Run one handoff command as ordinary code in the worktree, capturing the
  * whole output to `logPath` and returning an observation the worker can quote.
+ * `cwd` is where the command runs (may be a subdirectory such as the web
+ * package); `worktreePath` is always the worktree root and is what
+ * FACTORY_REPOS_ROOT is pinned to.
  */
-function runHandoffCommand({ command, cwd, logPath, timeoutMs }) {
+function runHandoffCommand({ command, cwd, worktreePath, logPath, timeoutMs }) {
   const fd = openSync(logPath, "w");
   let res;
   try {
     res = spawnSync("/bin/bash", ["-c", command], {
       cwd,
-      env: handoffEnvironment(cwd),
+      env: handoffEnvironment(worktreePath),
       stdio: ["ignore", fd, fd],
       timeout: timeoutMs,
     });
@@ -1022,6 +1020,7 @@ function verifyCompleted({
       const obs = runHandoffCommand({
         command: worktreeRecord.verify,
         cwd: worktreePath,
+        worktreePath,
         logPath: path.join(workspaceDir, ".verify.log"),
         timeoutMs: verifyTimeoutMs,
       });
@@ -1047,6 +1046,7 @@ function verifyCompleted({
       const obs = runHandoffCommand({
         command: ticketCommand,
         cwd: worktreePath,
+        worktreePath,
         logPath: path.join(workspaceDir, ".verify.ticket.log"),
         timeoutMs: verifyTimeoutMs,
       });
@@ -1079,6 +1079,7 @@ function verifyCompleted({
       const obs = runHandoffCommand({
         command: HANDOFF_WEB_BUILD_COMMAND,
         cwd: path.join(worktreePath, HANDOFF_WEB_BUILD_DIR),
+        worktreePath,
         logPath: path.join(workspaceDir, ".verify.web.log"),
         timeoutMs: verifyTimeoutMs,
       });

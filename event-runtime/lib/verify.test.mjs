@@ -1110,6 +1110,68 @@ describe("worktree baseline verification (WM-334)", () => {
     }
   });
 
+  test("the web build pins FACTORY_REPOS_ROOT to the worktree root, not its web cwd", () => {
+    const instanceRoot = tmpDir("evrt-handoff-instance-");
+    const { dir, record } = worktreeWorkspace("true", null);
+    record.base = "develop";
+    const repo = record.path;
+    const git = (...args) => execFileSync("git", args, { cwd: repo });
+    git("init", "-q", "-b", "develop");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    const webDir = path.join(repo, "event-runtime", "web");
+    mkdirSync(path.join(webDir, "src"), { recursive: true });
+    writeFileSync(
+      path.join(webDir, "package.json"),
+      JSON.stringify({
+        name: "web-fixture",
+        scripts: {
+          build:
+            'printf \'cwd=%s\\nrepos=%s\\nroot=%s\\ntimeout=%s\\n\' "$PWD" "$FACTORY_REPOS_ROOT" "${FACTORY_ROOT-unset}" "${FACTORY_REPO_VERIFY_TIMEOUT_MS-unset}"',
+        },
+      }),
+    );
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    git("update-ref", "refs/remotes/origin/develop", "HEAD");
+    git("checkout", "-qb", "feat/x");
+    writeFileSync(path.join(webDir, "src", "app.ts"), "export {};\n");
+    git("add", "-A");
+    git("commit", "-qm", "work");
+    const keys = ["FACTORY_REPOS_ROOT", "FACTORY_ROOT"];
+    const previous = Object.fromEntries(
+      keys.map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, {
+      FACTORY_REPOS_ROOT: instanceRoot,
+      FACTORY_ROOT: instanceRoot,
+    });
+    try {
+      const out = verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      expect(out.kind).toBe("completed");
+      expect(out.result.verification.checks).toContain("web_build_passed");
+      const observed = out.handoff.webBuild.output;
+      expect(observed).toContain(`cwd=${webDir}`);
+      expect(observed).toContain(`repos=${repo}`);
+      expect(observed).not.toContain(`repos=${webDir}`);
+      expect(observed).toContain("root=unset");
+      expect(observed).toContain("timeout=unset");
+      expect(observed).not.toContain(instanceRoot);
+    } finally {
+      for (const key of keys) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+    }
+  });
+
   test("later error noise cannot displace a failing test name from the bounded reason", () => {
     const { dir, record } = worktreeWorkspace(
       "printf '(fail) billing > rejects a duplicate charge\\n'; i=1; while [ \"$i\" -le 45 ]; do printf 'error: detail %s\\n' \"$i\"; i=$((i + 1)); done; exit 1",
