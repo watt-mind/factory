@@ -22,7 +22,7 @@ repos:
     worktree_down: bin/worktree-down.sh
     worktree_root: ~/Develop/.worktrees/factory
     max_in_flight: 20
-    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check
+    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check
     # Executables this repo's worktree script and verify command need, with the
     # semver range each must satisfy (WM-316, docs/event-runtime-repos.md §5).
     # Preflight resolves each one on the node and compares versions BEFORE a
@@ -41,6 +41,8 @@ repos:
     #
     # Constraints are validated at load: a range that is not semver (`latest`,
     # a typo) is a config error rather than a gate that silently passes.
+    # The single canonical wildcard "*" means the executable must exist; any parsed version passes.
+    # Other wildcard spellings are rejected because some only look constrained.
     #
     # Keep an example's floors genuinely low. This file is a LIVE fallback when
     # config/repos.yaml is absent, so a tight floor here would make the factory
