@@ -113,40 +113,69 @@ export function validateModelTierCellPatch(adapter, tier, patch) {
 }
 
 /** Read and validate only independently stored policy model cells. */
-export function runtimeModelTierCells(db) {
-  if (!db) return {};
-  const rows = db
+function readModelTierCell(row) {
+  const { adapter, tier } = parseModelTierCellKey(row.key);
+  let parsed;
+  try {
+    parsed = JSON.parse(row.patch_json);
+  } catch (err) {
+    throw new OverlayError(
+      500,
+      `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: patch_json is not JSON (${err.message}); delete or correct this runtime_overrides row`,
+    );
+  }
+  let patch;
+  try {
+    patch = validateModelTierCellPatch(adapter, tier, parsed);
+  } catch (err) {
+    if (err instanceof OverlayError) {
+      throw new OverlayError(
+        500,
+        `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: ${err.message}; delete or correct this runtime_overrides row`,
+      );
+    }
+    throw err;
+  }
+  return { adapter, tier, model: patch.model };
+}
+
+function modelTierCellRows(db) {
+  if (!db) return [];
+  return db
     .query(
       `SELECT key, patch_json FROM runtime_overrides WHERE kind = ? ORDER BY key`,
     )
     .all(KIND_MODEL_TIER_CELL);
+}
+
+function addModelTierCell(runtime, { adapter, tier, model }) {
+  runtime[adapter] = { ...(runtime[adapter] ?? {}), [tier]: model };
+}
+
+export function runtimeModelTierCells(db) {
   const runtime = {};
-  for (const row of rows) {
-    const { adapter, tier } = parseModelTierCellKey(row.key);
-    let parsed;
-    try {
-      parsed = JSON.parse(row.patch_json);
-    } catch (err) {
-      throw new OverlayError(
-        500,
-        `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: patch_json is not JSON (${err.message}); delete or correct this runtime_overrides row`,
-      );
-    }
-    let patch;
-    try {
-      patch = validateModelTierCellPatch(adapter, tier, parsed);
-    } catch (err) {
-      if (err instanceof OverlayError) {
-        throw new OverlayError(
-          500,
-          `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: ${err.message}; delete or correct this runtime_overrides row`,
-        );
-      }
-      throw err;
-    }
-    runtime[adapter] = { ...(runtime[adapter] ?? {}), [tier]: patch.model };
+  for (const row of modelTierCellRows(db)) {
+    addModelTierCell(runtime, readModelTierCell(row));
   }
   return runtime;
+}
+
+/**
+ * Read the model-tier cells for a read-only overview. Unlike the strict
+ * reader, one malformed persisted row is reported and does not hide valid
+ * cells or the rest of the configuration inventory.
+ */
+export function runtimeModelTierCellsTolerant(db) {
+  const runtime = {};
+  const problems = [];
+  for (const row of modelTierCellRows(db)) {
+    try {
+      addModelTierCell(runtime, readModelTierCell(row));
+    } catch (err) {
+      problems.push({ key: row.key, error: err.message });
+    }
+  }
+  return { cells: runtime, problems };
 }
 
 /** Compose stored cells over tracked policy; used before registry startup. */
@@ -167,6 +196,10 @@ export function applyModelTierCellOverrides(db, tracked) {
 /** Focused, secret-free policy model projection for API and Settings. */
 export function modelTierConfigView(db, tracked) {
   const runtime = runtimeModelTierCells(db);
+  return modelTierConfigViewFromRuntime(tracked, runtime);
+}
+
+function modelTierConfigViewFromRuntime(tracked, runtime) {
   const effective = composeModelTierMap(tracked, runtime);
   const adapters = [...MODEL_ADAPTERS];
   return {
@@ -182,6 +215,12 @@ export function modelTierConfigView(db, tracked) {
       adapters.map((adapter) => [adapter, { ...(effective[adapter] ?? {}) }]),
     ),
   };
+}
+
+/** Read-only configuration view that preserves valid cells alongside problems. */
+export function modelTierConfigViewTolerant(db, tracked) {
+  const { cells: runtime, problems } = runtimeModelTierCellsTolerant(db);
+  return { ...modelTierConfigViewFromRuntime(tracked, runtime), problems };
 }
 
 export function modelTierCellResult(db, tracked, adapter, tier, extra = {}) {

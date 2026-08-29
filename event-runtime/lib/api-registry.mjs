@@ -1,6 +1,11 @@
 /** Agent and repository registry endpoints. */
-import { getArtifactView, resolveModel } from "./registry.mjs";
-import { RepoError, resolvePromotionTarget, reposView } from "./repos.mjs";
+import { getArtifactView, loadModelTierMap, resolveModel } from "./registry.mjs";
+import {
+  RepoError,
+  reposRoot,
+  resolvePromotionTarget,
+  reposView,
+} from "./repos.mjs";
 import {
   KIND_AGENT,
   KIND_EVENT_TYPE,
@@ -136,11 +141,12 @@ export async function handleRegistryApiRoute({
     return send(200, agentsView(registry, { overrides }));
   }
 
-  const trackedModelTiers =
-    registry.trackedModelTiers ?? registry.modelTiers ?? {};
-
   if (route === "GET /overrides/config") {
     try {
+      // The tracked map is hot-reloadable policy input. The registry keeps its
+      // startup snapshot for execution, while both configuration endpoints
+      // read this disk source so their operator-facing views cannot drift.
+      const trackedModelTiers = loadModelTierMap({ root: reposRoot() });
       return send(200, modelTierConfigView(db, trackedModelTiers));
     } catch (err) {
       return sendOverlayError(send, err);
@@ -152,6 +158,7 @@ export async function handleRegistryApiRoute({
   );
   if (modelCellPath && (req.method === "PUT" || req.method === "DELETE")) {
     try {
+      const trackedModelTiers = loadModelTierMap({ root: reposRoot() });
       let adapter;
       let tier;
       try {
