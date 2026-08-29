@@ -1,5 +1,6 @@
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-acp-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import * as acp from "./acp.mjs";
 import {
   AcpProtocolError,
@@ -607,6 +609,66 @@ describe("permission policy", () => {
 });
 
 describe("execute against a fake ACP agent", () => {
+  test("spawn errors destroy the transcript before rejecting", async () => {
+    const workspaceDir = ws();
+    let transcript;
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = null;
+    child.stderr = null;
+
+    const pending = execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 1000,
+      config: fakeConfig,
+      spawnProcess: () => {
+        queueMicrotask(() =>
+          child.emit(
+            "error",
+            Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+          ),
+        );
+        return child;
+      },
+      transcriptFactory: () => {
+        transcript = new PassThrough();
+        return transcript;
+      },
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "ENOENT" });
+    expect(transcript.destroyed).toBe(true);
+  });
+
+  test("a child without stdout still settles when it closes", async () => {
+    const workspaceDir = ws();
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = null;
+    child.stderr = null;
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 1000,
+      config: fakeConfig,
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      },
+      transcriptFactory: () => new PassThrough(),
+    });
+
+    expect(outcome).toEqual({
+      exitCode: 0,
+      timedOut: false,
+      policyDenials: [],
+    });
+  });
+
   test("refuses a definition without verified promptText before launching the ACP agent", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");

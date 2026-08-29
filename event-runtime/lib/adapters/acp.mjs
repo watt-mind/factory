@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
 import {
   HARNESS_LAYOUT as CLAUDE_HARNESS_LAYOUT,
   KILL_GRACE_MS as CLAUDE_KILL_GRACE_MS,
@@ -155,7 +156,9 @@ function writeRpc(stream, obj) {
 export function createAcpRpc({ stdin, stdout, onRequest, onNotification }) {
   let nextId = 1;
   const pending = new Map();
-  const rl = createInterface({ input: stdout });
+  // A child can fail before stdio pipes are created. Keep the RPC transport
+  // inert in that case so the close/error path can settle the run normally.
+  const rl = createInterface({ input: stdout ?? Readable.from([]) });
 
   rl.on("line", (line) => {
     let msg;
@@ -471,6 +474,8 @@ export async function execute({
   resume = null,
   abortSignal,
   signal,
+  spawnProcess = spawn,
+  transcriptFactory = createWriteStream,
 }) {
   refuseSandbox("acp", def, SANDBOX_DEFERRAL_REASON);
 
@@ -492,27 +497,53 @@ export async function execute({
   const argv = [...resolved.args];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(resolved.command, argv, {
-      cwd: workspaceDir,
-      env: childEnv,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-
-    child.stdin?.on("error", () => {});
-
-    const transcript = createWriteStream(
+    // Open the transcript before spawning so a spawn error cannot race past
+    // cleanup, and so every failed launch has the same lifecycle as a run
+    // whose child reached the protocol handshake.
+    const transcript = transcriptFactory(
       path.join(workspaceDir, ".transcript.json"),
     );
     transcript.on("error", () => {});
     // Child close only says its stdio handles are closed; the file stream may
     // still have buffered bytes. Register before piping so a fast child cannot
     // finish before we can observe the output flush.
+    let resolveTranscriptClosed;
     const transcriptClosed = new Promise((done) => {
-      transcript.once("finish", done);
-      transcript.once("close", done);
+      resolveTranscriptClosed = done;
+      const doneOnce = () => {
+        resolveTranscriptClosed = null;
+        done();
+      };
+      transcript.once("finish", doneOnce);
+      transcript.once("close", doneOnce);
+      transcript.once("error", doneOnce);
     });
+    const closeTranscript = () => {
+      if (!transcript.destroyed && !transcript.writableEnded) {
+        transcript.end();
+      }
+    };
+
+    let child;
+    try {
+      child = spawnProcess(resolved.command, argv, {
+        cwd: workspaceDir,
+        env: childEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      });
+    } catch (err) {
+      closeTranscript();
+      transcript.destroy();
+      resolveTranscriptClosed?.();
+      reject(err);
+      return;
+    }
+
+    child.stdin?.on("error", () => {});
+
     if (child.stdout) child.stdout.pipe(transcript);
+    else transcript.end();
 
     let stderrBuf = "";
     if (child.stderr) {
@@ -775,7 +806,13 @@ export async function execute({
       cancelPendingPermissions();
       rpc.rejectAll(new Error("ACP child closed"));
       rpc.close();
+      // end() before destroy() is intentional: it lets an already-flushed
+      // stream emit "finish" (resolving transcriptClosed through the normal
+      // path) rather than only "close"; destroy() then guarantees the fd is
+      // released even when buffered bytes are abandoned.
+      closeTranscript();
       transcript.destroy();
+      resolveTranscriptClosed?.();
       fn(value);
     };
 
