@@ -656,6 +656,7 @@ function assertSafeConfigPath(keyPath) {
 }
 
 function assertSafeConfigSchemaPaths(schema, path = []) {
+  assertSafeConfigPath(path);
   if (!isPlainObject(schema)) return;
   if (isPlainObject(schema.properties)) {
     for (const [key, sub] of Object.entries(schema.properties)) {
