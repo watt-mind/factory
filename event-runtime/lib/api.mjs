@@ -208,6 +208,9 @@ export function createApi({
           "GET /health",
           "POST /events",
           "POST /github",
+          // Production Cloudflare tunnel forwards the literal path
+          // /webhooks/github (no rewrite), so it is an alias of POST /github.
+          "POST /webhooks/github",
           "POST /replay",
         ].includes(route)
       ) {

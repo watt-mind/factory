@@ -380,8 +380,13 @@ export async function handleIntakeApiRoute({
     return admit(db, registry, send, raw, nowMs, onEvent, parseJson);
   }
 
-  if (route === "POST /github") {
-    // The GitHub App's webhook points at this endpoint (POST /github); the App's
+  // The production Cloudflare tunnel forwards the literal path
+  // POST /webhooks/github (it does not rewrite to /github), so that path is a
+  // pure alias for the GitHub webhook intake: identical signature verification,
+  // event mapping, and delivery-id idempotency. Both must be in api.mjs's
+  // intake route whitelist for this branch to be reached.
+  if (route === "POST /github" || route === "POST /webhooks/github") {
+    // The GitHub App's webhook points at this endpoint; the App's
     // webhook secret is read from FACTORY_GITHUB_WEBHOOK_SECRET (see
     // githubWebhookSecret() in intake.mjs) and every delivery is verified with
     // GitHub's raw-body HMAC scheme BEFORE the body is parsed (fail closed).

@@ -713,6 +713,68 @@ describe("GitHub full event-set mapping (WM-1150)", () => {
     }
   });
 
+  test("POST /webhooks/github is accepted exactly like POST /github (tunnel alias)", async () => {
+    const s = await makeServer();
+    try {
+      const payload = {
+        action: "reopened",
+        pull_request: { number: 700, base: { ref: "develop" }, draft: false },
+        repository: { full_name: "watt-mind/factory" },
+      };
+      const body = JSON.stringify(payload);
+      const post = (path, signature) =>
+        fetch(s.url(path), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-github-event": "pull_request",
+            "x-github-delivery": "d-tunnel-alias",
+            "x-hub-signature-256": signature ?? ghSign(body),
+          },
+          body,
+        });
+
+      // Signature-verified delivery on the alias path admits the mapped event.
+      const ok = await post("/webhooks/github");
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({
+        admitted: true,
+        duplicate: false,
+        eventId: "d-tunnel-alias",
+      });
+      const row = githubEventRow(s, "d-tunnel-alias");
+      expect(row.type).toBe("factory.merge.requested");
+      expect(JSON.parse(row.envelope_json).payload).toEqual({
+        repo: "factory",
+        prNumbers: [700],
+      });
+
+      // Same delivery id again → duplicate (shared idempotency with /github).
+      const dup = await post("/webhooks/github");
+      expect(await dup.json()).toEqual({
+        admitted: false,
+        duplicate: true,
+        eventId: "d-tunnel-alias",
+      });
+
+      // A bad signature still 401s before parsing on the alias path.
+      const forged = await fetch(s.url("/webhooks/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "pull_request",
+          "x-github-delivery": "d-tunnel-forged",
+          "x-hub-signature-256": "sha256=deadbeef",
+        },
+        body,
+      });
+      expect(forged.status).toBe(401);
+      expect(githubEventRow(s, "d-tunnel-forged")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
   test("an unconfigured repo is a benign 2xx ignore, never a 4xx", async () => {
     const s = await makeServer();
     try {
