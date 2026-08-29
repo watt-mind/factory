@@ -12,6 +12,11 @@ cases/<skill>/<case-name>/
   expect.md     what a correct response must contain, and must not
 ```
 
+The directory name may be either a shared skill or a pinned
+`event-runtime/agents/<name>.md` prompt. Source resolution checks the shared
+skill first, then the emitted `plugins/core` skill, then the agent prompt, so a
+skill with the same name always wins. `--dry-run` prints the resolved path.
+
 `expect.md` is graded, not diffed — the wording will vary. State observable properties ("names a Verification Command that runs", "does not promote"), never exact phrasing.
 
 ## Choosing cases
@@ -25,7 +30,7 @@ Freeze a case once it's written. A case edited to match new behavior is no longe
     node evals/run.mjs                 # all
     node evals/run.mjs --skill ticket-spec
 
-One case is two model calls: the **subject** run puts the skill's own prompt (`shared/skills/<skill>/SKILL.md`, falling back to the emitted `plugins/core/skills/…`) in front of `input.md` and captures what it produces, then the **grader** judges that response against `expect.md` and answers with one line — `PASS: <reason>` or `FAIL: <reason>`. The subject may read the repo; the grader gets no tools, because it is judging text, not looking things up. Nothing is mutated: the subject is told this is an offline evaluation and is denied write tools.
+One case is two model calls: the **subject** run puts the case's own prompt (`shared/skills/<skill>/SKILL.md`, falling back to the emitted `plugins/core/skills/…`, then `event-runtime/agents/<name>.md`) in front of `input.md` and captures what it produces, then the **grader** judges that response against `expect.md` and answers with one line — `PASS: <reason>` or `FAIL: <reason>`. The subject may read the repo; the grader gets no tools, because it is judging text, not looking things up. Nothing is mutated: the subject is told this is an offline evaluation and is denied write tools.
 
 A grader that hangs, crashes, or answers with prose instead of a verdict **fails that case**, never the run.
 

@@ -9,6 +9,7 @@ import { configView, redactSecrets } from "./api-config.mjs";
 import { makeServer as makeApiServer } from "./api-test-helpers.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import {
+  EXTENSION_MANIFEST,
   extensionSecretEnvVar,
   loadExtensions,
   resetExtensionSecretsCache,
@@ -395,6 +396,66 @@ describe("GET /config view", () => {
       apiToken: { set: true, source: "env" },
     });
     expect(JSON.stringify(view)).not.toContain("super-secret-value");
+  });
+
+  test("GET /config cannot publish an innocently named secret beneath array items", async () => {
+    const dir = tmpDir("evrt-array-secret-extension-");
+    cpSync(SAMPLE_EXTENSION, dir, { recursive: true });
+    const manifestFile = path.join(dir, EXTENSION_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
+    manifest.name = "factory/array-secret";
+    manifest.contributes.config.namespace = "array-secret";
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    writeFileSync(
+      path.join(dir, "config.schema.json"),
+      JSON.stringify({
+        type: "object",
+        properties: {
+          destinations: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string" },
+                value: { type: "string", format: "secret" },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const secret = "plaintext-that-must-not-reach-config";
+    const loaded = await loadExtensions({
+      policy: {
+        extensions: [
+          {
+            path: dir,
+            config: {
+              destinations: [{ label: "prod", value: secret }],
+            },
+          },
+        ],
+      },
+      packRoots: [],
+    });
+    expect(loaded.extensions).toEqual([]);
+    expect(loaded.disabled[0].reason).toMatch(
+      /\$\.destinations\[\]\.value.*dynamic secret locations are unsupported/,
+    );
+
+    const view = configView({
+      root: fixtureRoot(),
+      registry: registry(),
+      repos: () => new Map(),
+      policyVersion: "git:test",
+      now: 0,
+    });
+    const section = view.sections.find((item) => item.id === "extensions");
+    expect(section.extensions[0].values).toBeNull();
+    expect(section.extensions[0].anomaly).toMatch(
+      /dynamic secret locations are unsupported/,
+    );
+    expect(JSON.stringify(view)).not.toContain(secret);
   });
 
   test("defaults to the extensions the process loaded (lib/extensions.mjs snapshot)", async () => {

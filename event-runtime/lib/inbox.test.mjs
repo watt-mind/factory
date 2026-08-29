@@ -641,6 +641,32 @@ describe("human inbox ledger (WM-285)", () => {
     });
   });
 
+  test("inbox counts omit expired open items", () => {
+    const db = openDb(":memory:");
+    const expiredAt = new Date(Date.now() - 61_000).toISOString();
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES ('expired-proposal', 'test', 'evt', 'run', 'open', ?, 60)`,
+    ).run(expiredAt);
+    createInboxItem(db, { kind: "BLOCKED", title: "active" }, { id: "active" });
+    createInboxItem(
+      db,
+      { kind: "proposal_expired", title: "expired by kind" },
+      { id: "expired-kind" },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "expired by proposal",
+        refs: { proposalId: "expired-proposal" },
+      },
+      { id: "expired-proposal-item" },
+    );
+
+    expect(inboxCounts(db)).toMatchObject({ open: 1, acked: 0 });
+  });
+
   test("runtime-owned referents auto-resolve after leaving their waiting state", () => {
     const db = openDb(":memory:");
     insertProposal(db, { id: "prop-1" });
