@@ -324,6 +324,30 @@ export function mapGitHubEvent({
   return null;
 }
 
+/**
+ * Decouple RESPONDING from PLANNING (WM-1162). A webhook handler must return
+ * 2xx immediately; the plan signal (`onEvent` → serve's `loopTick`, whose
+ * control-plane `gh` calls are blocking `spawnSync`) must run OFF the HTTP
+ * response path, or a single delivery stalls serve's event loop for seconds and
+ * GitHub gives up past its ~10s webhook timeout. We schedule the signal with
+ * `setImmediate` so it fires only after the response has been written to the
+ * socket (the check phase runs after the poll phase's I/O), never awaited before
+ * responding. The event is *persisted* (admitted) before we respond, so if the
+ * process dies between the response and the deferred plan, the tick loop's
+ * periodic re-scan of admitted-but-unplanned events recovers it — the event is
+ * never dropped, only planned slightly later.
+ */
+function planAfterResponse(onEvent, kind = "admitted") {
+  setImmediate(() => {
+    try {
+      onEvent(kind);
+    } catch {
+      // A planning failure must never surface on the already-sent response;
+      // the tick loop re-scans admitted events, so a miss here is recoverable.
+    }
+  });
+}
+
 function admit(db, registry, send, buffer, nowMs, onEvent, parseJson) {
   const parsed = parseJson(buffer);
   if (parsed.error) return send(422, { errors: [parsed.error] });
@@ -332,12 +356,14 @@ function admit(db, registry, send, buffer, nowMs, onEvent, parseJson) {
   });
   if (!outcome.admitted && !outcome.duplicate)
     return send(422, { errors: outcome.errors });
-  if (outcome.admitted) onEvent("admitted");
-  return send(200, {
+  // Respond first, then plan off the response path (WM-1162).
+  const response = send(200, {
     admitted: outcome.admitted,
     duplicate: outcome.duplicate,
     eventId: outcome.event.event_id,
   });
+  if (outcome.admitted) planAfterResponse(onEvent);
+  return response;
 }
 
 export async function handleIntakeApiRoute({
@@ -432,12 +458,14 @@ export async function handleIntakeApiRoute({
     });
     if (!outcome.admitted && !outcome.duplicate)
       return send(422, { errors: outcome.errors });
-    if (outcome.admitted) onEvent("admitted");
-    return send(200, {
+    // Ack GitHub immediately; plan off the response path (WM-1162).
+    const response = send(200, {
       admitted: outcome.admitted,
       duplicate: outcome.duplicate,
       eventId: outcome.event.event_id,
     });
+    if (outcome.admitted) planAfterResponse(onEvent);
+    return response;
   }
 
   if (route === "POST /replay") {
