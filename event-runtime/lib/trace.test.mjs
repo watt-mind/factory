@@ -224,12 +224,18 @@ function queueRun(db, spec, now = T0) {
   return spec;
 }
 
+// A checkout root with no config/, so the operator's config/policy.yaml — which
+// worktree-up copies into every worktree — never decides what runOnce does here
+// (#1285).
+const EMPTY_POLICY_ROOT = tmpDir("evrt-trace-empty-policy-");
+
 function opts(extra = {}) {
   return {
     owner: "w1",
     workspacesRoot: tmpDir("evrt-trace-"),
     now: T0,
     policyVersion: "test",
+    policyRoot: EMPTY_POLICY_ROOT,
     ...extra,
   };
 }

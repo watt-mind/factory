@@ -1,0 +1,13 @@
+# Every `bun test` process starts hermetic.
+#
+# `runtimeHome()` refuses the operator's real ~/.factory/event-runtime from a
+# test process (config.mjs), so any test reaching it needs FACTORY_EVENT_HOME
+# pointed at an isolated directory. `event-runtime/test-helpers.mjs` does that
+# on import, but only four of the ~96 test files import it: the rest inherited
+# the variable by accident, from whichever helper-importing file bun happened
+# to load first in the shared test process. Bun walks the tree in directory
+# order, so that order differs between checkouts — the same commit passed in
+# one worktree and failed in another (#1285, #1223). Preloading the helper
+# makes the isolated home a property of the process, not of the file order.
+[test]
+preload = ["./event-runtime/test-helpers.mjs"]
