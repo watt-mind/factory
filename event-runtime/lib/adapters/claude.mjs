@@ -490,7 +490,8 @@ export async function execute({
   // definition never reaches the host spawn below (WM-313).
   refuseSandbox("claude", def, SANDBOX_DEFERRAL_REASON);
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt =
+    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
   const childEnv = safeChildEnvironment(env, def);
 
   const mcpConfig = path.join(FACTORY_ROOT, "config", "mcp", "claude.json");

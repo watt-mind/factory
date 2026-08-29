@@ -638,6 +638,7 @@ process.stdin.on("end", () => {
   const defaultDef = {
     ref: "test-pi-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
   };
   const defaultSpec = {
@@ -684,14 +685,16 @@ process.stdin.on("end", () => {
     }
   }
 
-  test("executes stub binary in workspaceDir, strips API keys, pipes prompt on stdin, captures transcript + trace", async () => {
+  test("executes the verified prompt snapshot after its path changes, strips API keys, and captures trace", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: { ...defaultSpec, model: "openai-codex/gpt-5.6-terra" },
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
       timeoutMs: 5000,
       env: {
@@ -1011,6 +1014,7 @@ describe("sandboxed execution (WM-313)", () => {
   const sandboxDef = (extra = {}) => ({
     ref: "sandboxed-pi@1",
     promptPath: promptFile,
+    promptText: "You are a sandboxed test agent.",
     mutating: false,
     sandbox: {
       provider: "gondolin",

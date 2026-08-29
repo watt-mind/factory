@@ -8,7 +8,13 @@
  * promptVersion is provenance recorded at planning time, not a second
  * identity.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { format as prettierFormat, resolveConfig } from "prettier";
 import { hashBytes } from "./canonical.mjs";
@@ -50,6 +56,37 @@ function readJson(file, description = file) {
 
 function nullDict() {
   return Object.create(null);
+}
+
+function isStrictDescendant(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** Resolve a pack-owned resource without allowing lexical or symlink escape. */
+function resolvePackResource(root, canonicalRoot, relative) {
+  if (typeof relative !== "string" || relative === "") {
+    throw new RegistryError("pinned resource path must be a non-empty string");
+  }
+  const resolved = path.resolve(root, relative);
+  if (!isStrictDescendant(root, resolved)) {
+    throw new RegistryError(
+      `${relative}: resource resolves outside pack root ${root}`,
+    );
+  }
+  if (!existsSync(resolved)) return resolved;
+  const canonical = realpathSync(resolved);
+  if (!isStrictDescendant(canonicalRoot, canonical)) {
+    throw new RegistryError(
+      `${relative}: resource resolves outside canonical pack root ${canonicalRoot}`,
+    );
+  }
+  return canonical;
 }
 
 const SCHEDULE_OVERLAY_FIELDS = new Set(["enabled", "every", "payload"]);
@@ -278,6 +315,14 @@ export function createFsPackLoader(
   { builtIn = false, ignorePins = false } = {},
 ) {
   const root = path.resolve(pack.path);
+  let canonicalRoot;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch (err) {
+    throw new RegistryError(
+      `pack "${pack.name}": root ${root} is not accessible — ${err.message}`,
+    );
+  }
   let pins;
   return {
     listAgentDefs() {
@@ -295,7 +340,7 @@ export function createFsPackLoader(
     // notion, so only the fs loader offers them. loadRegistry treats an
     // absent method as "this pack has no views".
     readArtifactView(entry, def) {
-      return loadArtifactView(root, entry.source, def);
+      return loadArtifactView(root, canonicalRoot, entry.source, def);
     },
     // Optional seam member (WM-840): `panels/*.panel.json` under the pack
     // root, validated by lib/panel-view.mjs; a pack without the directory
@@ -312,7 +357,7 @@ export function createFsPackLoader(
           throw new RegistryError(`${file}: pins must be a path-to-hash map`);
         }
       }
-      const file = path.join(root, relative);
+      const file = resolvePackResource(root, canonicalRoot, relative);
       return {
         expected: builtIn
           ? Object.hasOwn(def.pins ?? nullDict(), relative)
@@ -487,14 +532,14 @@ function readViewFile(abs, rel, def, source) {
   return { file: rel, view, source, anomaly: null };
 }
 
-function loadArtifactView(root, defFile, def) {
+function loadArtifactView(root, canonicalRoot, defFile, def) {
   const agentRel = path.relative(root, defFile).replace(/\.json$/, VIEW_SUFFIX);
-  const agentAbs = path.join(root, agentRel);
+  const agentAbs = resolvePackResource(root, canonicalRoot, agentRel);
   if (existsSync(agentAbs))
     return readViewFile(agentAbs, agentRel, def, "agent");
   const contractRel = contractViewRel(def.output_contract);
   if (contractRel) {
-    const contractAbs = path.join(root, contractRel);
+    const contractAbs = resolvePackResource(root, canonicalRoot, contractRel);
     if (existsSync(contractAbs))
       return readViewFile(contractAbs, contractRel, def, "contract");
   }
@@ -795,6 +840,13 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     enumerable: false,
     writable: true,
     configurable: true,
+  });
+  // Prompt execution and publication must use the exact immutable bytes whose
+  // digest was accepted above, never a later read through the mutable path.
+  // Keep this runtime snapshot non-enumerable for receipt/registry identity.
+  Object.defineProperty(loaded, "promptText", {
+    value: Buffer.from(resources.prompt.bytes).toString("utf8"),
+    enumerable: false,
   });
   // The definition's own JSON file, kept non-enumerably for the same reason as
   // `pack`: it is loader-injected filesystem provenance, not definition content
@@ -1489,14 +1541,20 @@ export async function updatePins({
   }
 
   const changed = [];
-  const agentsDir = path.join(root, "agents");
+  const resolvedRoot = path.resolve(root);
+  const canonicalRoot = realpathSync(resolvedRoot);
+  const agentsDir = path.join(resolvedRoot, "agents");
   for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
     const file = path.join(agentsDir, name);
     const def = readJson(file);
     const pins = {};
     for (const field of PINNED_FIELDS) {
       if (!def[field]) continue;
-      pins[def[field]] = hashBytes(readFileSync(path.join(root, def[field])));
+      pins[def[field]] = hashBytes(
+        readFileSync(
+          resolvePackResource(resolvedRoot, canonicalRoot, def[field]),
+        ),
+      );
     }
     if (JSON.stringify(def.pins) !== JSON.stringify(pins)) {
       if (!check) {
