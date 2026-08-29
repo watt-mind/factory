@@ -168,6 +168,62 @@ describe("splitConfigSecrets", () => {
     expect({}.apiKey).toBeUndefined();
   });
 
+  test("strips forbidden keys from objects inside arrays", () => {
+    const { config, secrets } = splitConfigSecrets(
+      JSON.parse('{"items":[{"__proto__":{"x":1},"name":"a"},"scalar",7]}'),
+    );
+    expect(config).toEqual({ items: [{ name: "a" }, "scalar", 7] });
+    expect(Object.hasOwn(config.items[0], "__proto__")).toBe(false);
+    expect(secrets).toEqual({});
+    expect({}.x).toBeUndefined();
+  });
+
+  test("strips forbidden keys from objects inside nested arrays", () => {
+    const { config } = splitConfigSecrets(
+      JSON.parse(
+        '{"rows":[[{"constructor":{"y":2},"id":1}],[[{"prototype":{"z":3}}]]]}',
+      ),
+    );
+    expect(config).toEqual({ rows: [[{ id: 1 }], [[{}]]] });
+    expect(Object.hasOwn(config.rows[0][0], "constructor")).toBe(false);
+    expect(Object.hasOwn(config.rows[1][0][0], "prototype")).toBe(false);
+  });
+
+  test("deletes explicit secret paths that pass through an array element", () => {
+    const values = JSON.parse(
+      '{"items":[{"nested":{"__proto__":{"value":"x"}},"token":"t"}]}',
+    );
+    const { config, secrets } = splitConfigSecrets(values, [
+      { path: ["items", "0", "nested", "__proto__", "value"] },
+      { path: ["items", "0", "token"] },
+    ]);
+    expect(config).toEqual({ items: [{ nested: {} }] });
+    expect(Object.hasOwn(config.items[0].nested, "__proto__")).toBe(false);
+    expect(Object.hasOwn(secrets, "__proto__")).toBe(false);
+    expect(secrets).toEqual({ items: { 0: { token: "t" } } });
+    expect({}.value).toBeUndefined();
+  });
+
+  test("preserves legitimate arrays, including forbidden names as scalar elements", () => {
+    const { config, secrets } = splitConfigSecrets({
+      allowed: ["__proto__", "constructor", "prototype"],
+      items: [{ name: "a", tags: ["x", "y"] }, { name: "b" }],
+      matrix: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
+    expect(config).toEqual({
+      allowed: ["__proto__", "constructor", "prototype"],
+      items: [{ name: "a", tags: ["x", "y"] }, { name: "b" }],
+      matrix: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
+    expect(secrets).toEqual({});
+  });
+
   test("does not write through an inherited intermediate object", () => {
     Object.prototype.nested = {};
     const { secrets } = splitConfigSecrets({ nested: { token: "x" } }, [
