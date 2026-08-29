@@ -1728,9 +1728,21 @@ describe("extension packages (WM-922)", () => {
       stderr: "pipe",
     });
     expect(packed.exitCode).toBe(0);
+    // The CLI parses `npm pack --dry-run --json` structurally and prints its
+    // own stable summary, so this asserts the code's behavior — not npm's
+    // human text, which varies by npm version (object-keyed vs array report).
     const text = packed.stdout.toString();
-    expect(text).toMatch(/@test\/pack-ext@0\.1\.0: would pack/);
-    expect(text).toMatch(/factory-extension\.json/);
-    expect(text).toMatch(/package\.json/);
+    const summary = text.match(
+      /@test\/pack-ext@0\.1\.0: would pack (\d+) files/,
+    );
+    expect(summary).not.toBeNull();
+    // A real file set was resolved from the manifest's `files` list, not the
+    // empty/fallback shape a mis-parsed report would yield.
+    expect(Number(summary[1])).toBeGreaterThan(0);
+    // The listing still names each packed path, so a genuinely broken pack
+    // (missing the manifest or a contributed dir) would fail here.
+    expect(text).toMatch(/^ {2}factory-extension\.json$/m);
+    expect(text).toMatch(/^ {2}adapters\/echo\.mjs$/m);
+    expect(text).toMatch(/^ {2}package\.json$/m);
   });
 });
