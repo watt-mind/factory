@@ -409,14 +409,17 @@ export function proposalTtlLabel(
 
 /**
  * Expired items stay available in the Open tab, but are not actionable by default.
- * Must agree with the `open` count predicate in `inboxCounts` (event-runtime/lib/inbox.mjs)
- * so the sidebar badge and the Open tab count match.
+ * The server's `expired` flag comes from the shared predicate in
+ * event-runtime/lib/inbox.mjs, so the sidebar badge and Open tab count match.
  */
 export function isExpiredInboxItem(
   item: InboxItem,
   proposalsById: Map<string, Proposal>,
   now: number,
 ): boolean {
+  // The server uses the shared inbox SQL predicate. Older servers omit this
+  // field, so retain the proposal lookup only as a backwards-compatible fallback.
+  if (item.expired !== undefined) return item.expired;
   if (item.kind === "proposal_expired") return true;
   const proposal = item.refs.proposalId
     ? proposalsById.get(item.refs.proposalId)

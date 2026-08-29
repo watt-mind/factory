@@ -427,17 +427,11 @@ describe("Inbox view", () => {
         kind: "decision_needed",
         title: "Expired by proposal",
         refs: { proposalId: "expired-proposal-id" },
+        expired: true,
       }),
     ];
     api.proposals = mock(async () => ({
-      proposals: [
-        {
-          id: "expired-proposal-id",
-          status: "open",
-          created_at: new Date(Date.now() - 61_000).toISOString(),
-          ttl_seconds: 60,
-        } as Proposal,
-      ],
+      proposals: [],
     }));
 
     const { view } = renderInbox();
