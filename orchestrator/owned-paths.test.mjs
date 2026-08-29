@@ -25,6 +25,8 @@ import {
   nextDispatchable,
   readPinManifestRequirements,
   ownedPathsClosureGaps,
+  formatOwnedPathClosureGaps,
+  REGISTRY_DIGEST_BASELINE_PATH,
 } from "./owned-paths.mjs";
 
 test("parses the Owned Paths section of a real ticket", () => {
@@ -264,6 +266,54 @@ test("owned path closure passes when required paths are also owned", () => {
   );
 });
 
+test("registry inputs require owning the zero-pack digest baseline", () => {
+  const ownedPaths = [
+    "event-runtime/agents/triage-scan.md",
+    "event-runtime/agents/triage-scan.json",
+  ];
+  const expectedGap = {
+    rule: "registry-digest",
+    requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+    requiredBy: "event-runtime/agents/triage-scan.md",
+  };
+
+  expectEqual(ownedPathsClosureGaps({ ownedPaths }), [expectedGap]);
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: [...ownedPaths, REGISTRY_DIGEST_BASELINE_PATH],
+    }),
+    [],
+  );
+  expectEqual(formatOwnedPathClosureGaps([expectedGap]), [
+    "own event-runtime/lib/registry.test.mjs: registry input event-runtime/agents/triage-scan.md changes the zero-pack digest baseline",
+  ]);
+});
+
+test("each registry data input requires the digest baseline, but unrelated paths do not", () => {
+  for (const input of [
+    "event-runtime/event-types.json",
+    "event-runtime/edges.json",
+    "event-runtime/schedules.json",
+  ]) {
+    expectEqual(ownedPathsClosureGaps({ ownedPaths: [input] }), [
+      {
+        rule: "registry-digest",
+        requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+        requiredBy: input,
+      },
+    ]);
+  }
+
+  expectEqual(
+    ownedPathsClosureGaps({ ownedPaths: ["event-runtime/lib/planner.mjs"] }),
+    [],
+  );
+});
+
+test("a broad glob that owns the baseline satisfies registry digest closure", () => {
+  expectEqual(ownedPathsClosureGaps({ ownedPaths: ["event-runtime/**"] }), []);
+});
+
 test("pin manifests require owning generated output manifests", () => {
   const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
   try {
@@ -340,7 +390,10 @@ test("pin-manifest gap: shipped layout (agents/*.md keys) flags the missing JSON
     // Owning the prompt but not its JSON manifest is a pin-manifest gap.
     expectEqual(
       ownedPathsClosureGaps({
-        ownedPaths: ["event-runtime/agents/triage-scan.md"],
+        ownedPaths: [
+          "event-runtime/agents/triage-scan.md",
+          REGISTRY_DIGEST_BASELINE_PATH,
+        ],
         ownedPathsPolicy: {
           direct: [],
           pinManifests: ["event-runtime/agents/*.json"],
@@ -363,6 +416,7 @@ test("pin-manifest gap: shipped layout (agents/*.md keys) flags the missing JSON
         ownedPaths: [
           "event-runtime/agents/triage-scan.md",
           "event-runtime/agents/triage-scan.json",
+          REGISTRY_DIGEST_BASELINE_PATH,
         ],
         ownedPathsPolicy: {
           direct: [],
