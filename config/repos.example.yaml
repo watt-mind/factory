@@ -56,12 +56,16 @@ repos:
           requires:
             - dist/**
             - plugins/core/**
-        # Registry inputs change the tracked zero-pack digest baseline.
-        - source: event-runtime/agents/**
-          requires:
-            - event-runtime/lib/registry.test.mjs
       pin_manifests:
         - event-runtime/agents/*.json
+      # Registry inputs change the tracked zero-pack digest baseline.
+      registry_digest:
+        inputs:
+          - event-runtime/agents/**
+          - event-runtime/event-types.json
+          - event-runtime/edges.json
+          - event-runtime/schedules.json
+        baseline: event-runtime/lib/registry.test.mjs
     merge_ci:
       workflow: CI
       required_checks:
