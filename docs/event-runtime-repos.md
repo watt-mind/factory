@@ -355,12 +355,13 @@ Both are validated at config load, and both are strict on purpose:
 - a constraint must parse as a semver range. This is not decoration:
   `Bun.semver.satisfies("1.2.3", "not a range")` returns **true**, so an
   unvalidated typo would produce a gate that silently admits every version.
-  `isToolchainConstraint` rejects it at load instead. Whitespace after an
-  operator (`>= 1.2.3`) is valid node-semver and is accepted — a false reject
-  throws inside `loadRepos` and takes down every command that reads the
-  registry, so the validator is strict about garbage and lenient about
-  spelling. Known residue: some wildcard forms (`*.2.3`, `<*`) still validate
-  while constraining nothing (#1115).
+  `isToolchainConstraint` rejects it at load instead. Accepted syntax is an
+  exact or partial numeric version, a comparator, a two-sided comparator set,
+  a valid hyphen range, or clauses joined by `||`. Whitespace after an operator
+  (`>= 1.2.3`) is accepted. The single canonical wildcard "*" means the executable must exist; any parsed version passes.
+  Other whole-range or misleading wildcard spellings (`X`, `^x`, `<*`,
+  `*.2.3`) are rejected; requiring the canonical form avoids Bun/node-semver
+  divergence and makes an always-pass declaration explicit.
 
 The contract records what the repo requires; it does not select a version
 manager or install system packages. `repo doctor` resolves each executable in
