@@ -41,6 +41,7 @@ describe("sandbox decision (WM-313): deferred, so refused — never ignored", ()
   const sandboxedDef = (promptPath) => ({
     ref: "sandboxed-claude@1",
     promptPath,
+    promptText: "hello",
     mutating: false,
     sandbox: { provider: "gondolin", allowedHosts: ["api.anthropic.com"] },
   });
@@ -592,6 +593,16 @@ if (behavior === "normal") {
   process.exit(0);
 }
 
+if (behavior === "large_transcript") {
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] },
+    }) + "\\n",
+    () => process.exit(0),
+  );
+}
+
 if (behavior === "exit_code") {
   const code = parseInt(process.env.FACTORY_TEST_EXIT_CODE || "1", 10);
   process.exit(code);
@@ -720,6 +731,7 @@ if (behavior === "emit_denial_then_recovery") {
   const defaultDef = {
     ref: "test-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
     capabilities: { tools: ["Read", "Grep"] },
   };
@@ -767,14 +779,39 @@ if (behavior === "emit_denial_then_recovery") {
     }
   }
 
-  test("executes stub binary in workspaceDir, strips ANTHROPIC_API_KEY, captures .transcript.json and trace", async () => {
+  test("refuses a definition without verified promptText before launching Claude", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      execute({
+        spec: defaultSpec,
+        def: unverifiedDef,
+        workspaceDir,
+        timeoutMs: 5000,
+        env: {
+          PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+          FACTORY_TEST_BEHAVIOR: "normal",
+          FACTORY_TEST_RECORD_FILE: recordFile,
+        },
+      }),
+    ).rejects.toThrow(
+      "claude: definition test-agent@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
+  test("executes the verified prompt snapshot after its path changes and captures trace", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: defaultSpec,
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
       timeoutMs: 5000,
       env: {
@@ -841,6 +878,31 @@ if (behavior === "emit_denial_then_recovery") {
     expect(traceEvents[0].payload.text).toBe("Working...");
     expect(traceEvents[1].kind).toBe("usage");
     expect(traceEvents[1].payload.usage.input_tokens).toBe(15);
+  });
+
+  test("waits for a large transcript to flush before resolving", async () => {
+    const workspaceDir = ws();
+
+    await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+    });
+
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(transcript.length).toBeGreaterThan(1024 * 1024);
+    expect(transcript.endsWith("\n")).toBe(true);
+    expect(transcript.split("\n").filter(Boolean).map(JSON.parse)).toHaveLength(
+      1,
+    );
   });
 
   test("nonzero exit code propagates and timedOut is false", async () => {
@@ -1136,6 +1198,7 @@ if (behavior === "emit_denial_then_recovery") {
     const mutatingDef = {
       ref: "dispatch@1",
       promptPath: promptFile,
+      promptText: "You are a test agent.",
       mutating: true,
       capabilities: { tools: ["Bash", "Read", "Write", "Edit"] },
     };
@@ -1177,6 +1240,7 @@ if (behavior === "emit_denial_then_recovery") {
     const readOnlyDef = {
       ref: "status-report@1",
       promptPath: promptFile,
+      promptText: "You are a test agent.",
       mutating: false,
       capabilities: { tools: ["Read", "Grep"] },
     };

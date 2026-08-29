@@ -105,14 +105,73 @@ shell` means the spawn prompt was defective: correct its path/launch details
    wedges the run until the timeout kills it.
 6. **Push and open a PR** against the configured `base` for this repo in
    `config/repos.yaml`; never rely on GitHub's default branch. Use the exact
-   shape `gh pr create --base <configured-base> --title "..." --body "Fixes
-<TICKET>"`. Record its numeric GitHub PR number as
+   shape `gh pr create --base <configured-base> --title "..." --body "..."`,
+   with the body specified below. Record its numeric GitHub PR number as
    `artifact.prNumber`; this is what scopes the immediate merge review chained
    from a `PR_OPEN` result. For a required UX critique, create the PR as a
    draft first. Run `gh pr ready <PR>` only after an evidence-backed `SHIP`
    verdict (including a `FIX-FIRST` resolved to `SHIP`). Leave `FIX-FIRST`,
    `NOT-ASSESSED`, and `BLOCKED` PRs in draft for review; skipped critiques may
-   open ready normally. Include `UX critique: <status>` in the PR body.
+   open ready normally.
+
+   The checks you already ran are the reviewer's starting point — carry them
+   into the artifact instead of leaving them in the transcript. The PR body is
+   exactly this, in this order, with `Fixes` first and `run:` last:
+
+   ```
+   Fixes <TICKET>
+
+   <one line an operator can act on>
+
+   ## Validation
+
+   | Check                | Command                          | Result  | Notes                  |
+   | -------------------- | -------------------------------- | ------- | ---------------------- |
+   | Verification Command | `<the ticket's exact command>`    | pass    | 214 tests, 0 failures  |
+   | Repo verify          | `<the repo's configured verify>`  | pass    | clean                  |
+   | UX critique          | factory-ux-critic                | not run | no user-facing surface |
+
+   UX critique: <status>
+
+   run:$FACTORY_RUN_ID
+   ```
+
+   `Fixes <TICKET>` and the trailing `run:$FACTORY_RUN_ID` are unchanged
+   required lines — the `## Validation` section is added between them, never
+   in place of either. Omit the `run:` line only when `$FACTORY_RUN_ID` is
+   unset (an interactive session). `UX critique: <status>` still appears in
+   the body, and the table's UX row carries the same status.
+
+   **Every row is an observation, not an assertion.** A row names a command you
+   actually ran in `./repo` and records the exit status you actually saw:
+   `pass` only for an exit-0 run you observed on the tree you pushed, `fail`
+   for a non-zero one. A check you did not run gets a row with result
+   `not run` and a one-line reason — never omit that row, and never write
+   `pass` in its place. **Recording a pass for a command you did not run, or
+   whose exit status you did not read, is a protocol violation**, in the same
+   class as reporting success on failing output: the worker re-runs these
+   commands after you return, and the contradiction lands on the ticket.
+
+   **A failed check means no PR at all.** The floor's gate stands — never open
+   a PR on failing output. Fix it, or take the `BLOCKED` / `FAILED` route in
+   §3. The table exists to show passes, not to normalise shipping a red; a PR
+   whose table admits a `fail` row should not have been opened.
+
+   **Keep it bounded: at most 15 rows, one line each.** At minimum the
+   ticket's exact `Verification Command` and the repo's configured `verify`
+   from `config/repos.yaml`, plus the UX gate row (`not run` with the reason
+   when the gate was skipped). Notes are a phrase — counts, the failing name,
+   the reason it did not run. No pasted output, no stack traces, no logs: the
+   full output stays in the transcript and in `artifact.verification.output`.
+   This is a reviewer's summary, not a log dump.
+
+   **The table and the `## Handoff` comment must agree.** The
+   `Verification Command` row carries the same command string and the same
+   result as the Handoff's `Verification:` line below — write one from the
+   other so the two cannot drift. If they disagree, both are void: no reader
+   can tell which run is being described. Both are agent-reported, and the
+   worker's `## Handoff verification (worker-observed)` comment is what
+   settles the question.
 
    Post the structured `## Handoff` comment on the ticket before transitioning:
 

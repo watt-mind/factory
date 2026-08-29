@@ -32,11 +32,13 @@
   --wm-space-xl: 3rem;
   --wm-space-2xl: 4rem;
   --wm-space-3xl: 6rem;
+  --wm-page-margin: 1rem;
+  --wm-container-max: 90rem;
   --wm-radius-sm: 0.25rem;
   --wm-radius-md: 0.5rem;
   --wm-radius-lg: 0.75rem;
   --wm-rule: 1px solid var(--wm-color-outline-variant);
   --wm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --wm-duration-short: 180ms;
-  --wm-text-hero: clamp(3.5rem, 7vw, 6.75rem);
+  --wm-text-hero: clamp(3.5rem, 6.25vw, 6rem);
 }

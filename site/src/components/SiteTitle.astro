@@ -1,0 +1,92 @@
+---
+import wattMindLogo from "../assets/watt-mind-logo.svg";
+
+const { siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<a
+  href={siteTitleHref}
+  class="wm-site-title"
+  aria-label="Factory documentation home, by Watt Mind"
+>
+  <img
+    src={wattMindLogo.src}
+    width={wattMindLogo.width}
+    height={wattMindLogo.height}
+    alt=""
+  />
+  <span class="wm-site-title__brand" translate="no">WATT_MIND</span>
+  <span class="wm-site-title__product" translate="no">[ FACTORY ]</span>
+</a>
+
+<style>
+  @layer starlight.core {
+    .wm-site-title {
+      display: inline-flex;
+      min-width: 0;
+      align-items: center;
+      gap: var(--wm-space-2xs);
+      color: var(--sl-color-white);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .wm-site-title img {
+      width: 2rem;
+      height: 2rem;
+      flex: none;
+      object-fit: contain;
+    }
+
+    .wm-site-title__brand {
+      overflow: hidden;
+      font-family: var(--wm-font-display);
+      font-size: 1.05rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+
+    .wm-site-title__product {
+      color: var(--wm-color-primary);
+      font-family: var(--wm-font-mono);
+      font-size: 0.625rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      line-height: 1;
+    }
+
+    .wm-site-title:hover .wm-site-title__product {
+      color: var(--sl-color-white);
+    }
+
+    .wm-site-title:active {
+      transform: translateY(1px);
+    }
+
+    @media (max-width: 22rem) {
+      .wm-site-title__brand {
+        display: none;
+      }
+    }
+
+    @media (min-width: 50rem) {
+      .wm-site-title {
+        gap: var(--wm-space-xs);
+      }
+
+      .wm-site-title img {
+        width: 2.5rem;
+        height: 2.5rem;
+      }
+
+      .wm-site-title__brand {
+        font-size: 1.25rem;
+      }
+
+      .wm-site-title__product {
+        font-size: 0.6875rem;
+      }
+    }
+  }
+</style>

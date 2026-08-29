@@ -6,6 +6,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   test,
@@ -1011,6 +1012,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
       duplicate: false,
       eventId: "flow-1",
     });
+    // Planning runs off the response path (WM-1162): drain the deferred
+    // setImmediate before asserting the admitted wake-up.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(s.onEvents).toEqual(["admitted"]);
   });
 
@@ -1306,6 +1310,59 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       expect(outbox[0].published_at).toBeNull(); // no serve loop in this test — sink not run
     } finally {
       server.close();
+    }
+  });
+
+  test("journal and outbox bound malformed limits and normalize journal cursors", async () => {
+    const s = await makeServer();
+    try {
+      const insertJournal = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, ?)`,
+      );
+      const insertOutbox = s.db.query(
+        `INSERT INTO outbox (event_json, created_at) VALUES (?, ?)`,
+      );
+      const createdAt = new Date().toISOString();
+      s.db.transaction(() => {
+        for (let i = 0; i < 501; i += 1) {
+          insertJournal.run(`journal-limit-${i}`, createdAt, `hash-${i}`);
+          insertOutbox.run(
+            JSON.stringify({ eventId: `outbox-limit-${i}` }),
+            createdAt,
+          );
+        }
+      })();
+
+      for (const path of ["/journal?limit=-1", "/outbox?limit=-1"]) {
+        const response = await fetch(s.url(path));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.entries ?? body.outbox).toHaveLength(1);
+      }
+
+      for (const path of ["/journal?limit=999", "/outbox?limit=999"]) {
+        const response = await fetch(s.url(path));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.entries ?? body.outbox).toHaveLength(500);
+      }
+
+      const journalFallback = await fetch(s.url("/journal?limit=abc"));
+      expect(journalFallback.status).toBe(200);
+      expect((await journalFallback.json()).entries).toHaveLength(100);
+
+      const outboxFallback = await fetch(s.url("/outbox?limit=abc"));
+      expect(outboxFallback.status).toBe(200);
+      expect((await outboxFallback.json()).outbox).toHaveLength(50);
+
+      const normalizedSince = await fetch(
+        s.url("/journal?since=not-a-cursor&limit=500"),
+      );
+      expect(normalizedSince.status).toBe(200);
+      expect((await normalizedSince.json()).entries).toHaveLength(500);
+    } finally {
+      s.close();
     }
   });
 
@@ -1641,17 +1698,6 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
 });
 
 describe("GET /tickets/supply (WM-824)", () => {
-  afterEach(async () => {
-    const {
-      clearLinearSupplyCache,
-      setLinearSupplyGql,
-      setLinearSupplyBudget,
-    } = await import("./linear.mjs");
-    clearLinearSupplyCache();
-    setLinearSupplyGql(null);
-    setLinearSupplyBudget(undefined);
-  });
-
   function repoMap(rows) {
     return new Map(
       rows.map((row) => [
@@ -1734,12 +1780,9 @@ describe("GET /tickets/supply (WM-824)", () => {
     expect(stale.stale).toBe(true);
   });
 
-  test("GET /tickets/supply queries Linear on demand and honors refresh=1", async () => {
-    const { setLinearSupplyGql, clearLinearSupplyCache } =
-      await import("./linear.mjs");
-    clearLinearSupplyCache();
+  test("ticketSupplyView queries Linear on demand and honors refresh", async () => {
     let calls = 0;
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       calls += 1;
       return {
         issues: {
@@ -1753,15 +1796,13 @@ describe("GET /tickets/supply (WM-824)", () => {
           pageInfo: { hasNextPage: false },
         },
       };
-    });
+    };
     const repos = repoMap([{ name: "factory" }]);
-    const s = await makeServer({ repos: () => repos });
+    const s = await makeServer();
     try {
-      const first = await fetch(s.url("/tickets/supply"));
-      expect(first.status).toBe(200);
-      const body = await first.json();
-      expect(body.source).toBe("linear");
-      expect(body.repos).toEqual([
+      const first = await ticketSupplyView(s.db, { repos, gql });
+      expect(first.source).toBe("linear");
+      expect(first.repos).toEqual([
         expect.objectContaining({
           name: "factory",
           triage: 1,
@@ -1771,10 +1812,10 @@ describe("GET /tickets/supply (WM-824)", () => {
       ]);
       expect(calls).toBe(1);
 
-      await fetch(s.url("/tickets/supply"));
+      await ticketSupplyView(s.db, { repos, gql });
       expect(calls).toBe(1);
 
-      await fetch(s.url("/tickets/supply?refresh=1"));
+      await ticketSupplyView(s.db, { repos, gql, refresh: true });
       expect(calls).toBe(2);
     } finally {
       s.close();

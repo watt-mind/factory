@@ -103,7 +103,12 @@ afterAll(() => {
 });
 
 const ws = () => realpathSync(tmpDir("ws-", tmpBase));
-const defaultDef = { ref: "test-hermes@1", promptPath, mutating: false };
+const defaultDef = {
+  ref: "test-hermes@1",
+  promptPath,
+  promptText: "You are a test agent.",
+  mutating: false,
+};
 const defaultSpec = { agent: "test-hermes@1", input: {} };
 const fakeConfig = { command: process.execPath, args: [stubPath] };
 

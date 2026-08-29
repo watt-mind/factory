@@ -103,16 +103,39 @@ function worktreeScriptFailure(result) {
 }
 
 /**
+ * Canonicalize the workspace root for containment checks. A root that no
+ * longer exists (destroyed or retained-then-removed workspace) is reported as
+ * a PathViolation rather than a raw ENOENT so callers see one error class.
+ */
+function canonicalWorkspaceRoot(workspaceDir, relPath) {
+  try {
+    return realpathSync(path.resolve(workspaceDir));
+  } catch {
+    throw new PathViolation(
+      workspaceDir,
+      relPath,
+      "workspace root not resolvable",
+    );
+  }
+}
+
+/**
  * Resolve a declared workspace-relative path to an absolute one, rejecting
  * absolute inputs and anything that resolves outside the workspace. Strict:
- * the workspace directory itself is not a valid artifact path.
+ * the workspace directory itself is not a valid artifact path. Returns the
+ * canonical (realpath) absolute path, so symlinked roots resolve to their
+ * real location.
  */
 export function safeJoin(workspaceDir, relPath) {
   if (typeof relPath !== "string" || relPath.length === 0) {
     throw new PathViolation(workspaceDir, relPath);
   }
   if (path.isAbsolute(relPath)) throw new PathViolation(workspaceDir, relPath);
-  const root = path.resolve(workspaceDir);
+  // Keep both ends of containment checks in the same namespace. On macOS the
+  // system temp root may enter as /var while realpath resolves it as
+  // /private/var; comparing a candidate in one spelling with a root in the
+  // other incorrectly rejects an in-workspace artifact as an escape.
+  const root = canonicalWorkspaceRoot(workspaceDir, relPath);
   const resolved = path.resolve(root, relPath);
   if (!resolved.startsWith(root + path.sep))
     throw new PathViolation(workspaceDir, relPath);
@@ -135,9 +158,8 @@ export function safeJoin(workspaceDir, relPath) {
  * trust boundary and verify the copied bytes by hash in the meantime.
  */
 export function confinedRegularFile(workspaceDir, relPath) {
-  const root = path.resolve(workspaceDir);
+  const root = canonicalWorkspaceRoot(workspaceDir, relPath);
   const source = safeJoin(root, relPath);
-  const canonicalRoot = realpathSync(root);
   const relative = path.relative(root, source);
   const components = relative.split(path.sep).filter(Boolean);
   let cursor = root;
@@ -170,7 +192,7 @@ export function confinedRegularFile(workspaceDir, relPath) {
   }
 
   const canonicalSource = realpathSync(source);
-  if (!canonicalSource.startsWith(canonicalRoot + path.sep)) {
+  if (!canonicalSource.startsWith(root + path.sep)) {
     throw new PathViolation(
       workspaceDir,
       relPath,
@@ -460,6 +482,7 @@ function materializeWorktree({
   workerLeasesDir,
   ownershipConflict,
   preservationComment,
+  handoff = null,
 }) {
   const repoName = input?.repo;
   const ticket = input?.ticket;
@@ -478,7 +501,23 @@ function materializeWorktree({
   // directory, this looks it up. A mismatch searches a path that was never
   // created and reads as "worktree_up succeeded but produced nothing" (#884).
   const worktreePath = path.join(repo.worktreeRoot, ticketSlug(ticket));
-  if (existsSync(worktreePath)) {
+  const authenticatedHandoff =
+    handoff?.continuationRunId === runId &&
+    handoff?.repo === repoName &&
+    String(handoff?.ticket) === String(ticket) &&
+    handoff?.projectionState === "applied" &&
+    path.resolve(handoff?.workspacePath ?? "") === path.resolve(worktreePath);
+  if (handoff && !authenticatedHandoff) {
+    throw new WorktreeError(
+      `worktree_handoff_invalid: durable transfer does not authenticate ${runId}`,
+    );
+  }
+  if (authenticatedHandoff && !existsSync(worktreePath)) {
+    throw new WorktreeError(
+      `worktree_handoff_missing: transferred checkout ${worktreePath} no longer exists`,
+    );
+  }
+  if (existsSync(worktreePath) && !authenticatedHandoff) {
     const conflict = ownershipConflict({
       repo: repoName,
       ticket,
@@ -505,6 +544,13 @@ function materializeWorktree({
     // branch and addresses the opened PR by its GitHub slug.
     base: repo.base ?? null,
     github: repo.github ?? null,
+    ...(authenticatedHandoff
+      ? {
+          escalatedFromRunId: handoff.failedRunId,
+          rootRunId: handoff.rootRunId,
+          transferred: true,
+        }
+      : {}),
   };
   // Persist teardown facts before bring-up starts. A script can create its
   // worktree and daemons before timing out; the marker lets the janitor find
@@ -514,6 +560,29 @@ function materializeWorktree({
     `${canonicalJson(record)}\n`,
     "utf8",
   );
+
+  if (authenticatedHandoff) {
+    symlinkSync(worktreePath, path.join(workspaceDir, checkoutDir));
+    // The marker is the filesystem ownership token. Move it only after the
+    // continuation wrapper is complete, so a crash always leaves one owner
+    // able to delegate teardown to the repo script. Once ownership has moved,
+    // the failed run's wrapper is dead weight — dropping only its marker would
+    // leak one scratch directory per escalation. rmSync unlinks the wrapper's
+    // `checkout` symlink rather than following it, so the transferred worktree
+    // itself is untouched; guard the paths anyway.
+    const source = handoff.sourceWorkspacePath
+      ? path.resolve(handoff.sourceWorkspacePath)
+      : null;
+    if (
+      source &&
+      source !== path.resolve(workspaceDir) &&
+      source !== path.resolve(worktreePath)
+    ) {
+      rmSync(path.join(source, WORKTREE_MARKER), { force: true });
+      rmSync(source, { recursive: true, force: true });
+    }
+    return record;
+  }
 
   // Repo-owned bring-up may discover a red project baseline after the usable
   // worktree already exists. It reports that condition out-of-band and still
@@ -666,6 +735,7 @@ export function createWorkspace({
   workerLeasesDir,
   worktreeOwnershipConflict = detectWorktreeOwnershipConflict,
   worktreePreservationComment = commentOnPreservedWorktree,
+  worktreeHandoff = null,
 }) {
   // Lease loss can leave the prior attempt's scratch directory behind. Read
   // recognized harness session metadata before creating the new attempt;
@@ -736,6 +806,7 @@ export function createWorkspace({
         workerLeasesDir,
         ownershipConflict: worktreeOwnershipConflict,
         preservationComment: worktreePreservationComment,
+        handoff: worktreeHandoff,
       });
     } catch (err) {
       if (err instanceof WorktreeError) throw err;

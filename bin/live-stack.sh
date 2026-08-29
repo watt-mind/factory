@@ -76,6 +76,76 @@ cleanup_stale_fake_runtimes() {
   done < <(ps -axo pid=,pgid=,etime=,command=)
 }
 
+# PIDs listening on <port> that THIS checkout started (WM-657, #1068). Ownership
+# is decided by the process argv naming this checkout ($REPO): every daemon we
+# spawn runs an absolute $REPO/... path, so a sibling worktree's stack or the
+# operator's own live stack on the same port is never matched — the reap stays
+# scoped to processes we are responsible for, which is what makes it safe to run
+# on the shared operator box.
+owned_port_holders() { # <port>
+  command -v lsof >/dev/null 2>&1 || return 0
+  local pid cmd
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    [[ "$cmd" == *"$REPO/"* ]] || continue
+    printf '%s\n' "$pid"
+  done < <(lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u)
+}
+
+# Reap an orphan of ours still holding <port> after the pidfile teardown, or
+# before `up` binds it. The recorded owner has already been dealt with (down) or
+# is known dead (up's pre-flight) by the time this runs, so anything of ours
+# still on the port is a leak: a serve.mjs the web supervisor re-exec'd into a
+# pid the group-kill missed, or a daemon whose process group split. SIGTERM
+# first, then SIGKILL what ignores it. A holder we do not own is left untouched
+# for the bind to reject with its existing diagnostic.
+reap_owned_port() { # <port> <label>
+  command -v lsof >/dev/null 2>&1 || return 0
+  local port="$1" label="$2" pid deadline holders
+  holders="$(owned_port_holders "$port")"
+  [[ -n "$holders" ]] || return 0
+  for pid in $holders; do
+    warn "reaping orphaned $label still holding port $port (pid $pid)"
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  deadline=$(( $(date +%s) + 3 ))
+  while [[ $(date +%s) -lt $deadline ]]; do
+    holders="$(owned_port_holders "$port")"
+    [[ -n "$holders" ]] || return 0
+    sleep 0.1
+  done
+  for pid in $(owned_port_holders "$port"); do
+    warn "$label on port $port ignored SIGTERM — killing (pid $pid)"
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+}
+
+# Final backstop for `down` (#1068): after the pidfile teardown, sweep for any
+# serve, worker, or web process THIS checkout started that still survives — a
+# daemon whose process group split, or a serve.mjs re-exec'd into a pid the
+# group-kill missed. Scoped to this checkout's own paths ($REPO) and excluding
+# our own process group, so a sibling worktree's stack or the operator's own is
+# never touched. This is the acceptance guarantee that no cli.mjs serve/work or
+# web/serve.mjs the stack owns remains after `down`.
+reap_owned_processes() {
+  local pid pgid cmd current_pgid
+  current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+  while read -r pid pgid cmd; do
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
+    [[ "$pgid" =~ ^[0-9]+$ ]] || continue
+    [[ -z "$current_pgid" || "$pgid" != "$current_pgid" ]] || continue
+    case "$cmd" in
+      *"$REPO/event-runtime/cli.mjs "*) ;;
+      *"$REPO/event-runtime/web/serve.mjs"*) ;;
+      *"$REPO/bin/live-stack.sh __supervise"*) ;;
+      *) continue ;;
+    esac
+    warn "reaping orphaned stack process pid $pid: $cmd"
+    kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  done < <(ps -axo pid=,pgid=,command=)
+}
+
 case "$ACTION" in
   up)
     ADAPTER_FLAG=()
@@ -213,6 +283,47 @@ case "$ACTION" in
         [[ -f "$DIST_INDEX" ]] || die "web bundle build completed without creating $DIST_INDEX"
         WEB_BUILD_SECONDS=$(( $(date +%s) - WEB_BUILD_STARTED ))
         WEB_BUILD_MESSAGE="web bundle $WEB_BUNDLE_REASON — rebuilt in ${WEB_BUILD_SECONDS}s"
+      fi
+    fi
+
+    # Pre-flight port reclaim (#1068). A crashed or half-completed previous run
+    # can leave a process THIS checkout started still holding :API_PORT/:WEB_PORT
+    # after its pidfile is gone — the classic symptom is a web serve.mjs that
+    # held :7382 across restarts. `up` stays idempotent: a live daemon that still
+    # owns its pidfile is left to the "already running" checks below, so we only
+    # reclaim a port when its recorded owner is dead. reap_owned_port never
+    # touches a holder we do not own.
+    if ! pid_alive "$RUN_DIR/serve.pid"; then
+      reap_owned_port "$API_PORT" "event runtime"
+    fi
+    if ! pid_alive "$RUN_DIR/web.pid"; then
+      reap_owned_port "$WEB_PORT" "web server"
+    fi
+
+    # 0. Start or verify the GitHub App token-refresh daemon (#1148, epic #1136).
+    # When the App is configured, gh-app-auth.mjs --daemon mints a fresh
+    # installation token into ~/.factory/gh-app-token.json (~every 45 min; tokens
+    # expire hourly) and github.mjs reads that file per gh call. Supervising it
+    # here means a stack restart no longer strands the token: without the daemon
+    # the file goes stale within the hour and the control-plane silently falls
+    # back to the operator PAT — the rate contention the App exists to remove.
+    #
+    # Gated on both App vars: absent either, no daemon starts and nothing changes
+    # (no regression — the PAT path is still the default). Mint once in the
+    # foreground first so the token file exists before serve makes its first gh
+    # call; a failed mint warns rather than aborts, because serve's PAT fallback
+    # still lets the stack come up while the daemon retries.
+    if [[ -n "${FACTORY_GH_APP_ID:-}" && -n "${FACTORY_GH_APP_PRIVATE_KEY_PATH:-}" ]]; then
+      if pid_alive "$RUN_DIR/gh-app-auth.pid"; then
+        info "GitHub App token daemon already running (pid $(cat "$RUN_DIR/gh-app-auth.pid"))"
+      else
+        info "minting initial GitHub App installation token"
+        if ! (cd "$REPO" && bun "$REPO/lib/control-plane/gh-app-auth.mjs" >>"$RUN_DIR/gh-app-auth.log" 2>&1); then
+          warn "initial GitHub App token mint failed — control-plane falls back to the operator PAT until the daemon succeeds (see $RUN_DIR/gh-app-auth.log)"
+        fi
+        info "starting GitHub App token-refresh daemon"
+        spawn_daemon "$RUN_DIR/gh-app-auth.pid" "$RUN_DIR/gh-app-auth.log" "$REPO" \
+          bun "$REPO/lib/control-plane/gh-app-auth.mjs" --daemon
       fi
     fi
 
@@ -417,9 +528,20 @@ case "$ACTION" in
     term_daemon "$RUN_DIR/web.pid" "web server"
     term_daemon "$RUN_DIR/worker.pid" "worker"
     term_daemon "$RUN_DIR/serve.pid" "event runtime"
+    # Reap the App token daemon by pidfile too (#1148). term_daemon/await_daemon
+    # are no-ops when the pidfile is absent, so a stack that never started it
+    # (App env unset) tears down exactly as before.
+    term_daemon "$RUN_DIR/gh-app-auth.pid" "GitHub App token daemon"
     await_daemon "$RUN_DIR/web.pid" "web server"
     await_daemon "$RUN_DIR/worker.pid" "worker"
     await_daemon "$RUN_DIR/serve.pid" "event runtime"
+    await_daemon "$RUN_DIR/gh-app-auth.pid" "GitHub App token daemon"
+    # Backstop the pidfile teardown: reclaim the ports and sweep any serve /
+    # worker / web process of ours that outlived its recorded pid, so a restart
+    # never inherits an orphan holding :7381/:7382 or a lease (#1068).
+    reap_owned_port "$WEB_PORT" "web server"
+    reap_owned_port "$API_PORT" "event runtime"
+    reap_owned_processes
     rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.drain "$RUN_DIR"/*.id
     cleanup_stale_fake_runtimes
     info "done — live factory stack is down (durable state preserved at $HOME_DIR)"

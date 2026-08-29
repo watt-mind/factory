@@ -388,12 +388,15 @@ function hasInFlightAgent(db, agent, { github, pr, headSha }) {
   if (run) return true;
   const proposal = db
     .query(
-      `SELECT 1 AS ok FROM proposals
-        WHERE status = 'open'
-          AND json_extract(spec_json, '$.agent') = ?
-          AND json_extract(spec_json, '$.input.pr') = ?
-          AND json_extract(spec_json, '$.input.headSha') = ?
-          AND json_extract(spec_json, '$.input.github') = ?
+      `SELECT 1 AS ok FROM proposals p
+        JOIN runs r ON r.run_id = p.run_id
+        WHERE p.status = 'open'
+          AND p.decision = 'run'
+          AND r.state = 'PROPOSED'
+          AND json_extract(p.spec_json, '$.agent') = ?
+          AND json_extract(p.spec_json, '$.input.pr') = ?
+          AND json_extract(p.spec_json, '$.input.headSha') = ?
+          AND json_extract(p.spec_json, '$.input.github') = ?
         LIMIT 1`,
     )
     .get(agent, pr, headSha, github);

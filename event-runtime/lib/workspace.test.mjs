@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -18,6 +19,7 @@ import {
   WorktreeSandboxUnsupportedError,
   WorktreeError,
   MEMOS_JSON_NOTICE,
+  confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
   detectWorktreeOwnershipConflict,
@@ -51,6 +53,51 @@ describe("safeJoin", () => {
     expect(() => safeJoin(ws, "")).toThrow(PathViolation);
     expect(() => safeJoin(ws, undefined)).toThrow(PathViolation);
     expect(() => safeJoin(ws, ".")).toThrow(PathViolation);
+  });
+
+  test("canonicalizes a workspace reached through a symlinked ancestor", () => {
+    const realParent = tmpRoot();
+    const realWorkspace = path.join(realParent, "workspace");
+    mkdirSync(realWorkspace);
+    writeFileSync(path.join(realWorkspace, ".transcript.json"), "{}\n");
+
+    const aliasBase = tmpRoot();
+    const aliasParent = path.join(aliasBase, "alias");
+    symlinkSync(realParent, aliasParent, "dir");
+    const aliasedWorkspace = path.join(aliasParent, "workspace");
+
+    const expected = realpathSync(path.join(realWorkspace, ".transcript.json"));
+    expect(safeJoin(aliasedWorkspace, ".transcript.json")).toBe(expected);
+    expect(confinedRegularFile(aliasedWorkspace, ".transcript.json")).toBe(
+      expected,
+    );
+  });
+
+  test("reports a missing workspace root as PathViolation, not ENOENT", () => {
+    const gone = path.join(tmpRoot(), "destroyed-workspace");
+    let caught;
+    try {
+      safeJoin(gone, ".transcript.json");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PathViolation);
+    expect(caught.code).toBeUndefined();
+    expect(caught.detail).toBe("workspace root not resolvable");
+    expect(() => confinedRegularFile(gone, ".transcript.json")).toThrow(
+      PathViolation,
+    );
+  });
+
+  test("keeps symlink escapes closed below a canonicalized workspace", () => {
+    const workspace = tmpRoot();
+    const outside = tmpRoot();
+    writeFileSync(path.join(outside, "secret.txt"), "secret\n");
+    symlinkSync(outside, path.join(workspace, "outside"), "dir");
+
+    expect(() => confinedRegularFile(workspace, "outside/secret.txt")).toThrow(
+      PathViolation,
+    );
   });
 });
 
@@ -379,6 +426,39 @@ describe("worktree workspaces (WM-108)", () => {
     );
     expect(destroyWorkspace(retry.dir)).toBe(true);
     expect(destroyWorkspace(dir)).toBe(true);
+  });
+
+  test("tier escalation handoff reuses the exact checkout without a second bring-up", () => {
+    const first = make("wtrepo", "WM-845", "run_light");
+    const tree = path.join(wtRoot, "WM-845");
+    writeFileSync(path.join(tree, "useful-change"), "retain me\n");
+    const upCalls = calls().filter((call) => call.startsWith("up WM-845"));
+
+    const strong = make("wtrepo", "WM-845", "run_strong", {
+      worktreeHandoff: {
+        rootRunId: "run_light",
+        failedRunId: "run_light",
+        continuationRunId: "run_strong",
+        repo: "wtrepo",
+        ticket: "WM-845",
+        workspacePath: tree,
+        sourceWorkspacePath: first.dir,
+        projectionState: "applied",
+      },
+    });
+    expect(calls().filter((call) => call.startsWith("up WM-845"))).toEqual(
+      upCalls,
+    );
+    expect(
+      readFileSync(path.join(strong.dir, "repo", "useful-change"), "utf8"),
+    ).toBe("retain me\n");
+    // The failed run's wrapper is destroyed once ownership has moved, so an
+    // escalation does not leak one scratch directory per handoff. The
+    // transferred worktree itself survives.
+    expect(existsSync(first.dir)).toBe(false);
+    expect(existsSync(path.join(tree, "useful-change"))).toBe(true);
+    expect(strong.worktree.transferred).toBe(true);
+    expect(destroyWorkspace(strong.dir)).toBe(true);
   });
 
   test("a refusing worktree_down retains everything, with a filtered reason and raw evidence", () => {

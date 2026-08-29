@@ -47,6 +47,12 @@ commitMsg:
 dispatch:
   owned_paths_collision: advisory
   owned_paths_conformance: advisory
+  # Whether the work loop may dispatch `type:security` tickets (WM-1060).
+  #   excluded — only an operator-sourced dispatch works one (fail-closed default).
+  #   auto     — the loop dispatches them too; the merge lane still refuses to
+  #              merge a security PR, so it is held for human merge, never
+  #              auto-merged. The escalate_paths gate still guards touched files.
+  security_tickets: excluded
 
 concurrency:
   max_in_flight_per_repo: 20

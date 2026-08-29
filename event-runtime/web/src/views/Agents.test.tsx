@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import {
   Agents,
+  PromotionPanel,
   adapterText,
   agentTabCounts,
   modelText,
@@ -570,6 +571,98 @@ describe("Agents copy chords and hints (WM-233)", () => {
       // 2. Press 'l' immediately after 'c' -> 'c l' copies link
       fireEvent.keyDown(document.body, { key: "l" });
       expect(written).toBe(window.location.href);
+    });
+  });
+});
+
+describe("PromotionPanel (gh-860)", () => {
+  const preview = {
+    digest: "sha256:deadbeef",
+    selections: [
+      {
+        key: "eventType:factory.demo/v1:adapter",
+        kind: "eventType" as const,
+        ref: "factory.demo/v1",
+        field: "adapter" as const,
+        target: {
+          file: "event-runtime/event-types.json",
+          path: '["x"].adapter',
+        },
+        before: "pi",
+        effective: "cursor",
+        current: true,
+      },
+      {
+        key: "agent:stale@1:modelTier",
+        kind: "agent" as const,
+        ref: "stale@1",
+        field: "modelTier" as const,
+        target: { file: "event-runtime/agents/stale.json", path: "model_tier" },
+        before: "strong",
+        effective: "strong",
+        current: false,
+      },
+    ],
+  };
+
+  function withPromotionStubs(fn: () => Promise<void>) {
+    const origPreview = api.promotionPreview;
+    const origRepos = api.repos;
+    const origApply = api.promotionApply;
+    api.promotionPreview = async () => preview;
+    api.repos = async () =>
+      ({ repos: [{ name: "factory" }] }) as Awaited<
+        ReturnType<typeof api.repos>
+      >;
+    return fn().finally(() => {
+      api.promotionPreview = origPreview;
+      api.repos = origRepos;
+      api.promotionApply = origApply;
+    });
+  }
+
+  test("previews divergent overrides, promotes a selected subset, and links the PR", async () => {
+    await withPromotionStubs(async () => {
+      const applied: { repo: string; digest: string; keys: string[] }[] = [];
+      api.promotionApply = async (body) => {
+        applied.push(body);
+        return {
+          status: "opened",
+          repo: body.repo,
+          ticket: "gh-860-x",
+          branch: "promo/x",
+          pr: { url: "https://example/pr/9", number: 9 },
+        };
+      };
+
+      const r = renderWithClient(<PromotionPanel defaultRepo="factory" />);
+
+      // Collapsed by default: only the opener button, no preview fetch implied.
+      fireEvent.click(
+        r.getByRole("button", { name: "Promote overrides to Git…" }),
+      );
+
+      // The divergent row is selectable; the non-current one is disabled.
+      const good = await waitFor(() =>
+        r.getByLabelText("eventType:factory.demo/v1:adapter"),
+      );
+      const stale = r.getByLabelText("agent:stale@1:modelTier");
+      expect((stale as HTMLInputElement).disabled).toBe(true);
+
+      fireEvent.click(good);
+      fireEvent.click(r.getByRole("button", { name: "Promote 1 selected" }));
+
+      await waitFor(() => r.getByText("PR #9"));
+      expect(applied).toEqual([
+        {
+          repo: "factory",
+          digest: "sha256:deadbeef",
+          keys: ["eventType:factory.demo/v1:adapter"],
+        },
+      ]);
+      expect(r.getByText("PR #9").getAttribute("href")).toBe(
+        "https://example/pr/9",
+      );
     });
   });
 });

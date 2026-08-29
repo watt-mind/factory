@@ -23,6 +23,15 @@ concurrency:
 jobs:
   build:
     name: Build Starlight Site
+    # Fork pull requests never reach the persistent [self-hosted, shadow] fleet:
+    # this job-level gate is evaluated before scheduling, so no fork-controlled
+    # code (checkout, bun install, build) executes on a shared runner. Pushes
+    # and workflow_dispatch are trusted; pull requests must originate from a
+    # branch of this repository. Deliberately not pull_request_target — that
+    # would run fork code with repository-scoped credentials.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, shadow]
     timeout-minutes: 10
     steps:

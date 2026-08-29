@@ -2,14 +2,22 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-chain-tes
 import { describe, expect, test } from "bun:test";
 import { cpSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { memoryForge } from "../../lib/forge/memory.mjs";
 import * as fake from "./adapters/fake.mjs";
 import { admitChainEvent, buildChainInput, resolveChains } from "./chain.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
+import { createRun, transition } from "./lifecycle.mjs";
+import { enumerateMergeScan } from "./merge-reviews.mjs";
 import { planAdmittedEvents } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
+import { tick } from "../cli/serve.mjs";
+// Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
+// temp home for this whole file, so default-home lookups (artifactsRoot(),
+// dbPath()) never reach the operator's real ~/.factory (OPS-425).
+import { realFactorySnapshot } from "../test-helpers.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
@@ -416,6 +424,14 @@ describe("multi-emit chain resolution (WM-119)", () => {
     ).run(runId, JSON.stringify({ artifact }), now);
   }
 
+  function seedChainChild(db, runId, eventId) {
+    const now = new Date().toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at, correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('chain', ?, 'factory.work.requested', 'perf-edge@1', ?, ?, ?, ?, '{}', 'hash', 'admitted', ?)`,
+    ).run(eventId, now, now, `corr-${runId}`, runId, now);
+  }
+
   test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
     const dir = tmpDir("evrt-chain-multi-");
     const db = openDb(path.join(dir, "runtime.db"));
@@ -457,6 +473,161 @@ describe("multi-emit chain resolution (WM-119)", () => {
       skipped: 0,
       errors: [],
     });
+  });
+
+  test("partially emitted fan-out resumes missing siblings before marking the run resolved", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-partial-fanout",
+      agent: "work-scan@1",
+      input: { repo: "wm/partial" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/partial",
+        plan: [
+          { ticket: "WM-301" },
+          { ticket: "WM-302" },
+          { ticket: "WM-303" },
+        ],
+      },
+    });
+    seedChainChild(db, "run-partial-fanout", "chain-run-partial-fanout-WM-301");
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 2,
+      skipped: 0,
+      errors: [],
+    });
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-partial-fanout'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("production-shaped resolved history keeps a no-planning tick and health responsive", async () => {
+    const realHomeBefore = realFactorySnapshot();
+    expect(process.env.FACTORY_EVENT_HOME).toBeDefined();
+    const db = openDb(":memory:");
+    const perfRegistry = {
+      ...registry,
+      edges: {
+        "perf-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+
+    // Production had ~1,300 completed edge runs and ~6,000 chain events. Use
+    // 2,000/6,000 so this guards both that shape and future history growth.
+    db.transaction(() => {
+      for (let i = 0; i < 2_000; i += 1) {
+        const runId = `run-perf-${i}`;
+        seedCompletedRun(db, {
+          runId,
+          agent: "perf-edge@1",
+          input: { repo: "factory" },
+          artifact: { recommendation: "NEXT" },
+        });
+        seedChainChild(db, runId, `chain-${runId}`);
+        seedChainChild(db, runId, `chain-${runId}-legacy-a`);
+        seedChainChild(db, runId, `chain-${runId}-legacy-b`);
+      }
+    })();
+
+    let childEventLookups = 0;
+    const instrumented = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (/JOIN events child\s+ON child\.causation_id/s.test(sql)) {
+              childEventLookups += 1;
+            }
+            return target.query(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const noPlanning = Object.fromEntries(
+      [
+        "tick emit",
+        "plan",
+        "auto-approve",
+        "auto-approve-chains",
+        "announce",
+        "inbox",
+        "notify",
+        "reap",
+        "announce-after",
+        "outbox",
+        "GC",
+      ].map((name) => [name, () => {}]),
+    );
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true });
+      },
+    });
+
+    try {
+      const healthRequests = Array.from({ length: 20 }, async () => {
+        const started = performance.now();
+        const response = await fetch(`http://127.0.0.1:${server.port}/health`);
+        expect(response.status).toBe(200);
+        return performance.now() - started;
+      });
+      const tickStarted = performance.now();
+      await tick({
+        db: instrumented,
+        registry: perfRegistry,
+        policyVersion: PV,
+        subsystems: noPlanning,
+        log: () => {},
+      });
+      const tickMs = performance.now() - tickStarted;
+      const healthMs = (await Promise.all(healthRequests)).sort(
+        (a, b) => a - b,
+      );
+      const healthP95 = healthMs[Math.ceil(healthMs.length * 0.95) - 1];
+
+      console.info(
+        `chain benchmark: tick=${tickMs.toFixed(1)}ms health_p95=${healthP95.toFixed(1)}ms child_event_lookups=${childEventLookups}`,
+      );
+      expect(childEventLookups).toBe(1); // one bulk lookup, never 2,000
+      expect(tickMs).toBeLessThan(200);
+      // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
+      expect(healthP95).toBeLessThan(500);
+      // The production-shaped benchmark must never touch the operator's real
+      // ~/.factory/event-runtime/runtime.db (no default-home openDb/migration).
+      expect(realFactorySnapshot().dbMtime).toBe(realHomeBefore.dbMtime);
+
+      childEventLookups = 0;
+      expect(resolveChains(instrumented, perfRegistry)).toEqual({
+        emitted: 0,
+        skipped: 0,
+        errors: [],
+      });
+      expect(childEventLookups).toBe(0); // resolved history is not re-examined
+    } finally {
+      server.stop(true);
+      db.close();
+    }
   });
 
   test("empty plan skips cleanly without error", () => {
@@ -709,6 +880,185 @@ describe("multi-emit chain resolution (WM-119)", () => {
         baseSha: base,
       });
     }
+  });
+
+  test("a refused review with no verdict is proposed again on the next scan cycle", () => {
+    const dir = tmpDir("evrt-chain-merge-review-refused-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const github = "watt-mind/factory";
+    const head = "a".repeat(40);
+    const base = "b".repeat(40);
+    const now = "2026-08-24T10:00:00.000Z";
+    const reviewInput = {
+      repo: "factory",
+      github,
+      base: "develop",
+      pr: 12,
+      headSha: head,
+      baseSha: base,
+    };
+    const reviewSpec = {
+      agent: "merge-review@1",
+      input: reviewInput,
+    };
+
+    db.query(
+      `INSERT INTO events
+         (source, event_id, type, subject, occurred_at, received_at,
+          correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('chain', 'chain-first-scan-12', 'factory.merge-review.requested',
+               'merge-scan@2', ?, ?, 'merge-cycle', 'run-first-scan', ?,
+               'sha256:event', 'planned', ?)`,
+    ).run(
+      now,
+      now,
+      JSON.stringify({
+        schemaVersion: "factory.event/v1",
+        eventId: "chain-first-scan-12",
+        type: "factory.merge-review.requested",
+        source: "chain",
+        subject: "merge-scan@2",
+        occurredAt: now,
+        correlationId: "merge-cycle",
+        causationId: "run-first-scan",
+        payload: reviewInput,
+      }),
+      now,
+    );
+    createRun(db, {
+      runId: "run-refused-review",
+      idempotencyKey: "merge-review-family",
+      spec: reviewSpec,
+      specJson: JSON.stringify(reviewSpec),
+      specHash: "sha256:spec",
+      actor: "planner",
+      correlationId: "merge-cycle",
+      causationId: "run-first-scan",
+      policyVersion: PV,
+      now: Date.parse(now),
+    });
+    // This is the persisted suppression seam: an open proposal linked to a
+    // terminal run is not actionable, but older data can retain one.
+    db.query(
+      `INSERT INTO proposals
+         (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+          idempotency_key, status, created_at, ttl_seconds)
+       VALUES ('prop-refused-review', 'chain', 'chain-first-scan-12',
+               'run-refused-review', 'run', ?, 'sha256:spec',
+               'merge-review-family', 'open', ?, 1800)`,
+    ).run(JSON.stringify(reviewSpec), now);
+    for (const [from, to] of [
+      ["PROPOSED", "APPROVED"],
+      ["APPROVED", "QUEUED"],
+      ["QUEUED", "LEASED"],
+      ["LEASED", "RUNNING"],
+      ["RUNNING", "VERIFYING"],
+      ["VERIFYING", "REFUSED"],
+    ]) {
+      transition(db, {
+        runId: "run-refused-review",
+        to,
+        expectFrom: from,
+        actor: "test-worker",
+        reason: to === "REFUSED" ? "needs_human" : "test lifecycle",
+        policyVersion: PV,
+        now: Date.parse(now),
+      });
+    }
+    db.query(
+      `INSERT INTO results
+         (run_id, attempt, result_json, artifact_hash, verification_json,
+          receipt_json, accepted_at)
+       VALUES ('run-refused-review', 1, ?, 'none', '{}', '{}', ?)`,
+    ).run(
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "refused",
+        reasonCode: "needs_human",
+      }),
+      now,
+    );
+    expect(db.query(`SELECT COUNT(*) AS n FROM merge_reviews`).get().n).toBe(0);
+
+    const forge = memoryForge({
+      repos: {
+        [github]: {
+          prs: [
+            {
+              number: 12,
+              state: "OPEN",
+              isDraft: false,
+              headRefOid: head,
+              headRefName: "feat/gh-1034",
+              baseRefName: "develop",
+              title: "Fix retry starvation",
+              body: "Fixes watt-mind/factory#1034",
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+            },
+          ],
+        },
+      },
+      api: { [`repos/${github}/git/ref/heads/develop`]: base },
+    });
+    const scan = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge,
+      repos: new Map([
+        [
+          "factory",
+          {
+            name: "factory",
+            github,
+            base: "develop",
+            deployBranch: "main",
+          },
+        ],
+      ]),
+    });
+    expect(scan.artifact.reviews.map((item) => item.pr)).toEqual([12]);
+
+    seedCompletedRun(db, {
+      runId: "run-second-scan",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: scan.artifact,
+      correlationId: "merge-cycle",
+    });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    db.query(
+      `UPDATE events SET status = 'planned'
+        WHERE source = 'operator' AND event_id = 'evt-run-second-scan'`,
+    ).run();
+
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("merge-review@1", {
+      ...synthetic.agents.get("merge-review@1"),
+      workspace: { type: "none" },
+    });
+    expect(
+      planAdmittedEvents(db, synthetic, {
+        policyVersion: PV,
+        now: Date.parse("2026-08-24T10:01:00.000Z"),
+      }),
+    ).toMatchObject({ planned: 1, failed: 0 });
+    const fresh = db
+      .query(
+        `SELECT p.run_id AS runId, p.status, r.state
+           FROM proposals p
+           JOIN runs r ON r.run_id = p.run_id
+          WHERE p.event_source = 'chain'
+            AND p.event_id = 'chain-run-second-scan-12'`,
+      )
+      .get();
+    expect(fresh).toMatchObject({ status: "approved", state: "QUEUED" });
+    expect(fresh.runId).not.toBe("run-refused-review");
+    expect(db.query(`SELECT COUNT(*) AS n FROM merge_reviews`).get().n).toBe(0);
   });
 
   test("merge-fix UPDATED targets merge-review.requested for the new head (WM-907)", () => {

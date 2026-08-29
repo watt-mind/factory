@@ -9,13 +9,37 @@
  */
 import { API_HOST, DEFAULT_PORT } from "./config.mjs";
 
-export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
+/**
+ * Actionable text for a control-API 401 (#1132). Names the variable and the
+ * file the operator has to touch, and never the credential itself — the
+ * message reaches stderr, transcripts and PR bodies.
+ */
+export function unauthorizedMessage(tokenPresent) {
+  return tokenPresent
+    ? "control API rejected FACTORY_CONTROL_API_TOKEN"
+    : "control API requires FACTORY_CONTROL_API_TOKEN; set it in ~/.factory/secrets.env";
+}
+
+export function apiClient({
+  port = DEFAULT_PORT,
+  host = API_HOST,
+  // WM-1152: bearer the control API requires when FACTORY_CONTROL_API_TOKEN is
+  // set. Read from env by default so every CLI/worker caller authenticates
+  // without changes; sent on every request (webhook/health ignore it). Never
+  // logged. Unset means no header, matching the pre-token behavior.
+  token = process.env.FACTORY_CONTROL_API_TOKEN || null,
+} = {}) {
   const base = `http://${host}:${port}`;
+  const authHeader = token ? { authorization: `Bearer ${token}` } : {};
 
   async function call(method, path, { body, headers = {} } = {}) {
     const res = await fetch(`${base}${path}`, {
       method,
-      headers: { "content-type": "application/json", ...headers },
+      headers: {
+        "content-type": "application/json",
+        ...authHeader,
+        ...headers,
+      },
       body,
     });
     const text = await res.text();
@@ -27,10 +51,12 @@ export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
     }
     if (!res.ok) {
       const message =
-        json?.error ??
-        (Array.isArray(json?.errors)
-          ? json.errors.join("; ")
-          : `HTTP ${res.status}`);
+        res.status === 401
+          ? unauthorizedMessage(Boolean(token))
+          : (json?.error ??
+            (Array.isArray(json?.errors)
+              ? json.errors.join("; ")
+              : `HTTP ${res.status}`));
       const err = new Error(message);
       err.status = res.status;
       err.body = json;
@@ -107,6 +133,18 @@ export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
     runs: (state) =>
       call("GET", `/runs${state ? `?state=${encodeURIComponent(state)}` : ""}`),
     run: (id) => call("GET", `/runs/${encodeURIComponent(id)}`),
+    /**
+     * Raw artifact bytes by content address (GET /artifacts/:sha). The route
+     * sits behind the bearer gate like every other control route, so callers
+     * must go through here rather than a bare fetch (#1132 follow-up): a demo
+     * serve spawned under FACTORY_CONTROL_API_TOKEN answered a bare fetch
+     * with 401 and failed every worktree-up fixture verify. Returns the
+     * Response so callers can inspect status and read the body themselves.
+     */
+    artifact: (sha256) =>
+      fetch(`${base}/artifacts/${encodeURIComponent(sha256)}`, {
+        headers: { ...authHeader },
+      }),
     /** Live agent trace (factory.trace/v1): pass head back as since to poll. */
     trace: (id, { since = 0, limit = 100 } = {}) =>
       call(

@@ -82,6 +82,12 @@ export {
   appendIssueDetail,
 };
 
+/** Transition first, so a promotion rationale is never posted for a failed move. */
+export async function transitionThenComment(cp, key, state, options, comment) {
+  await cp.transition(key, state, options);
+  if (comment?.trim()) await cp.comment(key, comment);
+}
+
 // Budget capture lives on disk so `doctor` / `linear budget` can read it
 // across process boundaries. The verbs themselves go through the ControlPlane
 // adapter (team states and workspace labels are fetched there).
@@ -648,13 +654,14 @@ const VERBS = {
     const wanted = positional[1];
     const add = flagAll("add"),
       remove = flagAll("remove");
+    const comment = flag("comment");
     if (!key)
       throw new Error(
-        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label]`,
+        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
       );
     if (!wanted && !add.length && !remove.length && !has("unassign")) {
       throw new Error(
-        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label]`,
+        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
       );
     }
     const cp = controlPlane();
@@ -669,11 +676,13 @@ const VERBS = {
       }
     }
 
-    await cp.transition(key, wanted ?? "", {
-      add,
-      remove,
-      unassign: has("unassign"),
-    });
+    await transitionThenComment(
+      cp,
+      key,
+      wanted ?? "",
+      { add, remove, unassign: has("unassign") },
+      comment,
+    );
     const msg = wanted ? `${key} -> ${wanted}` : `${key} labels updated`;
     out(
       { ok: true, identifier: key, ...(wanted ? { state: wanted } : {}) },

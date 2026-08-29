@@ -425,6 +425,53 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 14,
+    name: "chain_resolution_indexes",
+    up(db) {
+      const columns = db
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name);
+      if (!columns.includes("chain_resolved_at")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN chain_resolved_at TEXT;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_causation
+          ON events (causation_id, source);
+        CREATE INDEX IF NOT EXISTS idx_runs_chain_unresolved
+          ON runs (state, chain_resolved_at);
+      `);
+    },
+  },
+  {
+    // 15, not 14: #1230 (#1197) also introduces a migration 14 and lands
+    // first. Guarded/idempotent like the rest, and the runner applies any
+    // migration above the database's user_version, so a v13 or v14 database
+    // and a fresh one all converge on 15.
+    version: 15,
+    name: "tier_escalations",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tier_escalations (
+          root_run_id         TEXT PRIMARY KEY,
+          failed_run_id       TEXT NOT NULL UNIQUE,
+          continuation_run_id TEXT NOT NULL UNIQUE,
+          repo                TEXT NOT NULL,
+          ticket              TEXT NOT NULL,
+          workspace_path      TEXT NOT NULL,
+          source_workspace_path TEXT NOT NULL,
+          projection_state    TEXT NOT NULL DEFAULT 'pending',
+          projection_attempts INTEGER NOT NULL DEFAULT 0,
+          projection_error    TEXT,
+          created_at          TEXT NOT NULL,
+          projected_at        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tier_escalations_projection
+          ON tier_escalations (projection_state, created_at);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
@@ -448,6 +495,7 @@ export const CORE_TABLES = [
   "merge_reviews",
   "runtime_overrides",
   "runtime_override_journal",
+  "tier_escalations",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */

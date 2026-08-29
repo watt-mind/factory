@@ -30,6 +30,6 @@
   "pins": {
     "agents/reconcile.md": "sha256:f2c7e089132677a70e82346b1e51ad68739746da36abef29e2a17a9f172dfb4a",
     "schemas/repo-loop.input.json": "sha256:8a67a773285d276f50f8b595d43d980f5ce286b74d2b4ad5852f07ee42e517a9",
-    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+    "schemas/command-result.output.json": "sha256:f158c1c76dd848407237c45a12c521b5d8e103cefd6fafdfdd51070a2b7e2585"
   }
 }

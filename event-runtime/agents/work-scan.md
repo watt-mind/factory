@@ -36,12 +36,17 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    - its labels include `ai:agent-ready`; and
    - its `assignee` field is `null`.
 
-   Exclude a ticket before ordering when its labels include `ai:escalated` or
-   `type:security` (or any other label containing `security`, case
-   insensitively). The dispatch planner must refuse those tickets, so including
-   them in a bounded batch can exhaust the scan and strand dispatchable work.
-   These excluded tickets are not candidates and must not appear in `plan`,
-   `deferred`, or `evidence.candidates`.
+   Exclude a ticket before ordering when its labels include `ai:escalated`.
+   Also exclude a ticket whose labels include `type:security` (or any other
+   label containing `security`, case insensitively) **unless**
+   `input.dispatchSecurity` equals `"auto"` — when it does, the dispatch planner
+   admits security tickets (the merge lane still holds their PRs for human
+   merge), so treat them as ordinary candidates. When `input.dispatchSecurity`
+   is absent or any other value, security tickets stay excluded because the
+   planner would refuse them, and including them in a bounded batch can exhaust
+   the scan and strand dispatchable work. Any ticket excluded here is not a
+   candidate and must not appear in `plan`, `deferred`, or
+   `evidence.candidates`.
 
    Apply this filter before ordering, cap checks, or path checks. `Blocked`,
    `Backlog`, `In Progress`, `In Review`, and `Done` are never candidates. Any
@@ -110,17 +115,22 @@ ticket — dispatching is the chained `factory.dispatch.requested` run's job
    in-flight ticket or an already-selected ticket does NOT disqualify — select
    the ticket while a free slot remains and record the overlap in its `reason`
    (`overlaps WM-123 on event-runtime/web/src/App.tsx`); rebase and merge-fix
-   resolve real conflicts later. Only two collisions are hard and defer a
-   candidate as `owned_paths_overlap`: (a) an in-flight or selected ticket
-   claims `**` (including a ticket with no parseable Owned Paths section — see
-   step 4), or (b) the candidate and an in-flight/selected ticket claim the
-   _identical_ concrete file (no globs on either side). Selected in order, each
-   item pins `{ticket, ownedPaths, reason}`. Every candidate not selected goes
-   in `deferred` as `{ticket, reason}`, where `reason` is the typed value
-   `owned_paths_overlap` for a hard collision or `cap_full` when no slot
-   remains. When a hard collision comes from an in-flight ticket with no
-   parseable Owned Paths, name that ticket in the `summary` so the operator can
-   fix its description (WM-868).
+   resolve real conflicts later. A whole-repo (`**`) claim is advisory too: an
+   in-flight or selected ticket that claims `**` — including one with no
+   parseable Owned Paths section (see step 4) — must NOT freeze the queue. A
+   single scope-unknown in-flight ticket (an epic or auto-filed issue parked
+   "In Progress") would otherwise claim the entire repository and stall every
+   ready candidate while the factory sits idle; select the candidate anyway and
+   record `overlaps WM-123 (whole-repo/unknown scope)` in its `reason`. Only one
+   collision is hard and defers a candidate as `owned_paths_overlap`: the
+   candidate and an in-flight/selected ticket claim the _identical_ concrete
+   file (no globs on either side) — a guaranteed conflict worth serializing.
+   Selected in order, each item pins `{ticket, ownedPaths, reason}`. Every
+   candidate not selected goes in `deferred` as `{ticket, reason}`, where
+   `reason` is the typed value `owned_paths_overlap` for a hard collision or
+   `cap_full` when no slot remains. When a candidate rode a whole-repo overlap
+   with an in-flight ticket that has no parseable Owned Paths, name that ticket
+   in the `summary` so the operator can still fix its description (WM-868).
    Do not stop accounting when the slots fill: mark every remaining candidate
    `cap_full`.
 

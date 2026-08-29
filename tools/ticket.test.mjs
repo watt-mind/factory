@@ -28,9 +28,12 @@ import {
   formatComment,
   formatComments,
   parsePositionalArgs,
+  transitionThenComment,
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
+  instanceConfigRoot,
+  InstanceConfigMissingError,
   __resetLinearReposCache,
 } from "./ticket.mjs";
 
@@ -253,6 +256,79 @@ test("state and label updates preserve the explicit state positional argument", 
       "ai:needs-review",
     ]),
   ).toEqual(["WM-250", "In Review"]);
+});
+
+// ------------------------------------------------------- state comments ---
+test("state posts its optional comment only after the transition succeeds", async () => {
+  const calls = [];
+  const cp = {
+    async transition(...args) {
+      calls.push(["transition", ...args]);
+    },
+    async comment(...args) {
+      calls.push(["comment", ...args]);
+    },
+  };
+
+  await transitionThenComment(
+    cp,
+    "WM-910",
+    "Todo",
+    { add: ["ai:agent-ready"], remove: [], unassign: false },
+    "standard scope with focused verification",
+  );
+
+  expect(calls).toEqual([
+    [
+      "transition",
+      "WM-910",
+      "Todo",
+      { add: ["ai:agent-ready"], remove: [], unassign: false },
+    ],
+    ["comment", "WM-910", "standard scope with focused verification"],
+  ]);
+});
+
+test("state without a comment preserves transition-only behavior", async () => {
+  const calls = [];
+  const cp = {
+    async transition(...args) {
+      calls.push(["transition", ...args]);
+    },
+    async comment(...args) {
+      calls.push(["comment", ...args]);
+    },
+  };
+
+  await transitionThenComment(
+    cp,
+    "WM-910",
+    "Todo",
+    { add: [], remove: [], unassign: false },
+    undefined,
+  );
+
+  expect(calls).toEqual([
+    ["transition", "WM-910", "Todo", { add: [], remove: [], unassign: false }],
+  ]);
+});
+
+test("state does not post a comment when the transition fails", async () => {
+  const calls = [];
+  const cp = {
+    async transition() {
+      calls.push("transition");
+      throw new Error("transition rejected");
+    },
+    async comment() {
+      calls.push("comment");
+    },
+  };
+
+  await expect(
+    transitionThenComment(cp, "WM-910", "Todo", {}, "do not post"),
+  ).rejects.toThrow("transition rejected");
+  expect(calls).toEqual(["transition"]);
 });
 
 test("values for other flags are not treated as positional arguments", () => {
@@ -574,4 +650,82 @@ test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () 
   expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
+});
+
+// ----------------------------------- instance config resolution (GH-975) ---
+// Every ticket verb acts on instance-local control-plane state, so the CLI must
+// resolve which operator checkout owns `config/repos.yaml` BEFORE it touches
+// cwd or the ticket identifier. A dispatched agent runs from an ephemeral
+// runtime workspace that has no `config/repos.yaml`; it receives the operator
+// checkout through `FACTORY_ROOT`, and resolution must honour that rather than
+// falling back to the executing agent's own checkout (which would point at the
+// tracked example config and misroute a real GitHub ticket into a Linear
+// lookup).
+function makeConfiguredRoot(label) {
+  const root = mkdtempSync(path.join(os.tmpdir(), label));
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    "repos:\n  - name: wm\n    path: /nonexistent\n",
+  );
+  return root;
+}
+
+test("instanceConfigRoot uses FACTORY_ROOT when the execution checkout lacks config/repos.yaml", () => {
+  const factoryRoot = makeConfiguredRoot("ticket-facroot-");
+  // The execution checkout is a bare workspace with no config/ at all — the
+  // exact shape of a dispatched runtime workspace under ~/.factory.
+  const checkoutRoot = mkdtempSync(path.join(os.tmpdir(), "ticket-checkout-"));
+  try {
+    // The bare checkout on its own is not a valid instance config root...
+    expect(() => instanceConfigRoot({ env: {}, checkoutRoot })).toThrow(
+      InstanceConfigMissingError,
+    );
+    // ...but FACTORY_ROOT names the operator checkout that owns the config.
+    expect(
+      instanceConfigRoot({ env: { FACTORY_ROOT: factoryRoot }, checkoutRoot }),
+    ).toBe(path.resolve(factoryRoot));
+  } finally {
+    rmSync(factoryRoot, { recursive: true, force: true });
+    rmSync(checkoutRoot, { recursive: true, force: true });
+  }
+});
+
+test("instanceConfigRoot: FACTORY_REPOS_ROOT is the explicit override, ahead of FACTORY_ROOT", () => {
+  const reposRoot = makeConfiguredRoot("ticket-reposroot-");
+  const factoryRoot = makeConfiguredRoot("ticket-facroot2-");
+  try {
+    expect(
+      instanceConfigRoot({
+        env: { FACTORY_REPOS_ROOT: reposRoot, FACTORY_ROOT: factoryRoot },
+        checkoutRoot: "/nonexistent",
+      }),
+    ).toBe(path.resolve(reposRoot));
+  } finally {
+    rmSync(reposRoot, { recursive: true, force: true });
+    rmSync(factoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("instanceConfigRoot throws instance_config_missing when no instance config is available", () => {
+  // No override env and a checkout without config/repos.yaml: a syntactically
+  // valid fallback is exactly what must NOT happen here, so this is an explicit
+  // refusal rather than a silent default-plane lookup.
+  const checkoutRoot = mkdtempSync(path.join(os.tmpdir(), "ticket-noconfig-"));
+  try {
+    let thrown;
+    try {
+      instanceConfigRoot({ env: {}, checkoutRoot });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InstanceConfigMissingError);
+    expect(thrown.code).toBe("instance_config_missing");
+    expect(thrown.message).toContain("instance_config_missing");
+    expect(thrown.message).toContain(
+      path.join(path.resolve(checkoutRoot), "config", "repos.yaml"),
+    );
+  } finally {
+    rmSync(checkoutRoot, { recursive: true, force: true });
+  }
 });

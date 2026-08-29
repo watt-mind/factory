@@ -5,6 +5,7 @@
  * and their view builders live in api-*.mjs and status-view.mjs so unrelated
  * endpoint work no longer contends on one source file.
  */
+import { timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -73,6 +74,41 @@ export {
   workerCapacityView,
 };
 
+/**
+ * Routes exempt from the bearer gate (WM-1152). Liveness stays open; the two
+ * webhook intakes authenticate by their own HMAC signature (`POST /events`
+ * factory HMAC, `POST /github` GitHub HMAC) — an external sender cannot present
+ * a bearer, so requiring one would break intake. Every other route — including
+ * the loopback `POST /replay` inject — is gated when a token is configured.
+ * Exact `METHOD path` matches, so `GET /events` (list) and `POST /events/*`
+ * stay gated.
+ */
+const BEARER_EXEMPT_ROUTES = new Set([
+  "GET /health",
+  "POST /events",
+  "POST /github",
+  // The production tunnel's /webhooks/github alias is the same GitHub HMAC
+  // intake as POST /github, so it authenticates by signature and must be
+  // exempt too — an external GitHub sender cannot present a bearer (WM-1150).
+  "POST /webhooks/github",
+]);
+
+/**
+ * Constant-time bearer check (WM-1152). Returns true only for a well-formed
+ * `Authorization: Bearer <token>` whose token equals the configured one. The
+ * length guard is required because timingSafeEqual throws on unequal-length
+ * buffers; it leaks only the token length, never its content.
+ */
+function bearerAuthorized(authHeader, token) {
+  if (typeof authHeader !== "string") return false;
+  const prefix = "Bearer ";
+  if (!authHeader.startsWith(prefix)) return false;
+  const presented = Buffer.from(authHeader.slice(prefix.length), "utf8");
+  const expected = Buffer.from(token, "utf8");
+  if (presented.length !== expected.length) return false;
+  return timingSafeEqual(presented, expected);
+}
+
 /** Build the request handler independently so tests can compose it directly. */
 export function createApi({
   db,
@@ -99,6 +135,10 @@ export function createApi({
   configRoot = reposRoot(),
   // Root of the config/policy.yaml the run endpoints consult (tests point it elsewhere).
   policyRoot = FACTORY_ROOT,
+  // WM-1152: application-level bearer for the control API. Unset (empty/null)
+  // keeps the historical loopback-trust behavior byte-for-byte; set requires
+  // `Authorization: Bearer <token>` on every non-exempt route. Never logged.
+  controlApiToken = process.env.FACTORY_CONTROL_API_TOKEN || null,
 } = {}) {
   const actor = "operator";
   const registryLoadedAt = new Date(now()).toISOString();
@@ -133,6 +173,16 @@ export function createApi({
 
       const url = new URL(req.url, `http://${API_HOST}`);
       const route = `${req.method} ${url.pathname}`;
+
+      // WM-1152: bearer gate. Only when a token is configured; otherwise the
+      // API behaves exactly as before (loopback-trust). Reject before any work
+      // or body read, so an unauthorized caller never triggers side effects.
+      if (controlApiToken && !BEARER_EXEMPT_ROUTES.has(route)) {
+        if (!bearerAuthorized(req.headers.authorization, controlApiToken)) {
+          return sendJson(res, 401, { error: "unauthorized" });
+        }
+      }
+
       const nowMs = now();
       const send = (status, body) => sendJson(res, status, body);
       const common = {
@@ -162,6 +212,9 @@ export function createApi({
           "GET /health",
           "POST /events",
           "POST /github",
+          // Production Cloudflare tunnel forwards the literal path
+          // /webhooks/github (no rewrite), so it is an alias of POST /github.
+          "POST /webhooks/github",
           "POST /replay",
         ].includes(route)
       ) {

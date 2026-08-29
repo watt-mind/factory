@@ -81,6 +81,19 @@ const STATE_ORDER = Object.keys(STATE_HUES);
 
 const NARROW_COLS = new Set(["depth", "events", "runs"]);
 
+/**
+ * The integer cols sit in a `w-12` slot where their full labels clip; render an
+ * abbreviation and keep the full name (and, for Depth, its meaning) in `title`.
+ */
+const NARROW_HEADERS: Record<string, { label: string; title: string }> = {
+  depth: {
+    label: "Dep",
+    title: "Depth — longest path from the root in hops",
+  },
+  events: { label: "Evt", title: "Events in the chain" },
+  runs: { label: "Run", title: "Runs in the chain" },
+};
+
 function chainStateSegments(
   states: ChainListItem["states"],
 ): { state: string; count: number }[] {
@@ -239,7 +252,7 @@ const CHAINS_DISPLAY: DisplayConfig<ChainListItem> = {
   ],
   columns: [
     { key: "origin", label: "Origin", always: true },
-    { key: "root", label: "Root event" },
+    { key: "root", label: "Root event", defaultHidden: true },
     { key: "depth", label: "Depth" },
     { key: "events", label: "Events" },
     { key: "runs", label: "Runs" },
@@ -404,10 +417,12 @@ export function Chains({
                 const current = isCustom
                   ? display.sortBy === column.key
                   : sort && display.sortBy === sort.key;
+                const narrow = NARROW_HEADERS[column.key];
                 return (
                   <Th
                     key={column.key}
-                    label={column.label}
+                    label={narrow?.label ?? column.label}
+                    title={narrow?.title}
                     dir={current ? display.sortDir : null}
                     naturalDir={sort?.defaultDir ?? "asc"}
                     onSort={

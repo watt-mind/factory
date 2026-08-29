@@ -16,12 +16,7 @@
  * Owned Paths. Tests register the module through `createAdapterRegistry`.
  */
 import { spawn } from "node:child_process";
-import {
-  createWriteStream,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { createWriteStream, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import {
@@ -31,6 +26,7 @@ import {
   PUSH_CREDENTIAL_ENV,
   killProcessGroup,
   safeChildEnvironment,
+  verifiedPrompt,
 } from "./claude.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
@@ -478,7 +474,7 @@ export async function execute({
 }) {
   refuseSandbox("acp", def, SANDBOX_DEFERRAL_REASON);
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "acp");
   const acpConfig = resolveAcpConfig({ spec, def, config });
   const childEnv = safeChildEnvironment({ ...acpConfig.env, ...env }, def);
   const resolved = resolveAcpCommand(acpConfig, {
@@ -509,6 +505,13 @@ export async function execute({
       path.join(workspaceDir, ".transcript.json"),
     );
     transcript.on("error", () => {});
+    // Child close only says its stdio handles are closed; the file stream may
+    // still have buffered bytes. Register before piping so a fast child cannot
+    // finish before we can observe the output flush.
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("finish", done);
+      transcript.once("close", done);
+    });
     if (child.stdout) child.stdout.pipe(transcript);
 
     let stderrBuf = "";
@@ -779,7 +782,7 @@ export async function execute({
     child.on("error", (err) => {
       settle(reject, err);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       if (handshakeError && !timedOut && !aborted) {
         settle(reject, handshakeError);
         return;
@@ -806,6 +809,7 @@ export async function execute({
       } catch {
         // observability
       }
+      await transcriptClosed;
       settle(resolve, {
         exitCode: finalExit,
         timedOut,

@@ -24,12 +24,7 @@
  * the pi path did not have to solve.
  */
 import { spawn, spawnSync } from "node:child_process";
-import {
-  createWriteStream,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
@@ -112,6 +107,19 @@ const TEXT_PREVIEW_CHARS = 4000;
 
 export const PROMPT_SUFFIX =
   "\n\n---\nInput is at ./input.json. Write ./result.json per the factory.agent-result/v1 contract. Work only inside this directory.";
+
+/**
+ * Prompt bytes are verified by the registry before they reach an adapter.
+ * `promptPath` remains provenance only: re-reading it would bypass that pin.
+ */
+export function verifiedPrompt(def, adapter) {
+  if (typeof def?.promptText !== "string") {
+    throw new Error(
+      `${adapter}: definition ${def?.ref ?? "<unknown>"} has no verified promptText (registry-loaded definitions only)`,
+    );
+  }
+  return def.promptText + PROMPT_SUFFIX;
+}
 
 // `mutating: false` means no durable mutation beyond the run's declared
 // workspace output; it does not mean a model cannot use the shell to inspect
@@ -490,7 +498,7 @@ export async function execute({
   // definition never reaches the host spawn below (WM-313).
   refuseSandbox("claude", def, SANDBOX_DEFERRAL_REASON);
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "claude");
   const childEnv = safeChildEnvironment(env, def);
 
   const mcpConfig = path.join(FACTORY_ROOT, "config", "mcp", "claude.json");
@@ -526,6 +534,13 @@ export async function execute({
       path.join(workspaceDir, ".transcript.json"),
     );
     transcript.on("error", () => {});
+    // Child close only says its stdio handles are closed; the file stream may
+    // still have buffered bytes. Register before piping so a fast child cannot
+    // finish before we can observe the output flush.
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("finish", done);
+      transcript.once("close", done);
+    });
     if (child.stdout) {
       child.stdout.pipe(transcript);
     }
@@ -642,7 +657,7 @@ export async function execute({
       transcript.destroy();
       reject(err);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       clearTimeout(termTimer);
       if (killTimer) clearTimeout(killTimer);
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
@@ -673,6 +688,7 @@ export async function execute({
       } catch {
         // Usage is observability: a consumer failure must not change execution.
       }
+      await transcriptClosed;
       resolve({
         exitCode,
         timedOut,

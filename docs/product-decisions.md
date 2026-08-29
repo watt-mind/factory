@@ -133,3 +133,80 @@ upgrade contract. `templates/starter/package.json` and
 `tools/publish-starter.mjs` still validate a Git commit pin as of this
 decision; migrating the starter template itself to the npm-published pin is
 follow-up scope, not part of this change.
+
+## Promote a runtime overlay into a git PR (gh-860)
+
+Decided 2026-08-25. Machine-local runtime overrides give a fast operational
+loop, but fleet defaults live in tracked agent/event-type definitions.
+Promotion is the explicit, reviewable path that turns selected effective
+overrides into a normal Git change — never an auto-commit on the live checkout
+(rejected 2026-08-19), because serve may run against production state and
+concurrent agents.
+
+Promotion is an explicit operator action. It shows a deterministic preview,
+lets the operator select all or a subset, creates an isolated ticket worktree
+via the configured repository `worktree_up` (checkout-only, from the
+configured base), writes the tracked defaults there, commits and pushes on one
+conventional commit, and opens a normal PR against the configured base. No
+merge is performed. The first version promotes only event-type adapter and
+agent `modelTier`/`model` overrides.
+
+Fail-closed rules: apply requires the exact preview digest and an explicit
+non-empty selected-key list. A stale preview, an unknown key, an unsupported
+field, invalid tracked JSON, or target drift fails before any worktree is
+created. Serve never edits, commits, or checks out branches in the live
+`FACTORY_ROOT`; the only live-root access is the read-only drift check.
+An empty selection is a typed no-op. A failure after checkout leaves the live
+checkout and the runtime override rows unchanged and returns the
+worktree/branch as recoverable evidence for operator cleanup.
+
+Promotion does not clear the runtime overrides. Clearing the overlay is a
+separate explicit action the operator takes after the promoted defaults have
+deployed, so the fast loop keeps winning until the fleet default catches up.
+
+## Exhausted dispatches escalate once to the strong tier (gh-845)
+
+Decided 2026-08-25. When an admitted `light` or `standard` dispatch exhausts
+its ordinary agent-error attempts with a verification failure, contract
+violation, or `agent_exit_*`, the runtime schedules exactly one `strong`
+continuation. Timeout, environment/lease failure, cancellation, refusal,
+human/policy/security denial, fatal failure, and an already-strong run do not
+escalate.
+
+The continuation is a runtime-authenticated, auto-approved handoff under the
+original admission authority. It has a new run ID, keeps the root correlation
+and ticket, names `escalatedFromRunId`, and reuses the exact retained checkout.
+Durable workspace ownership transfers before the continuation can become
+runnable; no second worktree or abandoned-work preservation/reset is allowed.
+
+Scheduling and tracker projection are separate crash-safe phases. The unique
+root handoff prevents a restart from creating a second continuation. The
+continuation remains approved but not queued until the control plane has
+replaced every prior `tier:*` label with `tier:strong` and posted an
+attributable comment naming both run IDs. Projection failures are retained and
+retried. Existing trust, budget, capacity, Owned Paths, security, and sensitive
+path gates still run at continuation claim time.
+
+Escalation never widens authority. The `ai:escalated`/`type:security` operator
+bypass carries into a continuation only when the failed run's own originating
+event was operator-sourced AND the durable escalation record authenticates this
+run as that failed run's continuation. It is never read out of an inherited
+spec field: `approvalPolicy.dispatchEvidence` is copied onto chain runs, so
+trusting it would give every descendant of one operator dispatch a permanent
+bypass.
+
+## Extension pack pin repair metadata boundary (gh-857)
+
+Decided 2026-08-25. `update-pins --pack <name>` may discover packs contributed
+by configured extensions through a CLI-only metadata path. It reads the
+extension allow-list (path and package roots), parses and validates
+`factory-extension.json`, confines contributed pack paths by realpath, and
+rejects duplicate pack names. It then writes pins for only the selected pack.
+
+This discovery imports no extension modules and does not register adapters,
+connectors, hooks, panels, or any other contribution. It exists specifically
+so an absent or stale extension `pins.json` can be repaired: normal extension
+loading correctly fails closed on that state before executing extension code.
+Serve and work retain the ordinary full validated loader; they cannot request
+metadata-only loading, and a repaired extension still has to pass the normal
+fail-closed pin and registry checks before it is loaded.

@@ -638,6 +638,7 @@ process.stdin.on("end", () => {
   const defaultDef = {
     ref: "test-pi-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
   };
   const defaultSpec = {
@@ -684,14 +685,39 @@ process.stdin.on("end", () => {
     }
   }
 
-  test("executes stub binary in workspaceDir, strips API keys, pipes prompt on stdin, captures transcript + trace", async () => {
+  test("refuses a definition without verified promptText before launching pi", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      execute({
+        spec: defaultSpec,
+        def: unverifiedDef,
+        workspaceDir,
+        timeoutMs: 5000,
+        env: {
+          PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+          FACTORY_TEST_BEHAVIOR: "normal",
+          FACTORY_TEST_RECORD_FILE: recordFile,
+        },
+      }),
+    ).rejects.toThrow(
+      "pi: definition test-pi-agent@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
+  test("executes the verified prompt snapshot after its path changes, strips API keys, and captures trace", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: { ...defaultSpec, model: "openai-codex/gpt-5.6-terra" },
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
       timeoutMs: 5000,
       env: {
@@ -1011,6 +1037,7 @@ describe("sandboxed execution (WM-313)", () => {
   const sandboxDef = (extra = {}) => ({
     ref: "sandboxed-pi@1",
     promptPath: promptFile,
+    promptText: "You are a sandboxed test agent.",
     mutating: false,
     sandbox: {
       provider: "gondolin",

@@ -22,6 +22,6 @@
   "pins": {
     "agents/janitor-apply.md": "sha256:b39c76f7970935eaa03c2eb841843ba7b08cbe4b8441efa32a2745f40ecfde17",
     "schemas/janitor.input.json": "sha256:bc78f62fa90f56d78587bf472fba015eda2cd805bdefe19283d618590ecc6969",
-    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+    "schemas/command-result.output.json": "sha256:f158c1c76dd848407237c45a12c521b5d8e103cefd6fafdfdd51070a2b7e2585"
   }
 }

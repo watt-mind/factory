@@ -4,9 +4,10 @@
  *
  * Static bundle + /api/* proxy to the loopback control API, so the browser
  * has one origin. Deliberately imports nothing from ../lib/ — it is a client
- * of the runtime, not part of it (spec §9). Loopback only: no auth by
- * decision (spec §1); binding beyond 127.0.0.1 is the moment auth becomes a
- * precondition, so no --host flag exists here.
+ * of the runtime, not part of it (spec §9). Loopback only; binding beyond
+ * 127.0.0.1 is the moment auth becomes a precondition, so no --host flag
+ * exists here. When the control API is token-gated (WM-1152), this proxy adds
+ * the bearer from its own env so the browser stays token-free.
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -36,6 +37,12 @@ function hostOf(value) {
   if (m) return m[1].toLowerCase();
   return value.replace(/:\d+$/, "").toLowerCase();
 }
+
+// WM-1152: the bearer this proxy presents to the control API. When the API is
+// token-gated (FACTORY_CONTROL_API_TOKEN set), the browser never sees or sends
+// the token — this same-origin proxy adds it from its own env when forwarding
+// to :7381. Unset = nothing added, exactly the old pass-through. Never logged.
+const CONTROL_API_TOKEN = process.env.FACTORY_CONTROL_API_TOKEN || "";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
@@ -109,6 +116,11 @@ Bun.serve({
       // proxy IS the same-origin boundary, so present as loopback upstream.
       headers.set("host", `127.0.0.1:${API_PORT}`);
       headers.delete("origin");
+      // WM-1152: authenticate to a token-gated control API. Overwrite any
+      // client-supplied header so the browser can never inject its own bearer.
+      if (CONTROL_API_TOKEN)
+        headers.set("authorization", `Bearer ${CONTROL_API_TOKEN}`);
+      else headers.delete("authorization");
       const init = { method: req.method, headers };
       try {
         if (bodyless) {

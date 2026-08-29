@@ -66,7 +66,7 @@ const stages = [
 <style>
   /* Hallmark · genre: modern-minimal · macrostructure: asymmetric typographic marquee · design-system: design.md · designed-as-app */
   /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 · contrast: pass (40–41) · mobile: pass (34, 49, 50–57) */
-  @layer starlight.core {
+  @layer starlight.components {
     .home-hero {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
@@ -117,17 +117,44 @@ const stages = [
     }
 
     .home-hero :global(.sl-link-button) {
-      min-height: 3rem;
+      min-height: 3.25rem;
       border-radius: var(--wm-radius-md);
-      font-weight: 600;
+      font-family: var(--wm-font-mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding-block: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
       white-space: nowrap;
       transition:
         transform var(--wm-duration-short) var(--wm-ease-out),
         background-color var(--wm-duration-short) var(--wm-ease-out),
-        border-color var(--wm-duration-short) var(--wm-ease-out);
+        border-color var(--wm-duration-short) var(--wm-ease-out),
+        color var(--wm-duration-short) var(--wm-ease-out);
+    }
+
+    .home-hero :global(.sl-link-button.primary) {
+      border-color: var(--wm-color-primary-container);
+      background: var(--wm-color-primary-container);
+      color: var(--wm-color-on-primary);
+    }
+
+    .home-hero :global(.sl-link-button.secondary) {
+      border-color: var(--wm-color-primary);
+      background: transparent;
+      color: var(--wm-color-primary);
+    }
+
+    .home-hero :global(.sl-link-button.minimal) {
+      border-color: transparent;
+      background: transparent;
+      color: var(--sl-color-gray-2);
     }
 
     .home-hero :global(.sl-link-button:hover) {
+      border-color: var(--wm-color-primary);
+      background: var(--wm-color-primary);
+      color: var(--wm-color-on-primary);
       transform: translateY(-2px);
     }
 

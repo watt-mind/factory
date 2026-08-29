@@ -43,6 +43,17 @@ if (!health) {
   console.error(`verify: no control API on 127.0.0.1:${port}`);
   process.exit(1);
 }
+// GET /health is bearer-exempt; the credential is first checked on a
+// privileged route. Probe it so a 401 prints which variable to set (#1132).
+try {
+  await client.runs();
+} catch (err) {
+  if (err.status === 401) {
+    console.error(`verify: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 check("GET /health reports ok: true", health.ok === true);
 check("runtime is in fake adapter mode", health.env?.adapter === "fake");
 
@@ -205,9 +216,9 @@ if (artifactRun) {
   );
 
   if (reportArtifact?.sha256) {
-    const artRes = await fetch(
-      `http://127.0.0.1:${port}/artifacts/${reportArtifact.sha256}`,
-    );
+    // Through the client so the bearer rides along: a bare fetch answered
+    // 401 whenever the demo serve inherited FACTORY_CONTROL_API_TOKEN.
+    const artRes = await client.artifact(reportArtifact.sha256);
     check(
       "GET /artifacts/:sha returns 200 for declared report",
       artRes.status === 200,

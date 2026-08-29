@@ -1,4 +1,7 @@
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-merge-test-mjs";
+// Side effect: pins FACTORY_EVENT_HOME to a temp dir before any spawned CLI
+// (merge-apply.mjs) can resolve the operator's live runtime home.
+import "./test-helpers.mjs";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
@@ -1525,10 +1528,13 @@ describe("merge transition chains", () => {
     ]);
 
     // A process interruption after one admission must not suppress the other
-    // three actions when the same accepted result is resolved again.
+    // three actions when the same accepted result is resolved again. The
+    // chain terminal marker is only written after every sibling exists, so an
+    // interrupted pass leaves chain_resolved_at NULL alongside the lone child.
     db.query(
       `DELETE FROM events WHERE source='chain' AND event_id != 'chain-scan-mixed-escalate'`,
     ).run();
+    db.query(`UPDATE runs SET chain_resolved_at = NULL`).run();
     expect(resolveChains(db, registry)).toEqual({
       emitted: 3,
       skipped: 0,

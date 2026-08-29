@@ -230,6 +230,19 @@ if (!health) {
   process.exit(1);
 }
 
+// GET /health is bearer-exempt, so the credential is only checked on the
+// first privileged call. Probe it here to fail with an actionable message
+// (which variable, which file) instead of a stack trace mid-seed (#1132).
+try {
+  await client.runs();
+} catch (err) {
+  if (err.status === 401) {
+    console.error(`seed: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
+
 // Guard: never seed a real-adapter runtime. The adapter lands in each spec at
 // planning time, so probe with a throwaway event and inspect its proposal.
 const probeId = `${prefix}-adapter-probe`;

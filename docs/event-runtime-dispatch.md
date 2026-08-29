@@ -521,6 +521,29 @@ Recorded, not silently decided:
   singletons, waits on the unattended-stage answer §3 already demands — it
   is not unlocked by anything here.
 
+## Remote handoff dispatch provenance (GH-1153)
+
+A remote operator may submit one exact agent-ready ticket through the dedicated
+SSH forced-command boundary documented in
+[remote-handoff.md](remote-handoff.md). The server, not the client, derives a
+`factory.dispatch.requested` event with `source=handoff` and HMAC-signs the
+exact `/events` request bytes using the existing runtime secret.
+
+`handoff` is reserved from every public/operator replay path. Signed `/events`
+is the only caller-facing boundary that may admit it; `chain` remains
+in-process-only. A handoff is unattended and its
+`operator_authorized` dispatch evidence is always false.
+
+Only `source=handoff` + `factory.dispatch.requested` joins the existing
+auto-approval path. It reuses the chain dispatch allowlist, immutable dispatch
+evidence, `approve.before` hooks, runtime budget/worker-cap/circuit-breaker
+guard, and evidence-changing execute-time recheck. It does not require a chain
+predecessor because the authenticated handoff boundary is its provenance.
+Every other handoff event type has no auto-approval policy. Ineligible,
+sensitive, escalated, changed, blocked, overlapping, capacity-limited, or
+otherwise unsafe dispatches therefore keep the same typed noop/watched outcomes
+as unattended chain dispatch; they never become operator-approved.
+
 ## Autonomous develop merge lifecycle (WM-398)
 
 Merge control is a durable runtime chain, not an interactive-orchestrator
