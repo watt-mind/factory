@@ -73,6 +73,22 @@ describe("safeJoin", () => {
     );
   });
 
+  test("reports a missing workspace root as PathViolation, not ENOENT", () => {
+    const gone = path.join(tmpRoot(), "destroyed-workspace");
+    let caught;
+    try {
+      safeJoin(gone, ".transcript.json");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PathViolation);
+    expect(caught.code).toBeUndefined();
+    expect(caught.detail).toBe("workspace root not resolvable");
+    expect(() => confinedRegularFile(gone, ".transcript.json")).toThrow(
+      PathViolation,
+    );
+  });
+
   test("keeps symlink escapes closed below a canonicalized workspace", () => {
     const workspace = tmpRoot();
     const outside = tmpRoot();

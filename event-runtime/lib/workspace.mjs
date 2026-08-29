@@ -103,9 +103,28 @@ function worktreeScriptFailure(result) {
 }
 
 /**
+ * Canonicalize the workspace root for containment checks. A root that no
+ * longer exists (destroyed or retained-then-removed workspace) is reported as
+ * a PathViolation rather than a raw ENOENT so callers see one error class.
+ */
+function canonicalWorkspaceRoot(workspaceDir, relPath) {
+  try {
+    return realpathSync(path.resolve(workspaceDir));
+  } catch {
+    throw new PathViolation(
+      workspaceDir,
+      relPath,
+      "workspace root not resolvable",
+    );
+  }
+}
+
+/**
  * Resolve a declared workspace-relative path to an absolute one, rejecting
  * absolute inputs and anything that resolves outside the workspace. Strict:
- * the workspace directory itself is not a valid artifact path.
+ * the workspace directory itself is not a valid artifact path. Returns the
+ * canonical (realpath) absolute path, so symlinked roots resolve to their
+ * real location.
  */
 export function safeJoin(workspaceDir, relPath) {
   if (typeof relPath !== "string" || relPath.length === 0) {
@@ -116,7 +135,7 @@ export function safeJoin(workspaceDir, relPath) {
   // system temp root may enter as /var while realpath resolves it as
   // /private/var; comparing a candidate in one spelling with a root in the
   // other incorrectly rejects an in-workspace artifact as an escape.
-  const root = realpathSync(path.resolve(workspaceDir));
+  const root = canonicalWorkspaceRoot(workspaceDir, relPath);
   const resolved = path.resolve(root, relPath);
   if (!resolved.startsWith(root + path.sep))
     throw new PathViolation(workspaceDir, relPath);
@@ -139,7 +158,7 @@ export function safeJoin(workspaceDir, relPath) {
  * trust boundary and verify the copied bytes by hash in the meantime.
  */
 export function confinedRegularFile(workspaceDir, relPath) {
-  const root = realpathSync(path.resolve(workspaceDir));
+  const root = canonicalWorkspaceRoot(workspaceDir, relPath);
   const source = safeJoin(root, relPath);
   const relative = path.relative(root, source);
   const components = relative.split(path.sep).filter(Boolean);
