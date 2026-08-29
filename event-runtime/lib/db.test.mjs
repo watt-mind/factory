@@ -133,6 +133,25 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
   });
 
+  test("tier escalation handoffs migrate with unique root and continuation ownership", () => {
+    const db = openDb(freshFile());
+    const columns = db
+      .query(`PRAGMA table_info(tier_escalations)`)
+      .all()
+      .map((row) => row.name);
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        "root_run_id",
+        "failed_run_id",
+        "continuation_run_id",
+        "workspace_path",
+        "source_workspace_path",
+        "projection_state",
+      ]),
+    );
+    db.close();
+  });
+
   test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {
     const file = freshFile();
     const db = new Database(file);

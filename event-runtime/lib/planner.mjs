@@ -416,6 +416,50 @@ export function buildRunSpec(
   };
 }
 
+/** Build the immutable strong-tier continuation for one admitted dispatch. */
+export function buildEscalatedContinuationSpec(
+  registry,
+  failedSpec,
+  { runId, operatorAuthorized = false } = {},
+) {
+  if (!runId) throw new Error("tier escalation continuation needs a runId");
+  const def = getAgent(registry, failedSpec.agent);
+  const planned = plannedDef(def, { modelTierOverride: "strong" });
+  const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
+  const input = { ...failedSpec.input, modelTier: "strong" };
+  return {
+    ...failedSpec,
+    runId,
+    input,
+    inputHash: hashJson(input),
+    modelTier: "strong",
+    model: resolveModel(planned, failedSpec.adapter, registry.modelTiers),
+    timeoutSeconds: def.limits.timeout_seconds,
+    maxAttempts: def.limits.attempts,
+    idempotencyKey: `${failedSpec.idempotencyKey}:tier-escalation:${rootRunId}`,
+    rootRunId,
+    escalatedFromRunId: failedSpec.runId,
+    approvalPolicy: {
+      source: "handoff",
+      mode: "auto",
+      eventType: "factory.dispatch.requested",
+      escalation: {
+        rootRunId,
+        failedRunId: failedSpec.runId,
+        operatorAuthorized:
+          operatorAuthorized === true ||
+          failedSpec.approvalPolicy?.dispatchEvidence?.checks
+            ?.operator_authorized === true,
+      },
+      ...(failedSpec.approvalPolicy?.dispatchEvidence
+        ? {
+            dispatchEvidence: failedSpec.approvalPolicy.dispatchEvidence,
+          }
+        : {}),
+    },
+  };
+}
+
 function resolveNow(now) {
   return typeof now === "function" ? now() : now;
 }
@@ -1041,6 +1085,7 @@ export function worktreeDispatchAutoEligibility(
     maxInFlightFallback,
     budgetRefusal = defaultBudgetRefusal,
     claimedRetry = null,
+    escalatedContinuation = null,
     operatorAuthorized = false,
     now = Date.now(),
   } = {},
@@ -1140,10 +1185,20 @@ export function worktreeDispatchAutoEligibility(
     claimedRetry.priorAttempt > 0 &&
     claimedRetry?.reasonCode === "lease_expired",
   );
+  const canResumeEscalation = Boolean(
+    escalatedContinuation?.failedRunId &&
+      escalatedContinuation?.continuationRunId &&
+      escalatedContinuation?.rootRunId &&
+      escalatedContinuation?.projectionState === "applied" &&
+      escalatedContinuation?.repo === payload?.repo &&
+      String(escalatedContinuation?.ticket) === String(payload?.ticket) &&
+      payload?.modelTier === "strong",
+  );
   let retryClaimedByFactory = false;
   let resumingOwnClaim = false;
   if (ticket.assignee) {
-    if (!canResumeClaim) return refusal("ticket_assigned", evidence);
+    if (!canResumeClaim && !canResumeEscalation)
+      return refusal("ticket_assigned", evidence);
     const viewer = fetchViewer();
     if (!viewer?.id || ticket.assignee.id !== viewer.id)
       return refusal("ticket_assigned", evidence);
@@ -1153,13 +1208,24 @@ export function worktreeDispatchAutoEligibility(
   }
 
   if (ticket.state?.name !== "Todo") {
-    if (!(retryClaimedByFactory && ticket.state?.name === "In Progress")) {
+    const resumableState = canResumeEscalation
+      ? ["In Progress", "In Review"].includes(ticket.state?.name)
+      : ticket.state?.name === "In Progress";
+    if (!(retryClaimedByFactory && resumableState)) {
       return refusal("ticket_not_todo", evidence);
     }
     resumingOwnClaim = true;
-    evidence.checks.ticket_claim_retry = true;
-    evidence.checks.ticket_in_progress_retry = true;
-    evidence.ticket.claimedRetryRunId = claimedRetry.runId;
+    if (canResumeEscalation) {
+      evidence.checks.ticket_claim_escalation = true;
+      evidence.ticket.escalatedFromRunId =
+        escalatedContinuation.failedRunId;
+      evidence.ticket.escalatedContinuationRunId =
+        escalatedContinuation.continuationRunId;
+    } else {
+      evidence.checks.ticket_claim_retry = true;
+      evidence.checks.ticket_in_progress_retry = true;
+      evidence.ticket.claimedRetryRunId = claimedRetry.runId;
+    }
   } else {
     // Assignment alone is not a surviving factory claim. Requiring the state
     // transition as well prevents an own-assigned Todo ticket from bypassing
@@ -1169,9 +1235,11 @@ export function worktreeDispatchAutoEligibility(
   }
 
   if (!evidence.ticket.labels.includes("ai:agent-ready")) {
-    if (!(
-      resumingOwnClaim && evidence.ticket.labels.includes("ai:in-progress")
-    )) {
+    const claimedLabel =
+      evidence.ticket.labels.includes("ai:in-progress") ||
+      (canResumeEscalation &&
+        evidence.ticket.labels.includes("ai:needs-review"));
+    if (!(resumingOwnClaim && claimedLabel)) {
       return refusal("ticket_not_agent_ready", evidence);
     }
     evidence.checks.ticket_in_progress_label_retry = true;

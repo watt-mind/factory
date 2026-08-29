@@ -460,6 +460,7 @@ function materializeWorktree({
   workerLeasesDir,
   ownershipConflict,
   preservationComment,
+  handoff = null,
 }) {
   const repoName = input?.repo;
   const ticket = input?.ticket;
@@ -478,7 +479,23 @@ function materializeWorktree({
   // directory, this looks it up. A mismatch searches a path that was never
   // created and reads as "worktree_up succeeded but produced nothing" (#884).
   const worktreePath = path.join(repo.worktreeRoot, ticketSlug(ticket));
-  if (existsSync(worktreePath)) {
+  const authenticatedHandoff =
+    handoff?.continuationRunId === runId &&
+    handoff?.repo === repoName &&
+    String(handoff?.ticket) === String(ticket) &&
+    handoff?.projectionState === "applied" &&
+    path.resolve(handoff?.workspacePath ?? "") === path.resolve(worktreePath);
+  if (handoff && !authenticatedHandoff) {
+    throw new WorktreeError(
+      `worktree_handoff_invalid: durable transfer does not authenticate ${runId}`,
+    );
+  }
+  if (authenticatedHandoff && !existsSync(worktreePath)) {
+    throw new WorktreeError(
+      `worktree_handoff_missing: transferred checkout ${worktreePath} no longer exists`,
+    );
+  }
+  if (existsSync(worktreePath) && !authenticatedHandoff) {
     const conflict = ownershipConflict({
       repo: repoName,
       ticket,
@@ -505,6 +522,13 @@ function materializeWorktree({
     // branch and addresses the opened PR by its GitHub slug.
     base: repo.base ?? null,
     github: repo.github ?? null,
+    ...(authenticatedHandoff
+      ? {
+          escalatedFromRunId: handoff.failedRunId,
+          rootRunId: handoff.rootRunId,
+          transferred: true,
+        }
+      : {}),
   };
   // Persist teardown facts before bring-up starts. A script can create its
   // worktree and daemons before timing out; the marker lets the janitor find
@@ -514,6 +538,19 @@ function materializeWorktree({
     `${canonicalJson(record)}\n`,
     "utf8",
   );
+
+  if (authenticatedHandoff) {
+    symlinkSync(worktreePath, path.join(workspaceDir, checkoutDir));
+    // The marker is the filesystem ownership token. Move it only after the
+    // continuation wrapper is complete, so a crash always leaves one owner
+    // able to delegate teardown to the repo script.
+    if (handoff.sourceWorkspacePath) {
+      rmSync(path.join(handoff.sourceWorkspacePath, WORKTREE_MARKER), {
+        force: true,
+      });
+    }
+    return record;
+  }
 
   // Repo-owned bring-up may discover a red project baseline after the usable
   // worktree already exists. It reports that condition out-of-band and still
@@ -666,6 +703,7 @@ export function createWorkspace({
   workerLeasesDir,
   worktreeOwnershipConflict = detectWorktreeOwnershipConflict,
   worktreePreservationComment = commentOnPreservedWorktree,
+  worktreeHandoff = null,
 }) {
   // Lease loss can leave the prior attempt's scratch directory behind. Read
   // recognized harness session metadata before creating the new attempt;
@@ -736,6 +774,7 @@ export function createWorkspace({
         workerLeasesDir,
         ownershipConflict: worktreeOwnershipConflict,
         preservationComment: worktreePreservationComment,
+        handoff: worktreeHandoff,
       });
     } catch (err) {
       if (err instanceof WorktreeError) throw err;

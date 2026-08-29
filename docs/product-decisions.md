@@ -164,6 +164,29 @@ Promotion does not clear the runtime overrides. Clearing the overlay is a
 separate explicit action the operator takes after the promoted defaults have
 deployed, so the fast loop keeps winning until the fleet default catches up.
 
+## Exhausted dispatches escalate once to the strong tier (gh-845)
+
+Decided 2026-08-25. When an admitted `light` or `standard` dispatch exhausts
+its ordinary agent-error attempts with a verification failure, contract
+violation, or `agent_exit_*`, the runtime schedules exactly one `strong`
+continuation. Timeout, environment/lease failure, cancellation, refusal,
+human/policy/security denial, fatal failure, and an already-strong run do not
+escalate.
+
+The continuation is a runtime-authenticated, auto-approved handoff under the
+original admission authority. It has a new run ID, keeps the root correlation
+and ticket, names `escalatedFromRunId`, and reuses the exact retained checkout.
+Durable workspace ownership transfers before the continuation can become
+runnable; no second worktree or abandoned-work preservation/reset is allowed.
+
+Scheduling and tracker projection are separate crash-safe phases. The unique
+root handoff prevents a restart from creating a second continuation. The
+continuation remains approved but not queued until the control plane has
+replaced every prior `tier:*` label with `tier:strong` and posted an
+attributable comment naming both run IDs. Projection failures are retained and
+retried. Existing trust, budget, capacity, Owned Paths, security, and sensitive
+path gates still run at continuation claim time.
+
 ## Extension pack pin repair metadata boundary (gh-857)
 
 Decided 2026-08-25. `update-pins --pack <name>` may discover packs contributed

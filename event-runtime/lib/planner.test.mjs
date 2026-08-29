@@ -9,6 +9,7 @@ import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
 import {
+  buildEscalatedContinuationSpec,
   buildRunSpec,
   createLinearReadCache,
   DEFAULT_MAX_IN_FLIGHT as PLANNER_DEFAULT_MAX_IN_FLIGHT,
@@ -633,7 +634,7 @@ describe("planEvent", () => {
     });
   });
 
-  test("a duplicate dispatch for a ticket with a live dispatch is refused at plan time (WM-491)", () => {
+  test("same_ticket_worktree: a duplicate dispatch with a live run is refused at plan time (WM-491)", () => {
     const synthetic = { ...registry, agents: new Map(registry.agents) };
     synthetic.agents.set("dispatch@1", {
       ...registry.agents.get("dispatch@1"),
@@ -957,6 +958,77 @@ describe("planEvent worktree gate (WM-108)", () => {
         expect(spec.modelTier).toBe(item.tier);
         expect(spec.model).toBe(item.model);
       }
+    });
+  });
+
+  test("tier escalation continuation pins a fresh strong-tier spec and authenticated claim proof", () => {
+    const base = {
+      schemaVersion: "factory.run-spec/v1",
+      runId: "run_light_failed",
+      agent: "dispatch@1",
+      input: { repo: "tiered", ticket: "WM-694", modelTier: "light" },
+      inputHash: hashJson({ repo: "tiered", ticket: "WM-694", modelTier: "light" }),
+      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      adapter: "cursor",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.dispatch-result/v1",
+      capabilities: ["tracker:write", "repo:write", "github:write"],
+      modelTier: "light",
+      model: "cursor-grok-4.6-low-fast",
+      timeoutSeconds: 5400,
+      maxAttempts: 1,
+      idempotencyKey: "dispatch-light",
+    };
+    const continuation = buildEscalatedContinuationSpec(registry, base, {
+      runId: "run_strong_continuation",
+      operatorAuthorized: true,
+    });
+    expect(continuation).toMatchObject({
+      runId: "run_strong_continuation",
+      rootRunId: "run_light_failed",
+      escalatedFromRunId: "run_light_failed",
+      modelTier: "strong",
+      model: "cursor-grok-4.6-high",
+      timeoutSeconds: 5400,
+      maxAttempts: 1,
+      approvalPolicy: {
+        source: "handoff",
+        mode: "auto",
+        escalation: { operatorAuthorized: true },
+      },
+    });
+
+    withReposRoot(tierRepo, () => {
+      const assigned = tierTicket(["tier:light"]);
+      assigned.state = { name: "In Progress" };
+      assigned.assignee = { id: "factory-viewer", name: "Factory" };
+      assigned.labels.nodes.push({ name: "ai:in-progress" });
+      const dispatch = {
+        ...tierDispatch(["tier:light"]),
+        fetchTicket: () => assigned,
+        fetchViewer: () => ({ id: "factory-viewer" }),
+      };
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, dispatch).refusal
+          .reason,
+      ).toBe("ticket_assigned");
+      const authenticated = worktreeDispatchAutoEligibility(
+        continuation.input,
+        {
+          ...dispatch,
+          escalatedContinuation: {
+            failedRunId: base.runId,
+            continuationRunId: continuation.runId,
+            rootRunId: base.runId,
+            repo: "tiered",
+            ticket: "WM-694",
+            projectionState: "applied",
+          },
+        },
+      );
+      expect(authenticated.ok).toBe(true);
+      expect(authenticated.evidence.checks.ticket_claim_escalation).toBe(true);
     });
   });
 

@@ -67,6 +67,7 @@ import {
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
+  defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
   dispatchLockPath,
@@ -85,6 +86,9 @@ import {
   repositoryStatus,
   provisionInstanceLocalConfigs,
   resolveLinearApiKey,
+  reconcileTierEscalations,
+  scheduleTierEscalation,
+  tierEscalationEligibility,
   retryRun,
   runLinearCli,
   runOnce,
@@ -1959,6 +1963,206 @@ describe("worker", () => {
     expect(DEFAULT_MAX_ENVIRONMENT_RETRIES).toBe(3);
   });
 
+  test("tier escalation eligibility is closed to exhausted agent-caused light and standard dispatch failures", () => {
+    const light = makeSpec({
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "WM-845" },
+      workspace: { type: "worktree", checkoutDir: "repo", retainOnFailure: true },
+      modelTier: "light",
+      maxAttempts: 1,
+    });
+    for (const reasonCode of [
+      "verification_failed",
+      "handoff_verification_failed",
+      "contract_violation",
+      "agent_exit_1",
+    ]) {
+      expect(tierEscalationEligibility(light, reasonCode)).toEqual({
+        eligible: true,
+        rootRunId: light.runId,
+      });
+    }
+    for (const reasonCode of [
+      "timeout",
+      "lease_expired",
+      "adapter_error",
+      "needs_human",
+      "policy_denied:Bash",
+      "cancelled",
+    ]) {
+      expect(tierEscalationEligibility(light, reasonCode).eligible).toBe(false);
+    }
+    expect(
+      tierEscalationEligibility({ ...light, modelTier: "strong" }, "agent_exit_1")
+        .eligible,
+    ).toBe(false);
+    expect(
+      tierEscalationEligibility(
+        { ...light, rootRunId: "run_root", escalatedFromRunId: "run_prior" },
+        "agent_exit_1",
+      ).eligible,
+    ).toBe(false);
+  });
+
+  test("tier escalation schedules exactly once and retries projection before the continuation is runnable", () => {
+    const databaseFile = path.join(
+      tmpDir("tier-escalation-restart-"),
+      "runtime.db",
+    );
+    let db = openDb(databaseFile);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_tier_root",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket: "WM-845", modelTier: "light" },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, {
+      type: "factory.dispatch.requested",
+      correlationId: "root-correlation",
+    });
+    const checkout = tmpDir("tier-escalation-checkout-");
+    const wrapper = tmpDir("tier-escalation-wrapper-");
+    const first = scheduleTierEscalation(db, registry, spec, {
+      workspacePath: checkout,
+      sourceWorkspacePath: wrapper,
+      continuationRunId: "run_tier_strong",
+      now: T0,
+      reasonCode: "contract_violation",
+    });
+    db.close();
+    db = openDb(databaseFile);
+    const again = scheduleTierEscalation(db, registry, spec, {
+      workspacePath: checkout,
+      sourceWorkspacePath: wrapper,
+      continuationRunId: "run_tier_duplicate",
+      now: T0,
+      reasonCode: "contract_violation",
+    });
+    expect(first.continuation_run_id).toBe("run_tier_strong");
+    expect(again.continuation_run_id).toBe("run_tier_strong");
+    expect(db.query(`SELECT COUNT(*) AS n FROM tier_escalations`).get().n).toBe(1);
+    expect(runState(db, "run_tier_strong")).toBe("APPROVED");
+    expect(db.query(`SELECT * FROM runs WHERE run_id = 'run_tier_duplicate'`).get()).toBeNull();
+    const continuation = JSON.parse(
+      db.query(`SELECT spec_json FROM runs WHERE run_id = 'run_tier_strong'`).get()
+        .spec_json,
+    );
+    expect(continuation).toMatchObject({
+      rootRunId: spec.runId,
+      escalatedFromRunId: spec.runId,
+      modelTier: "strong",
+    });
+    const event = db
+      .query(`SELECT * FROM events WHERE source = 'handoff'`)
+      .get();
+    expect(event.correlation_id).toBe("root-correlation");
+    expect(event.causation_id).toBe(spec.runId);
+
+    const projectionErrors = [];
+    expect(
+      claimNext(db, {
+        owner: "restart-worker",
+        adapters: [],
+        projectTierEscalation: () => {
+          throw new Error("tracker unavailable");
+        },
+        now: T0,
+        policyVersion: "test",
+        onTierEscalationProjectionError: (entry) =>
+          projectionErrors.push(entry),
+      }),
+    ).toBeNull();
+    expect(projectionErrors[0]).toMatchObject({
+      reasonCode: "tier_escalation_writeback_failed",
+      continuationRunId: "run_tier_strong",
+      error: "tracker unavailable",
+    });
+    expect(runState(db, "run_tier_strong")).toBe("APPROVED");
+
+    const writes = [];
+    expect(
+      claimNext(db, {
+        owner: "restart-worker",
+        adapters: [],
+        projectTierEscalation: (entry) => (writes.push(entry), true),
+        now: T0,
+        policyVersion: "test",
+      }),
+    ).toBeNull();
+    expect(writes[0]).toMatchObject({
+      failedRunId: spec.runId,
+      continuationRunId: "run_tier_strong",
+    });
+    expect(runState(db, "run_tier_strong")).toBe("QUEUED");
+
+    const noPendingProjection = reconcileTierEscalations(db, {
+      projectTierEscalation: () => {
+        throw new Error("tracker unavailable");
+      },
+      now: T0,
+      policyVersion: "test",
+    });
+    expect(noPendingProjection).toEqual({ ok: true, projected: 0 });
+    expect(
+      lifecycleOf(db, "run_tier_strong").map((entry) => entry.reason),
+    ).toEqual(
+      expect.arrayContaining([
+        `auto_approved:tier-escalation:${spec.runId}`,
+        `tracker_projection_applied:${spec.runId}`,
+      ]),
+    );
+    db.close();
+  });
+
+  test("tier escalation projection replaces every tier label and comments both run ids idempotently", () => {
+    const calls = [];
+    const runCli = (args) => {
+      calls.push(args);
+      if (args[0] === "comments") return "[]";
+      return "{}";
+    };
+    expect(
+      defaultProjectTierEscalation({
+        repo: "factory",
+        ticket: "WM-845",
+        failedRunId: "run_light",
+        continuationRunId: "run_strong",
+        fetchTicket: () => ({
+          labels: [
+            { name: "tier:light" },
+            { name: "tier:standard" },
+            { name: "tier:strong" },
+            { name: "type:feature" },
+          ],
+        }),
+        runCli,
+      }),
+    ).toBe(true);
+    expect(calls[0]).toEqual([
+      "labels",
+      "WM-845",
+      "--add",
+      "tier:strong",
+      "--remove",
+      "tier:light",
+      "--remove",
+      "tier:standard",
+    ]);
+    expect(calls.at(-1)[0]).toBe("comment");
+    expect(calls.at(-1)[2]).toContain("run_light");
+    expect(calls.at(-1)[2]).toContain("run_strong");
+  });
+
   test("adapter_error with maxAttempts 1 requeues and succeeds without consuming the agent budget", async () => {
     const db = openDb(":memory:");
     let calls = 0;
@@ -3133,6 +3337,100 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       return { exitCode: 0, timedOut: false };
     },
   };
+
+  test("tier escalation transfers a failed dispatch checkout and claim to one strong continuation", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeDispatchSpec({
+        runId: "run_dispatch_light_failure",
+        input: {
+          repo: "wt-worker",
+          ticket: "WM-845",
+          modelTier: "light",
+        },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, {
+      type: "factory.dispatch.requested",
+      correlationId: "dispatch-tier-root",
+    });
+    const unclaims = [];
+    const projections = [];
+    const summary = await runOnce(
+      db,
+      registry,
+      {
+        fake: {
+          async execute({ workspaceDir }) {
+            writeFileSync(
+              path.join(workspaceDir, "repo", "useful-change.txt"),
+              "keep this exact checkout\n",
+            );
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      opts({
+        dispatch: {
+          locksDir: tmpDir("tier-escalation-locks-"),
+          leasesDir: tmpDir("tier-escalation-leases-"),
+          fetchTicket: () =>
+            readyDispatchTicket("WM-845", {
+              labels: {
+                nodes: [
+                  { name: "ai:agent-ready" },
+                  { name: "tier:light" },
+                ],
+              },
+            }),
+          fetchViewer: () => ({ id: "factory" }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ({ ok: true }),
+          unclaimTicket: (entry) => (unclaims.push(entry), true),
+          projectTierEscalation: (entry) => (projections.push(entry), true),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      escalationProjection: { ok: true },
+    });
+    expect(summary.escalatedRunId).toMatch(/^run_/);
+    expect(unclaims).toHaveLength(0);
+    expect(projections).toHaveLength(1);
+    expect(projections[0]).toMatchObject({
+      failedRunId: spec.runId,
+      continuationRunId: summary.escalatedRunId,
+    });
+    expect(runState(db, summary.escalatedRunId)).toBe("QUEUED");
+    const strongSpec = JSON.parse(
+      db
+        .query(`SELECT spec_json FROM runs WHERE run_id = ?`)
+        .get(summary.escalatedRunId).spec_json,
+    );
+    expect(strongSpec).toMatchObject({
+      rootRunId: spec.runId,
+      escalatedFromRunId: spec.runId,
+      modelTier: "strong",
+    });
+    expect(
+      readFileSync(path.join(wtRoot, "WM-845", "useful-change.txt"), "utf8"),
+    ).toBe("keep this exact checkout\n");
+    expect(
+      readFileSync(callsLog, "utf8")
+        .trim()
+        .split("\n")
+        .filter((call) => call === "up WM-845"),
+    ).toHaveLength(1);
+  });
 
   test("resolves Linear credentials from env first, then the shared env file", () => {
     const dir = tmpDir("evrt-linear-key-");
