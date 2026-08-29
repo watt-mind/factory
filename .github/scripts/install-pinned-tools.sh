@@ -23,7 +23,7 @@ force_install="${FORCE_INSTALL:-0}"
 custom_prefix="${INSTALL_PREFIX:-}"
 
 download() {
-  local destination="$1" url="$2"
+  local url="$1" destination="$2"
   curl "${CURL_DOWNLOAD_FLAGS[@]}" -o "$destination" "$url"
 }
 
@@ -38,7 +38,7 @@ install_bun() {
   archive="$temp_dir/bun-linux-x64.zip"
   extract_dir="$temp_dir/bun-linux-x64"
   rm -rf "$extract_dir"
-  download "$archive" "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip"
+  download "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" "$archive"
   printf '%s  %s\n' "$BUN_SHA256" "$archive" | sha256sum -c -
   unzip -q "$archive" -d "$temp_dir"
   mkdir -p "$prefix/bin"
@@ -55,7 +55,7 @@ install_gitleaks() {
 
   archive="$temp_dir/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
   mkdir -p "$prefix/bin"
-  download "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+  download "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" "$archive"
   printf '%s  %s\n' "$GITLEAKS_SHA256" "$archive" | sha256sum -c -
   tar -xzf "$archive" -C "$prefix/bin" gitleaks
   chmod +x "$destination"
@@ -71,7 +71,7 @@ install_uv() {
   archive="$temp_dir/uv-x86_64-unknown-linux-gnu.tar.gz"
   extract_dir="$temp_dir/uv-x86_64-unknown-linux-gnu"
   rm -rf "$extract_dir"
-  download "$archive" "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+  download "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" "$archive"
   printf '%s  %s\n' "$UV_SHA256" "$archive" | sha256sum -c -
   tar -xzf "$archive" -C "$temp_dir"
   mkdir -p "$prefix/bin"
@@ -88,7 +88,7 @@ install_actionlint() {
 
   archive="$temp_dir/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
   mkdir -p "$prefix/bin"
-  download "$archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+  download "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" "$archive"
   printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum -c -
   tar -xzf "$archive" -C "$prefix/bin" actionlint
   chmod +x "$destination"
