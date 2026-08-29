@@ -19,6 +19,7 @@ import {
   planEvent,
   policyMaxConcurrentMerges,
   policyMergeBatchSize,
+  wrapLinearReads,
   worktreeDispatchAutoEligibility,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
@@ -1260,12 +1261,16 @@ describe("planEvent worktree gate (WM-108)", () => {
     withReposRoot(tierRepo, () => {
       const assigned = tierTicket(["tier:light"]);
       assigned.state = { name: "In Progress" };
-      assigned.assignee = { id: "factory-viewer", name: "Factory" };
+      assigned.assignee = { id: "10578603", name: "hdkiller" };
       assigned.labels.nodes.push({ name: "ai:in-progress" });
+      const viewerRepos = [];
       const dispatch = {
         ...tierDispatch(["tier:light"]),
         fetchTicket: () => assigned,
-        fetchViewer: () => ({ id: "factory-viewer" }),
+        fetchViewer: (repo) => {
+          viewerRepos.push(repo);
+          return { id: "10578603", name: "hdkiller" };
+        },
       };
       expect(
         worktreeDispatchAutoEligibility(continuation.input, dispatch).refusal
@@ -1286,7 +1291,74 @@ describe("planEvent worktree gate (WM-108)", () => {
         },
       );
       expect(authenticated.ok).toBe(true);
-      expect(authenticated.evidence.checks.ticket_claim_escalation).toBe(true);
+      expect(authenticated.evidence.checks).toMatchObject({
+        ticket_escalation_projection_applied: true,
+        ticket_escalation_repo_matches: true,
+        ticket_escalation_ticket_matches: true,
+        ticket_escalation_model_tier_strong: true,
+        ticket_claim_viewer_identity: true,
+        ticket_claim_escalation: true,
+      });
+      expect(viewerRepos).toEqual(["tiered"]);
+
+      assigned.assignee = { id: "someone-else", name: "Other" };
+      const foreign = worktreeDispatchAutoEligibility(continuation.input, {
+        ...dispatch,
+        escalatedContinuation: {
+          failedRunId: base.runId,
+          continuationRunId: continuation.runId,
+          rootRunId: base.runId,
+          repo: "tiered",
+          ticket: "WM-694",
+          projectionState: "applied",
+        },
+      });
+      expect(foreign.refusal).toMatchObject({
+        reason: "ticket_claimed_by_other",
+        detail: "tier_escalation_check_failed:viewer_identity",
+      });
+      expect(foreign.evidence.checks.ticket_claim_viewer_identity).toBe(false);
+      assigned.assignee = { id: "10578603", name: "hdkiller" };
+
+      const pendingProjection = worktreeDispatchAutoEligibility(
+        continuation.input,
+        {
+          ...dispatch,
+          escalatedContinuation: {
+            failedRunId: base.runId,
+            continuationRunId: continuation.runId,
+            rootRunId: base.runId,
+            repo: "tiered",
+            ticket: "WM-694",
+            projectionState: "pending",
+          },
+        },
+      );
+      expect(pendingProjection.refusal).toMatchObject({
+        reason: "ticket_assigned",
+        detail:
+          "tier_escalation_check_failed:ticket_escalation_projection_applied",
+      });
+
+      const wrongTier = worktreeDispatchAutoEligibility(
+        { ...continuation.input, modelTier: "standard" },
+        {
+          ...dispatch,
+          escalatedContinuation: {
+            failedRunId: base.runId,
+            continuationRunId: continuation.runId,
+            rootRunId: base.runId,
+            repo: "tiered",
+            ticket: "WM-694",
+            projectionState: "applied",
+          },
+        },
+      );
+      expect(wrongTier.refusal).toMatchObject({
+        reason: "ticket_assigned",
+        detail:
+          "tier_escalation_check_failed:ticket_escalation_model_tier_strong",
+      });
 
       const fullCapacity = {
         ...dispatch,
@@ -3514,6 +3586,23 @@ describe("Linear rate limit (WM-878)", () => {
       expect(cache.inFlightCalls).toBeLessThanOrEqual(3);
       expect(cache.inFlightCalls).toBeGreaterThan(0);
     });
+  });
+
+  test("viewer reads are cached per repo instead of crossing control planes", () => {
+    const calls = [];
+    const reads = wrapLinearReads(
+      {
+        fetchViewer: (repo) => {
+          calls.push(repo);
+          return { id: `${repo}-viewer` };
+        },
+      },
+      createLinearReadCache(),
+    );
+    expect(reads.fetchViewer("linear-repo").id).toBe("linear-repo-viewer");
+    expect(reads.fetchViewer("github-repo").id).toBe("github-repo-viewer");
+    expect(reads.fetchViewer("linear-repo").id).toBe("linear-repo-viewer");
+    expect(calls).toEqual(["linear-repo", "github-repo"]);
   });
 });
 

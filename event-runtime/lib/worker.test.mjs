@@ -2603,6 +2603,7 @@ describe("worker", () => {
     expect(writes[0]).toMatchObject({
       failedRunId: spec.runId,
       continuationRunId: "run_tier_strong",
+      workspacePath: checkout,
     });
     expect(runState(db, "run_tier_strong")).toBe("QUEUED");
 
@@ -2638,6 +2639,7 @@ describe("worker", () => {
         ticket: "WM-845",
         failedRunId: "run_light",
         continuationRunId: "run_strong",
+        workspacePath: "/retained/WM-845",
         fetchTicket: () => ({
           labels: [
             { name: "tier:light" },
@@ -2646,6 +2648,14 @@ describe("worker", () => {
             { name: "type:feature" },
           ],
         }),
+        findPullRequest: ({ workspacePath }) => {
+          expect(workspacePath).toBe("/retained/WM-845");
+          return {
+            number: 1281,
+            url: "https://github.com/watt-mind/factory/pull/1281",
+            headRefName: "feat/gh-1239",
+          };
+        },
         runCli,
       }),
     ).toBe(true);
@@ -2662,6 +2672,9 @@ describe("worker", () => {
     expect(calls.at(-1)[0]).toBe("comment");
     expect(calls.at(-1)[2]).toContain("run_light");
     expect(calls.at(-1)[2]).toContain("run_strong");
+    expect(calls.at(-1)[2]).toContain(
+      "https://github.com/watt-mind/factory/pull/1281",
+    );
   });
 
   test("adapter_error with maxAttempts 1 requeues and succeeds without consuming the agent budget", async () => {
@@ -4206,6 +4219,222 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         .split("\n")
         .filter((call) => call === "up WM-845"),
     ).toHaveLength(1);
+  });
+
+  test("tier escalation refuses a foreign claim with diagnostic evidence and terminal projection", async () => {
+    const db = openDb(":memory:");
+    const failed = queueRun(
+      db,
+      makeDispatchSpec({
+        runId: "run_foreign_claim_light",
+        input: {
+          repo: "wt-worker",
+          ticket: "WM-1290",
+          modelTier: "light",
+        },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, failed.runId, {
+      type: "factory.dispatch.requested",
+      correlationId: "foreign-claim-tier-root",
+    });
+    let ticket = readyDispatchTicket("WM-1290", {
+      labels: {
+        nodes: [{ name: "ai:agent-ready" }, { name: "tier:light" }],
+      },
+    });
+    const dispatchOpts = {
+      locksDir: tmpDir("tier-foreign-locks-"),
+      leasesDir: tmpDir("tier-foreign-leases-"),
+      fetchTicket: () => ticket,
+      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+      projectTierEscalation: () => true,
+    };
+    const failure = await runOnce(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      opts({ dispatch: dispatchOpts }),
+    );
+    expect(failure).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+    });
+    expect(runState(db, failure.escalatedRunId)).toBe("QUEUED");
+
+    ticket = readyDispatchTicket("WM-1290", {
+      state: { name: "In Progress" },
+      assignee: { id: "another-owner", name: "Other" },
+      labels: {
+        nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+      },
+    });
+    const refused = await runOnce(
+      db,
+      registry,
+      { fake: dispatchFakeAdapter },
+      opts({ dispatch: dispatchOpts }),
+    );
+    expect(refused).toMatchObject({
+      runId: failure.escalatedRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_claimed_by_other",
+    });
+    expect(
+      db
+        .query(
+          `SELECT projection_state AS projectionState, projection_error AS projectionError
+             FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(failure.escalatedRunId),
+    ).toEqual({
+      projectionState: "refused",
+      projectionError: "ticket_claimed_by_other",
+    });
+    const receipt = JSON.parse(
+      db
+        .query(
+          `SELECT receipt_json FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`,
+        )
+        .get(failure.escalatedRunId).receipt_json,
+    );
+    expect(receipt.dispatchGateEvidence.checks).toMatchObject({
+      ticket_escalation_model_tier_strong: true,
+      ticket_escalation_projection_applied: true,
+      ticket_claim_viewer_identity: false,
+    });
+    db.close();
+  });
+
+  test("tier escalation continuation is deferred, not refused, while its projection is pending (#1290)", async () => {
+    const db = openDb(":memory:");
+    const failed = queueRun(
+      db,
+      makeDispatchSpec({
+        runId: "run_pending_projection_light",
+        input: {
+          repo: "wt-worker",
+          ticket: "WM-1290",
+          modelTier: "light",
+        },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, failed.runId, {
+      type: "factory.dispatch.requested",
+      correlationId: "pending-projection-tier-root",
+    });
+    let now = T0;
+    let projectionWorks = false;
+    const dispatchOpts = {
+      locksDir: tmpDir("tier-pending-locks-"),
+      leasesDir: tmpDir("tier-pending-leases-"),
+      random: () => 0,
+      fetchTicket: () =>
+        readyDispatchTicket("WM-1290", {
+          labels: {
+            nodes: [{ name: "ai:agent-ready" }, { name: "tier:light" }],
+          },
+        }),
+      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+      projectTierEscalation: () => projectionWorks,
+      onTierEscalationProjectionError: () => {},
+    };
+    const o = opts({
+      now: () => now,
+      onTierEscalationProjectionError: () => {},
+      dispatch: dispatchOpts,
+    });
+    const failure = await runOnce(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      o,
+    );
+    expect(failure).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+    });
+    const continuationRunId = failure.escalatedRunId;
+    const projectionState = () =>
+      db
+        .query(
+          `SELECT projection_state AS projectionState
+             FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId).projectionState;
+    expect(projectionState()).toBe("pending");
+    expect(runState(db, continuationRunId)).toBe("APPROVED");
+
+    // A continuation admitted to the queue before its projection landed must
+    // not reach the eligibility gate: the planner would refuse it terminally.
+    transition(db, {
+      runId: continuationRunId,
+      to: "QUEUED",
+      expectFrom: "APPROVED",
+      actor: "test",
+      reason: "queued_before_projection",
+      now,
+    });
+    const deferred = await runOnce(
+      db,
+      registry,
+      { fake: dispatchFakeAdapter },
+      o,
+    );
+    expect(deferred).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "QUEUED",
+      reasonCode: "tier_escalation_projection_pending",
+    });
+    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
+    expect(runState(db, continuationRunId)).toBe("QUEUED");
+    expect(projectionState()).toBe("pending");
+    expect(claimNext(db, o)).toBeNull();
+
+    // Once the projection is applied the same continuation proceeds as before.
+    projectionWorks = true;
+    now += deferred.requeueAfterMs;
+    const completed = await runOnce(
+      db,
+      registry,
+      { fake: dispatchFakeAdapter },
+      o,
+    );
+    expect(completed).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "COMPLETED",
+      reasonCode: "ok",
+    });
+    expect(projectionState()).toBe("applied");
+    db.close();
   });
 
   test("only a durable escalation handoff authorises the operator bypass at execute time (GH-845)", async () => {

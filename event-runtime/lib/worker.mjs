@@ -1091,9 +1091,7 @@ function originatingEvent(db, runId) {
 
 function tierEscalationForContinuation(db, runId) {
   const row = db
-    .query(
-      `SELECT * FROM tier_escalations WHERE continuation_run_id = ? AND projection_state = 'applied'`,
-    )
+    .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
     .get(runId);
   if (!row) return null;
   return {
@@ -1106,6 +1104,32 @@ function tierEscalationForContinuation(db, runId) {
     sourceWorkspacePath: row.source_workspace_path,
     projectionState: row.projection_state,
   };
+}
+
+/** Leave a foreign-owned escalation in an explicit terminal projection state. */
+function refuseTierEscalationClaim(db, handoff, reasonCode) {
+  if (
+    !handoff?.rootRunId ||
+    !handoff?.failedRunId ||
+    !handoff?.continuationRunId
+  )
+    return false;
+  const changed = db
+    .query(
+      `UPDATE tier_escalations
+          SET projection_state = 'refused', projection_error = ?
+        WHERE root_run_id = ?
+          AND failed_run_id = ?
+          AND continuation_run_id = ?
+          AND projection_state <> 'refused'`,
+    )
+    .run(
+      reasonCode,
+      handoff.rootRunId,
+      handoff.failedRunId,
+      handoff.continuationRunId,
+    );
+  return changed.changes === 1;
 }
 
 /** Create exactly one auto-approved continuation and durable workspace transfer. */
@@ -1231,13 +1255,35 @@ export function scheduleTierEscalation(
 
 const TIER_ESCALATION_COMMENT_MARKER = "factory:tier-escalation:";
 
+function defaultFindWorkspacePullRequest({ workspacePath }) {
+  if (!workspacePath) return null;
+  const branch = execFileSync(
+    "git",
+    ["-C", workspacePath, "branch", "--show-current"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+  if (!branch) return null;
+  return (
+    loadForge()
+      .prList(null, {
+        cwd: workspacePath,
+        state: "open",
+        fields: ["number", "url", "headRefName"],
+        timeout: workerSubprocessTimeoutMs(),
+      })
+      .find((pr) => pr?.headRefName === branch && pr?.url) ?? null
+  );
+}
+
 export function defaultProjectTierEscalation({
   repo,
   ticket,
   failedRunId,
   continuationRunId,
+  workspacePath,
   fetchTicket,
   runCli = runLinearCli,
+  findPullRequest = defaultFindWorkspacePullRequest,
 }) {
   const current =
     typeof fetchTicket === "function"
@@ -1275,12 +1321,24 @@ export function defaultProjectTierEscalation({
   } catch {
     // A comment read is an idempotency optimization. Posting remains required.
   }
+  let existingPullRequest = null;
+  if (workspacePath) {
+    try {
+      existingPullRequest = findPullRequest({ workspacePath });
+    } catch {
+      // PR discovery enriches the escalation notice. The durable run ids are
+      // still sufficient to project the continuation when the forge is down.
+    }
+  }
   if (!alreadyCommented) {
+    const prLine = existingPullRequest?.url
+      ? `\n\nRetained worktree PR: ${existingPullRequest.url}`
+      : "";
     runCli(
       [
         "comment",
         ticket,
-        `Tier escalation scheduled: failed run \`${failedRunId}\` continues as strong run \`${continuationRunId}\` in the same retained worktree.\n\n<!-- ${marker} -->`,
+        `Tier escalation scheduled: failed run \`${failedRunId}\` continues as strong run \`${continuationRunId}\` in the same retained worktree.${prLine}\n\n<!-- ${marker} -->`,
       ],
       { repo },
     );
@@ -1310,6 +1368,7 @@ export function reconcileTierEscalations(
       ticket: row.ticket,
       failedRunId: row.failed_run_id,
       continuationRunId: row.continuation_run_id,
+      workspacePath: row.workspace_path,
       fetchTicket,
     });
     if (projected === false)
@@ -2648,7 +2707,7 @@ export async function executeClaimed(
   const refuseTerminal = (
     reasonCode,
     checks = ["dispatch_gate"],
-    { causeTyped = false, detail = null } = {},
+    { causeTyped = false, detail = null, receiptEvidence = null } = {},
   ) =>
     txImmediate(db, () => {
       const currentNow = nowFn();
@@ -2698,7 +2757,12 @@ export async function executeClaimed(
         evidenceSetHash: null,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
-        extraReceipt: filesystemConfinementReceipt,
+        extraReceipt: receiptEvidence
+          ? {
+              ...(filesystemConfinementReceipt ?? {}),
+              dispatchGateEvidence: receiptEvidence,
+            }
+          : filesystemConfinementReceipt,
         harnessPins: materializedHarnessPins,
       });
       const result = {
@@ -3009,6 +3073,15 @@ export async function executeClaimed(
             now: nowFn,
           });
         } else {
+          // A continuation whose tracker projection has not been applied yet
+          // is not runnable: the planner would refuse it terminally as
+          // ticket_assigned (tier_escalation_check_failed:
+          // ticket_escalation_projection_applied) and the row would stay
+          // pending forever (#1290). Requeue and let reconcileTierEscalations
+          // finish the projection first.
+          if (worktreeHandoff?.projectionState === "pending") {
+            return deferTransientGate("tier_escalation_projection_pending");
+          }
           gateResult = worktreeDispatchAutoEligibility(spec.input, {
             ...(dispatchOpts ?? {}),
             claimedRetry: claimedRetryFor(db, runId, attempt),
@@ -3034,7 +3107,7 @@ export async function executeClaimed(
             // failed run the spec names.
             operatorAuthorized:
               originatingEvent(db, runId)?.source === "operator" ||
-              (worktreeHandoff !== null &&
+              (worktreeHandoff?.projectionState === "applied" &&
                 spec.approvalPolicy?.escalation?.operatorAuthorized === true &&
                 spec.approvalPolicy.escalation.failedRunId ===
                   worktreeHandoff.failedRunId &&
@@ -3064,8 +3137,17 @@ export async function executeClaimed(
           return deferTransientGate("owned_paths_unknown");
         }
         releaseClaimLock(lockFile);
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_claimed_by_other" &&
+          worktreeHandoff
+        ) {
+          refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
+        }
         const res = refuseTerminal(gateRefusal.reason, [`${gate}_gate`], {
           detail: gateRefusal.detail,
+          receiptEvidence:
+            gate === "dispatch" && worktreeHandoff ? gateResult.evidence : null,
         });
         if (res?.fenced) return { fenced: true };
         return {

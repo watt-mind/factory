@@ -504,7 +504,10 @@ export function createLinearReadCache() {
   return {
     tickets: new Map(),
     inFlight: new Map(),
-    viewer: { value: undefined },
+    // Viewer identity is control-plane/repo specific. A Linear UUID cached
+    // while planning one repo must never be compared with a GitHub assignee
+    // id while planning the next repo in the same pass.
+    viewers: new Map(),
     rateLimitError: null,
     rateLimitedUntil: 0,
     inFlightCalls: 0,
@@ -557,12 +560,13 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
         throw err;
       }
     },
-    fetchViewer: () => {
+    fetchViewer: (repo) => {
       throwIfLimited();
-      if (cache.viewer.value !== undefined) return cache.viewer.value;
+      const key = repo ?? "__default__";
+      if (cache.viewers.has(key)) return cache.viewers.get(key);
       try {
-        const value = fetchViewer();
-        cache.viewer.value = value;
+        const value = fetchViewer(repo);
+        cache.viewers.set(key, value);
         return value;
       } catch (err) {
         remember(err);
@@ -614,17 +618,31 @@ function fetchTicketDefault(ticketId, repo) {
   }
 }
 
-function fetchViewerDefault() {
+function fetchViewerDefault(repoName) {
   try {
-    const out = execFileSync(
-      "bun",
-      [linearCli(), "raw", "query{ viewer{ id name } }"],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    return JSON.parse(out)?.viewer ?? null;
+    const repo = repoName ? getRepo(loadRepos(), repoName) : null;
+    // GitHub App installation identities are not assignable users. The
+    // GitHub control plane's claim uses the ambient `gh auth` user as the
+    // lock owner, so resume checks must read that same identity via /user.
+    // The ticket CLI routes the raw call through the repo's own plane.
+    const rawQuery =
+      repo?.controlPlane === "github" ? "/user" : "query{ viewer{ id name } }";
+    const args = [linearCli(), "raw", rawQuery];
+    if (repoName) args.push("--repo", repoName);
+    const out = execFileSync("bun", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(out);
+    if (repo?.controlPlane === "github") {
+      return parsed?.id == null
+        ? null
+        : {
+            id: String(parsed.id),
+            name: parsed.login ?? parsed.name ?? null,
+          };
+    }
+    return parsed?.viewer ?? null;
   } catch (err) {
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
@@ -1154,15 +1172,34 @@ export function worktreeDispatchAutoEligibility(
   }
   evidence.checks.ticket_identifier_parseable = true;
 
+  const escalationChecks = escalatedContinuation
+    ? {
+        ticket_escalation_failed_run_bound: Boolean(
+          escalatedContinuation.failedRunId,
+        ),
+        ticket_escalation_continuation_run_bound: Boolean(
+          escalatedContinuation.continuationRunId,
+        ),
+        ticket_escalation_root_run_bound: Boolean(
+          escalatedContinuation.rootRunId,
+        ),
+        ticket_escalation_projection_applied:
+          escalatedContinuation.projectionState === "applied",
+        ticket_escalation_repo_matches:
+          escalatedContinuation.repo === payload?.repo,
+        ticket_escalation_ticket_matches:
+          String(escalatedContinuation.ticket) === String(payload?.ticket),
+        ticket_escalation_model_tier_strong: payload?.modelTier === "strong",
+      }
+    : null;
+  if (escalationChecks) Object.assign(evidence.checks, escalationChecks);
   const canResumeEscalation = Boolean(
-    escalatedContinuation?.failedRunId &&
-    escalatedContinuation?.continuationRunId &&
-    escalatedContinuation?.rootRunId &&
-    escalatedContinuation?.projectionState === "applied" &&
-    escalatedContinuation?.repo === payload?.repo &&
-    String(escalatedContinuation?.ticket) === String(payload?.ticket) &&
-    payload?.modelTier === "strong",
+    escalationChecks && Object.values(escalationChecks).every(Boolean),
   );
+  const failedEscalationCheck = escalationChecks
+    ? (Object.entries(escalationChecks).find(([, passed]) => !passed)?.[0] ??
+      null)
+    : null;
 
   let budgetReason;
   try {
@@ -1214,6 +1251,18 @@ export function worktreeDispatchAutoEligibility(
         ? "label"
         : "definition";
 
+  // A durable continuation row is not a second route to ordinary dispatch.
+  // If any binding is wrong (including a projection not yet applied), fail
+  // closed even when the ticket happens to be unassigned at this instant.
+  if (escalatedContinuation && !canResumeEscalation) {
+    return refusal(
+      "ticket_assigned",
+      evidence,
+      "noop",
+      `tier_escalation_check_failed:${failedEscalationCheck}`,
+    );
+  }
+
   // A lease-loss retry is the one exception to the ordinary Todo/unassigned
   // admission rule. The prior attempt already performed the Linear claim, so
   // its durable state is expected to be In Progress and assigned. Accept that
@@ -1228,11 +1277,31 @@ export function worktreeDispatchAutoEligibility(
   let retryClaimedByFactory = false;
   let resumingOwnClaim = false;
   if (ticket.assignee) {
-    if (!canResumeClaim && !canResumeEscalation)
-      return refusal("ticket_assigned", evidence);
-    const viewer = fetchViewer();
-    if (!viewer?.id || ticket.assignee.id !== viewer.id)
-      return refusal("ticket_assigned", evidence);
+    if (!canResumeClaim && !canResumeEscalation) {
+      return refusal(
+        "ticket_assigned",
+        evidence,
+        "noop",
+        failedEscalationCheck
+          ? `tier_escalation_check_failed:${failedEscalationCheck}`
+          : null,
+      );
+    }
+    const viewer = fetchViewer(payload?.repo);
+    const viewerOwnsClaim = Boolean(
+      viewer?.id && String(ticket.assignee.id) === String(viewer.id),
+    );
+    evidence.checks.ticket_claim_viewer_identity = viewerOwnsClaim;
+    if (!viewerOwnsClaim) {
+      return refusal(
+        canResumeEscalation ? "ticket_claimed_by_other" : "ticket_assigned",
+        evidence,
+        "noop",
+        canResumeEscalation
+          ? "tier_escalation_check_failed:viewer_identity"
+          : null,
+      );
+    }
     retryClaimedByFactory = true;
   } else {
     evidence.checks.ticket_unassigned = true;
