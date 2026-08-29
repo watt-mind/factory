@@ -36,6 +36,14 @@ jobs:
     runs-on: [self-hosted, verify-lane]
     timeout-minutes: 45
     steps:
+      # Every later step resolves the runtime home here, never the operator's
+      # real ~/.factory/event-runtime: self-hosted CI runs on the operator box,
+      # and a migration-carrying branch once upgraded the live runtime.db from
+      # a test (2026-08-29). Steps that need their own home (E2E seed) still
+      # override it. (`runner.temp` is not available in job-level `env`.)
+      - name: Isolate the factory runtime home from the operator's ~/.factory
+        shell: bash
+        run: echo "FACTORY_EVENT_HOME=$RUNNER_TEMP/factory-event-home" >> "$GITHUB_ENV"
       - name: Sweep stale shared-host temp directories
         if: runner.environment == 'self-hosted'
         shell: bash

@@ -11,6 +11,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
@@ -25,6 +26,7 @@ import {
   txImmediate,
   usageSpend,
 } from "./db.mjs";
+import { dbPath, isTestOrCiProcess, runtimeHome } from "./config.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
 
 const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
@@ -577,6 +579,63 @@ describe("hermetic execution guard (OPS-425)", () => {
       expect(() => expectRealDbUnchanged(before, after)).toThrow();
     } finally {
       rmSync(factoryHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("default runtime home guard (fail closed in tests/CI)", () => {
+  const liveDefault = path.join(homedir(), ".factory", "event-runtime");
+
+  test("bun test runs with NODE_ENV=test, so the guard is armed here", () => {
+    expect(process.env.NODE_ENV).toBe("test");
+    expect(isTestOrCiProcess(process.env)).toBe(true);
+  });
+
+  test("refuses the default home when FACTORY_EVENT_HOME is unset in a test or CI process", () => {
+    for (const env of [
+      { NODE_ENV: "test" },
+      { BUN_ENV: "test" },
+      { CI: "true" },
+      { CI: "1" },
+    ]) {
+      expect(() => runtimeHome(env)).toThrow(
+        /refusing to use the default runtime home/,
+      );
+      expect(() => dbPath(runtimeHome(env))).toThrow();
+    }
+  });
+
+  test("honours FACTORY_EVENT_HOME in a test or CI process", () => {
+    const isolated = trackTmpDir(createIsolatedHome("evrt-guard-home-"));
+    expect(
+      runtimeHome({ NODE_ENV: "test", FACTORY_EVENT_HOME: isolated }),
+    ).toBe(isolated);
+    expect(runtimeHome({ CI: "true", FACTORY_EVENT_HOME: isolated })).toBe(
+      isolated,
+    );
+  });
+
+  test("plain operator processes still resolve ~/.factory/event-runtime", () => {
+    for (const env of [
+      {},
+      { CI: "" },
+      { CI: "false" },
+      { NODE_ENV: "production" },
+    ]) {
+      expect(isTestOrCiProcess(env)).toBe(false);
+      expect(runtimeHome(env)).toBe(liveDefault);
+    }
+  });
+
+  test("openDb() with no path cannot reach the live database from this test process", () => {
+    const saved = process.env.FACTORY_EVENT_HOME;
+    delete process.env.FACTORY_EVENT_HOME;
+    try {
+      expect(() => openDb()).toThrow(
+        /refusing to use the default runtime home/,
+      );
+    } finally {
+      process.env.FACTORY_EVENT_HOME = saved;
     }
   });
 });
