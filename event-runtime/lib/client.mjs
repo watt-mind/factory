@@ -9,13 +9,26 @@
  */
 import { API_HOST, DEFAULT_PORT } from "./config.mjs";
 
-export function apiClient({ port = DEFAULT_PORT, host = API_HOST } = {}) {
+export function apiClient({
+  port = DEFAULT_PORT,
+  host = API_HOST,
+  // WM-1152: bearer the control API requires when FACTORY_CONTROL_API_TOKEN is
+  // set. Read from env by default so every CLI/worker caller authenticates
+  // without changes; sent on every request (webhook/health ignore it). Never
+  // logged. Unset means no header, matching the pre-token behavior.
+  token = process.env.FACTORY_CONTROL_API_TOKEN || null,
+} = {}) {
   const base = `http://${host}:${port}`;
+  const authHeader = token ? { authorization: `Bearer ${token}` } : {};
 
   async function call(method, path, { body, headers = {} } = {}) {
     const res = await fetch(`${base}${path}`, {
       method,
-      headers: { "content-type": "application/json", ...headers },
+      headers: {
+        "content-type": "application/json",
+        ...authHeader,
+        ...headers,
+      },
       body,
     });
     const text = await res.text();

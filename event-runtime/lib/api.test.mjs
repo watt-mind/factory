@@ -568,6 +568,122 @@ describe("environment identity (webui chip)", () => {
   });
 });
 
+describe("bearer-token auth on the control API (WM-1152)", () => {
+  const TOKEN = "s3cr3t-control-token";
+
+  test("token set: privileged route needs a correct bearer (401 without/with-wrong, 200 with correct)", async () => {
+    const s = await makeServer({ controlApiToken: TOKEN });
+    try {
+      const missing = await fetch(s.url("/status"));
+      expect(missing.status).toBe(401);
+      expect((await missing.json()).error).toBe("unauthorized");
+
+      const wrong = await fetch(s.url("/status"), {
+        headers: { authorization: "Bearer not-the-token" },
+      });
+      expect(wrong.status).toBe(401);
+      expect((await wrong.json()).error).toBe("unauthorized");
+
+      // A same-length-but-different token still fails (constant-time compare).
+      const sameLength = await fetch(s.url("/status"), {
+        headers: { authorization: `Bearer ${"x".repeat(TOKEN.length)}` },
+      });
+      expect(sameLength.status).toBe(401);
+
+      const ok = await fetch(s.url("/status"), {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(ok.status).toBe(200);
+      expect(typeof (await ok.json()).events).toBe("object");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("token set: the apiClient carries the bearer, so internal callers do not 401 themselves", async () => {
+    const s = await makeServer({ controlApiToken: TOKEN });
+    const client = apiClient({ port: s.port, token: TOKEN });
+    try {
+      const status = await client.status();
+      expect(status.env.name).toBeDefined();
+      // A client without the token is rejected, proving the header is required.
+      const anon = apiClient({ port: s.port, token: null });
+      const err = await rejection(anon.status());
+      expect(err.status).toBe(401);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("token set: GET /health stays open (liveness, no bearer)", async () => {
+    const s = await makeServer({ controlApiToken: TOKEN });
+    try {
+      const res = await fetch(s.url("/health"));
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(true);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("token set: POST /events stays signature-gated, not bearer-gated", async () => {
+    const s = await makeServer({ controlApiToken: TOKEN });
+    try {
+      // A correctly signed webhook is admitted with NO bearer present.
+      const body = JSON.stringify(envelope({ eventId: "hook-1152" }));
+      const ts = String(Date.now());
+      const admitted = await fetch(s.url("/events"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-factory-timestamp": ts,
+          "x-factory-signature": sign(body, ts),
+        },
+        body,
+      });
+      expect(admitted.status).toBe(200);
+      expect(await admitted.json()).toEqual({
+        admitted: true,
+        duplicate: false,
+        eventId: "hook-1152",
+      });
+
+      // A bad signature is still rejected by signature (not the bearer 401),
+      // even when a valid bearer is supplied — the HMAC governs this route.
+      const forged = JSON.stringify(envelope({ eventId: "hook-forged-1152" }));
+      const ts2 = String(Date.now());
+      const rejected = await fetch(s.url("/events"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+          "x-factory-timestamp": ts2,
+          "x-factory-signature": sign(forged, ts2, "wrong-secret"),
+        },
+        body: forged,
+      });
+      expect(rejected.status).toBe(401);
+      expect((await rejected.json()).error).toBe("bad_signature");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("token unset: behavior is unchanged — privileged routes work with no bearer (no regression)", async () => {
+    const s = await makeServer({ controlApiToken: null });
+    try {
+      const res = await fetch(s.url("/status"));
+      expect(res.status).toBe(200);
+      expect(typeof (await res.json()).events).toBe("object");
+      // No Authorization header is sent and none is required.
+      const agents = await fetch(s.url("/agents"));
+      expect(agents.status).toBe(200);
+    } finally {
+      s.close();
+    }
+  });
+});
+
 describe("serve PID lock (OPS-458)", () => {
   test("acquireServeLock acquires lock in empty runtime home and releaseServeLock removes it", async () => {
     const { acquireServeLock, releaseServeLock, serveLockPath } =
