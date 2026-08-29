@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { api } from "./api";
 import { notify } from "./components/ui";
 import { goPrefixActive } from "./goSequence";
@@ -367,14 +373,59 @@ export function useTheme(): [Theme, () => void] {
   return [theme, cycle];
 }
 
-/** Ticks every second — drives TTL countdowns and relative timestamps. */
+/** One clock subscription drives every TTL countdown and relative timestamp. */
+let now = Date.now();
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+const nowListeners = new Set<() => void>();
+
+function tickNow() {
+  now = Date.now();
+  nowListeners.forEach((listener) => listener());
+}
+
+function pauseNowTicker() {
+  if (nowTimer === null) return;
+  clearInterval(nowTimer);
+  nowTimer = null;
+}
+
+function startNowTicker() {
+  if (nowTimer !== null || document.hidden) return;
+  nowTimer = setInterval(tickNow, 1_000);
+}
+
+function onNowVisibilityChange() {
+  if (document.hidden) {
+    pauseNowTicker();
+    return;
+  }
+  tickNow();
+  startNowTicker();
+}
+
+function subscribeToNow(listener: () => void) {
+  nowListeners.add(listener);
+  if (nowListeners.size === 1) {
+    document.addEventListener("visibilitychange", onNowVisibilityChange);
+    tickNow();
+    startNowTicker();
+  }
+  return () => {
+    nowListeners.delete(listener);
+    if (nowListeners.size === 0) {
+      pauseNowTicker();
+      document.removeEventListener("visibilitychange", onNowVisibilityChange);
+    }
+  };
+}
+
+/** Ticks every second while visible — shared across all consumers. */
 export function useNow(): number {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
+  return useSyncExternalStore(
+    subscribeToNow,
+    () => now,
+    () => now,
+  );
 }
 
 /**
