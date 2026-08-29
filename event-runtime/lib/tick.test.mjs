@@ -104,6 +104,42 @@ describe("tick (OPS-412)", () => {
     expect(nextTickResult.lastPrune).toBe(now);
   });
 
+  test("TICK_SUBSYSTEMS lists every executed runStep in order", async () => {
+    const { db } = harness();
+    const ran = [];
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.map((name) => [name, () => ran.push(name)]),
+    );
+
+    await tick({
+      db,
+      registry,
+      policyVersion: "git:test",
+      withWorker: true,
+      subsystems,
+    });
+
+    expect(ran).toEqual(TICK_SUBSYSTEMS);
+  });
+
+  test("tick skips the worker subsystem when withWorker is false", async () => {
+    const { db } = harness();
+    const ran = [];
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.map((name) => [name, () => ran.push(name)]),
+    );
+
+    await tick({
+      db,
+      registry,
+      policyVersion: "git:test",
+      subsystems,
+    });
+
+    expect(ran).toEqual(TICK_SUBSYSTEMS.filter((name) => name !== "worker"));
+    expect(ran).not.toContain("worker");
+  });
+
   for (const failing of TICK_SUBSYSTEMS) {
     test(`a throw in ${failing} does not prevent the others from running`, async () => {
       const { db } = harness();
@@ -125,6 +161,7 @@ describe("tick (OPS-412)", () => {
         now: Date.now(),
         lastPrune: Date.now(),
         policyVersion: "git:test",
+        withWorker: true,
         log: (line) => logs.push(line),
         subsystems,
       });
