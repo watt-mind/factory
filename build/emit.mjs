@@ -456,7 +456,8 @@ function floorStatus() {
     }
     const isRunningRepo =
       configuredRoot === runningRoot ||
-      (runningGithub && githubSlug(String(repo.github ?? "")) === runningGithub);
+      (runningGithub &&
+        githubSlug(String(repo.github ?? "")) === runningGithub);
     const checkoutPath = isRunningRepo ? ROOT : repoPath;
     const agentsFile = path.join(checkoutPath, "AGENTS.md");
     if (!existsSync(checkoutPath))
