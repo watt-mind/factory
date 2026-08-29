@@ -25,4 +25,52 @@ Freeze a case once it's written. A case edited to match new behavior is no longe
     node evals/run.mjs                 # all
     node evals/run.mjs --skill ticket-spec
 
-Not yet implemented — the runner is the next piece. Cases are written first deliberately: they're the specification of what the skill is for, and writing them has already surfaced disagreements about what "agent-ready" means.
+Each case runs the skill under test against its `input.md`, then a model grades
+the response against `expect.md` — **graded, not diffed**: `expect.md` states
+properties, and the wording of a correct response will vary. Every case yields
+`pass | fail` and the grader's one-line reason. Output is human-readable by
+default; `--json` emits the same for CI.
+
+The runner exits non-zero if any case fails, so it drops into CI as a gate with
+no wrapper:
+
+    node evals/run.mjs && echo "prompts safe to merge"
+
+Other flags:
+
+    --dry-run              list the cases that would run and their resolved
+                           skill source; makes no model calls (testable without spend)
+    --compare <file>       diff this run against a prior .results/<ts>.json and
+                           report any *regression* — a case that passed then and
+                           fails now — so a drop is detectable, not just a score
+    --timeout <ms>         per-case bound for the subject run and the grader
+    --total-timeout <ms>   total cap for the whole run
+    --json                 machine-readable output
+
+### The grader is pinned
+
+Grading uses a model call, and the grader model is pinned in
+`config/policy.yaml` so a grader upgrade is a deliberate, reviewable change —
+never a silent shift in the pass bar. Set it under an `evals:` block:
+
+    evals:
+      grader:
+        model: <your-strong-model>
+
+If that pin is absent the runner falls back to `models.claude.strong`, and
+finally to the CLI's own default. The resolved model and its source are printed
+at the top of every non-`--json` run, and recorded into the results file.
+
+### Determinism is honest
+
+Every run records the model, the case set, and per-case pass/fail into
+`evals/.results/<timestamp>.json`. `--compare` reads one of those back and
+flags regressions. A hung grader fails its own case rather than wedging the run.
+
+### Scope of the current runner
+
+The subject run is a lightweight harness: it applies the skill's `SKILL.md` to
+the case `input.md` with a bounded model call — no repository workspace, no MCP,
+no Linear. That is enough for the self-contained judgement cases this corpus is
+built from. Cases that require the skill to explore a live repository are a
+follow-up, not silently unsupported.
