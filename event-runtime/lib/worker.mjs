@@ -707,14 +707,25 @@ export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
 
 /** Claim-lock contention is deferred independently from execution attempts. */
 // Requeue budget for the per-repo dispatch lock. Contended runs re-queue with
-// exponential backoff and only give up (claim_lock_starvation → REFUSED) after
-// this many attempts. The lock is held briefly (claim + gate control-plane
-// reads, not the agent run), so a contended run reliably wins once the runs
-// ahead of it release — the ceiling only needs to exceed the worker pool's
-// concurrent same-repo contenders. At 8 a surge (a freshly-unblocked backlog,
-// a reaper mass-reclaim, or a merge-lane fan-out) starved legitimate dispatch
-// and merge-fix work; 24 clears a full worker pool of contenders with headroom.
-export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = 24;
+// exponential backoff without spending an execution attempt.
+//
+// WM-1124: the default is now unbounded (Infinity → never terminally REFUSE
+// with claim_lock_starvation). acquireClaimLock() only ever returns false for a
+// *live* lock owner — a dead owner's lock is reclaimed in place (see the
+// isAlive branch there), so a deferred run is, by construction, only ever
+// contending against an owner that WILL release. A live owner's hold is bounded
+// (claim + gate control-plane reads under the worker subprocess timeout, not
+// the agent run), so the contender reliably wins a later cycle. A fixed ceiling
+// turned that transient, self-healing contention into a terminal refusal: an
+// N-wide same-repo dispatch burst (observed 14–16 per scan) starved most of
+// itself — 11 of 14 terminally REFUSED in one 2026-08-29 cycle — wasting a full
+// scan and the agents' budget on tickets that were never actually un-claimable.
+// Durable defer-and-retry is strictly safer here than a terminal refusal, and
+// the atomic claim is untouched: the lock, gate read, and claim keep their
+// exact ordering. An explicit finite `maxClaimLockContentionRequeues` option
+// still caps the requeues (used by the starvation-ceiling test and available to
+// operators); only the production default stops being terminal.
+export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = Infinity;
 export const DEFAULT_MAX_TRANSIENT_GATE_REQUEUES = 3;
 export const CLAIM_LOCK_BACKOFF_BASE_MS = 25;
 export const CLAIM_LOCK_BACKOFF_MAX_MS = 1_000;
