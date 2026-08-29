@@ -185,9 +185,9 @@ describe("schema migration runner and assertions (OPS-415)", () => {
   });
 
   test("tier escalation handoffs reach schema 15 from a fresh and from a v14 database", () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(15);
+    expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(15);
     const fresh = openDb(freshFile());
-    expect(getSchemaVersion(fresh)).toBe(15);
+    expect(getSchemaVersion(fresh)).toBe(CURRENT_SCHEMA_VERSION);
     fresh.close();
 
     // #1230 (#1197) owns migration 14 and lands first; a database already at
@@ -197,9 +197,9 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrateDb(at14, { targetVersion: 13 });
     at14.exec("PRAGMA user_version = 14;");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(15);
+    expect(getSchemaVersion(at14)).toBe(CURRENT_SCHEMA_VERSION);
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(15);
+    expect(getSchemaVersion(at14)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
       at14
         .query(
@@ -227,6 +227,53 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       ]),
     );
     db.close();
+  });
+
+  test("hot proposal and inbox lookup indexes upgrade an existing database", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    migrateDb(db, { targetVersion: CURRENT_SCHEMA_VERSION - 1 });
+    db.close();
+
+    const migrated = openDb(file);
+    const plans = [
+      [
+        "metrics latest proposal",
+        `SELECT p2.rowid FROM proposals p2
+         WHERE p2.run_id = 'run-1'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1`,
+        "idx_proposals_run_id",
+      ],
+      [
+        "event proposal",
+        `SELECT p2.rowid FROM proposals p2
+         WHERE p2.event_source = 'github' AND p2.event_id = 'event-1'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1`,
+        "idx_proposals_event",
+      ],
+      [
+        "inbox correlation",
+        `SELECT p.id FROM events e
+         JOIN proposals p
+           ON p.event_source = e.source AND p.event_id = e.event_id
+         WHERE e.correlation_id = 'inbox-1'
+         ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
+        "idx_events_correlation",
+      ],
+    ];
+
+    for (const [name, sql, index] of plans) {
+      const detail = migrated
+        .query(`EXPLAIN QUERY PLAN ${sql}`)
+        .all()
+        .map((row) => row.detail)
+        .join("\n");
+      expect(detail, name).toMatch(
+        new RegExp(`USING (?:COVERING )?INDEX ${index}`),
+      );
+      expect(detail, name).not.toMatch(/SCAN (?:p2|p|e)\b/);
+    }
+    migrated.close();
   });
 
   test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {
