@@ -426,6 +426,55 @@ function matchingManifestPaths(repoPath, manifestGlobs = []) {
   return [...matched].sort();
 }
 
+/**
+ * Normalize a raw pin key into a repository-root-relative path.
+ *
+ * Shipped manifests record their pins relative to the pack root — a manifest at
+ * `event-runtime/agents/triage-scan.json` pins `agents/triage-scan.md`, meaning
+ * `event-runtime/agents/triage-scan.md`. Owned Paths and the manifest path used
+ * for closure are both repo-root-relative, so the raw pack-relative key never
+ * matches and the closure guard silently misses the required manifest. Resolve
+ * the key against the pack root — derived from the manifest's own location
+ * (`<packRoot>/agents/<id>.json`), not a hard-coded `event-runtime` prefix — so
+ * any pack layout normalizes correctly.
+ *
+ * Keys that are already repo-root-relative (they begin with the pack root) are
+ * left untouched, so existing root-relative manifests are not double-prefixed.
+ * A key that normalizes outside the repository (via `..` or an absolute path) is
+ * a manifest/config error and throws — closure is fail-closed around it rather
+ * than silently resolving to a path beyond the repo.
+ */
+function normalizePinPath(pinKey, manifestPath) {
+  const key = String(pinKey ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  if (!key) return null;
+
+  const manifestRel = String(manifestPath ?? "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  const packRoot = path.posix.dirname(path.posix.dirname(manifestRel));
+  const rootPrefix = packRoot && packRoot !== "." ? `${packRoot}/` : "";
+
+  const joined =
+    rootPrefix && (key === packRoot || key.startsWith(rootPrefix))
+      ? key
+      : path.posix.join(packRoot, key);
+  const normalized = path.posix.normalize(joined);
+
+  if (
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    path.posix.isAbsolute(normalized)
+  ) {
+    throw new Error(
+      `owned-path closure check failed: pin path ${JSON.stringify(pinKey)} in manifest ${manifestPath} normalizes outside the repository (${normalized})`,
+    );
+  }
+  return normalized;
+}
+
 function parsePinnedPaths(manifestPath) {
   let payload;
   try {
@@ -462,7 +511,11 @@ export function readPinManifestRequirements(repoPath, manifestGlobs = []) {
 
   for (const manifest of manifests) {
     const manifestPath = path.join(absoluteRepo, manifest);
-    const pinnedPaths = parsePinnedPaths(manifestPath);
+    // Raw pin keys are pack-root-relative; normalize them against the manifest's
+    // repo-root-relative location so closure compares like-for-like namespaces.
+    const pinnedPaths = parsePinnedPaths(manifestPath)
+      .map((pinKey) => normalizePinPath(pinKey, manifest))
+      .filter(Boolean);
     out.push({ manifestPath: manifest, pinnedPaths });
   }
 

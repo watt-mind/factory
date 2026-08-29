@@ -305,6 +305,118 @@ test("pin manifests require owning generated output manifests", () => {
   }
 });
 
+// WM-1002: the shipped manifests pin pack-root-relative keys (`agents/*.md`),
+// but Owned Paths and the manifest path are repo-root-relative. Without
+// normalization the closure guard compared mismatched namespaces and never
+// flagged the missing JSON manifest, so a ticket could edit a pinned prompt
+// while lacking ownership of the manifest needed to re-pin it.
+test("pin-manifest gap: shipped layout (agents/*.md keys) flags the missing JSON manifest", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
+  try {
+    mkdirSync(path.join(repo, "event-runtime/agents"), { recursive: true });
+    writeFileSync(
+      path.join(repo, "event-runtime/agents/triage-scan.json"),
+      `${JSON.stringify({
+        pins: {
+          "agents/triage-scan.md": "sha256:aaa",
+          "schemas/triage-scan.input.json": "sha256:bbb",
+        },
+      })}\n`,
+    );
+    const requirements = readPinManifestRequirements(repo, [
+      "event-runtime/agents/*.json",
+    ]);
+    // Pin keys are normalized to repo-root-relative before comparison.
+    expectEqual(requirements, [
+      {
+        manifestPath: "event-runtime/agents/triage-scan.json",
+        pinnedPaths: [
+          "event-runtime/agents/triage-scan.md",
+          "event-runtime/schemas/triage-scan.input.json",
+        ],
+      },
+    ]);
+
+    // Owning the prompt but not its JSON manifest is a pin-manifest gap.
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: ["event-runtime/agents/triage-scan.md"],
+        ownedPathsPolicy: {
+          direct: [],
+          pinManifests: ["event-runtime/agents/*.json"],
+        },
+        pinManifestRequirements: requirements,
+      }),
+      [
+        {
+          rule: "pin-manifest",
+          requiredPath: "event-runtime/agents/triage-scan.json",
+          requiredBy: "event-runtime/agents/triage-scan.md",
+          manifestPath: "event-runtime/agents/triage-scan.json",
+        },
+      ],
+    );
+
+    // Owning both the prompt and its manifest satisfies closure.
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [
+          "event-runtime/agents/triage-scan.md",
+          "event-runtime/agents/triage-scan.json",
+        ],
+        ownedPathsPolicy: {
+          direct: [],
+          pinManifests: ["event-runtime/agents/*.json"],
+        },
+        pinManifestRequirements: requirements,
+      }),
+      [],
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("pin-manifest normalization: already-root-relative keys are not double-prefixed", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
+  try {
+    mkdirSync(path.join(repo, "event-runtime/agents"), { recursive: true });
+    writeFileSync(
+      path.join(repo, "event-runtime/agents/triage-scan.json"),
+      `${JSON.stringify({
+        pins: { "event-runtime/schemas/triage-scan.output.json": "sha256:ccc" },
+      })}\n`,
+    );
+    expectEqual(
+      readPinManifestRequirements(repo, ["event-runtime/agents/*.json"]),
+      [
+        {
+          manifestPath: "event-runtime/agents/triage-scan.json",
+          pinnedPaths: ["event-runtime/schemas/triage-scan.output.json"],
+        },
+      ],
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("pin-manifest normalization: an escaping pin path fails closed", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
+  try {
+    mkdirSync(path.join(repo, "event-runtime/agents"), { recursive: true });
+    writeFileSync(
+      path.join(repo, "event-runtime/agents/triage-scan.json"),
+      `${JSON.stringify({ pins: { "../../etc/passwd": "sha256:ddd" } })}\n`,
+    );
+    expect(() =>
+      readPinManifestRequirements(repo, ["event-runtime/agents/*.json"]),
+    ).toThrow(/outside the repository/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("supports level 3 numbered headers (### 2. Owned Paths) and colons", () => {
   const desc = `## 1. Problem & Context
 
