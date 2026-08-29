@@ -24,8 +24,10 @@ import {
   normalizeFailureOutput,
   outputTail,
   ownedPathsDeviations,
+  HANDOFF_SANDBOX_MARKER,
   handoffGitMounts,
   handoffSandboxAvailable,
+  insideHandoffSandbox,
   policyOwnedPathsConformance,
   runHandoffCommand,
   verifyResult,
@@ -1339,6 +1341,7 @@ describe("handoff verification helpers (WM-718)", () => {
       logPath,
       timeoutMs: 1_000,
       spawn,
+      nested: false,
       sandboxAvailable: () => true,
       runtimeBinaries: [{ name: "bun", executable: "/safe/toolchain/bun" }],
     });
@@ -1401,6 +1404,7 @@ describe("handoff verification helpers (WM-718)", () => {
         spawn: () => {
           throw new Error("must not spawn without a sandbox");
         },
+        nested: false,
         sandboxAvailable: () => false,
       }),
     ).toThrow(SandboxUnavailable);
@@ -1409,18 +1413,21 @@ describe("handoff verification helpers (WM-718)", () => {
       handoffSandboxAvailable({
         spawn: () => ({ status: 0, error: null }),
         cache: false,
+        nested: false,
       }),
     ).toBe(true);
     expect(
       handoffSandboxAvailable({
         spawn: () => ({ status: 1, error: null }),
         cache: false,
+        nested: false,
       }),
     ).toBe(false);
     expect(
       handoffSandboxAvailable({
         spawn: () => ({ status: null, error: new Error("ENOENT") }),
         cache: false,
+        nested: false,
       }),
     ).toBe(false);
   });
@@ -1435,6 +1442,7 @@ describe("handoff verification helpers (WM-718)", () => {
         workspaceRoot: worktree,
         logPath: path.join(worktree, `handoff-${seq++}.log`),
         timeoutMs,
+        nested: false,
         spawn: (_file, _args, options) => {
           writeSync(options.stdio[1], "output the reviewer needs\n");
           return result;
@@ -1496,7 +1504,8 @@ describe("handoff verification helpers (WM-718)", () => {
     // A plain checkout keeps its .git inside the bound workspace: no mounts.
     expect(handoffGitMounts(repo)).toEqual([]);
 
-    if (!handoffSandboxAvailable({ cache: false })) return;
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
     const obs = runHandoffCommand({
       command: "git status --porcelain=v1 && git log --oneline -1",
       cwd: worktree,
@@ -1510,7 +1519,10 @@ describe("handoff verification helpers (WM-718)", () => {
   });
 
   test("the guest env carries only the worktree repos-root pin (GH-1214)", () => {
-    if (!handoffSandboxAvailable({ cache: false })) return;
+    // Skipped when this suite is itself running inside a handoff sandbox: the
+    // boundary cannot nest, so there is no guest env to inspect.
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
     const worktree = realpathSync(tmpDir("evrt-handoff-env-"));
     const obs = runHandoffCommand({
       command: "env | sort",
@@ -1527,11 +1539,57 @@ describe("handoff verification helpers (WM-718)", () => {
       .split("\n")
       .filter((line) => line.startsWith("FACTORY_"))
       .sort();
-    expect(factoryVars).toEqual(["FACTORY_REPOS_ROOT=/workspace"]);
+    // The marker is the only other FACTORY_* the guest sees: the boundary
+    // cannot nest (CLONE_NEWUSER is EPERM under chroot), so a handoff gate
+    // running inside the sandbox passes commands through instead of refusing.
+    expect(factoryVars).toEqual([
+      `${HANDOFF_SANDBOX_MARKER}=1`,
+      "FACTORY_REPOS_ROOT=/workspace",
+    ]);
+    expect(insideHandoffSandbox({ [HANDOFF_SANDBOX_MARKER]: "1" })).toBe(true);
+    expect(insideHandoffSandbox({})).toBe(false);
+  });
+
+  test("inside the sandbox the command is passed through, not re-sandboxed", () => {
+    const worktree = realpathSync(tmpDir("evrt-handoff-nested-"));
+    {
+      let invocation;
+      const obs = runHandoffCommand({
+        nested: true,
+        command: "bun test focused.test.mjs",
+        cwd: worktree,
+        workspaceRoot: worktree,
+        logPath: path.join(worktree, "handoff.log"),
+        timeoutMs: 1_000,
+        spawn: (file, args, options) => {
+          invocation = { file, args, options };
+          writeSync(options.stdio[1], "passed through\n");
+          return { status: 0, error: null };
+        },
+        runtimeBinaries: [],
+      });
+      expect(obs.passed).toBe(true);
+      expect(obs.confinement).toContain("inherited handoff sandbox");
+      expect(invocation.args).not.toContain("/usr/bin/unshare");
+      expect(invocation.args).toEqual([
+        "--signal=TERM",
+        "--kill-after=0.1s",
+        "1s",
+        "/bin/bash",
+        "-c",
+        "bun test focused.test.mjs",
+      ]);
+      // Still confined to the worktree, still pinned, still credential-free.
+      expect(invocation.options.cwd).toBe(worktree);
+      expect(invocation.options.env.FACTORY_REPOS_ROOT).toBe(worktree);
+      expect(invocation.options.env.GITHUB_TOKEN).toBeUndefined();
+      expect(invocation.options.env.LINEAR_API_KEY).toBeUndefined();
+    }
   });
 
   test("the sandbox has a working loopback and no host network", () => {
-    if (!handoffSandboxAvailable({ cache: false })) return;
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
     const worktree = realpathSync(tmpDir("evrt-handoff-loopback-"));
     const obs = runHandoffCommand({
       // Bind + connect on 127.0.0.1: what 10+ suites in this repo do.

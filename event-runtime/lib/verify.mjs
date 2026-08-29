@@ -126,6 +126,22 @@ export const HANDOFF_GUEST_PATH =
   "/opt/factory-bin:/usr/local/bin:/usr/bin:/bin";
 /** Where the verified worktree is mounted inside the chroot. */
 export const HANDOFF_GUEST_WORKSPACE = "/workspace";
+/**
+ * Set in the guest environment so a handoff gate running INSIDE the sandbox
+ * knows not to try to build another one. `clone(CLONE_NEWUSER)` is EPERM for
+ * a chrooted process, so the boundary cannot nest — and this repo's own
+ * `verify:` command runs the tests that exercise this very function, which
+ * would otherwise all refuse `sandbox_unavailable` when the factory verifies
+ * a change to itself. Ticket code forging the marker gains nothing: it is
+ * already inside the boundary, and the pass-through keeps the same minimal
+ * environment, cwd confinement and timeout.
+ */
+export const HANDOFF_SANDBOX_MARKER = "FACTORY_HANDOFF_SANDBOX";
+
+/** True when this process is itself running inside a handoff sandbox. */
+export function insideHandoffSandbox(env = process.env) {
+  return env[HANDOFF_SANDBOX_MARKER] === "1";
+}
 export const HANDOFF_RUNTIME_COMMANDS = Object.freeze(["bun", "uv", "pnpm"]);
 
 /** Non-system package runners mounted as individual, read-only executables. */
@@ -225,7 +241,8 @@ mkdir -p "$root/tmp/home"
   shift
   exec /usr/bin/env -i \
     HOME=/tmp/home TMPDIR=/tmp PATH=${HANDOFF_GUEST_PATH} LANG=C.UTF-8 \
-    FACTORY_REPOS_ROOT=${HANDOFF_GUEST_WORKSPACE} /bin/bash -c "$1"
+    FACTORY_REPOS_ROOT=${HANDOFF_GUEST_WORKSPACE} ${HANDOFF_SANDBOX_MARKER}=1 \
+    /bin/bash -c "$1"
 ' bash "$guest_cwd" "$command"
 `;
 
@@ -287,7 +304,9 @@ let sandboxProbeCache = null;
 export function handoffSandboxAvailable({
   spawn = spawnSync,
   cache = true,
+  nested = insideHandoffSandbox(),
 } = {}) {
+  if (nested) return true;
   if (cache && sandboxProbeCache !== null) return sandboxProbeCache;
   let available;
   try {
@@ -367,7 +386,8 @@ export function runHandoffCommand({
   timeoutMs,
   spawn = spawnSync,
   runtimeBinaries = handoffRuntimeBinaries(),
-  sandboxAvailable = () => handoffSandboxAvailable(),
+  nested = insideHandoffSandbox(),
+  sandboxAvailable = () => handoffSandboxAvailable({ nested }),
 }) {
   if (!sandboxAvailable()) throw new SandboxUnavailable();
   const root = realpathSync(workspaceRoot);
@@ -395,41 +415,66 @@ export function runHandoffCommand({
       name,
       executable,
     ]);
-    res = spawn(
-      "/usr/bin/timeout",
-      [
-        "--signal=TERM",
-        "--kill-after=0.1s",
-        `${timeoutMs / 1000}s`,
-        "/usr/bin/unshare",
-        "--user",
-        "--map-root-user",
-        "--net",
-        "--mount",
-        "--pid",
-        "--fork",
-        "--kill-child=KILL",
-        "/bin/bash",
-        "-ceu",
-        HANDOFF_SANDBOX_SETUP,
-        "bash",
-        sandboxRoot,
-        root,
-        guestCwd,
-        String(gitMounts.length),
-        ...gitMounts.flatMap(({ path: gitPath, mode }) => [gitPath, mode]),
-        ...runtimeArgs,
-        command,
-      ],
-      {
-        cwd: root,
-        env: HANDOFF_HOST_ENV,
-        stdio: ["ignore", fd, fd],
-        // GNU timeout owns the process group and escalates TERM→KILL. This
-        // outer ceiling catches timeout itself wedging during teardown.
-        timeout: timeoutMs + 5_000,
-      },
-    );
+    res = nested
+      ? spawn(
+          "/usr/bin/timeout",
+          [
+            "--signal=TERM",
+            "--kill-after=0.1s",
+            `${timeoutMs / 1000}s`,
+            "/bin/bash",
+            "-c",
+            command,
+          ],
+          {
+            cwd: commandCwd,
+            env: {
+              ...HANDOFF_HOST_ENV,
+              HOME: process.env.HOME ?? "/tmp/home",
+              TMPDIR: process.env.TMPDIR ?? "/tmp",
+              PATH: process.env.PATH ?? HANDOFF_HOST_ENV.PATH,
+              FACTORY_REPOS_ROOT: root,
+              [HANDOFF_SANDBOX_MARKER]: "1",
+            },
+            stdio: ["ignore", fd, fd],
+            timeout: timeoutMs + 5_000,
+          },
+        )
+      : spawn(
+          "/usr/bin/timeout",
+          [
+            "--signal=TERM",
+            "--kill-after=0.1s",
+            `${timeoutMs / 1000}s`,
+            "/usr/bin/unshare",
+            "--user",
+            "--map-root-user",
+            "--net",
+            "--mount",
+            "--pid",
+            "--fork",
+            "--kill-child=KILL",
+            "/bin/bash",
+            "-ceu",
+            HANDOFF_SANDBOX_SETUP,
+            "bash",
+            sandboxRoot,
+            root,
+            guestCwd,
+            String(gitMounts.length),
+            ...gitMounts.flatMap(({ path: gitPath, mode }) => [gitPath, mode]),
+            ...runtimeArgs,
+            command,
+          ],
+          {
+            cwd: root,
+            env: HANDOFF_HOST_ENV,
+            stdio: ["ignore", fd, fd],
+            // GNU timeout owns the process group and escalates TERM→KILL. This
+            // outer ceiling catches timeout itself wedging during teardown.
+            timeout: timeoutMs + 5_000,
+          },
+        );
   } finally {
     closeSync(fd);
     rmSync(sandboxRoot, { recursive: true, force: true });
@@ -452,7 +497,9 @@ export function runHandoffCommand({
   return {
     command,
     cwd: commandCwd,
-    confinement: "user+mount+pid+network namespace; chroot; minimal env",
+    confinement: nested
+      ? "inherited handoff sandbox (already namespaced + chrooted); minimal env"
+      : "user+mount+pid+network namespace; chroot; minimal env",
     elapsedMs,
     exitCode,
     timedOut,

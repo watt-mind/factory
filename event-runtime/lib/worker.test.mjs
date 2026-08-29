@@ -17,6 +17,7 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
+import { insideHandoffSandbox } from "./verify.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -6151,9 +6152,13 @@ describe("handoff verification gate (WM-718)", () => {
       adapter: agent({ files }),
     });
     expect(g.summary.terminalState).toBe("COMPLETED");
+    // The chroot maps the worktree at /workspace; when this suite itself runs
+    // inside a handoff sandbox the command is passed through and keeps the
+    // real path. Either way the build ran in the web directory, not the root.
     expect(g.summary.handoff.webBuild.tail).toContain(
-      "web_built:/workspace/event-runtime/web",
+      `web_built:${insideHandoffSandbox() ? "" : "/workspace"}`,
     );
+    expect(g.summary.handoff.webBuild.tail).toContain("/event-runtime/web");
     const result = JSON.parse(
       g.db
         .query(`SELECT result_json FROM results WHERE run_id = ?`)
