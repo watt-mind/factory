@@ -995,23 +995,58 @@ describe("planEvent worktree gate (WM-108)", () => {
         }).decision,
       ).toBe("run");
 
-      const chainDb = openDb(":memory:");
-      const chainRef = admit(chainDb, {
-        type: "factory.dispatch.requested",
-        source: "chain",
-        eventId: "chain-security-dispatch",
-        correlationId: "chain-security-dispatch",
-        causationId: "run-parent",
-        payload: { repo: "tiered", ticket: "WM-694" },
-      });
-      expect(
-        planEvent(chainDb, registry, chainRef, {
+      for (const source of ["chain", "handoff"]) {
+        const unattendedDb = openDb(":memory:");
+        const unattendedRef = admit(unattendedDb, {
+          type: "factory.dispatch.requested",
+          source,
+          eventId: `${source}-security-dispatch`,
+          correlationId: `${source}-security-dispatch`,
+          causationId: source === "chain" ? "run-parent" : null,
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        expect(
+          planEvent(unattendedDb, registry, unattendedRef, {
+            now: NOW,
+            policyVersion: "git:test",
+            dispatch: securityDispatch,
+          }),
+        ).toMatchObject({ decision: "noop", reason: "ticket_security" });
+      }
+    });
+  });
+
+  test("eligible handoff dispatch pins auto-approval evidence without operator authorization", () => {
+    withReposRoot(
+      tierRepo,
+      () => {
+        const db = openDb(":memory:");
+        const ref = admit(db, {
+          type: "factory.dispatch.requested",
+          source: "handoff",
+          eventId: "handoff-safe-dispatch",
+          correlationId: "handoff-safe-dispatch",
+          causationId: null,
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        const outcome = planEvent(db, registry, ref, {
           now: NOW,
           policyVersion: "git:test",
-          dispatch: securityDispatch,
-        }),
-      ).toMatchObject({ decision: "noop", reason: "ticket_security" });
-    });
+          dispatch: tierDispatch(),
+        });
+        expect(outcome.decision).toBe("run");
+        const spec = JSON.parse(outcome.proposal.spec_json);
+        expect(spec.approvalPolicy).toMatchObject({
+          source: "handoff",
+          mode: "auto",
+          eventType: "factory.dispatch.requested",
+          dispatchEvidence: {
+            checks: { operator_authorized: false },
+          },
+        });
+      },
+      "chain_auto_approval:\n  allowed_event_types:\n    - factory.dispatch.requested\n",
+    );
   });
 
   test("dispatch.security_tickets: auto admits a chain security dispatch, held for human merge (WM-1060)", () => {

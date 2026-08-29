@@ -248,7 +248,24 @@ export function translateGitHubEvent({
  *         | { admitted: false, duplicate: true, event: object }
  *         | { admitted: false, duplicate: false, errors: string[] }}
  */
-export const RESERVED_INTERNAL_SOURCES = new Set(["chain"]);
+export const RESERVED_INTERNAL_SOURCES = new Set(["chain", "handoff"]);
+
+function reservedSourceRefusal(envelope, allowed = new Set()) {
+  if (
+    envelope &&
+    typeof envelope === "object" &&
+    !Array.isArray(envelope) &&
+    RESERVED_INTERNAL_SOURCES.has(envelope.source) &&
+    !allowed.has(envelope.source)
+  ) {
+    return {
+      admitted: false,
+      duplicate: false,
+      errors: [`source: reserved internal provenance "${envelope.source}"`],
+    };
+  }
+  return null;
+}
 
 /**
  * Persist an envelope supplied by a public/operator boundary. Reserved runtime
@@ -257,19 +274,18 @@ export const RESERVED_INTERNAL_SOURCES = new Set(["chain"]);
  * the event, rather than untrusted envelope text.
  */
 export function admitExternalEvent(db, registry, envelope, options = {}) {
-  if (
-    envelope &&
-    typeof envelope === "object" &&
-    !Array.isArray(envelope) &&
-    RESERVED_INTERNAL_SOURCES.has(envelope.source)
-  ) {
-    return {
-      admitted: false,
-      duplicate: false,
-      errors: [`source: reserved internal provenance "${envelope.source}"`],
-    };
-  }
-  return admitEvent(db, registry, envelope, options);
+  const refusal = reservedSourceRefusal(envelope);
+  return refusal ?? admitEvent(db, registry, envelope, options);
+}
+
+/**
+ * Persist an envelope after the existing factory HMAC boundary authenticated
+ * its exact bytes. Handoff is the one reserved provenance that boundary may
+ * admit; chain remains in-process-only and caller text can never select it.
+ */
+export function admitSignedEvent(db, registry, envelope, options = {}) {
+  const refusal = reservedSourceRefusal(envelope, new Set(["handoff"]));
+  return refusal ?? admitEvent(db, registry, envelope, options);
 }
 
 /**

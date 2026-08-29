@@ -1,6 +1,7 @@
 /** Health, signed webhook intake, GitHub intake, and loopback replay. */
 import {
   admitExternalEvent,
+  admitSignedEvent,
   translateGitHubEvent,
   verifyGitHubWebhook,
   verifyWebhook,
@@ -348,10 +349,19 @@ function planAfterResponse(onEvent, kind = "admitted") {
   });
 }
 
-function admit(db, registry, send, buffer, nowMs, onEvent, parseJson) {
+function admit(
+  db,
+  registry,
+  send,
+  buffer,
+  nowMs,
+  onEvent,
+  parseJson,
+  admitEnvelope = admitExternalEvent,
+) {
   const parsed = parseJson(buffer);
   if (parsed.error) return send(422, { errors: [parsed.error] });
-  const outcome = admitExternalEvent(db, registry, parsed.value, {
+  const outcome = admitEnvelope(db, registry, parsed.value, {
     now: nowMs,
   });
   if (!outcome.admitted && !outcome.duplicate)
@@ -403,7 +413,16 @@ export async function handleIntakeApiRoute({
     });
     // Fail closed: nothing is parsed, nothing is written (§14).
     if (!verdict.ok) return send(401, { error: verdict.reason });
-    return admit(db, registry, send, raw, nowMs, onEvent, parseJson);
+    return admit(
+      db,
+      registry,
+      send,
+      raw,
+      nowMs,
+      onEvent,
+      parseJson,
+      admitSignedEvent,
+    );
   }
 
   // The production Cloudflare tunnel forwards the literal path

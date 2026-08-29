@@ -22,6 +22,7 @@ import {
 } from "../../tools/linear.mjs";
 
 export const CHAIN_APPROVAL_SOURCE = "chain";
+export const HANDOFF_APPROVAL_SOURCE = "handoff";
 export const CHAIN_APPROVAL_MODE_AUTO = "auto";
 export const CHAIN_APPROVAL_MODE_WATCHED = "watched";
 export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
@@ -51,6 +52,9 @@ const MERGE_EVENT_TYPES = new Set([
 ]);
 export const CHAIN_AUTO_APPROVAL_REASON = "auto_approved:chain-policy@1";
 export const CHAIN_AUTO_APPROVAL_ACTOR = "chain-auto-approval";
+export const HANDOFF_AUTO_APPROVAL_REASON =
+  "auto_approved:handoff-dispatch-policy@1";
+export const HANDOFF_AUTO_APPROVAL_ACTOR = "handoff-auto-approval";
 const NEVER_AUTO_APPROVE = new Set(["factory.ship-apply.requested"]);
 
 function policyPath(root = reposRoot()) {
@@ -120,21 +124,29 @@ export function loadChainAutoApprovalPolicy({ root = reposRoot() } = {}) {
   }
 }
 
-/** Build the immutable approval policy embedded in a chain run spec. */
+/**
+ * Build the immutable unattended approval policy embedded in a run spec.
+ * Chain keeps its full closed allowlist. Handoff may reuse it for exactly one
+ * event type: factory.dispatch.requested.
+ */
 export function buildChainApprovalPolicy(
   eventType,
   { source = "operator", policy = loadChainAutoApprovalPolicy() } = {},
 ) {
-  if (source !== CHAIN_APPROVAL_SOURCE) return null;
+  const chain = source === CHAIN_APPROVAL_SOURCE;
+  const handoffDispatch =
+    source === HANDOFF_APPROVAL_SOURCE &&
+    eventType === "factory.dispatch.requested";
+  if (!chain && !handoffDispatch) return null;
   if (policy.allowed.has(eventType)) {
     return {
-      source: CHAIN_APPROVAL_SOURCE,
+      source,
       mode: CHAIN_APPROVAL_MODE_AUTO,
       eventType,
     };
   }
   return {
-    source: CHAIN_APPROVAL_SOURCE,
+    source,
     mode: CHAIN_APPROVAL_MODE_WATCHED,
     eventType,
     reason: policy.reason ?? "event_type_not_allowlisted",
@@ -780,8 +792,11 @@ function eligible(
   policy,
   { dispatchEligibility, dispatch, now, hooks, hookTimeoutMs },
 ) {
-  if (candidate.event_source !== CHAIN_APPROVAL_SOURCE)
-    return "event_source_not_chain";
+  const isChain = candidate.event_source === CHAIN_APPROVAL_SOURCE;
+  const isHandoff = candidate.event_source === HANDOFF_APPROVAL_SOURCE;
+  if (!isChain && !isHandoff) return "event_source_not_unattended";
+  if (isHandoff && candidate.event_type !== "factory.dispatch.requested")
+    return "handoff_event_type_not_dispatch";
 
   let envelope;
   try {
@@ -799,7 +814,7 @@ function eligible(
 
   const approvalPolicy = runSpec?.approvalPolicy;
   if (!approvalPolicy) return "run_approval_policy_missing";
-  if (approvalPolicy.source !== CHAIN_APPROVAL_SOURCE)
+  if (approvalPolicy.source !== candidate.event_source)
     return "run_approval_policy_source_unknown";
   if (approvalPolicy.mode !== CHAIN_APPROVAL_MODE_AUTO)
     return `run_approval_policy_${approvalPolicy.mode}`;
@@ -809,13 +824,15 @@ function eligible(
   if (!policy.allowed.has(candidate.event_type))
     return policy.reason ?? "policy_unknown";
 
-  const predecessorReason = chainPredecessorReason(
-    db,
-    registry,
-    candidate,
-    envelope,
-  );
-  if (predecessorReason) return predecessorReason;
+  if (isChain) {
+    const predecessorReason = chainPredecessorReason(
+      db,
+      registry,
+      candidate,
+      envelope,
+    );
+    if (predecessorReason) return predecessorReason;
+  }
 
   const mergeReason = mergeEligibility(
     db,
@@ -981,7 +998,8 @@ async function runPass(
          FROM proposals p
          JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
          JOIN runs r ON r.run_id = p.run_id
-        WHERE p.status = 'open' AND p.decision = 'run' AND e.source = 'chain'
+        WHERE p.status = 'open' AND p.decision = 'run'
+          AND e.source IN ('chain', 'handoff')
         ORDER BY p.created_at, p.rowid`,
         )
         .all();
@@ -1030,9 +1048,14 @@ async function runPass(
           continue;
         }
         try {
+          const handoff = row.event_source === HANDOFF_APPROVAL_SOURCE;
           const outcome = approveProposal(db, registry, row.id, {
-            actor: CHAIN_AUTO_APPROVAL_ACTOR,
-            reason: CHAIN_AUTO_APPROVAL_REASON,
+            actor: handoff
+              ? HANDOFF_AUTO_APPROVAL_ACTOR
+              : CHAIN_AUTO_APPROVAL_ACTOR,
+            reason: handoff
+              ? HANDOFF_AUTO_APPROVAL_REASON
+              : CHAIN_AUTO_APPROVAL_REASON,
             now,
             policyVersion,
           });
