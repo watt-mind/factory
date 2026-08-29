@@ -130,14 +130,20 @@ function makeEmitFixture() {
   const fixture = mkdtempSync(path.join(tmpdir(), "emit-fixture-"));
   // The emit import graph reaches across event-runtime/, orchestrator/,
   // tools/ and more, so copy the checkout rather than curate a file list.
-  // Skipped: the git dir (the fixture gets its own), node_modules (linked
-  // below), and the operator-local configs — the fixture writes its own.
+  // Skipped: the git dir (the fixture gets its own), every node_modules at
+  // any depth (the root one is linked below; nested ones are not imported by
+  // emit), operator-local trees that live inside a checkout (.claude/ and
+  // .worktrees/ hold agent worktrees that run to hundreds of MB and filled
+  // the sandbox tmpfs with ENOSPC), and the operator-local configs — the
+  // fixture writes its own.
   cpSync(ROOT, fixture, {
     recursive: true,
     filter: (source) => {
       const relative = path.relative(ROOT, source);
-      const top = relative.split(path.sep)[0];
-      if (top === ".git" || top === "node_modules") return false;
+      const segments = relative.split(path.sep);
+      if (segments.includes("node_modules") || segments[0] === ".git")
+        return false;
+      if (/^\.(claude|worktrees|factory)$/.test(segments[0])) return false;
       return !(
         path.dirname(relative) === "config" &&
         /^(repos|policy|schedule)\.yaml$/.test(path.basename(relative))
