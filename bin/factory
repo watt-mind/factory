@@ -72,6 +72,7 @@ case "$cmd" in
     run_bun tools/ticket.mjs "$@"
     ;;
   queue)        run_bun orchestrator/queue.mjs "$@" ;;
+  ask)          run_bun orchestrator/ask.mjs "$@" ;;
   next)         run_bun orchestrator/next.mjs "$@" ;;
   state)        run_bun orchestrator/state.mjs "$@" ;;
   status)       run_bun orchestrator/status.mjs "$@" ;;
@@ -283,6 +284,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   ticket        tools/ticket.mjs
   linear        tools/ticket.mjs (deprecated alias for 'ticket')
   queue         orchestrator/queue.mjs
+  ask           orchestrator/ask.mjs (one read-only surface: queue, in-flight, held, runs, noop, spend)
   next          orchestrator/next.mjs
   state         orchestrator/state.mjs
   status        orchestrator/status.mjs (repo, deployment, and factory snapshot)
