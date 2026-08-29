@@ -36,3 +36,49 @@ jobs: []
 #   merge-client-repo:
 #     enabled: true
 #     approval: auto
+#
+# The kernel's tracked schedules.json ships only the four public loops
+# (reaper, work-factory, merge-factory, triage-factory). Every per-client
+# repo loop lives here in the instance overlay so no client identity leaks
+# into the public repository. A brand-new overlay name must carry a complete
+# entry (eventType, cadence, payload) and stays `watched` until it is also
+# listed in overlay_auto_approve above. Replace `client-repo` with your real
+# local repo name and repeat the block per repo you run. The full loop set a
+# product repo typically schedules:
+#
+# schedules:
+#   work-client-repo:
+#     enabled: true
+#     every: 30m
+#     eventType: factory.work.requested
+#     payload: { repo: client-repo }
+#   merge-client-repo:
+#     enabled: true
+#     every: 30m
+#     eventType: factory.merge.requested
+#     payload: { repo: client-repo }
+#   ship-client-repo:
+#     enabled: true
+#     every: 7d
+#     eventType: factory.ship.requested
+#     payload: { repo: client-repo }
+#   reconcile-client-repo:
+#     enabled: true
+#     every: 10m
+#     eventType: factory.reconcile.requested
+#     payload: { repo: client-repo }
+#   label-guard-client-repo:
+#     enabled: true
+#     every: 5m
+#     eventType: factory.label-guard.requested
+#     payload: { repo: client-repo }
+#   warm-client-repo:
+#     enabled: true
+#     every: 2h
+#     eventType: factory.warm.requested
+#     payload: { repo: client-repo }
+#   unblock-digest-client-repo:
+#     enabled: true
+#     every: 1d
+#     eventType: factory.unblock-digest.requested
+#     payload: { repo: client-repo }
