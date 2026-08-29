@@ -137,10 +137,9 @@ describe("splitConfigSecrets", () => {
 
   test("does not write through an inherited intermediate object", () => {
     Object.prototype.nested = {};
-    const { secrets } = splitConfigSecrets(
-      { nested: { token: "x" } },
-      [{ path: ["nested", "token"] }],
-    );
+    const { secrets } = splitConfigSecrets({ nested: { token: "x" } }, [
+      { path: ["nested", "token"] },
+    ]);
     expect(Object.prototype.token).toBeUndefined();
     expect(Object.hasOwn(secrets, "nested")).toBe(true);
     expect(secrets.nested).not.toBe(Object.prototype.nested);
