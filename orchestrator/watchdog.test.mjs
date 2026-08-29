@@ -1,9 +1,14 @@
 import { test, expect } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import {
   fetchRecentSandboxRefusals,
   formatWatchdogReport,
-  recentSandboxRefusals,
+  isScanLoopAgent,
   runWatchdogCheck,
+  SANDBOX_REFUSAL_MAX_PAGES,
+  SANDBOX_REFUSAL_MAX_RUNS,
+  SCAN_LOOP_AGENTS,
 } from "./watchdog.mjs";
 
 test("formatWatchdogReport formats clean watchdog status", () => {
@@ -61,51 +66,110 @@ test("formatWatchdogReport formats critical issues", () => {
   expect(formatted).toContain("WEB_DOWN");
 });
 
-test("recentSandboxRefusals joins recent typed journal entries to agents", () => {
-  const now = Date.parse("2026-08-29T20:00:00Z");
-  const refusals = recentSandboxRefusals(
-    {
-      entries: [
-        {
-          runId: "run_recent",
-          to: "REFUSED",
-          reason:
-            "work-scan@1: sandbox_unavailable:qemu — qemu-system-x86_64 is not on PATH",
-          at: "2026-08-29T19:45:00Z",
-        },
-        {
-          runId: "run_old",
-          to: "REFUSED",
-          reason: "sandbox_unavailable:qemu",
-          at: "2026-08-29T18:00:00Z",
-        },
-        {
-          runId: "run_other",
-          to: "REFUSED",
-          reason: "permission_denied",
-          at: "2026-08-29T19:50:00Z",
-        },
-      ],
-    },
-    {
-      runs: [
-        { runId: "run_recent", agent: "work-scan@1" },
-        { runId: "run_old", agent: "triage-scan@1" },
-        { runId: "run_other", agent: "factory-status-report@1" },
-      ],
-    },
-    { now },
-  );
+test("SCAN_LOOP_AGENTS is exactly the set the confinement gate can refuse", () => {
+  // Derive from the shipped definitions: a new non-mutating workspace-only
+  // agent must be added here, or its refusals go unnoticed the way #1250's
+  // did with a three-agent hardcoded regex.
+  const agentsDir = path.join(import.meta.dir, "..", "event-runtime", "agents");
+  const derived = readdirSync(agentsDir)
+    .filter((file) => file.endsWith(".json") && !file.includes(".view."))
+    .map((file) => JSON.parse(readFileSync(path.join(agentsDir, file), "utf8")))
+    .filter(
+      (def) =>
+        def?.mutating === false &&
+        def?.capabilities?.filesystem === "workspace-only",
+    )
+    .map((def) => def.id)
+    .sort();
 
-  expect(refusals).toEqual([
-    {
-      runId: "run_recent",
-      agent: "work-scan@1",
-      reason:
-        "work-scan@1: sandbox_unavailable:qemu — qemu-system-x86_64 is not on PATH",
-      at: "2026-08-29T19:45:00Z",
-    },
-  ]);
+  expect([...SCAN_LOOP_AGENTS].sort()).toEqual(derived);
+  expect(isScanLoopAgent("work-scan@1")).toBe(true);
+  expect(isScanLoopAgent("acme/work-scan@1")).toBe(true);
+  expect(isScanLoopAgent("dispatch@1")).toBe(false);
+  expect(isScanLoopAgent("label-guard@1")).toBe(false);
+  expect(isScanLoopAgent(undefined)).toBe(false);
+});
+
+test("fetchRecentSandboxRefusals is bounded in pages, runs, and wall clock", async () => {
+  const listings = [];
+  let details = 0;
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const fetchFn = async (input) => {
+    const url = new URL(input);
+    if (url.pathname.startsWith("/runs/")) {
+      details += 1;
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await Bun.sleep(1);
+      inFlight -= 1;
+      return Response.json({
+        lifecycle: [
+          {
+            to_state: "REFUSED",
+            reason: "work-scan@1: sandbox_unavailable:qemu",
+            at: "2026-08-29T19:50:00Z",
+          },
+        ],
+      });
+    }
+    listings.push(url);
+    // An unbounded scan would follow this cursor forever.
+    return Response.json({
+      runs: Array.from({ length: 400 }, (_, index) => ({
+        runId: `run_${listings.length}_${index}`,
+        agent: "work-scan@1",
+      })),
+      nextBefore: `page-${listings.length + 1}`,
+    });
+  };
+
+  const refusals = await fetchRecentSandboxRefusals({ fetchFn });
+
+  expect(listings.length).toBeLessThanOrEqual(SANDBOX_REFUSAL_MAX_PAGES);
+  expect(listings[0].searchParams.get("limit")).toBe(
+    String(SANDBOX_REFUSAL_MAX_RUNS),
+  );
+  expect(details).toBe(SANDBOX_REFUSAL_MAX_RUNS);
+  expect(refusals).toHaveLength(SANDBOX_REFUSAL_MAX_RUNS);
+  expect(peakInFlight).toBeLessThanOrEqual(4);
+});
+
+test("fetchRecentSandboxRefusals abandons the scan when its time budget is spent", async () => {
+  let clock = 0;
+  const fetchFn = async (input) => {
+    const url = new URL(input);
+    clock += 100;
+    if (url.pathname.startsWith("/runs/")) {
+      return Response.json({
+        lifecycle: [
+          {
+            to_state: "REFUSED",
+            reason: "work-scan@1: sandbox_unavailable:qemu",
+            at: "2026-08-29T19:50:00Z",
+          },
+        ],
+      });
+    }
+    return Response.json({
+      runs: [
+        { runId: "run_a", agent: "work-scan@1" },
+        { runId: "run_b", agent: "work-scan@1" },
+        { runId: "run_c", agent: "work-scan@1" },
+      ],
+      nextBefore: null,
+    });
+  };
+
+  // Budget covers the listing plus one detail read; the rest is abandoned
+  // rather than allowed to run long on a busy box.
+  const refusals = await fetchRecentSandboxRefusals({
+    fetchFn,
+    budgetMs: 150,
+    concurrency: 1,
+    clock: () => clock,
+  });
+  expect(refusals).toHaveLength(1);
 });
 
 test("fetchRecentSandboxRefusals paginates the terminal window and ignores non-scan agents", async () => {
@@ -126,9 +190,9 @@ test("fetchRecentSandboxRefusals paginates the terminal window and ignores non-s
     }
     if (!url.searchParams.has("before")) {
       return Response.json({
-        runs: Array.from({ length: 200 }, (_, index) => ({
+        runs: Array.from({ length: 40 }, (_, index) => ({
           runId: `run_other_${index}`,
-          agent: "factory-status-report@1",
+          agent: "dispatch@1",
         })),
         nextBefore: "page-2",
       });

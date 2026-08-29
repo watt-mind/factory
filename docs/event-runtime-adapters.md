@@ -26,27 +26,62 @@ An explicit `sandbox:` block on an agent definition is always strict. It is
 never eligible for host fallback: unsupported adapters, invalid policies, and
 unavailable guest infrastructure continue to refuse.
 
-## Explicit host fallback
+## Explicit host fallback (an allow-list, never a switch)
 
-An operator may temporarily run otherwise eligible workspace-only scans on a
-host that lacks Gondolin by setting the instance-local policy:
+An operator may temporarily run _named_ workspace-only scans on a host that
+lacks Gondolin by adding this to the instance-local `config/policy.yaml`:
 
 ```yaml
 sandbox:
-  workspace_only_fallback: host
+  workspace_only_fallback:
+    mode: host
+    agents:
+      - work-scan
+      - triage-scan
+      - ci-doctor
 ```
 
-This is an opt-out from filesystem enforcement, not another sandbox provider.
+This is an opt-out from filesystem enforcement, not another sandbox provider,
+so it is deliberately not a single global switch: the operator writes down
+exactly which agents they accept running unconfined, and every other
+workspace-only agent keeps refusing. Adding an agent to the list is a
+reviewable one-line change; forgetting to remove one is visible in the policy
+file rather than hidden behind a boolean.
+
 It applies only when all of these conditions hold:
 
+- this host's sandbox preflight fails — a host that _can_ sandbox never falls
+  back, whatever the allow-list says;
 - the agent is explicitly non-mutating;
 - its filesystem capability is exactly `workspace-only`;
-- a model-backed adapter was selected; and
-- the agent definition has no explicit `sandbox:` block.
+- a model-backed adapter was selected;
+- the agent definition has no explicit `sandbox:` block; and
+- `agents` names the agent (bare name, no `@version`, no pack namespace).
 
-The value must be exactly `host`. Missing, misspelled, malformed, or unknown
-values fail closed. The downgrade is never silent: every terminal run receipt
-that used it contains this worker-controlled attestation:
+An agent absent from `agents` is refused exactly as it was before this
+fallback existed, with the reason naming the missing host capability
+(`sandbox_unavailable:qemu`) rather than the policy shape.
+
+Missing, misspelled, malformed, and unknown values all fail closed — including
+`mode: host` with an empty or absent `agents` list, which grants nobody.
+
+### The legacy blanket form
+
+```yaml
+sandbox:
+  workspace_only_fallback: host # deprecated
+```
+
+The bare string is still accepted for instances configured before the
+allow-list landed. It means "every non-mutating workspace-only agent" and logs
+a loud warning on every claim. Replace it with the object form.
+
+### The audit marker
+
+The downgrade is never silent: every terminal run receipt written by a run
+that used it — completed _and_ refused — contains this worker-controlled
+attestation, and the failure paths that write no receipt record the same
+object on the attempt trace:
 
 ```json
 {
@@ -54,7 +89,9 @@ that used it contains this worker-controlled attestation:
     "status": "unconfined",
     "declared": "workspace-only",
     "fallback": "host",
-    "source": "policy:sandbox.workspace_only_fallback"
+    "source": "policy:sandbox.workspace_only_fallback",
+    "agent": "work-scan",
+    "hostCapability": "qemu"
   }
 }
 ```
@@ -66,7 +103,8 @@ cannot overwrite the audit marker.
 
 1. Confirm Gondolin is unavailable with
    `bun event-runtime/cli.mjs sandbox doctor`.
-2. Add the exact host fallback to the live `config/policy.yaml`.
+2. Add the allow-list stanza to the live `config/policy.yaml`, naming only
+   the agents you accept running unconfined.
 3. Restart the event-runtime worker processes so they read the new policy.
 4. Confirm the affected scan runs complete and their receipts say
    `filesystemConfinement.status: unconfined`.
