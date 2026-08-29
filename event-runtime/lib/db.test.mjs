@@ -17,10 +17,12 @@ import {
   CURRENT_SCHEMA_VERSION,
   MIGRATIONS,
   assertSchema,
+  DB_BUSY_ATTEMPT_TIMEOUT_MS,
   getSchemaVersion,
   migrateDb,
   openDb,
   recordRunUsage,
+  retryBusy,
   runUsage,
   setSchemaVersion,
   txImmediate,
@@ -30,6 +32,31 @@ import { dbPath, isTestOrCiProcess, runtimeHome } from "./config.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
 
 const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
+
+describe("retryBusy", () => {
+  test("retries busy attempts asynchronously and restores the connection timeout", async () => {
+    const db = openDb(":memory:");
+    let attempts = 0;
+    const busy = Object.assign(new Error("database is locked"), {
+      code: "SQLITE_BUSY",
+    });
+    await expect(
+      retryBusy(
+        db,
+        () => {
+          attempts += 1;
+          throw busy;
+        },
+        { timeoutMs: 5, minDelayMs: 1, maxDelayMs: 1 },
+      ),
+    ).rejects.toBe(busy);
+    expect(attempts).toBeGreaterThan(1);
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_ATTEMPT_TIMEOUT_MS,
+    );
+    db.close();
+  });
+});
 
 describe("cold start (OPS-376, OPS-424)", () => {
   test("a second connection to a brand-new database does not fight for the WAL switch", () => {

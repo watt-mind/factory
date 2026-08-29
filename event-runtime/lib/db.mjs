@@ -631,6 +631,9 @@ function enableWal(db, { attempts = 20, waitMs = 50 } = {}) {
   }
 }
 
+export const DB_BUSY_ATTEMPT_TIMEOUT_MS = 100;
+export const DB_BUSY_RETRY_TIMEOUT_MS = 5_000;
+
 export function openDb(file = dbPath()) {
   if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file, { create: true });
@@ -649,6 +652,10 @@ export function openDb(file = dbPath()) {
   db.exec("PRAGMA foreign_keys = ON;");
   migrateDb(db);
   assertSchema(db);
+  // Runtime writes must fail quickly rather than pin serve's event loop behind
+  // another process's transaction. Latency-sensitive callers use retryBusy()
+  // to retry these short attempts across event-loop turns.
+  db.exec(`PRAGMA busy_timeout = ${DB_BUSY_ATTEMPT_TIMEOUT_MS};`);
   return db;
 }
 
@@ -689,6 +696,47 @@ export function isBusyError(err) {
   return /database is locked|database table is locked|resource temporarily unavailable|\bSQLITE_BUSY\b|\bSQLITE_LOCKED\b/i.test(
     msg,
   );
+}
+
+/**
+ * Retry an idempotent SQLite attempt without holding the event loop for the
+ * connection's normal busy timeout. The callback must contain the complete
+ * transaction, so a SQLITE_BUSY rollback leaves each retry safe to repeat.
+ */
+export async function retryBusy(
+  db,
+  attempt,
+  {
+    busyTimeoutMs = DB_BUSY_ATTEMPT_TIMEOUT_MS,
+    timeoutMs = DB_BUSY_RETRY_TIMEOUT_MS,
+    minDelayMs = 15,
+    maxDelayMs = 50,
+    random = Math.random,
+  } = {},
+) {
+  const startedAt = Date.now();
+  let lastBusyError;
+  for (;;) {
+    const previousTimeout = db.query("PRAGMA busy_timeout").get().timeout;
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))};`);
+    try {
+      return attempt();
+    } catch (err) {
+      if (!isBusyError(err)) throw err;
+      lastBusyError = err;
+    } finally {
+      db.exec(`PRAGMA busy_timeout = ${previousTimeout};`);
+    }
+
+    const remainingMs = timeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) throw lastBusyError;
+    const spread = Math.max(0, maxDelayMs - minDelayMs);
+    const delayMs = Math.min(
+      remainingMs,
+      minDelayMs + Math.floor(random() * (spread + 1)),
+    );
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 
 /** Normalize adapter-supplied usage into durable, non-negative values. */
