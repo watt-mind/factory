@@ -4,11 +4,19 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import {
+  assertRepoReadyForClaim,
   loadRepos,
+  parseToolVersion,
+  preflightToolchain,
+  probeToolVersion,
   proveMergeChecks,
   RepoError,
+  RepoNotReadyError,
   reposView,
   selectMergeCheckGate,
+  TOOLCHAIN_MISMATCH,
+  TOOLCHAIN_MISSING,
+  toolchainReport,
 } from "./repos.mjs";
 
 const scratch = [];
@@ -114,6 +122,7 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
       worktreeDown: "bin/worktree-down.sh",
       worktreeWarm: "bin/worktree-warm.sh",
       verify: "npm run typecheck",
+      toolchain: null,
       ownedPathsPolicy: {
         direct: [
           { source: "shared/**", requires: ["dist/**", "plugins/core/**"] },
@@ -415,6 +424,7 @@ describe("reposView is what the control API serves", () => {
         "smokeUrl",
         "smokeWorkflow",
         "team",
+        "toolchain",
         "verify",
         "worktreeRoot",
       ]);
@@ -516,5 +526,287 @@ describe("control_plane on a repo entry", () => {
     expect(reposView(loadRepos({ root: pinned }))[0].controlPlane).toBe(
       "github",
     );
+  });
+});
+
+// WM-316: toolchain preflight — declare executable version constraints per repo,
+// verify them before claim, and fail with a typed reason instead of mid-run.
+describe("toolchain constraints parse and validate", () => {
+  const TOOLCHAIN_YAML = `repos:
+  - name: pinned
+    path: /tmp/pinned
+    toolchain:
+      - executable: bun
+        constraint: ">=1.2"
+      - executable: node
+        constraint: ">=22 <25"
+  - name: none
+    path: /tmp/none
+`;
+
+  test("a declared toolchain becomes an ordered list of { executable, constraint }", () => {
+    const repos = loadRepos({ root: factoryRoot(TOOLCHAIN_YAML) });
+    expect(repos.get("pinned").toolchain).toEqual([
+      { executable: "bun", constraint: ">=1.2" },
+      { executable: "node", constraint: ">=22 <25" },
+    ]);
+  });
+
+  test("a repo with no toolchain block reads as null — additive, no gating", () => {
+    const repos = loadRepos({ root: factoryRoot(TOOLCHAIN_YAML) });
+    expect(repos.get("none").toolchain).toBeNull();
+  });
+
+  test("the constraint list is published on the wire for doctor and operators", () => {
+    const rows = reposView(loadRepos({ root: factoryRoot(TOOLCHAIN_YAML) }));
+    expect(rows.find((r) => r.name === "pinned").toolchain).toEqual([
+      { executable: "bun", constraint: ">=1.2" },
+      { executable: "node", constraint: ">=22 <25" },
+    ]);
+    expect(rows.find((r) => r.name === "none").toolchain).toBeNull();
+  });
+
+  test("malformed toolchain blocks fail the load with a RepoError", () => {
+    const invalidCases = [
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain: "bun"\n`,
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain: []\n`,
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain:\n      - executable: bun\n`,
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain:\n      - constraint: ">=1"\n`,
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain:\n      - executable: ""\n        constraint: ">=1"\n`,
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain:\n      - executable: bun\n        constraint: ""\n`,
+      `repos:\n  - name: a\n    path: /tmp/a\n    toolchain:\n      - executable: bun\n        constraint: ">=1"\n      - executable: bun\n        constraint: ">=2"\n`,
+    ];
+    for (const yaml of invalidCases) {
+      expect(() => loadRepos({ root: factoryRoot(yaml) })).toThrow(RepoError);
+    }
+  });
+});
+
+describe("parseToolVersion normalizes tool banners", () => {
+  test("extracts the first semver from assorted --version output", () => {
+    expect(parseToolVersion("git version 2.47.3")).toBe("2.47.3");
+    expect(parseToolVersion("v22.4.1")).toBe("22.4.1");
+    expect(parseToolVersion("1.2.8")).toBe("1.2.8");
+    expect(parseToolVersion("Python 3.12.4")).toBe("3.12.4");
+    expect(parseToolVersion("no digits here")).toBeNull();
+    expect(parseToolVersion(null)).toBeNull();
+  });
+});
+
+describe("preflightToolchain verifies constraints before claim", () => {
+  // A repo shaped like loadRepos output, minimal to the fields preflight reads.
+  const repo = (toolchain) => ({ name: "sut", toolchain });
+  const constraints = [
+    { executable: "bun", constraint: ">=1.2" },
+    { executable: "node", constraint: ">=22 <25" },
+  ];
+
+  test("all constraints satisfied → ready, one passing check per executable", () => {
+    const resolve = (exe) =>
+      ({
+        bun: { found: true, version: "1.2.8" },
+        node: { found: true, version: "22.4.1" },
+      })[exe];
+    const result = preflightToolchain(repo(constraints), {
+      node: "runner-a",
+      resolve,
+    });
+    expect(result.ready).toBe(true);
+    expect(result.failures).toEqual([]);
+    expect(result.checks.map((c) => [c.executable, c.ok])).toEqual([
+      ["bun", true],
+      ["node", true],
+    ]);
+  });
+
+  test("a missing executable fails with repo_toolchain_missing and no observed version", () => {
+    const resolve = (exe) =>
+      ({
+        bun: { found: true, version: "1.2.8" },
+        node: { found: false, version: null },
+      })[exe];
+    const result = preflightToolchain(repo(constraints), { resolve });
+    expect(result.ready).toBe(false);
+    const failure = result.failures[0];
+    expect(failure).toMatchObject({
+      executable: "node",
+      reason: TOOLCHAIN_MISSING,
+      observed: null,
+    });
+  });
+
+  test("a version mismatch carries node, executable, constraint, and observed version", () => {
+    const resolve = (exe) =>
+      ({
+        bun: { found: true, version: "1.2.8" },
+        node: { found: true, version: "18.19.0" },
+      })[exe];
+    const result = preflightToolchain(repo(constraints), {
+      node: "runner-b",
+      resolve,
+    });
+    expect(result.ready).toBe(false);
+    expect(result.node).toBe("runner-b");
+    expect(result.failures[0]).toEqual({
+      executable: "node",
+      constraint: ">=22 <25",
+      observed: "18.19.0",
+      ok: false,
+      reason: TOOLCHAIN_MISMATCH,
+    });
+  });
+
+  test("a repo with no toolchain block is ready with zero checks (passthrough)", () => {
+    const called = [];
+    const resolve = (exe) => {
+      called.push(exe);
+      return { found: true, version: "1.0.0" };
+    };
+    for (const tc of [null, undefined]) {
+      const result = preflightToolchain(repo(tc), { resolve });
+      expect(result.ready).toBe(true);
+      expect(result.checks).toEqual([]);
+    }
+    // Passthrough must not probe anything — additive means untouched.
+    expect(called).toEqual([]);
+  });
+});
+
+describe("preflight is non-mutating — it never installs or upgrades tooling", () => {
+  test("probeToolVersion only ever runs `<exe> --version`", () => {
+    const spawned = [];
+    const spawnSync = (argv) => {
+      spawned.push(argv);
+      return {
+        exitCode: 0,
+        stdout: new TextEncoder().encode("1.2.8"),
+        stderr: new Uint8Array(),
+      };
+    };
+    const result = probeToolVersion("bun", { spawnSync });
+    expect(result).toEqual({ found: true, version: "1.2.8" });
+    expect(spawned).toEqual([["bun", "--version"]]);
+    // Structural guarantee: no install/add/upgrade verb is ever spawned.
+    const flat = spawned.flat().join(" ");
+    expect(flat).not.toMatch(/\b(install|add|upgrade|update|get)\b/);
+  });
+
+  test("a probe for an absent binary resolves to not-found, never an install", () => {
+    const spawned = [];
+    const spawnSync = (argv) => {
+      spawned.push(argv);
+      const err = new Error("spawn ENOENT");
+      err.code = "ENOENT";
+      throw err;
+    };
+    expect(probeToolVersion("ghost", { spawnSync })).toEqual({
+      found: false,
+      version: null,
+    });
+    expect(spawned).toEqual([["ghost", "--version"]]);
+  });
+
+  test("preflight drives only the injected resolver and spawns nothing itself", () => {
+    const repo = {
+      name: "sut",
+      toolchain: [{ executable: "bun", constraint: ">=1" }],
+    };
+    const seen = [];
+    preflightToolchain(repo, {
+      resolve: (exe) => {
+        seen.push(exe);
+        return { found: true, version: "1.5.0" };
+      },
+    });
+    expect(seen).toEqual(["bun"]);
+  });
+});
+
+describe("dispatch consults readiness before claiming (WM-316)", () => {
+  test("assertRepoReadyForClaim returns the passing result for a ready repo", () => {
+    const repo = {
+      name: "ready",
+      toolchain: [{ executable: "bun", constraint: ">=1.2" }],
+    };
+    const result = assertRepoReadyForClaim(repo, {
+      resolve: () => ({ found: true, version: "1.2.8" }),
+    });
+    expect(result.ready).toBe(true);
+  });
+
+  test("a not-ready repo is refused before claim, and the refusal names the failing constraint", () => {
+    const repo = {
+      name: "stale",
+      toolchain: [{ executable: "node", constraint: ">=22" }],
+    };
+    let thrown;
+    try {
+      assertRepoReadyForClaim(repo, {
+        node: "runner-c",
+        resolve: () => ({ found: true, version: "18.19.0" }),
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(RepoNotReadyError);
+    expect(thrown.message).toContain("node");
+    expect(thrown.message).toContain(">=22");
+    expect(thrown.message).toContain("18.19.0");
+    expect(thrown.message).toContain(TOOLCHAIN_MISMATCH);
+    // The full preflight result rides along for diagnostics/doctor.
+    expect(thrown.detail.failures[0].observed).toBe("18.19.0");
+  });
+
+  test("a missing-executable repo is refused naming the tool and constraint", () => {
+    const repo = {
+      name: "nobun",
+      toolchain: [{ executable: "bun", constraint: ">=1.2" }],
+    };
+    expect(() =>
+      assertRepoReadyForClaim(repo, {
+        resolve: () => ({ found: false, version: null }),
+      }),
+    ).toThrow(/repo_toolchain_missing[\s\S]*bun/);
+  });
+
+  test("a repo with no toolchain block is never refused — nine working repos stay dispatchable", () => {
+    const repo = { name: "legacy", toolchain: null };
+    expect(assertRepoReadyForClaim(repo).ready).toBe(true);
+  });
+});
+
+describe("toolchainReport surfaces per-repo status for factory doctor", () => {
+  test("one row per repo: declared flag, readiness, and per-executable checks", () => {
+    const repos = loadRepos({
+      root: factoryRoot(`repos:
+  - name: pinned
+    path: /tmp/pinned
+    toolchain:
+      - executable: bun
+        constraint: ">=99"
+  - name: plain
+    path: /tmp/plain
+`),
+    });
+    const report = toolchainReport(repos, {
+      resolve: () => ({ found: true, version: "1.2.8" }),
+    });
+    expect(report).toEqual([
+      {
+        repo: "pinned",
+        declared: true,
+        ready: false,
+        checks: [
+          {
+            executable: "bun",
+            constraint: ">=99",
+            observed: "1.2.8",
+            ok: false,
+            reason: TOOLCHAIN_MISMATCH,
+          },
+        ],
+      },
+      { repo: "plain", declared: false, ready: true, checks: [] },
+    ]);
   });
 });

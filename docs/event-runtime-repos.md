@@ -327,19 +327,38 @@ constraints:
 repos:
   - name: factory
     toolchain:
-      bun: ">=1.3 <2"
-      node: ">=22 <25"
-      git: ">=2.40"
+      - executable: bun
+        constraint: ">=1.2 <2"
+      - executable: node
+        constraint: ">=22 <25"
+      - executable: git
+        constraint: ">=2.40"
     repo_ready_check: bin/repo-ready-check.sh
 ```
 
+Each `toolchain` entry is an `{ executable, constraint }` pair, where
+`constraint` is a semver range; the list is ordered so failures report in
+declaration order. **Implemented in WM-316**
+(`event-runtime/lib/repos.mjs`): `loadRepos` parses and validates the block,
+`preflightToolchain` resolves each executable's version and evaluates the
+constraint, `assertRepoReadyForClaim` is the pre-claim gate dispatch consults,
+and `toolchainReport` surfaces per-repo status for doctor. A repo with no
+`toolchain:` block is unaffected — no preflight, no gating.
+
 The contract records what the repo requires; it does not select a version
-manager or install system packages. `repo doctor` resolves each executable in
-the same non-interactive environment a worker uses, captures its normalized
-version, and checks the constraint. A mismatch is
-`repo_toolchain_mismatch` with node, executable, constraint, observed version,
-and recovery guidance. It happens before claim, workspace creation, dependency
-installation, or model spawn.
+manager or install system packages. Preflight resolves each executable in the
+same non-interactive environment a worker uses by running `<executable>
+--version` — and nothing else — captures its normalized version, and checks the
+constraint. A resolvable version outside the range is `repo_toolchain_mismatch`
+with node, executable, constraint, observed version, and recovery guidance; an
+executable that cannot be resolved is `repo_toolchain_missing`. It happens
+before claim, workspace creation, dependency installation, or model spawn.
+
+> Persisting bounded readiness attestations (freshness/staleness of the whole
+> preflight) and wiring the gate into `orchestrator/tick.mjs` and
+> `orchestrator/doctor.mjs` land in WM-317; WM-316 delivers the toolchain
+> contract, the non-mutating preflight, the typed reasons, and the reusable
+> gate/report the dispatcher and doctor call.
 
 The generic checks cannot know whether a repo needs a local Postgres role,
 Docker daemon, mobile SDK, signing setup, or another repo-specific service.

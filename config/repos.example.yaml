@@ -23,6 +23,23 @@ repos:
     worktree_root: ~/Develop/.worktrees/factory
     max_in_flight: 20
     verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check
+    # Toolchain preflight (WM-316). Each entry is an { executable, constraint }
+    # pair; constraint is a semver range. Before a ticket is claimed, dispatch
+    # resolves each executable on the target node and checks its version. A
+    # missing executable fails with repo_toolchain_missing; a version outside
+    # the range fails with repo_toolchain_mismatch (carrying the observed
+    # version), so the mismatch surfaces pre-claim instead of mid-run.
+    #
+    # Preflight only ever runs `<executable> --version`; it never installs or
+    # upgrades host tooling. Omit this block entirely to keep today's behaviour
+    # (no preflight, no gating) — it is additive.
+    toolchain:
+      - executable: bun
+        constraint: ">=1.2 <2"
+      - executable: node
+        constraint: ">=22 <25"
+      - executable: git
+        constraint: ">=2.40"
     owned_paths_policy:
       direct:
         - source: shared/**

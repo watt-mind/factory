@@ -32,6 +32,219 @@ export class RepoError extends Error {
 }
 
 /**
+ * A repo cannot be safely dispatched into on the target node because its
+ * toolchain preflight did not pass. Thrown by the pre-claim gate so the refusal
+ * carries the failing constraint instead of surfacing mid-run (WM-316). Carries
+ * the full preflight result on `.detail` for diagnostics and doctor output.
+ */
+export class RepoNotReadyError extends RepoError {
+  constructor(message, detail) {
+    super(message);
+    this.name = "RepoNotReadyError";
+    this.detail = detail;
+  }
+}
+
+// The typed reason codes the design already names (docs/event-runtime-repos.md
+// §6.3, line 418). A declared executable that cannot be resolved on the node is
+// `missing`; one whose version fails the constraint is `mismatch`, and the
+// mismatch payload carries node, executable, constraint, and observed version
+// (design line 340) so the operator sees "node X has 18, not 22" pre-claim.
+export const TOOLCHAIN_MISSING = "repo_toolchain_missing";
+export const TOOLCHAIN_MISMATCH = "repo_toolchain_mismatch";
+
+function normalizeToolchain(raw, repoName, file) {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) {
+    throw new RepoError(
+      `${file}: repo ${repoName} toolchain must be a list of { executable, constraint } entries`,
+    );
+  }
+  if (raw.length === 0) {
+    throw new RepoError(
+      `${file}: repo ${repoName} toolchain is empty — omit the block instead of declaring no constraints`,
+    );
+  }
+  const constraints = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new RepoError(
+        `${file}: repo ${repoName} toolchain entries must be objects with executable and constraint`,
+      );
+    }
+    const { executable, constraint } = entry;
+    if (typeof executable !== "string" || !executable.trim()) {
+      throw new RepoError(
+        `${file}: repo ${repoName} toolchain.executable must be a non-empty string`,
+      );
+    }
+    if (typeof constraint !== "string" || !constraint.trim()) {
+      throw new RepoError(
+        `${file}: repo ${repoName} toolchain ${executable} constraint must be a non-empty semver range`,
+      );
+    }
+    const exe = executable.trim();
+    if (seen.has(exe)) {
+      throw new RepoError(
+        `${file}: repo ${repoName} toolchain declares ${exe} more than once`,
+      );
+    }
+    seen.add(exe);
+    constraints.push({ executable: exe, constraint: constraint.trim() });
+  }
+  return constraints;
+}
+
+/**
+ * Pull the first semver-shaped token out of a `<tool> --version` line. Tools
+ * print wildly different banners ("git version 2.47.3", "1.2.8", "v22.4.1"),
+ * so we normalize by locating the version rather than parsing per tool.
+ */
+export function parseToolVersion(output) {
+  const match = String(output ?? "").match(
+    /\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?/,
+  );
+  return match ? match[0] : null;
+}
+
+/**
+ * Resolve one executable's version on the current node by running
+ * `<executable> --version`. Deliberately non-mutating: it only ever asks a tool
+ * to print its version and never installs, upgrades, or otherwise touches host
+ * tooling (design §10). `spawnSync` is injectable so tests can assert exactly
+ * that. A binary that is absent (ENOENT) or that fails to print a parseable
+ * version resolves to `found: false`.
+ *
+ * @returns {{ found: boolean, version: string|null }}
+ */
+export function probeToolVersion(
+  executable,
+  { spawnSync = Bun.spawnSync } = {},
+) {
+  let proc;
+  try {
+    proc = spawnSync([executable, "--version"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch {
+    // ENOENT and friends: the executable is not on PATH for this node.
+    return { found: false, version: null };
+  }
+  if (!proc || proc.exitCode !== 0) return { found: false, version: null };
+  const decode = (buf) => (buf ? new TextDecoder().decode(buf) : "");
+  const version = parseToolVersion(
+    `${decode(proc.stdout)}\n${decode(proc.stderr)}`,
+  );
+  if (!version) return { found: false, version: null };
+  return { found: true, version };
+}
+
+/**
+ * Verify a repo's declared toolchain constraints against the tools actually
+ * present on the target node, before any claim (WM-316). Purely a validator: it
+ * resolves versions through `resolve` (default: the non-mutating
+ * `probeToolVersion`) and never installs anything.
+ *
+ * A repo with no `toolchain:` block is ready with zero checks — the feature is
+ * additive and must not turn today's repos not-ready on upgrade.
+ *
+ * @returns {{ ready: boolean, node: string|null, repo: string|null,
+ *             checks: Array<{executable: string, constraint: string,
+ *                            observed: string|null, ok: boolean,
+ *                            reason: string|null}>,
+ *             failures: Array<object> }}
+ */
+export function preflightToolchain(
+  repo,
+  { node = null, resolve = probeToolVersion } = {},
+) {
+  const constraints = repo?.toolchain ?? null;
+  const repoName = repo?.name ?? null;
+  if (!constraints || constraints.length === 0) {
+    return { ready: true, node, repo: repoName, checks: [], failures: [] };
+  }
+  const checks = [];
+  for (const { executable, constraint } of constraints) {
+    const { found, version } = resolve(executable) ?? {
+      found: false,
+      version: null,
+    };
+    if (!found) {
+      checks.push({
+        executable,
+        constraint,
+        observed: null,
+        ok: false,
+        reason: TOOLCHAIN_MISSING,
+      });
+      continue;
+    }
+    const ok = Bun.semver.satisfies(version ?? "", constraint);
+    checks.push({
+      executable,
+      constraint,
+      observed: version,
+      ok,
+      reason: ok ? null : TOOLCHAIN_MISMATCH,
+    });
+  }
+  const failures = checks.filter((check) => !check.ok);
+  return {
+    ready: failures.length === 0,
+    node,
+    repo: repoName,
+    checks,
+    failures,
+  };
+}
+
+function describeFailure(node, failure) {
+  const where = node ? ` on node ${node}` : "";
+  if (failure.reason === TOOLCHAIN_MISSING) {
+    return `executable ${failure.executable} (needs ${failure.constraint}) is not installed${where}`;
+  }
+  return `executable ${failure.executable} is ${failure.observed}${where}, needs ${failure.constraint}`;
+}
+
+/**
+ * The pre-claim readiness gate dispatch consults before burning a slot on a
+ * repo (WM-316). Throws {@link RepoNotReadyError} naming the failing constraint
+ * when toolchain preflight fails, so the failure lands before claim/worktree/
+ * spawn instead of mid-run. Returns the passing preflight result otherwise.
+ */
+export function assertRepoReadyForClaim(repo, opts = {}) {
+  const result = preflightToolchain(repo, opts);
+  if (!result.ready) {
+    const first = result.failures[0];
+    throw new RepoNotReadyError(
+      `repo ${result.repo} is not ready: ${first.reason} — ${describeFailure(result.node, first)}`,
+      result,
+    );
+  }
+  return result;
+}
+
+/**
+ * Toolchain status for every repo, for `factory doctor` to render so a mismatch
+ * is diagnosable without reading run logs (WM-316). One row per repo in file
+ * order; a repo with no `toolchain:` block reports `declared: false` and stays
+ * ready.
+ */
+export function toolchainReport(repos, opts = {}) {
+  return [...repos.values()].map((repo) => {
+    const result = preflightToolchain(repo, opts);
+    return {
+      repo: repo.name,
+      declared: (repo.toolchain?.length ?? 0) > 0,
+      ready: result.ready,
+      checks: result.checks,
+    };
+  });
+}
+
+/**
  * Which factory checkout supplies repos.yaml. Defaults to the running one;
  * FACTORY_REPOS_ROOT points elsewhere (a runtime serving another checkout —
  * and the hook that makes these tests hermetic instead of depending on
@@ -289,6 +502,10 @@ export function loadRepos({ root = reposRoot() } = {}) {
       worktreeDown: entry.worktree_down ?? null,
       worktreeWarm: entry.worktree_warm ?? null,
       verify: entry.verify ?? null,
+      // WM-316: declared executable version constraints, verified before claim.
+      // Absent means "no preflight, no gating" — additive, so nine working
+      // repos stay ready on upgrade.
+      toolchain: normalizeToolchain(entry.toolchain, entry.name, file),
       ownedPathsPolicy: normalizeOwnedPathsPolicy(
         entry.owned_paths_policy,
         entry.name,
@@ -339,6 +556,9 @@ export function reposView(repos) {
     security: repo.security,
     mergeCi: repo.mergeCi,
     escalatePaths: repo.escalatePaths,
+    // WM-316: null when the repo declares no constraints; otherwise the list a
+    // reader (and doctor) needs to see what this repo requires of its node.
+    toolchain: repo.toolchain,
     ownedPathsPolicy: repo.ownedPathsPolicy,
     worktreeRoot: repo.worktreeRoot,
     hasWorktreeUp: repo.worktreeUp !== null,
