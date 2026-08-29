@@ -14,7 +14,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -125,11 +124,9 @@ export const HANDOFF_HOST_ENV = Object.freeze({
 });
 export const HANDOFF_GUEST_PATH =
   "/opt/factory-bin:/usr/local/bin:/usr/bin:/bin";
-export const HANDOFF_RUNTIME_COMMANDS = Object.freeze([
-  "bun",
-  "uv",
-  "pnpm",
-]);
+/** Where the verified worktree is mounted inside the chroot. */
+export const HANDOFF_GUEST_WORKSPACE = "/workspace";
+export const HANDOFF_RUNTIME_COMMANDS = Object.freeze(["bun", "uv", "pnpm"]);
 
 /** Non-system package runners mounted as individual, read-only executables. */
 export function handoffRuntimeBinaries(which = (name) => Bun.which(name)) {
@@ -143,16 +140,38 @@ export function handoffRuntimeBinaries(which = (name) => Bun.which(name)) {
  * Constant setup program for the handoff shell's Linux isolation boundary.
  *
  * - a user namespace grants mount/chroot authority without host root;
- * - a network namespace starts with loopback down and no host interfaces;
+ * - a network namespace has no host interfaces; loopback is brought up
+ *   because suites routinely bind 127.0.0.1, and a namespaced loopback
+ *   reaches nothing outside the sandbox;
  * - a private mount namespace exposes only read-only /usr, selected package
- *   runners, the intended worktree, ephemeral /tmp, proc and basic devices;
+ *   runners, the intended worktree, the git directories that worktree's
+ *   `.git` file points at, ephemeral /tmp, proc and basic devices;
  * - chroot makes host absolute paths and worktree symlink escapes unreachable.
+ *
+ * Argument protocol: root, workspace, guest_cwd, git_mount_count, then
+ * `git_mount_count` × (host_path, ro|rw), then (name, executable) pairs for
+ * the package runners, then the command as the last argument.
+ *
+ * Guest environment (GH-967): HOME/TMPDIR/PATH/LANG plus one pin.
+ * `reposRoot()` is `FACTORY_REPOS_ROOT || FACTORY_ROOT`, and FACTORY_ROOT is
+ * derived from the module's own location — so the previous
+ * `FACTORY_ROOT=/workspace` set the variable nothing reads while leaving
+ * `FACTORY_REPOS_ROOT` unset, silently undoing #1214's pin. The host factory
+ * root is deliberately NOT bound into the chroot (it holds config/repos.yaml,
+ * mirrors and other repos' worktrees — none of which a ticket's check needs),
+ * so the only coherent repos root inside the guest is the worktree itself:
+ * `FACTORY_REPOS_ROOT=/workspace`, which is exactly #1214's "pin the repos
+ * root at the worktree, never at the worker's factory root" expressed in
+ * guest coordinates. It is derived from the workspace root, not the command's
+ * cwd, so the web-build call site (cwd `event-runtime/web`) is pinned right
+ * too (#1224). #1214 covers the same seam on the unsandboxed path.
  */
 export const HANDOFF_SANDBOX_SETUP = String.raw`
 root=$1
 workspace=$2
 guest_cwd=$3
-shift 3
+git_mounts=$4
+shift 4
 mount --make-rprivate /
 mount -t tmpfs -o mode=0755,size=64m tmpfs "$root"
 mkdir -p "$root/usr" "$root/workspace" "$root/tmp" "$root/dev" \
@@ -172,6 +191,25 @@ for dev in null zero random urandom; do
   touch "$root/dev/$dev"
   mount --bind "/dev/$dev" "$root/dev/$dev"
 done
+if command -v ip >/dev/null 2>&1; then
+  ip link set lo up || echo "handoff-sandbox: loopback stayed down" >&2
+elif command -v ifconfig >/dev/null 2>&1; then
+  ifconfig lo up || echo "handoff-sandbox: loopback stayed down" >&2
+else
+  echo "handoff-sandbox: no ip/ifconfig; loopback stays down" >&2
+fi
+while [ "$git_mounts" -gt 0 ]; do
+  git_path=$1
+  git_mode=$2
+  shift 2
+  git_mounts=$((git_mounts - 1))
+  mkdir -p "$root$git_path"
+  mount --rbind "$git_path" "$root$git_path"
+  mount --make-rslave "$root$git_path"
+  if [ "$git_mode" = ro ]; then
+    mount -o remount,bind,ro "$root$git_path"
+  fi
+done
 while [ "$#" -gt 1 ]; do
   name=$1
   executable=$2
@@ -187,9 +225,108 @@ mkdir -p "$root/tmp/home"
   shift
   exec /usr/bin/env -i \
     HOME=/tmp/home TMPDIR=/tmp PATH=${HANDOFF_GUEST_PATH} LANG=C.UTF-8 \
-    FACTORY_ROOT=/workspace /bin/bash -c "$1"
+    FACTORY_REPOS_ROOT=${HANDOFF_GUEST_WORKSPACE} /bin/bash -c "$1"
 ' bash "$guest_cwd" "$command"
 `;
+
+/**
+ * A linked git worktree's `.git` is a file holding an absolute host gitdir
+ * (`<repo>/.git/worktrees/<name>`), and that gitdir's `commondir` points at
+ * the parent repository's `.git` where the objects live. Neither is under the
+ * workspace, so inside the chroot `git` would fail with "not a git
+ * repository". Both are bound back at their own absolute paths: the
+ * worktree's own gitdir writable (it is this workspace's state — git refreshes
+ * its index on `git status`), the shared repository `.git` read-only, so ticket
+ * code can read history but cannot rewrite the host repository.
+ *
+ * A plain checkout (`.git` is a directory) needs nothing: it already lives
+ * inside the bound workspace.
+ */
+export function handoffGitMounts(workspaceRoot, read = readFileSync) {
+  const dotGit = path.join(workspaceRoot, ".git");
+  let pointer;
+  try {
+    pointer = read(dotGit, "utf8");
+  } catch {
+    return [];
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(String(pointer));
+  if (!match) return [];
+  const gitDir = path.resolve(workspaceRoot, match[1]);
+  const mounts = [{ path: gitDir, mode: "rw" }];
+  let commonDir = null;
+  try {
+    commonDir = path.resolve(
+      gitDir,
+      String(read(path.join(gitDir, "commondir"), "utf8")).trim(),
+    );
+  } catch {
+    /* no commondir: a gitdir file that is not a linked worktree */
+  }
+  if (commonDir && !commonDir.startsWith(`${gitDir}${path.sep}`)) {
+    mounts.push({ path: commonDir, mode: "ro" });
+  }
+  return mounts;
+}
+
+/** Reason code for a host that cannot build the handoff sandbox at all. */
+export const HANDOFF_SANDBOX_UNAVAILABLE = "sandbox_unavailable";
+
+let sandboxProbeCache = null;
+
+/**
+ * Can this host build the isolation boundary at all? Unprivileged user
+ * namespaces are a kernel/distro toggle (`kernel.unprivileged_userns_clone`,
+ * AppArmor `userns` restrictions, some container runtimes), and `unshare`
+ * itself may be absent. When the probe says no, the handoff gate refuses with
+ * `sandbox_unavailable` — an environment fault, distinct from the ticket's
+ * check actually failing — instead of reporting the ticket's command red.
+ * There is deliberately NO unsandboxed fallback: running ticket-authored
+ * commands with the worker's credentials is exactly what GH-967 removes.
+ */
+export function handoffSandboxAvailable({
+  spawn = spawnSync,
+  cache = true,
+} = {}) {
+  if (cache && sandboxProbeCache !== null) return sandboxProbeCache;
+  let available;
+  try {
+    const res = spawn(
+      "/usr/bin/unshare",
+      [
+        "--user",
+        "--map-root-user",
+        "--net",
+        "--mount",
+        "--pid",
+        "--fork",
+        "/bin/true",
+      ],
+      { env: HANDOFF_HOST_ENV, stdio: "ignore", timeout: 10_000 },
+    );
+    available = !res.error && res.status === 0;
+  } catch {
+    available = false;
+  }
+  if (cache) sandboxProbeCache = available;
+  return available;
+}
+
+/** Test seam: forget a cached probe result. */
+export function resetHandoffSandboxProbe() {
+  sandboxProbeCache = null;
+}
+
+/** Thrown when the host cannot provide the handoff sandbox (GH-967). */
+export class SandboxUnavailable extends Error {
+  constructor() {
+    super(
+      "sandbox_unavailable: this host cannot create an unprivileged user+mount namespace, so the ticket's verification command cannot be run without the worker's credentials",
+    );
+    this.name = "SandboxUnavailable";
+    this.reasonCode = HANDOFF_SANDBOX_UNAVAILABLE;
+  }
+}
 
 /** `dispatch.owned_paths_conformance` in config/policy.yaml: advisory (default) | strict. */
 export function policyOwnedPathsConformance(root = reposRoot()) {
@@ -230,7 +367,9 @@ export function runHandoffCommand({
   timeoutMs,
   spawn = spawnSync,
   runtimeBinaries = handoffRuntimeBinaries(),
+  sandboxAvailable = () => handoffSandboxAvailable(),
 }) {
+  if (!sandboxAvailable()) throw new SandboxUnavailable();
   const root = realpathSync(workspaceRoot);
   const commandCwd = realpathSync(cwd);
   const relativeCwd = path.relative(root, commandCwd);
@@ -247,7 +386,7 @@ export function runHandoffCommand({
   const sandboxRoot = mkdtempSync(
     path.join(sandboxParent, ".handoff-sandbox-"),
   );
-  mkdirSync(sandboxRoot, { recursive: true });
+  const gitMounts = handoffGitMounts(root);
   const fd = openSync(logPath, "w");
   let res;
   const startedAt = Date.now();
@@ -277,6 +416,8 @@ export function runHandoffCommand({
         sandboxRoot,
         root,
         guestCwd,
+        String(gitMounts.length),
+        ...gitMounts.flatMap(({ path: gitPath, mode }) => [gitPath, mode]),
         ...runtimeArgs,
         command,
       ],
@@ -295,11 +436,18 @@ export function runHandoffCommand({
   }
   const output = readFileSync(logPath, "utf8");
   const elapsedMs = Date.now() - startedAt;
+  // Only the timeout's own verdict counts: 124 from GNU timeout, ETIMEDOUT
+  // from the outer ceiling, or `timeout` itself dying by SIGKILL past the
+  // budget (its --kill-after escalation signals the whole process group,
+  // which it belongs to, so the killer takes the killer with it). A wall
+  // clock that merely reached the budget, or a 137 the command itself exited
+  // with (an OOM kill inside the suite, a test that SIGKILLs a child), is a
+  // real failure with real output — reporting those as "timed out" hid the
+  // actual red.
   const timedOut =
-    elapsedMs >= timeoutMs ||
     res.error?.code === "ETIMEDOUT" ||
     res.status === 124 ||
-    res.status === 137;
+    (res.status == null && res.signal === "SIGKILL" && elapsedMs >= timeoutMs);
   const exitCode = timedOut ? null : (res.status ?? (res.error ? 1 : 0));
   return {
     command,
@@ -1123,6 +1271,19 @@ function verifyCompleted({
       handoff.reasonCode = reasonCode;
       throw new ContractViolation([violation], { reasonCode, handoff });
     };
+    // A host that cannot build the sandbox is an environment fault, not the
+    // agent's red: refuse with its own code so the worker never drafts the
+    // PR or returns the ticket over it.
+    const runHandoffStep = (options) => {
+      try {
+        return runHandoffCommand(options);
+      } catch (err) {
+        if (err instanceof SandboxUnavailable) {
+          refuse(HANDOFF_SANDBOX_UNAVAILABLE, err.message);
+        }
+        throw err;
+      }
+    };
     const failureWhy = (obs) =>
       obs.timedOut
         ? `timed out after ${verifyTimeoutMs}ms`
@@ -1139,7 +1300,7 @@ function verifyCompleted({
     // 1. The repo's own verify command (the pre-WM-718 gate, kept as-is: it
     //    is what the red-baseline logic is keyed on).
     if (worktreeRecord.verify) {
-      const obs = runHandoffCommand({
+      const obs = runHandoffStep({
         command: worktreeRecord.verify,
         cwd: worktreePath,
         workspaceRoot: worktreePath,
@@ -1165,7 +1326,7 @@ function verifyCompleted({
 
     // 2. The ticket's exact Verification Command on the final tree.
     if (ticketCommand) {
-      const obs = runHandoffCommand({
+      const obs = runHandoffStep({
         command: ticketCommand,
         cwd: worktreePath,
         workspaceRoot: worktreePath,
@@ -1198,7 +1359,7 @@ function verifyCompleted({
       files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
       existsSync(path.join(worktreePath, HANDOFF_WEB_BUILD_DIR, "package.json"))
     ) {
-      const obs = runHandoffCommand({
+      const obs = runHandoffStep({
         command: HANDOFF_WEB_BUILD_COMMAND,
         cwd: path.join(worktreePath, HANDOFF_WEB_BUILD_DIR),
         workspaceRoot: worktreePath,

@@ -54,6 +54,7 @@ import {
   ContractViolation,
   composeHandoffVerification,
   HANDOFF_REASON_CODES,
+  HANDOFF_SANDBOX_UNAVAILABLE,
   verifyResult,
 } from "./verify.mjs";
 import {
@@ -747,6 +748,10 @@ const ENVIRONMENT_FAILURES = new Set([
   "lease_expired",
   "linear_unconfigured",
   "registry_stale",
+  // GH-967: the host could not build the handoff sandbox. Nothing about the
+  // agent's work is implicated, so this must never burn an agent attempt or
+  // draft the PR — it is the worker host that needs attention.
+  HANDOFF_SANDBOX_UNAVAILABLE,
 ]);
 // The handoff gate (WM-718) catching the agent's own red is an agent error:
 // bounded by maxAttempts like any contract violation, never an environment
@@ -2593,9 +2598,11 @@ export async function executeClaimed(
               /* intentionally ignored */
             }
           }
-          const res = refuseTerminal(capture.reasonCode, [
-            "post_claim_ticket_capture",
-          ], { detail: capture.detail });
+          const res = refuseTerminal(
+            capture.reasonCode,
+            ["post_claim_ticket_capture"],
+            { detail: capture.detail },
+          );
           if (res?.fenced) return { fenced: true };
           return {
             runId,
@@ -3038,6 +3045,7 @@ export async function executeClaimed(
       if (!(err instanceof ContractViolation)) throw err;
       const reasonCode =
         err.reasonCode === "baseline_red" ||
+        err.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
         HANDOFF_REASON_CODES.has(err.reasonCode)
           ? err.reasonCode
           : "contract_violation";

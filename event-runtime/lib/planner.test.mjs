@@ -1338,14 +1338,16 @@ describe("planEvent worktree gate (WM-108)", () => {
       });
     });
 
-    test("an absent ready pin fails closed", () => {
+    test("an absent ready pin fails closed under its own reason code", () => {
       withReposRoot(tierRepo, () => {
         const result = worktreeDispatchAutoEligibility(
           { repo: "tiered", ticket: "acme/widget#1" },
           githubDispatch(githubTicket({ readyPinHash: null })),
         );
         expect(result.ok).toBe(false);
-        expect(result.refusal.reason).toBe("ticket_body_changed_since_ready");
+        // Distinct from a mismatch (GH-967): an unpinned ticket is re-stamped
+        // by a relabel sweep, a changed body needs a human.
+        expect(result.refusal.reason).toBe("ticket_ready_pin_missing");
         expect(result.evidence.checks.ticket_body_pin_matches).toBe(false);
       });
     });
