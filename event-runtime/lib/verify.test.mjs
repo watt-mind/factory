@@ -1108,7 +1108,11 @@ describe("worktree baseline verification (WM-334)", () => {
       const observed = out.handoff.repoVerify.output;
       // The worktree is mounted at /workspace in the sandbox (#967); the pin
       // still names the worktree root, in the coordinates the command sees.
-      expect(observed).toContain("repos=/workspace");
+      // When this suite is itself running inside a sandbox the boundary does
+      // not nest and the command keeps the real paths.
+      expect(observed).toContain(
+        `repos=${insideHandoffSandbox() ? realpathSync(record.path) : "/workspace"}`,
+      );
       expect(observed).toContain("root=unset");
       expect(observed).toContain("home=unset");
       expect(observed).toContain("port=unset");
@@ -1169,9 +1173,12 @@ describe("worktree baseline verification (WM-334)", () => {
       expect(out.kind).toBe("completed");
       expect(out.result.verification.checks).toContain("web_build_passed");
       const observed = out.handoff.webBuild.output;
-      expect(observed).toContain("cwd=/workspace/event-runtime/web");
-      expect(observed).toContain("repos=/workspace\n");
-      expect(observed).not.toContain("repos=/workspace/event-runtime/web");
+      const guestRoot = insideHandoffSandbox()
+        ? realpathSync(repo)
+        : "/workspace";
+      expect(observed).toContain(`cwd=${guestRoot}/event-runtime/web`);
+      expect(observed).toContain(`repos=${guestRoot}\n`);
+      expect(observed).not.toContain(`repos=${guestRoot}/event-runtime/web`);
       expect(observed).toContain("root=unset");
       expect(observed).toContain("timeout=unset");
       expect(observed).not.toContain(instanceRoot);
