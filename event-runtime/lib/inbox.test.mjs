@@ -641,13 +641,18 @@ describe("human inbox ledger (WM-285)", () => {
     });
   });
 
-  test("inbox counts omit expired open items", () => {
+  test("list items and counts share the expired-open predicate", () => {
     const db = openDb(":memory:");
     const expiredAt = new Date(Date.now() - 61_000).toISOString();
+    const liveAt = new Date().toISOString();
     db.query(
       `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
        VALUES ('expired-proposal', 'test', 'evt', 'run', 'open', ?, 60)`,
     ).run(expiredAt);
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES ('live-proposal', 'test', 'live-evt', 'run', 'open', ?, 60)`,
+    ).run(liveAt);
     createInboxItem(db, { kind: "BLOCKED", title: "active" }, { id: "active" });
     createInboxItem(
       db,
@@ -663,8 +668,37 @@ describe("human inbox ledger (WM-285)", () => {
       },
       { id: "expired-proposal-item" },
     );
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "live by proposal",
+        refs: { proposalId: "live-proposal" },
+      },
+      { id: "live-proposal-item" },
+    );
 
-    expect(inboxCounts(db)).toMatchObject({ open: 1, acked: 0 });
+    const items = listInboxItems(db, { status: "all" });
+    expect(
+      items.find((item) => item.id === "expired-proposal-item"),
+    ).toMatchObject({
+      expired: true,
+    });
+    expect(getInboxItem(db, "expired-proposal-item")).toMatchObject({
+      expired: true,
+    });
+    expect(
+      items.find((item) => item.id === "live-proposal-item"),
+    ).toMatchObject({
+      expired: false,
+    });
+    expect(inboxCounts(db)).toMatchObject({
+      open: items.filter(
+        (item) =>
+          item.resolvedAt === null && item.ackedAt === null && !item.expired,
+      ).length,
+      acked: 0,
+    });
   });
 
   test("runtime-owned referents auto-resolve after leaving their waiting state", () => {
