@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -12,6 +13,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { packExtension } from "../cli/extensions.mjs";
 import { createAdapterRegistry } from "./adapters/index.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import { openDb } from "./db.mjs";
@@ -1710,6 +1712,75 @@ describe("extension packages (WM-922)", () => {
     );
   });
 
+  test("extensions pack rejects mismatched or incomplete npm metadata", () => {
+    const dir = tempExtension();
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({
+        name: "@test/pack-ext",
+        version: "0.1.0",
+        type: "module",
+        files: ["factory-extension.json", "pack", "adapters"],
+      }),
+    );
+    const diagnostics = [];
+    for (const report of [
+      [{ name: "factory/sample", version: "1.0.0", files: [] }],
+      [{ name: "@test/pack-ext", version: "0.1.0" }],
+      [{}],
+    ]) {
+      expect(() =>
+        packExtension(dir, {
+          spawn: () => ({
+            status: 0,
+            stdout: JSON.stringify(report),
+            stderr: "",
+          }),
+          exit: (code) => {
+            throw new Error(`exit:${code}`);
+          },
+          error: (message) => diagnostics.push(message),
+        }),
+      ).toThrow("exit:1");
+    }
+    expect(diagnostics.join("\n")).toContain("npm_pack_metadata_invalid");
+    expect(diagnostics.join("\n")).toContain("@test/pack-ext@0.1.0");
+  });
+
+  test("extensions pack uses an isolated npm cache and explicit target", () => {
+    const dir = tempExtension();
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ name: "@test/pack-ext", version: "0.1.0" }),
+    );
+    let invocation;
+    packExtension(dir, {
+      spawn: (command, args, options) => {
+        invocation = { command, args, options };
+        return {
+          status: 0,
+          // Workspace-aware npm may key the one metadata object by package.
+          stdout: JSON.stringify({
+            "@test/pack-ext": {
+              name: "@test/pack-ext",
+              version: "0.1.0",
+              files: [{ path: "package.json" }],
+            },
+          }),
+          stderr: "",
+        };
+      },
+    });
+    expect(invocation.command).toBe("npm");
+    expect(invocation.args).toContain(".");
+    expect(invocation.args).toContain("--cache");
+    expect(invocation.args).toContain("--ignore-scripts");
+    const cache = invocation.args[invocation.args.indexOf("--cache") + 1];
+    expect(cache).toContain("factory-npm-pack-");
+    expect(existsSync(cache)).toBe(false);
+    expect(invocation.options.cwd).toBe(dir);
+  });
+
   test("extensions pack validates then lists npm pack --dry-run files", () => {
     const dir = tempExtension();
     writeFileSync(
@@ -1727,7 +1798,11 @@ describe("extension packages (WM-922)", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    expect(packed.exitCode).toBe(0);
+    if (packed.exitCode !== 0) {
+      throw new Error(
+        `extensions pack CLI exited ${packed.exitCode}: ${packed.stderr.toString().trim() || "no stderr"}`,
+      );
+    }
     // The CLI parses `npm pack --dry-run --json` structurally and prints its
     // own stable summary, so this asserts the code's behavior — not npm's
     // human text, which varies by npm version (object-keyed vs array report).

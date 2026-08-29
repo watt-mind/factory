@@ -1,28 +1,9 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   TICKET_SUPPLY_CACHE_TTL_MS,
-  clearLinearSupplyCache,
   countOpenIssues,
   loadLinearSupply,
-  setLinearSupplyBudget,
-  setLinearSupplyGql,
 } from "./linear.mjs";
-
-// Pin a healthy budget by default so loadLinearSupply() exercises its GraphQL
-// path deterministically. readBudget() otherwise falls back to the on-disk
-// Linear budget of whatever host runs the suite (the self-hosted CI runner's
-// real budget is often exhausted), which would non-deterministically short
-// these tests to `linear_budget_exhausted`. The budget-exhaustion case is
-// still exercised: its test injects `{ remaining: 0 }` explicitly.
-beforeEach(() => {
-  setLinearSupplyBudget({ remaining: 2000, limit: 2500 });
-});
-
-afterEach(() => {
-  clearLinearSupplyCache();
-  setLinearSupplyGql(null);
-  setLinearSupplyBudget(undefined);
-});
 
 function issue(state, { assignee = null, labels = [] } = {}) {
   return {
@@ -76,15 +57,18 @@ describe("loadLinearSupply (WM-824)", () => {
 
   test("queries Linear per team+project and maps counts onto repos", async () => {
     const calls = [];
-    setLinearSupplyGql(async (query, variables) => {
+    const gql = async (query, variables) => {
       calls.push({ query, variables });
       const nodes =
         variables.t === "WM"
           ? [issue("Triage"), issue("Todo", { labels: ["ai:agent-ready"] })]
           : [issue("In Progress"), issue("In Progress")];
       return { issues: { nodes, pageInfo: { hasNextPage: false } } };
+    };
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_700_000_000_000,
+      gql,
     });
-    const snap = await loadLinearSupply(repos, { nowMs: 1_700_000_000_000 });
     expect(snap.ok).toBe(true);
     expect(snap.cached).toBe(false);
     expect(snap.byRepo.factory).toEqual({
@@ -107,23 +91,28 @@ describe("loadLinearSupply (WM-824)", () => {
   test("TTL cache avoids a second GraphQL round-trip until refresh", async () => {
     const oneRepo = [{ name: "factory", team: "WM", project: "Factory" }];
     let calls = 0;
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       calls += 1;
       return { issues: { nodes: [], pageInfo: { hasNextPage: false } } };
+    };
+    const first = await loadLinearSupply(oneRepo, { nowMs: 1_000, gql });
+    const cached = await loadLinearSupply(oneRepo, {
+      nowMs: 1_000 + 10_000,
+      gql,
     });
-    const first = await loadLinearSupply(oneRepo, { nowMs: 1_000 });
-    const cached = await loadLinearSupply(oneRepo, { nowMs: 1_000 + 10_000 });
     expect(first.cached).toBe(false);
     expect(cached.cached).toBe(true);
     expect(calls).toBe(1);
     const refreshed = await loadLinearSupply(oneRepo, {
       nowMs: 1_000 + 10_000,
       refresh: true,
+      gql,
     });
     expect(refreshed.cached).toBe(false);
     expect(calls).toBe(2);
     await loadLinearSupply(oneRepo, {
       nowMs: 1_000 + 10_000 + TICKET_SUPPLY_CACHE_TTL_MS + 1,
+      gql,
     });
     expect(calls).toBe(3);
   });
@@ -135,13 +124,17 @@ describe("loadLinearSupply (WM-824)", () => {
     const gate = new Promise((resolve) => {
       release = resolve;
     });
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       calls += 1;
       await gate;
       return { issues: { nodes: [], pageInfo: { hasNextPage: false } } };
+    };
+    const a = loadLinearSupply(oneRepo, { nowMs: 1_000, gql });
+    const b = loadLinearSupply(oneRepo, {
+      nowMs: 1_000,
+      refresh: true,
+      gql,
     });
-    const a = loadLinearSupply(oneRepo, { nowMs: 1_000 });
-    const b = loadLinearSupply(oneRepo, { nowMs: 1_000, refresh: true });
     release();
     const [left, right] = await Promise.all([a, b]);
     expect(calls).toBe(1);
@@ -149,14 +142,51 @@ describe("loadLinearSupply (WM-824)", () => {
     expect(right.ok).toBe(true);
   });
 
+  test("an injected GraphQL seam never reads the host budget cache", async () => {
+    let budgetReads = 0;
+    let gqlCalls = 0;
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_000,
+      budgetLoader: () => {
+        budgetReads += 1;
+        return { remaining: 0, limit: 2500 };
+      },
+      gql: async () => {
+        gqlCalls += 1;
+        return { issues: { nodes: [], pageInfo: { hasNextPage: false } } };
+      },
+    });
+    expect(snap.ok).toBe(true);
+    expect(budgetReads).toBe(0);
+    expect(gqlCalls).toBe(2);
+  });
+
+  test("production default GraphQL still honors an exhausted budget loader", async () => {
+    let budgetReads = 0;
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_000,
+      budgetLoader: () => {
+        budgetReads += 1;
+        return { remaining: 0, limit: 2500 };
+      },
+    });
+    expect(snap.ok).toBe(false);
+    expect(snap.error).toBe("linear_budget_exhausted");
+    expect(snap.budget).toEqual({ remaining: 0, limit: 2500 });
+    expect(budgetReads).toBe(1);
+  });
+
   test("skips Linear when remaining budget is 0", async () => {
     let calls = 0;
-    setLinearSupplyBudget({ remaining: 0, limit: 2500 });
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       calls += 1;
       return { issues: { nodes: [] } };
+    };
+    const snap = await loadLinearSupply(repos, {
+      nowMs: 1_000,
+      budget: { remaining: 0, limit: 2500 },
+      gql,
     });
-    const snap = await loadLinearSupply(repos, { nowMs: 1_000 });
     expect(snap.ok).toBe(false);
     expect(snap.error).toBe("linear_budget_exhausted");
     expect(snap.budget).toEqual({ remaining: 0, limit: 2500 });
@@ -164,10 +194,10 @@ describe("loadLinearSupply (WM-824)", () => {
   });
 
   test("returns a fallback error instead of throwing when GraphQL fails", async () => {
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       throw new Error("RATELIMITED");
-    });
-    const snap = await loadLinearSupply(repos, { nowMs: 1_000 });
+    };
+    const snap = await loadLinearSupply(repos, { nowMs: 1_000, gql });
     expect(snap.ok).toBe(false);
     expect(snap.error).toBe("RATELIMITED");
     expect(snap.byRepo).toEqual({});

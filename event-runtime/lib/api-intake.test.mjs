@@ -233,6 +233,43 @@ describe("webhook intake (§14)", () => {
     ).toBe(0);
   });
 
+  test("signed webhook admits reserved handoff provenance while replay refuses it", async () => {
+    const handoff = envelope({
+      eventId: "handoff-api-1",
+      type: "factory.dispatch.requested",
+      source: "handoff",
+      subject: "watt-mind/factory#1153",
+      payload: { repo: "factory", ticket: "watt-mind/factory#1153" },
+    });
+    const body = JSON.stringify(handoff);
+    const ts = String(Date.now());
+    const signed = await fetch(s.url("/events"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-factory-timestamp": ts,
+        "x-factory-signature": sign(body, ts),
+      },
+      body,
+    });
+    expect(signed.status).toBe(200);
+    expect(await signed.json()).toEqual({
+      admitted: true,
+      duplicate: false,
+      eventId: "handoff-api-1",
+    });
+
+    const replay = await fetch(s.url("/replay"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...handoff, eventId: "handoff-api-forged" }),
+    });
+    expect(replay.status).toBe(422);
+    expect((await replay.json()).errors).toContain(
+      'source: reserved internal provenance "handoff"',
+    );
+  });
+
   test("envelope schema failure → 422 with errors, no admission", async () => {
     const body = JSON.stringify({
       schemaVersion: "factory.event/v1",
@@ -250,7 +287,7 @@ describe("webhook intake (§14)", () => {
     });
     expect(res.status).toBe(422);
     expect((await res.json()).errors.length).toBeGreaterThan(0);
-    expect(s.db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(1);
+    expect(s.db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(2);
   });
 });
 

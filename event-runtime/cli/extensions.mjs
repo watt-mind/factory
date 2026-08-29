@@ -8,6 +8,8 @@
  * Wiring `pack` into cli.mjs is outside this ticket's Owned Paths.
  */
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { validateExtensionManifest } from "../lib/extensions.mjs";
 
@@ -44,11 +46,16 @@ export function normalizePackReport(report) {
  * `npm pack --dry-run` would include.
  *
  * @param {string} dir
- * @param {{ spawn?: typeof spawnSync, exit?: (code: number) => never }} [options]
+ * @param {{ spawn?: typeof spawnSync, exit?: (code: number) => never, log?: (message: string) => void, error?: (message: string) => void }} [options]
  */
 export function packExtension(
   dir,
-  { spawn = spawnSync, exit = (code) => process.exit(code) } = {},
+  {
+    spawn = spawnSync,
+    exit = (code) => process.exit(code),
+    log = console.log,
+    error = console.error,
+  } = {},
 ) {
   const checked = validateExtensionManifest(dir);
   for (const warning of checked.warnings) console.error(`warning: ${warning}`);
@@ -57,32 +64,98 @@ export function packExtension(
     return exit(1);
   }
   const cwd = path.dirname(checked.file);
-  const packed = spawn("npm", ["pack", "--dry-run", "--json"], {
-    cwd,
-    encoding: "utf8",
-  });
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(path.join(cwd, "package.json"), "utf8"));
+  } catch (err) {
+    error(`npm_pack_metadata_invalid: package.json: ${err.message}`);
+    return exit(1);
+  }
+  if (
+    typeof pkg?.name !== "string" ||
+    pkg.name === "" ||
+    typeof pkg?.version !== "string" ||
+    pkg.version === ""
+  ) {
+    error("npm_pack_metadata_invalid: package.json needs name and version");
+    return exit(1);
+  }
+
+  // npm's shared cache produced another fixture's package metadata twice on a
+  // busy self-hosted runner (#1161). One private cache plus an explicit target
+  // keeps concurrent pack probes independent and makes the inspected package
+  // unambiguous.
+  const cache = mkdtempSync(path.join(os.tmpdir(), "factory-npm-pack-"));
+  let packed;
+  try {
+    packed = spawn(
+      "npm",
+      [
+        "pack",
+        ".",
+        "--dry-run",
+        "--json",
+        "--ignore-scripts",
+        "--cache",
+        cache,
+      ],
+      { cwd, encoding: "utf8" },
+    );
+  } finally {
+    rmSync(cache, { recursive: true, force: true });
+  }
   if (packed.status !== 0) {
     const detail = String(packed.stderr || packed.stdout || "").trim();
-    console.error(detail || "npm pack --dry-run failed");
+    error(detail || "npm pack --dry-run failed");
     return exit(packed.status === null ? 1 : packed.status);
   }
+
   let report;
   try {
     report = JSON.parse(packed.stdout);
-  } catch {
-    console.log(packed.stdout);
-    return checked;
+  } catch (err) {
+    error(`npm_pack_metadata_invalid: invalid JSON: ${err.message}`);
+    return exit(1);
   }
+  // Tolerate npm's shape differences via the shared normalizer (older npm
+  // returns an array, newer npm a `{ "package-name": metadata }` map, and a
+  // bare single object is also accepted); every identity is still revalidated
+  // strictly below against the package we asked npm to inspect.
   const entries = normalizePackReport(report);
-  for (const item of entries) {
-    const files = item.files ?? [];
-    const name = item.name ?? checked.manifest.name;
-    const version = item.version ?? checked.manifest.version;
-    console.log(`${name}@${version}: would pack ${files.length} files`);
-    for (const file of files) {
-      console.log(`  ${file.path ?? file}`);
-    }
+  if (entries.length !== 1) {
+    error(
+      `npm_pack_metadata_invalid: expected one package, got ${Array.isArray(report) ? report.length : typeof report}`,
+    );
+    return exit(1);
   }
+  const [item] = entries;
+  if (item?.name !== pkg.name || item?.version !== pkg.version) {
+    const shape =
+      item && typeof item === "object"
+        ? `keys=${Object.keys(item).sort().join(",") || "<none>"}${item.error?.code ? ` error=${item.error.code}` : ""}`
+        : `type=${typeof item}`;
+    error(
+      `npm_pack_metadata_invalid: expected ${pkg.name}@${pkg.version}, got ${String(item?.name)}@${String(item?.version)} (${shape})`,
+    );
+    return exit(1);
+  }
+  if (
+    !Array.isArray(item.files) ||
+    item.files.length === 0 ||
+    !item.files.every(
+      (file) =>
+        typeof file === "string" ||
+        (file && typeof file.path === "string" && file.path !== ""),
+    )
+  ) {
+    error(
+      `npm_pack_metadata_invalid: ${pkg.name}@${pkg.version} returned no valid files`,
+    );
+    return exit(1);
+  }
+
+  log(`${item.name}@${item.version}: would pack ${item.files.length} files`);
+  for (const file of item.files) log(`  ${file.path ?? file}`);
   return { ...checked, pack: entries };
 }
 

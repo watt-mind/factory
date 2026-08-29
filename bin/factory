@@ -95,6 +95,7 @@ case "$cmd" in
   warm)         run_bun orchestrator/warm.mjs "$@" ;;
   tick)         run_bun orchestrator/tick.mjs "$@" ;;
   dispatch)     run_bun tools/dispatch.mjs "$@" ;;
+  handoff)      run_bun tools/handoff.mjs "$@" ;;
   events)       run_bun event-runtime/cli.mjs "$@" ;;
   pack)         run_bun event-runtime/cli.mjs pack "$@" ;;
   inbox)        run_bun event-runtime/cli.mjs inbox "$@" ;;

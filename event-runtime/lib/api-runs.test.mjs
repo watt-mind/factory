@@ -1698,28 +1698,6 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
 });
 
 describe("GET /tickets/supply (WM-824)", () => {
-  // Pin a healthy budget so the supply loader exercises its GraphQL path
-  // deterministically. Without this, readBudget() falls back to the on-disk
-  // Linear budget of whatever host runs the suite (the self-hosted CI runner's
-  // real budget is often exhausted), which would non-deterministically short
-  // these tests to `linear_budget_exhausted`. Exhaustion is still exercised
-  // through explicitly-injected budgets in the merge test below.
-  beforeEach(async () => {
-    const { setLinearSupplyBudget } = await import("./linear.mjs");
-    setLinearSupplyBudget({ remaining: 2000, limit: 2500 });
-  });
-
-  afterEach(async () => {
-    const {
-      clearLinearSupplyCache,
-      setLinearSupplyGql,
-      setLinearSupplyBudget,
-    } = await import("./linear.mjs");
-    clearLinearSupplyCache();
-    setLinearSupplyGql(null);
-    setLinearSupplyBudget(undefined);
-  });
-
   function repoMap(rows) {
     return new Map(
       rows.map((row) => [
@@ -1802,12 +1780,9 @@ describe("GET /tickets/supply (WM-824)", () => {
     expect(stale.stale).toBe(true);
   });
 
-  test("GET /tickets/supply queries Linear on demand and honors refresh=1", async () => {
-    const { setLinearSupplyGql, clearLinearSupplyCache } =
-      await import("./linear.mjs");
-    clearLinearSupplyCache();
+  test("ticketSupplyView queries Linear on demand and honors refresh", async () => {
     let calls = 0;
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       calls += 1;
       return {
         issues: {
@@ -1821,15 +1796,13 @@ describe("GET /tickets/supply (WM-824)", () => {
           pageInfo: { hasNextPage: false },
         },
       };
-    });
+    };
     const repos = repoMap([{ name: "factory" }]);
-    const s = await makeServer({ repos: () => repos });
+    const s = await makeServer();
     try {
-      const first = await fetch(s.url("/tickets/supply"));
-      expect(first.status).toBe(200);
-      const body = await first.json();
-      expect(body.source).toBe("linear");
-      expect(body.repos).toEqual([
+      const first = await ticketSupplyView(s.db, { repos, gql });
+      expect(first.source).toBe("linear");
+      expect(first.repos).toEqual([
         expect.objectContaining({
           name: "factory",
           triage: 1,
@@ -1839,10 +1812,10 @@ describe("GET /tickets/supply (WM-824)", () => {
       ]);
       expect(calls).toBe(1);
 
-      await fetch(s.url("/tickets/supply"));
+      await ticketSupplyView(s.db, { repos, gql });
       expect(calls).toBe(1);
 
-      await fetch(s.url("/tickets/supply?refresh=1"));
+      await ticketSupplyView(s.db, { repos, gql, refresh: true });
       expect(calls).toBe(2);
     } finally {
       s.close();
