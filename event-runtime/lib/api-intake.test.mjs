@@ -51,6 +51,13 @@ const makeServer = async (...args) => {
   return result;
 };
 
+// WM-1162: planning now runs OFF the response path via setImmediate, so the
+// `onEvent("admitted")` wake-up fires after the HTTP response returns. The
+// server and these tests share one event loop, so a single setImmediate hop
+// (scheduled after the server's, which is enqueued during request handling)
+// drains any pending plan signal before we assert on `onEvents`.
+const flushPlanning = () => new Promise((resolve) => setImmediate(resolve));
+
 describe("webhook intake (§14)", () => {
   let s;
   beforeAll(async () => {
@@ -95,6 +102,7 @@ describe("webhook intake (§14)", () => {
       duplicate: false,
       eventId: "hook-1",
     });
+    await flushPlanning(); // planning is deferred off the response path (WM-1162)
     expect(s.onEvents).toEqual(["admitted"]);
 
     const again = await fetch(s.url("/events"), {
@@ -108,6 +116,7 @@ describe("webhook intake (§14)", () => {
       duplicate: true,
       eventId: "hook-1",
     });
+    await flushPlanning();
     expect(s.onEvents).toEqual(["admitted"]); // no second wake-up for a duplicate
   });
 
@@ -400,6 +409,7 @@ describe("GitHub full event-set mapping (WM-1150)", () => {
       });
 
       // Same delivery id again → duplicate, no second wake-up.
+      await flushPlanning(); // drain the first admit's deferred plan (WM-1162)
       const before = s.onEvents.length;
       const again = await postEvent(s, "issues", openIssue(), "d-issue-ready");
       expect(await again.json()).toEqual({
@@ -407,6 +417,7 @@ describe("GitHub full event-set mapping (WM-1150)", () => {
         duplicate: true,
         eventId: "d-issue-ready",
       });
+      await flushPlanning();
       expect(s.onEvents.length).toBe(before);
     } finally {
       s.close();
@@ -834,6 +845,170 @@ describe("GitHub full event-set mapping (WM-1150)", () => {
       });
       expect(res.status).toBe(401);
       expect(githubEventRow(s, "d-issue-forged")).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("webhook ack-fast, plan-async (WM-1162)", () => {
+  const ghSign = (body) =>
+    `sha256=${createHmac("sha256", GH_SECRET).update(body).digest("hex")}`;
+
+  const agentReadyIssue = () => ({
+    action: "labeled",
+    issue: {
+      number: 1162,
+      state: "open",
+      labels: [{ name: "ai:agent-ready" }],
+      assignees: [],
+    },
+    repository: { full_name: "watt-mind/factory" },
+  });
+
+  const postGitHub = (s, event, payload, deliveryId, sig) => {
+    const body = JSON.stringify(payload);
+    return fetch(s.url("/webhooks/github"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": event,
+        "x-github-delivery": deliveryId,
+        "x-hub-signature-256": sig ?? ghSign(body),
+      },
+      body,
+    });
+  };
+
+  // A planner stub standing in for serve's blocking `loopTick`: it records when
+  // planning starts and, after an async sleep, when it finishes. If the handler
+  // (wrongly) awaited planning before responding, the response would be delayed
+  // by SLEEP_MS; the assertions prove it is not.
+  const SLEEP_MS = 500;
+  function sleepingPlanner() {
+    const marks = { startedAt: null, finishedAt: null, calls: 0 };
+    return {
+      marks,
+      onEvent: (kind) => {
+        marks.calls += 1;
+        marks.startedAt = Date.now();
+        setTimeout(() => {
+          marks.finishedAt = Date.now();
+        }, SLEEP_MS);
+      },
+    };
+  }
+
+  test("a signed webhook returns 2xx before the sleeping planner completes, then plans", async () => {
+    const planner = sleepingPlanner();
+    const s = await makeServer({ onEvent: planner.onEvent });
+    try {
+      const started = Date.now();
+      const res = await postGitHub(
+        s,
+        "issues",
+        agentReadyIssue(),
+        "d-1162-ack",
+      );
+      const ackMs = Date.now() - started;
+
+      // Ack is fast and the slow planner has NOT finished on the response path.
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        admitted: true,
+        duplicate: false,
+        eventId: "d-1162-ack",
+      });
+      expect(planner.marks.finishedAt).toBeNull();
+      expect(ackMs).toBeLessThan(SLEEP_MS);
+
+      // The event is persisted (admitted) regardless of planning timing.
+      const row = s.db
+        .query(
+          `SELECT type FROM events WHERE source = 'github' AND event_id = ?`,
+        )
+        .get("d-1162-ack");
+      expect(row.type).toBe("factory.work.requested");
+
+      // Planning runs after the response is sent (off the response path).
+      await flushPlanning();
+      expect(planner.marks.startedAt).not.toBeNull();
+      expect(planner.marks.calls).toBe(1);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("/health stays responsive while a webhook is being processed", async () => {
+    const planner = sleepingPlanner();
+    const s = await makeServer({ onEvent: planner.onEvent });
+    try {
+      // Fire the webhook and a liveness probe without awaiting the webhook first.
+      const webhook = postGitHub(s, "issues", agentReadyIssue(), "d-1162-live");
+      const health = fetch(s.url("/health"));
+      const [wres, hres] = await Promise.all([webhook, health]);
+      expect(wres.status).toBe(200);
+      expect(hres.status).toBe(200);
+      expect((await hres.json()).ok).toBe(true);
+      // Both responses came back before the slow planner could finish.
+      expect(planner.marks.finishedAt).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("bad GitHub signature → 401 and planning is never scheduled (unchanged)", async () => {
+    const planner = sleepingPlanner();
+    const s = await makeServer({ onEvent: planner.onEvent });
+    try {
+      const res = await postGitHub(
+        s,
+        "issues",
+        agentReadyIssue(),
+        "d-1162-badsig",
+        "sha256=deadbeef",
+      );
+      expect(res.status).toBe(401);
+      await flushPlanning();
+      expect(planner.marks.calls).toBe(0);
+      const row = s.db
+        .query(
+          `SELECT type FROM events WHERE source = 'github' AND event_id = ?`,
+        )
+        .get("d-1162-badsig");
+      expect(row).toBeNull();
+    } finally {
+      s.close();
+    }
+  });
+
+  test("a duplicate delivery short-circuits to 2xx and schedules no second plan", async () => {
+    const planner = sleepingPlanner();
+    const s = await makeServer({ onEvent: planner.onEvent });
+    try {
+      const first = await postGitHub(
+        s,
+        "issues",
+        agentReadyIssue(),
+        "d-1162-dupe",
+      );
+      expect((await first.json()).admitted).toBe(true);
+      await flushPlanning();
+      expect(planner.marks.calls).toBe(1);
+
+      const again = await postGitHub(
+        s,
+        "issues",
+        agentReadyIssue(),
+        "d-1162-dupe",
+      );
+      expect(await again.json()).toEqual({
+        admitted: false,
+        duplicate: true,
+        eventId: "d-1162-dupe",
+      });
+      await flushPlanning();
+      expect(planner.marks.calls).toBe(1); // no second wake-up for a duplicate
     } finally {
       s.close();
     }

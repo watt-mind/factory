@@ -73,6 +73,32 @@ export const WRITE_OPS = Object.freeze([
 
 const DEFAULT_WINDOW_HOURS = 24;
 
+/**
+ * How many `listComments` reads for held tickets are in flight at once.
+ *
+ * Small on purpose: this is a read surface that may be polled, and the point
+ * is to stop paying N round trips in series, not to burst a tracker's rate
+ * limiter — which, when it trips, is exactly the failure this command is
+ * supposed to survive.
+ *
+ * MEASURED CAVEAT: this buys real wall-clock only on the Linear adapter, whose
+ * transport is `await fetch`. `lib/control-plane/github.mjs` shells out through
+ * `spawnSync`, which blocks the event loop, so its reads serialize no matter
+ * what is awaited around them — measured on the factory repo at 13.0s
+ * concurrent vs 12.5s serial for five held tickets. The fan-out is correct and
+ * bounded here; making it *pay* on GitHub is an adapter-level fix, filed
+ * separately. Do not "fix" this by raising the limit.
+ */
+const HELD_COMMENT_CONCURRENCY = 5;
+
+/** `Promise.all` over fixed-size chunks: bounded fan-out, input order kept. */
+async function mapWithConcurrency(items, limit, fn) {
+  const out = [];
+  for (let i = 0; i < items.length; i += limit)
+    out.push(...(await Promise.all(items.slice(i, i + limit).map(fn))));
+  return out;
+}
+
 const reasonOf = (error) =>
   error?.message ? String(error.message) : String(error);
 
@@ -98,6 +124,26 @@ const msSince = (iso, now) => {
   const at = Date.parse(iso);
   return Number.isFinite(at) ? Math.max(0, now - at) : null;
 };
+
+/**
+ * When this ticket last showed a sign of life, and how confident that is.
+ *
+ * `lastCommentAt` is a real heartbeat — an agent posting its phase change.
+ * `updatedAt` is a proxy: it advances on the claim mutation, on label swaps
+ * and on comments, so it is an upper bound on silence rather than a heartbeat.
+ * The GitHub adapter pins `lastCommentAt: null` (github.mjs), which is the
+ * whole reason the distinction has to be carried rather than collapsed.
+ *
+ * Reporting a missing heartbeat as `never` would be the same mistake this
+ * command exists to prevent, one level down: "we did not read it" rendered as
+ * "it did not happen". Hence the explicit `unknown` source.
+ */
+export function heartbeatOf(ticket) {
+  if (ticket?.lastCommentAt)
+    return { at: ticket.lastCommentAt, source: "comment" };
+  if (ticket?.updatedAt) return { at: ticket.updatedAt, source: "updatedAt" };
+  return { at: null, source: "unknown" };
+}
 
 /** Compact duration for the human view: 5s / 12m / 3h / 2d. */
 export function humanAge(ms) {
@@ -380,7 +426,13 @@ export async function gatherAsk({
         return tickets
           .filter((t) => stateName(t) === "In Progress")
           .map((t) => {
-            const claimedAt = t.startedAt ?? t.createdAt ?? null;
+            const heartbeat = heartbeatOf(t);
+            // `startedAt` before `updatedAt` before `createdAt`, the same
+            // precedence reaper.mjs `lastActivity()` uses. GitHub has no
+            // workflow-state startedAt (github.mjs pins it null), so without
+            // the `updatedAt` step a ticket claimed 12 minutes ago reads as
+            // "30d old" — issue-creation time wearing a claim's label.
+            const claimedAt = t.startedAt ?? t.updatedAt ?? t.createdAt ?? null;
             return {
               repo: repo.name,
               identifier: t.identifier,
@@ -389,9 +441,17 @@ export async function gatherAsk({
               assignee: t.assignee?.name ?? null,
               labels: labelNames(t),
               claimedAt,
+              claimedAtSource: t.startedAt
+                ? "startedAt"
+                : t.updatedAt
+                  ? "updatedAt"
+                  : t.createdAt
+                    ? "createdAt"
+                    : "unknown",
               ageMs: msSince(claimedAt, now),
-              lastHeartbeatAt: t.lastCommentAt ?? null,
-              heartbeatAgeMs: msSince(t.lastCommentAt, now),
+              lastHeartbeatAt: heartbeat.at,
+              heartbeatAgeMs: msSince(heartbeat.at, now),
+              heartbeatSource: heartbeat.source,
             };
           });
       });
@@ -402,42 +462,54 @@ export async function gatherAsk({
         const tickets = (await allTickets(repo)).filter((t) =>
           labelNames(t).some((name) => HELD_LABELS.includes(name)),
         );
-        const rows = [];
-        for (const t of tickets) {
-          // The question is the newest comment — the same conservative guess
-          // reply-detection makes when it has no label-add to anchor on. A
-          // per-ticket failure costs the question, never the row.
-          let question = null;
-          let questionAt = null;
-          let questionError = null;
-          try {
-            const comments = await planeFor(repo).listComments(t.identifier);
-            const newest = [...comments].sort(
-              (a, b) =>
-                Date.parse(a.createdAt ?? 0) - Date.parse(b.createdAt ?? 0),
-            )[comments.length - 1];
-            if (newest) {
-              question = oneLine(newest.body, 400);
-              questionAt = newest.createdAt ?? null;
+        // One listComments per held ticket, fully serialized, was the bulk of
+        // the wall-clock — and it got slowest exactly when the factory was
+        // unhealthy and the answer mattered most. Bounded concurrency keeps
+        // the per-ticket try/catch (a failure still costs one question, not
+        // the section) without paying for the round trips in series.
+        return mapWithConcurrency(
+          tickets,
+          HELD_COMMENT_CONCURRENCY,
+          async (t) => {
+            let question = null;
+            let questionAt = null;
+            let questionError = null;
+            try {
+              const comments = await planeFor(repo).listComments(t.identifier);
+              const newest = [...comments].sort(
+                (a, b) =>
+                  Date.parse(a.createdAt ?? 0) - Date.parse(b.createdAt ?? 0),
+              )[comments.length - 1];
+              if (newest) {
+                question = oneLine(newest.body, 400);
+                questionAt = newest.createdAt ?? null;
+              }
+            } catch (error) {
+              questionError = reasonOf(error);
             }
-          } catch (error) {
-            questionError = reasonOf(error);
-          }
-          rows.push({
-            repo: repo.name,
-            identifier: t.identifier,
-            title: t.title ?? null,
-            url: t.url ?? null,
-            state: stateName(t),
-            holds: labelNames(t).filter((n) => HELD_LABELS.includes(n)),
-            labels: labelNames(t),
-            question,
-            questionAt,
-            questionError,
-            ageMs: msSince(t.updatedAt ?? t.createdAt, now),
-          });
-        }
-        return rows;
+            return {
+              repo: repo.name,
+              identifier: t.identifier,
+              title: t.title ?? null,
+              url: t.url ?? null,
+              state: stateName(t),
+              holds: labelNames(t).filter((n) => HELD_LABELS.includes(n)),
+              labels: labelNames(t),
+              question,
+              questionAt,
+              // NOT necessarily the question. reply-detection anchors on the
+              // ai:blocked label-add and only falls back to newest-comment when
+              // there is no add event; the neutral contract exposes no label
+              // history (GitHub has none), so this is always the fallback. Once
+              // a human answers a held ticket, the newest comment is their
+              // ANSWER. Consumers must read this discriminator before calling
+              // the text a question, and the renderer labels it accordingly.
+              questionSource: "newest-comment",
+              questionError,
+              ageMs: msSince(t.updatedAt ?? t.createdAt, now),
+            };
+          },
+        );
       });
     }
 
@@ -557,6 +629,33 @@ const count = (section) =>
   section?.error ? "unavailable" : (section?.rows?.length ?? 0);
 
 /**
+ * A heartbeat we never read is `unknown`, not `never` — and a timestamp that
+ * is only `updatedAt` says so, because "silent for 40m" and "last touched 40m
+ * ago" are different claims about whether an agent is alive.
+ */
+/**
+ * A comment read that FAILED must not render like a ticket that simply has no
+ * comments — falling back to the title in both cases is the section-level
+ * "unavailable vs empty" mistake repeated per row. Rate limits hit these reads
+ * one ticket at a time, so this is the common case, not the exotic one.
+ */
+const heldRowText = (r, repoW, idW) => {
+  const head = `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(r.holds.join(","), 22)}  `;
+  if (r.questionError)
+    return `${head}comment unreadable — ${oneLine(r.questionError, 60)}`;
+  if (r.question) return `${head}last comment: ${oneLine(r.question, 60)}`;
+  return `${head}${oneLine(r.title, 70)} (no comments)`;
+};
+
+const heartbeatText = (row) => {
+  if (row.heartbeatSource === "comment")
+    return `heartbeat ${humanAge(row.heartbeatAgeMs)} ago`;
+  if (row.heartbeatSource === "updatedAt")
+    return `updated ${humanAge(row.heartbeatAgeMs)} ago`;
+  return "heartbeat unknown";
+};
+
+/**
  * The human view, rendered from the document `gatherAsk` returned — never from
  * a second read. If a number here disagrees with `--json`, that is a bug in
  * this function, not a different answer.
@@ -589,7 +688,7 @@ export function formatAsk(doc) {
       doc.inflight,
       "nothing claimed",
       (r) =>
-        `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(`${humanAge(r.ageMs)} old`, 9)}  heartbeat ${pad(r.lastHeartbeatAt ? `${humanAge(r.heartbeatAgeMs)} ago` : "never", 10)}  ${oneLine(r.title, 45)}`,
+        `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(`${humanAge(r.ageMs)} old`, 9)}  ${pad(heartbeatText(r), 24)}  ${oneLine(r.title, 45)}`,
     );
   }
 
@@ -597,12 +696,13 @@ export function formatAsk(doc) {
     const repoW = columnWidth(doc.held.rows, "repo", 6, 16);
     const idW = columnWidth(doc.held.rows, "identifier", 8, 26);
     lines.push(`\nHELD — waiting on a human (${count(doc.held)})`);
-    renderRows(
-      lines,
-      doc.held,
-      "nothing held",
-      (r) =>
-        `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(r.holds.join(","), 22)}  ${oneLine(r.question ?? r.title, 70)}`,
+    // "last comment", never "question": once a human answers, the newest
+    // comment IS the answer, and this is the view where mislabelling it turns
+    // "what is waiting on me" into a lie.
+    if (doc.held.rows?.length)
+      lines.push("  (newest comment shown — may be the reply, not the ask)");
+    renderRows(lines, doc.held, "nothing held", (r) =>
+      heldRowText(r, repoW, idW),
     );
   }
 

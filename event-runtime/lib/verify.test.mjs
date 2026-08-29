@@ -4,10 +4,12 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { storeCollected } from "./artifacts.mjs";
 import { hashJson, sha256Hex } from "./canonical.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { execFileSync } from "node:child_process";
@@ -801,6 +803,77 @@ describe("verifyResult", () => {
         attempt: 1,
       }),
     ).toThrow(ContractViolation);
+  });
+
+  // WM-1017: on macOS a workspace enters as `/tmp/...` while its realpath is
+  // `/private/tmp/...`. verifyCompleted() must record the workspace provenance
+  // root in the same canonical namespace as the realpath'd artifact URI, or
+  // storeCollected()'s `path.relative(root, src)` escapes the lexical root and
+  // rejects a valid regular artifact with a PathViolation.
+  test("workspace behind a symlinked parent → canonical provenance persists via storeCollected", () => {
+    // A workspace directory reached through a symlinked parent, mimicking the
+    // /tmp → /private/tmp alias without depending on the host's own /tmp.
+    const realParent = tmpDir("evrt-verify-realparent-");
+    const realWorkspace = path.join(realParent, "ws");
+    mkdirSync(path.join(realWorkspace, "logs"), { recursive: true });
+
+    const linkBase = tmpDir("evrt-verify-linkbase-");
+    const aliasedParent = path.join(linkBase, "aliased");
+    symlinkSync(realParent, aliasedParent, "dir");
+    const workspaceDir = path.join(aliasedParent, "ws");
+
+    writeFileSync(
+      path.join(workspaceDir, "result.json"),
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+        artifacts: [{ kind: "log", path: "logs/agent.log" }],
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      path.join(workspaceDir, "logs", "agent.log"),
+      "hello\n",
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      attempt: 1,
+    });
+
+    // The URI is spelled in the resolved namespace, not the symlinked alias.
+    const canonicalFile = realpathSync(
+      path.join(workspaceDir, "logs", "agent.log"),
+    );
+    const entry = out.result.artifacts[0];
+    expect(entry.uri).toBe(`file://${canonicalFile}`);
+    expect(entry.uri).not.toContain("aliased");
+    expect(entry.sha256).toBe(sha256Hex("hello\n"));
+
+    // Provenance shares that canonical namespace and stays internal: the
+    // workspaceRoot property is non-enumerable and never serialized.
+    const descriptor = Object.getOwnPropertyDescriptor(entry, "workspaceRoot");
+    expect(descriptor.enumerable).toBe(false);
+    expect(entry.workspaceRoot).toBe(realpathSync(workspaceDir));
+    expect(JSON.stringify(out.result)).not.toContain("workspaceRoot");
+
+    // The end-to-end proof: durable storage repeats confinement against the
+    // canonical root and persists the artifact instead of throwing.
+    const storeRoot = tmpDir("evrt-verify-store-");
+    const stored = storeCollected({
+      entries: out.result.artifacts,
+      storeRoot,
+      workspaceDir,
+    });
+    expect(stored[0].uri).toBe(`file://${path.join(storeRoot, entry.sha256)}`);
+    expect(readFileSync(path.join(storeRoot, entry.sha256), "utf8")).toBe(
+      "hello\n",
+    );
   });
 
   test("declared artifact that does not exist → ContractViolation", () => {

@@ -370,12 +370,14 @@ version, and checks the constraint. A mismatch is
 and recovery guidance. It happens before claim, workspace creation, dependency
 installation, or model spawn.
 
-`preflightToolchain(repo, {node, which, spawn})` is that check. The only
-subprocess it starts, per declared executable, is `<executable> --version`;
+`preflightToolchain(repo, {node, which, spawn})` is that check. Config declares
+a bare executable name; `which` resolves it on PATH, and the probe then spawns
+that **resolved path** — `<resolved> --version`, exactly one argument, no shell.
 PATH resolution and the probe are injected so the non-mutation property is
-asserted on the argv the real code builds. (Resolution and the probe currently
-perform two independent PATH lookups, so the attestation's `resolved` path and
-the binary that answered can in principle differ — #1116.) A resolution failure is
+asserted on the argv the real code builds. Spawning the resolved path rather
+than the bare name closes a second, independent PATH lookup, so the version the
+attestation reports is provably from the binary its `resolved` path names
+(#1116). A resolution failure is
 `repo_toolchain_missing`; a version that is out of range, unparseable, or
 unobtainable (non-zero exit) is `repo_toolchain_mismatch`, which carries
 `observed` (normalized) and `observedRaw` (the tool's own first line) so an

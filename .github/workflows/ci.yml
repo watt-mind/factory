@@ -131,8 +131,15 @@ jobs:
 
   fast-unit-tests:
     name: Fast unit tests
+    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
+    # this job is still evaluated when `shadow-runner-health` is intentionally
+    # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
+    # workflow or a failed `route` skips it, and on the self-hosted lane it
+    # still requires a healthy shadow fleet.
     if: >-
       ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
         (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
       }}
@@ -247,8 +254,14 @@ jobs:
     # shared-host contention. Not a required check — required Verify and Fast
     # unit tests exclude this group. A red result here is a flake signal, not
     # a merge blocker.
+    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
+    # this job still reaches a hosted runner when `shadow-runner-health` is
+    # intentionally skipped on the cloud lane (WM-1122). Same fail-closed guards
+    # as Fast unit tests.
     if: >-
       ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
         (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
       }}
@@ -356,8 +369,16 @@ jobs:
 
   verify:
     name: Full verification
+    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
+    # this job is still evaluated when `shadow-runner-health` is intentionally
+    # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
+    # workflow or a failed `route` skips it, on the self-hosted lane it still
+    # requires a healthy shadow fleet, and it always still requires successful
+    # fast unit tests.
     if: >-
       ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
         (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success') &&
         needs.fast-unit-tests.result == 'success'
@@ -467,6 +488,23 @@ jobs:
 
       - name: Formatting check (prettier)
         run: bun run format:check
+
+      # WM-1122: the shadow/verify self-hosted image ships ripgrep, but the
+      # GitHub-hosted ubuntu-latest cloud lane (nightly/fork/force_hosted) does
+      # not. Without it the guard below hits `rg: command not found` and
+      # misreports it as a stale search contract, failing Verify on every
+      # cloud-lane run. Install it only when missing so the self-hosted lane is
+      # untouched.
+      - name: Ensure ripgrep is available
+        if: runner.environment != 'self-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version | head -1
 
       - name: Guard host-serialized spawn suites
         shell: bash

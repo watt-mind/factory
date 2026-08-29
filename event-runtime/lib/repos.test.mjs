@@ -523,9 +523,12 @@ function fakeNode({ versions = {}, missing = [], exitCodes = {} } = {}) {
     },
     spawn: async (argv) => {
       spawnCalls.push(argv);
+      // The production probe spawns the PATH-resolved path (argv[0] is
+      // `/opt/bin/<exe>`), so key the fake's canned output by basename.
+      const key = argv[0].split("/").pop();
       return {
-        exitCode: exitCodes[argv[0]] ?? 0,
-        stdout: versions[argv[0]] ?? "",
+        exitCode: exitCodes[key] ?? 0,
+        stdout: versions[key] ?? "",
         stderr: "",
       };
     },
@@ -821,10 +824,12 @@ describe("preflightToolchain verifies without mutating the host", () => {
     await preflightToolchain(repo, { now, ...node });
 
     expect(node.whichCalls).toEqual(["bun", "node", "git"]);
+    // The probe spawns the PATH-resolved path from `which`, not the bare name,
+    // so the version reported is provably from the binary the attestation names.
     expect(node.spawnCalls).toEqual([
-      ["bun", "--version"],
-      ["node", "--version"],
-      ["git", "--version"],
+      ["/opt/bin/bun", "--version"],
+      ["/opt/bin/node", "--version"],
+      ["/opt/bin/git", "--version"],
     ]);
     // Not just "the expected commands ran" — no install/upgrade verb reached
     // the host under any name. Toolchain preflight validates; it does not
@@ -836,6 +841,37 @@ describe("preflightToolchain verifies without mutating the host", () => {
       expect(argv[1]).toBe("--version");
       expect(mutating.test(argv.join(" "))).toBe(false);
     }
+  });
+
+  test("the probe spawns the resolved path, not the bare name (WM-1116)", async () => {
+    // `which` and `spawn` each resolve PATH independently; if the probe spawned
+    // the bare name it could run a different binary than the one attested. A
+    // `which` that returns a path unrelated to the bare name proves the spawn
+    // used argv[0] = the resolved path, so `resolved` and `observed` describe
+    // the same binary.
+    const repo = repoWith(`    toolchain:\n      bun: ">=1.3 <2"\n`);
+    const spawnCalls = [];
+    const resolvedPath = "/opt/homebrew/Cellar/bun/1.3.14/bin/bun";
+    const node = {
+      which: async () => resolvedPath,
+      spawn: async (argv) => {
+        spawnCalls.push(argv);
+        // Only answer for the resolved path; a bare-name spawn would get "".
+        return {
+          exitCode: 0,
+          stdout: argv[0] === resolvedPath ? "1.3.14\n" : "",
+          stderr: "",
+        };
+      },
+    };
+    const attestation = await preflightToolchain(repo, { now, ...node });
+
+    expect(spawnCalls).toEqual([[resolvedPath, "--version"]]);
+    const [tool] = attestation.tools;
+    expect(tool.resolved).toBe(resolvedPath);
+    expect(tool.observed).toBe("1.3.14");
+    expect(tool.satisfied).toBe(true);
+    expect(attestation.ok).toBe(true);
   });
 
   test("a repo with no toolchain block is attested without touching the host", async () => {

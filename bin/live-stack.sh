@@ -300,6 +300,33 @@ case "$ACTION" in
       reap_owned_port "$WEB_PORT" "web server"
     fi
 
+    # 0. Start or verify the GitHub App token-refresh daemon (#1148, epic #1136).
+    # When the App is configured, gh-app-auth.mjs --daemon mints a fresh
+    # installation token into ~/.factory/gh-app-token.json (~every 45 min; tokens
+    # expire hourly) and github.mjs reads that file per gh call. Supervising it
+    # here means a stack restart no longer strands the token: without the daemon
+    # the file goes stale within the hour and the control-plane silently falls
+    # back to the operator PAT — the rate contention the App exists to remove.
+    #
+    # Gated on both App vars: absent either, no daemon starts and nothing changes
+    # (no regression — the PAT path is still the default). Mint once in the
+    # foreground first so the token file exists before serve makes its first gh
+    # call; a failed mint warns rather than aborts, because serve's PAT fallback
+    # still lets the stack come up while the daemon retries.
+    if [[ -n "${FACTORY_GH_APP_ID:-}" && -n "${FACTORY_GH_APP_PRIVATE_KEY_PATH:-}" ]]; then
+      if pid_alive "$RUN_DIR/gh-app-auth.pid"; then
+        info "GitHub App token daemon already running (pid $(cat "$RUN_DIR/gh-app-auth.pid"))"
+      else
+        info "minting initial GitHub App installation token"
+        if ! (cd "$REPO" && bun "$REPO/lib/control-plane/gh-app-auth.mjs" >>"$RUN_DIR/gh-app-auth.log" 2>&1); then
+          warn "initial GitHub App token mint failed — control-plane falls back to the operator PAT until the daemon succeeds (see $RUN_DIR/gh-app-auth.log)"
+        fi
+        info "starting GitHub App token-refresh daemon"
+        spawn_daemon "$RUN_DIR/gh-app-auth.pid" "$RUN_DIR/gh-app-auth.log" "$REPO" \
+          bun "$REPO/lib/control-plane/gh-app-auth.mjs" --daemon
+      fi
+    fi
+
     # 1. Start or verify event runtime API server
     if pid_alive "$RUN_DIR/serve.pid"; then
       info "event runtime already running (pid $(cat "$RUN_DIR/serve.pid"), port $API_PORT)"
@@ -501,9 +528,14 @@ case "$ACTION" in
     term_daemon "$RUN_DIR/web.pid" "web server"
     term_daemon "$RUN_DIR/worker.pid" "worker"
     term_daemon "$RUN_DIR/serve.pid" "event runtime"
+    # Reap the App token daemon by pidfile too (#1148). term_daemon/await_daemon
+    # are no-ops when the pidfile is absent, so a stack that never started it
+    # (App env unset) tears down exactly as before.
+    term_daemon "$RUN_DIR/gh-app-auth.pid" "GitHub App token daemon"
     await_daemon "$RUN_DIR/web.pid" "web server"
     await_daemon "$RUN_DIR/worker.pid" "worker"
     await_daemon "$RUN_DIR/serve.pid" "event runtime"
+    await_daemon "$RUN_DIR/gh-app-auth.pid" "GitHub App token daemon"
     # Backstop the pidfile teardown: reclaim the ports and sweep any serve /
     # worker / web process of ours that outlived its recorded pid, so a restart
     # never inherits an orphan holding :7381/:7382 or a lease (#1068).

@@ -256,8 +256,13 @@ describe("registry", () => {
     // evidence. Both prompts are registry inputs; dispatch.json and
     // merge-review.json are re-pinned. Prompt text only — no schema, contract,
     // route, or capability changed.
+    // Regenerated (#1028): private client-repo loops (bj29/cashsaas/legalease/
+    // wm-home work-/merge-/ship-/reconcile-/label-guard-/warm-/unblock-digest-)
+    // moved out of the public kernel schedules.json into the instance overlay,
+    // so the tracked kernel now ships only reaper/work-factory/merge-factory/
+    // triage-factory. schedules.json is a registry input (kernelSchedules).
     const expected =
-      "sha256:5af0bf31532d3fcd8e119e4c054d2a3f119dea89004fe95bce4ed061bb2e44e8";
+      "sha256:9c8b4dc211772cfbe7645fd99dcac98a644ce5aa3170c8f91f12815309f4d7bd";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -268,7 +273,7 @@ describe("registry", () => {
     );
     writeFileSync(
       config,
-      `schedules:\n  work-bj29:\n    every: 9h\n    enabled: true\n    payload:\n      instance: local\n  merge-factory:\n    enabled: false\n`,
+      `schedules:\n  work-factory:\n    every: 9h\n    enabled: true\n    payload:\n      instance: local\n  merge-factory:\n    enabled: false\n`,
     );
     const overlaid = loadRegistry({
       packRoots: [],
@@ -282,13 +287,13 @@ describe("registry", () => {
       ),
     });
 
-    expect(overlaid.schedules["work-bj29"]).toMatchObject({
+    expect(overlaid.schedules["work-factory"]).toMatchObject({
       every: "9h",
       enabled: true,
-      payload: { repo: "bj29", instance: "local" },
+      payload: { repo: "factory", instance: "local" },
     });
     expect(overlaid.schedules["merge-factory"].enabled).toBe(false);
-    expect(overlaid.scheduleSources["work-bj29"]).toBe("overlay");
+    expect(overlaid.scheduleSources["work-factory"]).toBe("overlay");
     expect(overlaid.scheduleSources.reaper).toBe("kernel");
     expect(registryDigest(overlaid)).toBe(registryDigest(withoutOverlay));
   });
@@ -300,7 +305,7 @@ describe("registry", () => {
     );
     writeFileSync(
       config,
-      `overlay_auto_approve:\n  - work-bj29\nschedules:\n  work-bj29:\n    enabled: true\n    approval: auto\n`,
+      `overlay_auto_approve:\n  - reaper\nschedules:\n  reaper:\n    enabled: true\n    approval: auto\n`,
     );
     const authorized = loadRegistry({
       packRoots: [],
@@ -314,15 +319,15 @@ describe("registry", () => {
       ),
     });
 
-    expect(authorized.schedules["work-bj29"]).toMatchObject({
+    expect(authorized.schedules["reaper"]).toMatchObject({
       enabled: true,
       approval: "auto",
     });
-    expect(authorized.scheduleSources["work-bj29"]).toBe(
+    expect(authorized.scheduleSources["reaper"]).toBe(
       "operator-authorized-auto",
     );
-    expect(withoutOverlay.schedules["work-bj29"].approval).toBe("watched");
-    expect(withoutOverlay.scheduleSources["work-bj29"]).toBe("kernel");
+    expect(withoutOverlay.schedules["reaper"].approval).toBe("watched");
+    expect(withoutOverlay.scheduleSources["reaper"]).toBe("kernel");
     expect(registryDigest(authorized)).toBe(registryDigest(withoutOverlay));
   });
 
@@ -333,7 +338,7 @@ describe("registry", () => {
     );
     writeFileSync(
       config,
-      `schedules:\n  work-bj29:\n    enabled: true\n    approval: auto\n`,
+      `schedules:\n  reaper:\n    enabled: true\n    approval: auto\n`,
     );
     const originalWarn = console.warn;
     const warnings = [];
@@ -345,8 +350,8 @@ describe("registry", () => {
       console.warn = originalWarn;
     }
 
-    expect(registry.schedules["work-bj29"].approval).toBe("watched");
-    expect(registry.scheduleSources["work-bj29"]).toBe("overlay");
+    expect(registry.schedules["reaper"].approval).toBe("watched");
+    expect(registry.scheduleSources["reaper"]).toBe("overlay");
     expect(warnings).toEqual([
       expect.stringContaining("not named in overlay_auto_approve"),
     ]);

@@ -28,6 +28,9 @@ const NOW = Date.parse("2026-08-29T12:00:00.000Z");
 const ago = (ms) => new Date(NOW - ms).toISOString();
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+const byId = (rows) => Object.fromEntries(rows.map((r) => [r.identifier, r]));
 
 const REPO = {
   name: "factory",
@@ -125,6 +128,25 @@ function seedPlane() {
             createdAt: ago(2 * HOUR),
           },
         ],
+      },
+      {
+        // The GITHUB shape. lib/control-plane/github.mjs pins `startedAt` and
+        // `lastCommentAt` to null unconditionally, and config/repos.yaml puts
+        // the factory repo on that adapter — so this, not WM-2, is the primary
+        // in-flight path. Without it the suite only ever sees Linear's richer
+        // ticket and cannot tell a real heartbeat from a missing one.
+        id: "t5",
+        identifier: "WM-5",
+        title: "Claimed on a GitHub-shaped tracker",
+        state: { id: "s-progress", name: "In Progress", type: "started" },
+        team,
+        project,
+        labels: [],
+        assignee: { id: "u-2", name: "Grace" },
+        createdAt: ago(30 * DAY),
+        startedAt: null,
+        updatedAt: ago(12 * MIN),
+        comments: [],
       },
       {
         id: "t4",
@@ -310,17 +332,26 @@ test("every section is present and typed on a seeded fixture", async () => {
   expect(doc.queue.rows[0].ageMs).toBe(6 * HOUR);
 
   // inflight — claimed, with age and last heartbeat
-  expect(doc.inflight.rows.map((r) => r.identifier)).toEqual(["WM-2"]);
-  expect(doc.inflight.rows[0].ageMs).toBe(3 * HOUR);
-  expect(doc.inflight.rows[0].heartbeatAgeMs).toBe(11 * MIN);
-  expect(doc.inflight.rows[0].assignee).toBe("Ada");
+  expect(doc.inflight.rows.map((r) => r.identifier).sort()).toEqual([
+    "WM-2",
+    "WM-5",
+  ]);
+  const claimed = byId(doc.inflight.rows);
+  expect(claimed["WM-2"]).toMatchObject({
+    assignee: "Ada",
+    ageMs: 3 * HOUR,
+    claimedAtSource: "startedAt",
+    heartbeatAgeMs: 11 * MIN,
+    heartbeatSource: "comment",
+  });
 
-  // held — with the question
+  // held — with the newest comment, explicitly marked as such
   expect(doc.held.rows.map((r) => r.identifier)).toEqual(["WM-3"]);
   expect(doc.held.rows[0].holds).toEqual(["ai:blocked"]);
   expect(doc.held.rows[0].question).toBe(
     "Which base branch should this target?",
   );
+  expect(doc.held.rows[0].questionSource).toBe("newest-comment");
 
   // recent — 24h window, scoped to the requested repos
   expect(doc.recent.rows.map((r) => r.runId)).toEqual([
@@ -360,6 +391,199 @@ test("every section is present and typed on a seeded fixture", async () => {
   expect(text).toContain("Which base branch should this target?");
   expect(text).toContain("owned_paths_overlap");
   expect(text).toContain("$1.25");
+});
+
+test("in-flight age and heartbeat survive a tracker with no startedAt or lastCommentAt", async () => {
+  // github.mjs pins startedAt and lastCommentAt to null, so this is the shape
+  // the factory repo's own tickets arrive in. The bug this guards: age falling
+  // back to createdAt (a 12-minute-old claim reading as "30d old") and an
+  // UNKNOWN heartbeat rendering as a definite "never".
+  const plane = seedPlane();
+  const doc = await gatherAsk(askArgs({ controlPlaneFor: () => plane }));
+  const row = byId(doc.inflight.rows)["WM-5"];
+
+  expect(row.claimedAtSource).toBe("updatedAt");
+  expect(row.ageMs).toBe(12 * MIN);
+  expect(row.ageMs).not.toBe(30 * DAY);
+  expect(row.heartbeatSource).toBe("updatedAt");
+  expect(row.heartbeatAgeMs).toBe(12 * MIN);
+  expect(row.lastHeartbeatAt).toBe(ago(12 * MIN));
+
+  // A heartbeat that was never read must not render as one that never happened.
+  const text = formatAsk(doc);
+  expect(text).toContain("updated 12m ago");
+  expect(text).not.toContain("never");
+  expect(text).not.toContain("30d old");
+});
+
+test("a heartbeat the tracker cannot answer reads unknown, not never", async () => {
+  const silent = {
+    kind: "memory",
+    async listTickets() {
+      return [
+        {
+          identifier: "WM-9",
+          title: "No timestamps at all",
+          state: { name: "In Progress" },
+          labels: [],
+          createdAt: null,
+          startedAt: null,
+          updatedAt: null,
+          lastCommentAt: null,
+        },
+      ];
+    },
+    async listDispatchable() {
+      return [];
+    },
+    async listComments() {
+      return [];
+    },
+  };
+  const doc = await gatherAsk(
+    askArgs({ controlPlaneFor: () => silent, sections: ["inflight"] }),
+  );
+
+  expect(doc.inflight.rows[0]).toMatchObject({
+    heartbeatSource: "unknown",
+    lastHeartbeatAt: null,
+    heartbeatAgeMs: null,
+    claimedAtSource: "unknown",
+    ageMs: null,
+  });
+  expect(formatAsk(doc)).toContain("heartbeat unknown");
+  expect(formatAsk(doc)).not.toContain("never");
+});
+
+test("held rows never present a comment as the outstanding question", async () => {
+  // The human has ALREADY answered; the newest comment is their reply. Calling
+  // that "the question" is the specific way this view lies, because it is the
+  // view that answers "what is waiting on me".
+  const answered = {
+    kind: "memory",
+    async listTickets() {
+      return [
+        {
+          identifier: "WM-8",
+          title: "Held, and answered",
+          state: { name: "Blocked" },
+          labels: [{ name: "ai:blocked" }],
+          createdAt: ago(6 * HOUR),
+          updatedAt: ago(1 * HOUR),
+        },
+      ];
+    },
+    async listDispatchable() {
+      return [];
+    },
+    async listComments() {
+      return [
+        {
+          id: "q",
+          body: "Which base branch should this target?",
+          createdAt: ago(5 * HOUR),
+        },
+        { id: "a", body: "develop, always.", createdAt: ago(1 * HOUR) },
+      ];
+    },
+  };
+  const doc = await gatherAsk(
+    askArgs({ controlPlaneFor: () => answered, sections: ["held"] }),
+  );
+
+  expect(doc.held.rows[0].question).toBe("develop, always.");
+  expect(doc.held.rows[0].questionSource).toBe("newest-comment");
+
+  const text = formatAsk(doc);
+  expect(text).toContain("last comment: develop, always.");
+  expect(text).toContain("may be the reply, not the ask");
+});
+
+test("a held comment read that failed does not render like a ticket with no comments", async () => {
+  // Rate limits hit these reads one ticket at a time, so a per-row failure is
+  // the common case. Falling back to the title in both cases would repeat the
+  // section-level "unavailable vs empty" mistake once per row.
+  const flaky = {
+    kind: "memory",
+    async listTickets() {
+      return ["WM-6", "WM-7"].map((identifier) => ({
+        identifier,
+        title: `Held ${identifier}`,
+        state: { name: "Blocked" },
+        labels: [{ name: "ai:blocked" }],
+        createdAt: ago(6 * HOUR),
+        updatedAt: ago(1 * HOUR),
+      }));
+    },
+    async listDispatchable() {
+      return [];
+    },
+    async listComments(identifier) {
+      if (identifier === "WM-6") throw new Error("HTTP 403 rate limited");
+      return [];
+    },
+  };
+  const doc = await gatherAsk(
+    askArgs({ controlPlaneFor: () => flaky, sections: ["held"] }),
+  );
+
+  // The section survives: both rows are present, neither is dropped.
+  expect(doc.held.error).toBeNull();
+  expect(doc.held.rows.length).toBe(2);
+  const held = byId(doc.held.rows);
+  expect(held["WM-6"].questionError).toContain("rate limited");
+  expect(held["WM-6"].question).toBeNull();
+  expect(held["WM-7"].questionError).toBeNull();
+  expect(held["WM-7"].question).toBeNull();
+
+  const text = formatAsk(doc);
+  expect(text).toContain("comment unreadable — HTTP 403 rate limited");
+  expect(text).toContain("(no comments)");
+});
+
+test("held comment reads are bounded-concurrent, not serialized", async () => {
+  const HELD = 12;
+  let inFlight = 0;
+  let peak = 0;
+  const plane = {
+    kind: "memory",
+    async listTickets() {
+      return Array.from({ length: HELD }, (_, i) => ({
+        identifier: `WM-${100 + i}`,
+        title: `Held ${i}`,
+        state: { name: "Blocked" },
+        labels: [{ name: "ai:blocked" }],
+        createdAt: ago(6 * HOUR),
+        updatedAt: ago(1 * HOUR),
+      }));
+    },
+    async listDispatchable() {
+      return [];
+    },
+    async listComments(identifier) {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Bun.sleep(5);
+      inFlight -= 1;
+      return [{ id: "c", body: `note for ${identifier}`, createdAt: ago(MIN) }];
+    },
+  };
+
+  const doc = await gatherAsk(
+    askArgs({ controlPlaneFor: () => plane, sections: ["held"] }),
+  );
+
+  expect(doc.held.rows.length).toBe(HELD);
+  // Serialized would peak at 1; unbounded would peak at HELD. Neither is right.
+  expect(peak).toBeGreaterThan(1);
+  expect(peak).toBeLessThanOrEqual(5);
+  // Input order is preserved despite the fan-out.
+  expect(doc.held.rows.map((r) => r.identifier)).toEqual(
+    Array.from({ length: HELD }, (_, i) => `WM-${100 + i}`),
+  );
+  expect(doc.held.rows.every((r) => r.question?.includes("note for"))).toBe(
+    true,
+  );
 });
 
 test("a failing section carries its error and never renders as empty", async () => {
