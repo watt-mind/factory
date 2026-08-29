@@ -2859,6 +2859,12 @@ export async function executeClaimed(
             ...(dispatchOpts ?? {}),
             claimedRetry: claimedRetryFor(db, runId, attempt),
             escalatedContinuation: worktreeHandoff,
+            hasTicketLease:
+              dispatchOpts?.hasTicketLease ??
+              ((repo, ticket) =>
+                liveWorkerLeases(repo, { dir: leasesDir }).some(
+                  (lease) => String(lease.ticket) === String(ticket),
+                )),
             // Match the planner's operator-only bypass from the immutable
             // proposal that admitted this run. Never trust caller options here:
             // chain and schedule runs must keep the security/escalation gate.

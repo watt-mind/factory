@@ -1089,6 +1089,10 @@ export function worktreeDispatchAutoEligibility(
     fetchViewer = fetchViewerDefault,
     fetchInFlight = fetchInFlightDefault,
     countLeases = (repoName) => liveWorkerLeases(repoName).length,
+    hasTicketLease = (repoName, ticket) =>
+      liveWorkerLeases(repoName).some(
+        (lease) => String(lease.ticket) === String(ticket),
+      ),
     maxInFlightFallback,
     budgetRefusal = defaultBudgetRefusal,
     claimedRetry = null,
@@ -1148,6 +1152,16 @@ export function worktreeDispatchAutoEligibility(
   }
   evidence.checks.ticket_identifier_parseable = true;
 
+  const canResumeEscalation = Boolean(
+    escalatedContinuation?.failedRunId &&
+      escalatedContinuation?.continuationRunId &&
+      escalatedContinuation?.rootRunId &&
+      escalatedContinuation?.projectionState === "applied" &&
+      escalatedContinuation?.repo === payload?.repo &&
+      String(escalatedContinuation?.ticket) === String(payload?.ticket) &&
+      payload?.modelTier === "strong",
+  );
+
   let budgetReason;
   try {
     budgetReason = budgetRefusal();
@@ -1157,7 +1171,24 @@ export function worktreeDispatchAutoEligibility(
   if (budgetReason) return refusal(budgetReason, evidence);
   evidence.checks.budget_available = true;
 
-  if (live >= cap) return refusal("capacity_full", evidence);
+  // A tier escalation transfers one already-live ticket lease rather than
+  // admitting another dispatch. At a full cap, discount only the exact
+  // ticket lease authenticated by the durable continuation handoff; if the
+  // failed worker has already released it, the ordinary capacity count wins.
+  let transferredLease = false;
+  if (live >= cap && canResumeEscalation) {
+    try {
+      transferredLease = hasTicketLease(repo.name, payload?.ticket) === true;
+    } catch {
+      transferredLease = false;
+    }
+  }
+  const effectiveLive = live - (transferredLease ? 1 : 0);
+  if (canResumeEscalation) {
+    evidence.repo.capTransferred = transferredLease;
+    evidence.repo.capEffective = effectiveLive;
+  }
+  if (effectiveLive >= cap) return refusal("capacity_full", evidence);
   evidence.checks.cap_available = true;
 
   const ticket = fetchTicket(payload?.ticket, payload?.repo);
@@ -1191,15 +1222,6 @@ export function worktreeDispatchAutoEligibility(
     Number.isInteger(claimedRetry?.priorAttempt) &&
     claimedRetry.priorAttempt > 0 &&
     claimedRetry?.reasonCode === "lease_expired",
-  );
-  const canResumeEscalation = Boolean(
-    escalatedContinuation?.failedRunId &&
-      escalatedContinuation?.continuationRunId &&
-      escalatedContinuation?.rootRunId &&
-      escalatedContinuation?.projectionState === "applied" &&
-      escalatedContinuation?.repo === payload?.repo &&
-      String(escalatedContinuation?.ticket) === String(payload?.ticket) &&
-      payload?.modelTier === "strong",
   );
   let retryClaimedByFactory = false;
   let resumingOwnClaim = false;

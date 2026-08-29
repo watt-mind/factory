@@ -895,7 +895,7 @@ describe("planEvent worktree gate (WM-108)", () => {
 
   const tierRepo =
     `repos:\n  - name: tiered\n    path: /tmp/nowhere\n    base: develop\n` +
-    `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+    `    team: WM\n    project: Factory\n    max_in_flight: 1\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
     `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`;
 
   const tierTicket = (tierLabels = []) => ({
@@ -978,7 +978,7 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
-  test("tier escalation continuation pins a fresh strong-tier spec and authenticated claim proof", () => {
+  test("escalated continuation pins a fresh strong-tier spec and authenticated claim proof", () => {
     const base = {
       schemaVersion: "factory.run-spec/v1",
       runId: "run_light_failed",
@@ -1046,6 +1046,34 @@ describe("planEvent worktree gate (WM-108)", () => {
       );
       expect(authenticated.ok).toBe(true);
       expect(authenticated.evidence.checks.ticket_claim_escalation).toBe(true);
+
+      const fullCapacity = {
+        ...dispatch,
+        countLeases: () => 1,
+        hasTicketLease: () => false,
+        escalatedContinuation: {
+          failedRunId: base.runId,
+          continuationRunId: continuation.runId,
+          rootRunId: base.runId,
+          repo: "tiered",
+          ticket: "WM-694",
+          projectionState: "applied",
+        },
+      };
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, fullCapacity)
+          .refusal.reason,
+      ).toBe("capacity_full");
+      const transferredCapacity = worktreeDispatchAutoEligibility(
+        continuation.input,
+        { ...fullCapacity, hasTicketLease: () => true },
+      );
+      expect(transferredCapacity.ok).toBe(true);
+      expect(transferredCapacity.evidence.repo).toMatchObject({
+        capCurrent: 1,
+        capEffective: 0,
+        capTransferred: true,
+      });
     });
   });
 
