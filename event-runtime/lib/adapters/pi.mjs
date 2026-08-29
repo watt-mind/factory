@@ -55,14 +55,11 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { FACTORY_ROOT } from "../config.mjs";
 import { normalizePolicy } from "../sandbox/gondolin.mjs";
-import {
-  PROMPT_SUFFIX,
-  PUSH_CREDENTIAL_ENV,
-  verifiedPrompt,
-} from "./claude.mjs";
+import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
   BASE_INHERITED_ENV,
   PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment as sharedSafeChildEnvironment,
 } from "./child-env.mjs";

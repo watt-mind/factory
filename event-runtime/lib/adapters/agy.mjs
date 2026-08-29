@@ -15,15 +15,12 @@ import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import {
-  PROMPT_SUFFIX,
-  PUSH_CREDENTIAL_ENV,
-  verifiedPrompt,
-} from "./claude.mjs";
+import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import { FACTORY_ROOT } from "../config.mjs";
 import {
   BASE_INHERITED_ENV,
   PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment as sharedSafeChildEnvironment,
 } from "./child-env.mjs";

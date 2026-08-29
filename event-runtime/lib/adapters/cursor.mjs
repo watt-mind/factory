@@ -31,7 +31,6 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
-<<<<<<< HEAD
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
   BASE_INHERITED_ENV as SHARED_BASE_INHERITED_ENV,
