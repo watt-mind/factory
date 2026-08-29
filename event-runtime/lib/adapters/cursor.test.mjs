@@ -455,6 +455,7 @@ if (behavior === "emit_error_tool_result") {
   const defaultDef = {
     ref: "test-cursor-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
   };
   const defaultSpec = {
@@ -498,14 +499,16 @@ if (behavior === "emit_error_tool_result") {
     }
   }
 
-  test("executes stub binary in workspaceDir, passes CURSOR_API_KEY, prompt on argv, captures transcript + trace", async () => {
+  test("executes the verified prompt snapshot after its path changes and captures trace", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: { ...defaultSpec, model: "composer-2.5" },
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
       timeoutMs: 5000,
       env: {

@@ -28,6 +28,7 @@ import { spawn } from "node:child_process";
 import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
+import { PUSH_CREDENTIAL_ENV } from "./claude.mjs";
 import { runSandboxed, sandboxRequested } from "./sandboxed.mjs";
 
 /** This adapter executes inside the VM when a definition asks (WM-185). */
@@ -35,6 +36,96 @@ export const SANDBOX_SUPPORT = "gondolin";
 
 const KILL_GRACE_MS = 10_000;
 const OUTPUT_TAIL_CHARS = 2_000;
+
+/**
+ * Runtime-identity variables every command-adapter child needs so that it
+ * talks to the SAME event-runtime instance as the worker that spawned it.
+ * bin/live-stack.sh and bin/worktree-daemons.sh set these on the worker only;
+ * without them a child's `config.mjs` silently resolves the DEFAULT live home,
+ * port, secret, and env — a worktree stack's merge-apply/merge-scan/reaper/
+ * digest/ci-log-capture would then read and write the production runtime.
+ * This is an explicit allow-list on purpose: no `FACTORY_EVENT_*` wildcard.
+ *
+ * GitHub and Linear credentials are deliberately NOT here. Read-only agents
+ * (merge-scan, merge-plan, ci-log-capture, unblock-digest) authenticate via
+ * files under HOME — `gh` reads its config/hosts (and the App token file that
+ * lib/control-plane/gh-app-auth.mjs resolves from FACTORY_GH_APP_TOKEN_FILE
+ * or ~/.factory/gh-app-token.json), and `factory linear` reads the operator
+ * .env — so no env token is required for reads. Mutating definitions receive
+ * PUSH_CREDENTIAL_ENV below.
+ */
+export const RUNTIME_IDENTITY_ENV = [
+  "FACTORY_EVENT_HOME",
+  "FACTORY_EVENT_PORT",
+  "FACTORY_EVENT_SECRET",
+  "FACTORY_EVENT_ENV",
+];
+
+export const BASE_INHERITED_ENV = [
+  ...RUNTIME_IDENTITY_ENV,
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOGNAME",
+  "PATH",
+  "SHELL",
+  "TERM",
+  "TMPDIR",
+  "USER",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+];
+
+export { PUSH_CREDENTIAL_ENV };
+
+const PROVIDER_CREDENTIAL_ENV = [
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "GOOGLE_GENAI_API_KEY",
+  "MISTRAL_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "GROQ_API_KEY",
+  "CLAUDECODE",
+  "CLAUDE_CODE_ENTRYPOINT",
+];
+
+/**
+ * Build the environment for an unsandboxed deterministic command.
+ *
+ * Ambient worker authority is allowlisted. Caller-provided values may add or
+ * override ordinary command configuration, but adapter-owned FACTORY_ROOT and
+ * credentials are enforced after that overlay. Push credentials are available
+ * only to an explicitly mutating definition.
+ */
+export function safeChildEnvironment(env = {}, defOrOpts = {}) {
+  const isMutating =
+    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
+  const inherited = isMutating
+    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
+    : BASE_INHERITED_ENV;
+  const childEnv = Object.fromEntries(
+    inherited.flatMap((key) =>
+      process.env[key] === undefined ? [] : [[key, process.env[key]]],
+    ),
+  );
+
+  Object.assign(childEnv, env);
+  childEnv.FACTORY_ROOT = FACTORY_ROOT;
+
+  for (const key of PROVIDER_CREDENTIAL_ENV) {
+    delete childEnv[key];
+  }
+  if (!isMutating) {
+    for (const key of PUSH_CREDENTIAL_ENV) {
+      delete childEnv[key];
+    }
+  }
+
+  return childEnv;
+}
 
 /**
  * Substitute `{field}` placeholders in one argv element.
@@ -167,6 +258,7 @@ export async function execute({
   timeoutMs,
   abortSignal,
   signal,
+  env = {},
   onTrace,
   runSandbox,
 }) {
@@ -192,7 +284,7 @@ export async function execute({
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
       cwd: workspaceDir,
-      env: process.env,
+      env: safeChildEnvironment(env, def),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });

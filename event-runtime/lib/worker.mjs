@@ -39,6 +39,11 @@ import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
+import {
+  filesystemConfinementRefusal,
+  MODEL_BACKED_ADAPTERS,
+} from "./adapters/sandboxed.mjs";
+import { isSandboxGuarded } from "./adapters/index.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
 import {
   HARNESS_KINDS,
@@ -63,6 +68,7 @@ import {
 import { HEARTBEAT_STALE_MS, satisfiesPlacement } from "./workers.mjs";
 import {
   assertSandboxWorkspaceSupported,
+  confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
   PathViolation,
@@ -752,6 +758,7 @@ const ENVIRONMENT_FAILURES = new Set([
 const AGENT_FAILURES = new Set(["contract_violation", ...HANDOFF_REASON_CODES]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
+  "filesystem_confinement_unavailable",
   "sandbox_unsupported",
   "worktree_sandbox_unsupported",
   "unknown_adapter",
@@ -1333,7 +1340,7 @@ function hasPlanTimeDispatchEvidence(spec) {
  * ledger that this new attempt belongs to the same run and immediately follows
  * a lease-expired claim before relaxing the Todo/unassigned dispatch gate.
  */
-function claimedRetryFor(db, runId, attempt) {
+export function claimedRetryFor(db, runId, attempt) {
   if (!Number.isInteger(attempt) || attempt <= 1) return null;
   const priorAttempt = attempt - 1;
   const prior = db
@@ -2282,6 +2289,66 @@ export async function executeClaimed(
       return { fenced: true };
     }
 
+    const adapterKey = adapterOverride ?? spec.adapter;
+    const selectedAdapter = adapters[adapterKey];
+    // Production entry points supply only registry-wrapped adapters. Unit and
+    // integration tests may inject a raw non-model contract stub under a model
+    // route; that stub spawns no model and is outside this boundary.
+    const modelRuntimeSelected =
+      MODEL_BACKED_ADAPTERS.includes(adapterKey) &&
+      isSandboxGuarded(selectedAdapter);
+    const missingModelDefinitionPin =
+      def?.mutating === false && modelRuntimeSelected && !spec.defHash;
+    if (missingModelDefinitionPin || (def && !verifyDefHash(spec, def))) {
+      const refusedRes = refuseTerminal(
+        "agent_definition_mismatch",
+        [missingModelDefinitionPin ? "def_hash_missing" : "def_hash_mismatch"],
+        { causeTyped: true },
+      );
+      stopCancellationMonitor();
+      if (refusedRes?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: "agent_definition_mismatch",
+        receipt: refusedRes.receipt,
+      };
+    }
+    const filesystemIntent =
+      spec.filesystem ?? def?.capabilities?.filesystem ?? null;
+    const confinementDef =
+      filesystemIntent === def?.capabilities?.filesystem
+        ? def
+        : {
+            ...def,
+            capabilities: {
+              ...(def?.capabilities ?? {}),
+              filesystem: filesystemIntent,
+            },
+          };
+    const confinementRefusal = modelRuntimeSelected
+      ? filesystemConfinementRefusal(adapterKey, confinementDef, {
+          sandboxSupport: selectedAdapter?.SANDBOX_SUPPORT ?? null,
+        })
+      : null;
+    if (confinementRefusal) {
+      const res = refuseTerminal(
+        confinementRefusal.code,
+        ["filesystem_confinement"],
+        { detail: confinementRefusal.detail },
+      );
+      stopCancellationMonitor();
+      if (res?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: confinementRefusal.code,
+        receipt: res?.receipt,
+      };
+    }
+
     if (isWorktree && repoName && ticketId) {
       if (!linearConfigured) {
         const res = failTerminal(
@@ -2555,7 +2622,6 @@ export async function executeClaimed(
       }
     }
 
-    const adapterKey = adapterOverride ?? spec.adapter;
     const created = createWorkspace({
       root: workspacesRoot,
       runId,
@@ -2595,23 +2661,6 @@ export async function executeClaimed(
       };
     }
     if (!def) def = getAgent(registry, spec.agent);
-
-    if (!verifyDefHash(spec, def)) {
-      const refusedRes = refuseTerminal(
-        "agent_definition_mismatch",
-        ["def_hash_mismatch"],
-        { causeTyped: true },
-      );
-      cleanupWorkspace();
-      if (refusedRes?.fenced) return { fenced: true };
-      return {
-        runId,
-        attempt,
-        terminalState: "REFUSED",
-        reasonCode: "agent_definition_mismatch",
-        receipt: refusedRes.receipt,
-      };
-    }
 
     try {
       const writtenHarness = materializeRunHarness({
@@ -3112,17 +3161,33 @@ export async function executeClaimed(
       for (const entry of RUNTIME_ARTIFACTS) {
         let abs;
         try {
-          abs = safeJoin(workspaceDir, entry.path);
+          // Refusal artifacts bypass verifyCompleted's collection path, so
+          // repeat the shared canonical/regular-file preflight before the
+          // first host-side read or hash. Missing and guest-supplied links are
+          // best-effort omissions, just like absent runtime artifacts.
+          abs = confinedRegularFile(workspaceDir, entry.path);
         } catch (err) {
+          if (err?.code === "ENOENT") continue;
           if (!(err instanceof PathViolation)) throw err;
           continue;
         }
-        if (existsSync(abs)) {
-          collected.push({
+        try {
+          const collectedEntry = {
             kind: entry.kind,
             uri: `file://${abs}`,
             sha256: sha256Hex(readFileSync(abs)),
+          };
+          // The fixed runtime files live at the workspace root. The helper
+          // returned their canonical path, so dirname is canonical provenance
+          // for storeCollected's independent pre-copy confinement check.
+          Object.defineProperty(collectedEntry, "workspaceRoot", {
+            value: path.dirname(abs),
           });
+          collected.push(collectedEntry);
+        } catch (err) {
+          // The guest may unlink the artifact between the preflight and the
+          // read; that is the same best-effort omission as never writing it.
+          if (err?.code !== "ENOENT") throw err;
         }
       }
       const artifacts = storeCollected({
@@ -3446,7 +3511,10 @@ export async function executeClaimed(
 /**
  * Explicit operator recovery for a worker that stopped heartbeating while it
  * still owned a run. This mirrors the lease reaper's retry/exhaustion rules,
- * but targets exactly the selected worker/run and records an operator reason.
+ * but targets exactly the selected worker/run. When the run is retried it is
+ * re-queued with the fixed `retry:environment` reason (matching the reaper's
+ * lease-expiry requeue); operator provenance is carried by `actor` (default
+ * "operator") on the recorded transitions, not by the reason string.
  */
 export function releaseStalledWorkerLease(
   db,
@@ -3503,36 +3571,35 @@ export function releaseStalledWorkerLease(
       `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
     ).run(iso(currentNow - 1), heldRunId, run.attempts);
     if (run.attempts < spec.maxAttempts) {
+      const failureReason = typedFailureReason("lease_expired");
       if (run.state === "VERIFYING") {
         transition(db, {
           runId: heldRunId,
           to: "FAILED",
           actor,
-          reason,
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-        transition(db, {
-          runId: heldRunId,
-          to: "QUEUED",
-          actor,
-          reason: "retry_after_stalled_worker_release",
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      } else {
-        transition(db, {
-          runId: heldRunId,
-          to: "QUEUED",
-          actor,
-          reason,
+          reason: failureReason,
           attempt: run.attempts,
           policyVersion,
           now: currentNow,
         });
       }
+      finishAttempt(
+        db,
+        heldRunId,
+        run.attempts,
+        "FAILED",
+        "lease_expired",
+        currentNow,
+      );
+      transition(db, {
+        runId: heldRunId,
+        to: "QUEUED",
+        actor,
+        reason: "retry:environment",
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
     } else {
       if (run.state === "LEASED") {
         transition(db, {

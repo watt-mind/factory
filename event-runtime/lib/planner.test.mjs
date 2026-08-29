@@ -150,6 +150,22 @@ describe("merge concurrency policy", () => {
 });
 
 describe("planEvent", () => {
+  test("pins workspace-only intent into the RunSpec for the execute-time admission backstop (#962)", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, {
+      eventId: "workspace-only-pin",
+      correlationId: "workspace-only-pin",
+    });
+    const outcome = planEvent(db, registry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("run");
+    expect(JSON.parse(outcome.proposal.spec_json).filesystem).toBe(
+      "workspace-only",
+    );
+  });
+
   test("run decision: PROPOSED run + open proposal with the §5.2 spec", () => {
     const db = openDb(":memory:");
     const ref = admit(db);
@@ -182,6 +198,7 @@ describe("planEvent", () => {
       // verifyDefHash consumes.
       defHash: computeDefHash(registry.agents.get("factory-status-report@1")),
       capabilities: ["tracker:read"],
+      filesystem: "workspace-only",
       // Model-tier routing (WM-135): the committed definition declares
       // standard, policy maps it to models.pi.standard (WM-215 made pi the
       // default harness), and the planner pins the resolution.
