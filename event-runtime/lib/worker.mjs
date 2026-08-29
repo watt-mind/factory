@@ -2077,11 +2077,13 @@ export async function executeClaimed(
   let materializedHarnessPins = null;
 
   let dispatchOpts = dispatch;
-  const explicitDispatchStub =
-    !dispatchOpts &&
-    (process.env.FACTORY_DISPATCH_STUB === "1" ||
-      adapterOverride === "fake" ||
-      spec.adapter === "fake");
+  // The demo dispatch stub is only ever activated explicitly (WM-533): a
+  // missing credential must never be read as permission to fake a claim.
+  const dispatchStubSelected =
+    process.env.FACTORY_DISPATCH_STUB === "1" ||
+    adapterOverride === "fake" ||
+    spec.adapter === "fake";
+  const explicitDispatchStub = !dispatchOpts && dispatchStubSelected;
   if (explicitDispatchStub) {
     dispatchOpts = {
       fetchTicket: () => ({
@@ -2103,6 +2105,19 @@ export async function executeClaimed(
       commentTicket: () => true,
       returnHandoffTicket: () => true,
       holdPullRequest: () => false,
+    };
+  } else if (dispatchStubSelected) {
+    // A caller that supplies only some dispatch seams (locks, ticket reads,
+    // claim accounting) must not silently fall through to the real tracker
+    // for the ones it left out. These three are best-effort, non-asserted
+    // mutations, so the "a fake run never reaches Linear or GitHub"
+    // guarantee above has to hold for a partial override too — otherwise a
+    // fake dispatch posts real handoff comments and blocks on the network.
+    dispatchOpts = {
+      commentTicket: () => true,
+      returnHandoffTicket: () => true,
+      holdPullRequest: () => false,
+      ...dispatchOpts,
     };
   }
   const linearConfigured =
