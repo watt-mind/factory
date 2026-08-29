@@ -177,6 +177,51 @@ describe("extension pack metadata discovery (gh-857)", () => {
     ).toThrow(/pack name "sample-ext" is already configured/);
   });
 
+  test("scopes discovery failures to the requested pack name", () => {
+    const broken = tempExtension((manifest) => {
+      manifest.contributes.packs = ["../outside"];
+    });
+    const healthy = tempExtension((manifest) => {
+      manifest.name = "factory/healthy";
+    });
+    writeFileSync(
+      path.join(healthy, "pack", "pack.json"),
+      `${JSON.stringify({ name: "healthy-ext", version: "1.0.0", namespace: "healthy" })}\n`,
+    );
+    const policy = policyFor(broken, healthy);
+
+    // Unscoped discovery still fails closed on the unrelated broken manifest.
+    expect(() => discoverExtensionPackRoots({ policy })).toThrow(
+      /contributes\.packs\[0\].*escapes/,
+    );
+    // A request for the healthy pack is not blocked by the broken sibling.
+    expect(discoverExtensionPackRoots({ policy, name: "healthy-ext" })).toEqual([
+      { kind: "fs", name: "healthy-ext", path: path.join(healthy, "pack") },
+    ]);
+    // A miss surfaces the collected errors so the operator sees why.
+    expect(() =>
+      discoverExtensionPackRoots({ policy, name: "missing-ext" }),
+    ).toThrow(/pack "missing-ext" not found; rejected: .*escapes/);
+    // A clean miss stays a plain miss.
+    expect(
+      discoverExtensionPackRoots({ policy: policyFor(healthy), name: "nope" }),
+    ).toEqual([]);
+
+    // A duplicate of the requested name itself still fails closed, while a
+    // duplicate elsewhere is skipped.
+    const first = tempExtension();
+    const second = tempExtension();
+    const duplicated = policyFor(first, second, healthy);
+    expect(() =>
+      discoverExtensionPackRoots({ policy: duplicated, name: "sample-ext" }),
+    ).toThrow(/pack name "sample-ext" is already configured/);
+    expect(
+      discoverExtensionPackRoots({ policy: duplicated, name: "healthy-ext" }),
+    ).toEqual([
+      { kind: "fs", name: "healthy-ext", path: path.join(healthy, "pack") },
+    ]);
+  });
+
   test("update-pins repairs a stale extension pack without executing it", async () => {
     const factoryRoot = tmpDir("event-extension-repair-root-");
     const extension = tempExtension();

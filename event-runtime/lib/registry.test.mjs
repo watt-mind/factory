@@ -1,6 +1,12 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-registry-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { format as prettierFormat, resolveConfig } from "prettier";
 import { canonicalJson, hashBytes } from "./canonical.mjs";
@@ -706,6 +712,48 @@ describe("registry", () => {
     writeFileSync(defFile, JSON.stringify({ ...def, command: ["true"] }));
     const registry = loadRegistry({ packRoots: [pack] });
     expect(getAgent(registry, "sample/echo@1").mutating).toBeUndefined();
+  });
+
+  test("updatePins resolves a pack name through extension metadata (gh-857)", async () => {
+    const factoryRoot = tmpDir("event-registry-ext-root-");
+    const extension = tmpDir("event-registry-ext-");
+    cpSync(
+      path.join(RUNTIME_ROOT, "test-support", "extensions", "sample"),
+      extension,
+      { recursive: true },
+    );
+    const sentinel = path.join(factoryRoot, "extension-imported");
+    writeFileSync(
+      path.join(extension, "adapters", "echo.mjs"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(sentinel)}, "ran"); export default {};`,
+    );
+    const prompt = path.join(extension, "pack", "agents", "echo.md");
+    writeFileSync(prompt, `${readFileSync(prompt, "utf8")}drift\n`);
+    mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(factoryRoot, "config", "policy.yaml"),
+      `extensions:\n  - path: ${JSON.stringify(extension)}\n`,
+    );
+    const pins = path.join(extension, "pack", "pins.json");
+    const stale = readFileSync(pins, "utf8");
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = factoryRoot;
+    try {
+      expect(await updatePins({ pack: "sample-ext", check: true })).toEqual([
+        "sample-ext",
+      ]);
+      expect(readFileSync(pins, "utf8")).toBe(stale);
+      expect(await updatePins({ pack: "sample-ext" })).toEqual(["sample-ext"]);
+      expect(readFileSync(pins, "utf8")).not.toBe(stale);
+      expect(await updatePins({ pack: "sample-ext" })).toEqual([]);
+      await expect(updatePins({ pack: "not-configured" })).rejects.toThrow(
+        /unknown configured pack "not-configured"/,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+    expect(existsSync(sentinel)).toBe(false);
   });
 
   test("pack manifest and pins fail closed, and explicit pack pinning repairs drift", async () => {

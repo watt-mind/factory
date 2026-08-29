@@ -1448,7 +1448,18 @@ export async function updatePins({
   if (pack !== undefined) {
     let descriptor = pack;
     if (typeof pack === "string") {
-      descriptor = loadPackRoots().find((candidate) => candidate.name === pack);
+      const policyPacks = loadPackRoots();
+      descriptor = policyPacks.find((candidate) => candidate.name === pack);
+      if (!descriptor) {
+        // Extension-contributed packs (gh-857): metadata-only discovery so a
+        // stale extension pins.json can be repaired without importing the
+        // extension. Imported lazily — extensions.mjs depends on this module.
+        const { discoverExtensionPackRoots } = await import("./extensions.mjs");
+        [descriptor] = discoverExtensionPackRoots({
+          packRoots: policyPacks,
+          name: pack,
+        });
+      }
       if (!descriptor)
         throw new RegistryError(`unknown configured pack "${pack}"`);
     }
