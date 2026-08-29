@@ -701,6 +701,90 @@ describe("human inbox ledger (WM-285)", () => {
     });
   });
 
+  test("inbox expiry lookups use the proposals primary-key index", () => {
+    const db = openDb(":memory:");
+    const expiredAt = new Date(Date.now() - 61_000).toISOString();
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES ('expired-proposal', 'test', 'evt', 'run', 'open', ?, 60)`,
+    ).run(expiredAt);
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "expired by proposal",
+        refs: { proposalId: "expired-proposal" },
+      },
+      { id: "expired-proposal-item" },
+    );
+
+    const expiryPredicate = `(i.kind = 'proposal_expired' OR EXISTS (
+      SELECT 1 FROM proposals p
+       WHERE p.id = i.proposal_id
+         AND p.status = 'open'
+         AND p.ttl_seconds > 0
+         AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
+    ))`;
+    const planFor = (sql) =>
+      db
+        .query(`EXPLAIN QUERY PLAN ${sql}`)
+        .all()
+        .map((row) => row.detail)
+        .join(" ");
+    const listPlan = planFor(`
+      SELECT i.*, i.rowid AS list_rowid, ${expiryPredicate} AS expired
+      FROM inbox_items i
+      WHERE 1 = 1
+      ORDER BY i.created_at DESC, i.rowid DESC
+      LIMIT 101
+    `);
+    const countsPlan = planFor(`
+      SELECT SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NULL
+                           AND NOT ${expiryPredicate}
+                      THEN 1 ELSE 0 END) AS open
+      FROM inbox_items i
+    `);
+
+    for (const plan of [listPlan, countsPlan]) {
+      expect(plan).toContain(
+        "SEARCH p USING INDEX sqlite_autoindex_proposals_1 (id=?)",
+      );
+      expect(plan).not.toContain("SCAN p");
+    }
+    db.close();
+  });
+
+  test("inbox counts complete within 200ms for 10k inbox rows and proposals", () => {
+    const db = openDb(":memory:");
+    const createdAt = new Date().toISOString();
+    const insertProposal = db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, 'run', 'open', ?, 3600)`,
+    );
+    const insertInbox = db.query(
+      `INSERT INTO inbox_items
+         (id, kind, severity, title, refs_json, proposal_id, source, created_at)
+       VALUES (?, 'decision_needed', 'normal', 'inbox item', ?, ?, 'cli', ?)`,
+    );
+    db.transaction(() => {
+      for (let i = 0; i < 10_000; i += 1) {
+        const proposalId = `proposal-${i}`;
+        insertProposal.run(proposalId, `event-${i}`, createdAt);
+        insertInbox.run(
+          `inbox-${i}`,
+          JSON.stringify({ proposalId }),
+          proposalId,
+          createdAt,
+        );
+      }
+    })();
+
+    const started = performance.now();
+    expect(inboxCounts(db).open).toBe(10_000);
+    expect(performance.now() - started).toBeLessThan(200);
+    db.close();
+  });
+
   test("runtime-owned referents auto-resolve after leaving their waiting state", () => {
     const db = openDb(":memory:");
     insertProposal(db, { id: "prop-1" });

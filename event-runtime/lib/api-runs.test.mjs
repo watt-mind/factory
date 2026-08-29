@@ -61,6 +61,33 @@ const makeServer = async (...args) => {
   return result;
 };
 
+async function holdWriteLock(file, durationMs) {
+  const child = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      `
+        import { openDb } from "./event-runtime/lib/db.mjs";
+        const db = openDb(process.argv[1]);
+        db.exec("BEGIN IMMEDIATE");
+        console.log("locked");
+        await new Promise((resolve) => setTimeout(resolve, Number(process.argv[2])));
+        db.exec("ROLLBACK");
+        db.close();
+      `,
+      file,
+      String(durationMs),
+    ],
+    { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
+  );
+  const reader = child.stdout.getReader();
+  const { value, done } = await reader.read();
+  reader.releaseLock();
+  expect(done).toBe(false);
+  expect(new TextDecoder().decode(value)).toContain("locked");
+  return child;
+}
+
 describe("run deadline extension (WM-566)", () => {
   const start = Date.parse("2026-08-12T10:00:00Z");
   // The policy cap the extend endpoint enforces, owned by this suite rather
@@ -1102,6 +1129,37 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     const again = await rejection(s.client.approve(flowProposalId));
     expect(again.status).toBe(409);
     expect(again.message).toContain("not open");
+  });
+
+  test("approval waits for a worker write lock and returns db_busy after its timeout", async () => {
+    const waiting = await planned("approve-waits-for-lock");
+    const lock = await holdWriteLock(s.db.filename, 75);
+    const startedAt = Date.now();
+    const approved = await s.client.approve(waiting.id);
+    const elapsedMs = Date.now() - startedAt;
+    expect(approved).toEqual({ approved: true, runId: waiting.runId });
+    // The lock is held for 75 ms; a lower bound proves the approval actually
+    // waited on it instead of racing past a lock that was never taken.
+    expect(elapsedMs).toBeGreaterThanOrEqual(50);
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(await lock.exited).toBe(0);
+    expect(await s.client.cancel(waiting.runId, "test cleanup")).toEqual({
+      cancelled: true,
+    });
+
+    const timedOut = await planned("approve-busy-timeout");
+    let timeoutLock;
+    try {
+      s.db.exec("PRAGMA busy_timeout = 10;");
+      timeoutLock = await holdWriteLock(s.db.filename, 75);
+      const err = await rejection(s.client.approve(timedOut.id));
+      expect(err.status).toBe(503);
+      expect(err.message).toBe("db_busy");
+      expect(err.body).toEqual({ error: "db_busy", retryable: true });
+    } finally {
+      s.db.exec("PRAGMA busy_timeout = 5000;");
+    }
+    expect(await timeoutLock?.exited).toBe(0);
   });
 
   test("reject an open proposal → run CANCELLED", async () => {

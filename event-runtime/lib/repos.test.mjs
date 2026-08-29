@@ -2,6 +2,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-repos-tes
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import semver from "semver";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import {
   isToolchainConstraint,
@@ -645,6 +646,70 @@ describe("toolchain: declaration parsing and validation", () => {
     expect(() => repoWith(`    toolchain:\n      bun: latest\n`)).toThrow(
       /must be a semver range/,
     );
+  });
+
+  test("only canonical * may express an always-pass whole-range wildcard", () => {
+    expect(isToolchainConstraint("*")).toBe(true);
+    expect(Bun.semver.satisfies("0.0.1", "*")).toBe(true);
+    expect(Bun.semver.satisfies("999.999.999", "*")).toBe(true);
+    expect(repoWith(`    toolchain:\n      bun: "*"\n`).toolchain).toEqual([
+      { executable: "bun", constraint: "*" },
+    ]);
+
+    const rejected = [
+      "X",
+      "X.X.X",
+      "*.*",
+      "^x",
+      "~*",
+      ">=*",
+      "<*",
+      "v*",
+      "*||*",
+      "*.2.3",
+      "x.2.3",
+    ];
+    for (const constraint of rejected) {
+      expect([constraint, isToolchainConstraint(constraint)]).toEqual([
+        constraint,
+        false,
+      ]);
+      expect(() =>
+        repoWith(`    toolchain:\n      bun: ${JSON.stringify(constraint)}\n`),
+      ).toThrow(/"\*" is the only canonical any-version form/);
+    }
+
+    // Bun treats `<*` as always-pass while node-semver treats it as
+    // always-fail. Reject it before either engine can choose the semantics.
+    for (const version of ["0.0.1", "999.999.999"]) {
+      expect(Bun.semver.satisfies(version, "<*")).toBe(true);
+      expect(semver.satisfies(version, "<*")).toBe(false);
+    }
+  });
+
+  test("ambiguous comparator lists and operator-prefixed hyphen ranges fail closed", () => {
+    for (const constraint of ["1 2 3", ">=1 >=2 >=3", ">=1.2.3 - 2.0.0"]) {
+      expect([constraint, isToolchainConstraint(constraint)]).toEqual([
+        constraint,
+        false,
+      ]);
+      expect(() =>
+        repoWith(`    toolchain:\n      bun: ${JSON.stringify(constraint)}\n`),
+      ).toThrow(/must be a semver range/);
+    }
+  });
+
+  test("the canonical wildcard's always-pass policy is documented for operators", () => {
+    const root = path.resolve(import.meta.dir, "../..");
+    for (const relative of [
+      "config/repos.example.yaml",
+      "docs/event-runtime-repos.md",
+    ]) {
+      const text = readFileSync(path.join(root, relative), "utf8");
+      expect(text).toContain(
+        'The single canonical wildcard "*" means the executable must exist; any parsed version passes.',
+      );
+    }
   });
 
   test("structural errors name the repo instead of loading a half-understood block", () => {
