@@ -625,7 +625,10 @@ describe("execute against a fake ACP agent", () => {
       config: fakeConfig,
       spawnProcess: () => {
         queueMicrotask(() =>
-          child.emit("error", Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
+          child.emit(
+            "error",
+            Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+          ),
         );
         return child;
       },
