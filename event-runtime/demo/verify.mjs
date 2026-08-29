@@ -216,9 +216,9 @@ if (artifactRun) {
   );
 
   if (reportArtifact?.sha256) {
-    const artRes = await fetch(
-      `http://127.0.0.1:${port}/artifacts/${reportArtifact.sha256}`,
-    );
+    // Through the client so the bearer rides along: a bare fetch answered
+    // 401 whenever the demo serve inherited FACTORY_CONTROL_API_TOKEN.
+    const artRes = await client.artifact(reportArtifact.sha256);
     check(
       "GET /artifacts/:sha returns 200 for declared report",
       artRes.status === 200,

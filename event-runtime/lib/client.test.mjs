@@ -27,6 +27,14 @@ beforeAll(() => {
         }
         return Response.json({ runs: [] });
       }
+      if (url.pathname.startsWith("/artifacts/")) {
+        if (lastAuthorization !== `Bearer ${TOKEN}`) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+        return new Response("fake report body", {
+          headers: { "content-type": "text/plain" },
+        });
+      }
       return Response.json({ error: "not found" }, { status: 404 });
     },
   });
@@ -81,4 +89,17 @@ test("non-401 errors keep the server's message and status", async () => {
   await client.repos().catch((e) => (err = e));
   expect(err.status).toBe(404);
   expect(err.message).toBe("not found");
+});
+
+test("artifact() presents the bearer on GET /artifacts/:sha and returns the raw body", async () => {
+  const res = await apiClient({ port, token: TOKEN }).artifact("a".repeat(64));
+  expect(res.status).toBe(200);
+  expect(await res.text()).toBe("fake report body");
+  expect(lastAuthorization).toBe(`Bearer ${TOKEN}`);
+});
+
+test("artifact() without a token gets the gate's 401 (regression: worktree-up verify)", async () => {
+  const res = await apiClient({ port, token: null }).artifact("a".repeat(64));
+  expect(res.status).toBe(401);
+  expect(lastAuthorization).toBeNull();
 });

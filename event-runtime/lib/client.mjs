@@ -133,6 +133,18 @@ export function apiClient({
     runs: (state) =>
       call("GET", `/runs${state ? `?state=${encodeURIComponent(state)}` : ""}`),
     run: (id) => call("GET", `/runs/${encodeURIComponent(id)}`),
+    /**
+     * Raw artifact bytes by content address (GET /artifacts/:sha). The route
+     * sits behind the bearer gate like every other control route, so callers
+     * must go through here rather than a bare fetch (#1132 follow-up): a demo
+     * serve spawned under FACTORY_CONTROL_API_TOKEN answered a bare fetch
+     * with 401 and failed every worktree-up fixture verify. Returns the
+     * Response so callers can inspect status and read the body themselves.
+     */
+    artifact: (sha256) =>
+      fetch(`${base}/artifacts/${encodeURIComponent(sha256)}`, {
+        headers: { ...authHeader },
+      }),
     /** Live agent trace (factory.trace/v1): pass head back as since to poll. */
     trace: (id, { since = 0, limit = 100 } = {}) =>
       call(
