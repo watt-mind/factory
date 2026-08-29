@@ -84,6 +84,7 @@ import {
   forceFailRun,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
+  policyWorkspaceOnlyFallback,
   materializeRunHarness,
   reapExpiredLeases,
   releaseStalledWorkerLease,
@@ -1954,7 +1955,17 @@ describe("worker", () => {
       db,
       registry,
       guardedAdapters,
-      opts({ workspacesRoot }),
+      opts({
+        workspacesRoot,
+        sandboxAvailability: {
+          available: false,
+          qemu: null,
+          node: null,
+          nodeVersion: null,
+          sdk: false,
+          reason: "qemu-system-x86_64 is not on PATH",
+        },
+      }),
     );
 
     expect(summary).toMatchObject({
@@ -1964,6 +1975,9 @@ describe("worker", () => {
     expect(executed).toBe(false);
     expect(readdirSync(workspacesRoot)).toEqual([]);
     expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "sandbox_unavailable:qemu",
+    );
     expect(
       JSON.parse(
         db
@@ -1971,6 +1985,62 @@ describe("worker", () => {
           .get(spec.runId).result_json,
       ).verification,
     ).toEqual({ status: "passed", checks: ["filesystem_confinement"] });
+  });
+
+  test("explicit host fallback runs workspace-only models and attests the unconfined receipt (#1250)", async () => {
+    const db = openDb(":memory:");
+    const def = getAgent(registry, "factory-status-report@1");
+    const spec = queueRun(
+      db,
+      makeSpec({ adapter: "claude", defHash: computeDefHash(def) }),
+    );
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(policyRoot, "config", "policy.yaml"),
+      "sandbox:\n  workspace_only_fallback: host\n",
+    );
+    expect(policyWorkspaceOnlyFallback(policyRoot)).toBe("host");
+
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        claude: { ...fake, SANDBOX_SUPPORT: "unsupported" },
+      },
+    }).toMap();
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({
+        policyRoot,
+        sandboxAvailability: {
+          available: false,
+          qemu: null,
+          node: null,
+          nodeVersion: null,
+          sdk: false,
+          reason: "qemu-system-x86_64 is not on PATH",
+        },
+      }),
+    );
+
+    const expected = {
+      status: "unconfined",
+      declared: "workspace-only",
+      fallback: "host",
+      source: "policy:sandbox.workspace_only_fallback",
+    };
+    expect(summary).toMatchObject({
+      terminalState: "COMPLETED",
+      receipt: { filesystemConfinement: expected },
+    });
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT receipt_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).receipt_json,
+      ).filesystemConfinement,
+    ).toEqual(expected);
   });
 
   test("legacy non-mutating model specs without a definition pin fail closed before using the live definition (#962)", async () => {

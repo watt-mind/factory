@@ -23,6 +23,48 @@ const c = {
   red: (s) => `\x1b[31m${s}\x1b[0m`,
 };
 
+export const SANDBOX_REFUSAL_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Find recent run refusals caused by a missing Gondolin host capability.
+ * `/journal` carries the typed detail while `/runs` supplies the agent name,
+ * so health clients join the two existing API projections rather than adding
+ * a one-off server endpoint.
+ */
+export function recentSandboxRefusals(
+  journal,
+  runs,
+  { now = Date.now(), windowMs = SANDBOX_REFUSAL_WINDOW_MS } = {},
+) {
+  const agentsByRun = new Map(
+    (runs?.runs ?? []).map((run) => [run.runId, run.agent ?? "unknown"]),
+  );
+  const cutoff = now - windowMs;
+  const seen = new Set();
+  const refusals = [];
+  for (const entry of journal?.entries ?? []) {
+    const observedAt = Date.parse(entry?.at);
+    if (
+      entry?.to !== "REFUSED" ||
+      typeof entry.reason !== "string" ||
+      !entry.reason.includes("sandbox_unavailable:") ||
+      !Number.isFinite(observedAt) ||
+      observedAt < cutoff ||
+      seen.has(entry.runId)
+    ) {
+      continue;
+    }
+    seen.add(entry.runId);
+    refusals.push({
+      runId: entry.runId,
+      agent: agentsByRun.get(entry.runId) ?? "unknown",
+      reason: entry.reason,
+      at: entry.at,
+    });
+  }
+  return refusals;
+}
+
 export async function runWatchdogCheck({
   host = "127.0.0.1",
   port = 7381,
@@ -38,6 +80,7 @@ export async function runWatchdogCheck({
     runningRuns: 0,
     wedgedRuns: 0,
     queuedRuns: 0,
+    sandboxRefusals: [],
     anomalies: [],
   };
 
@@ -84,7 +127,8 @@ export async function runWatchdogCheck({
 
   // 3. Workers & Runs Status from API
   try {
-    const [statusRes, workersRes, runningRes] = await Promise.all([
+    const [statusRes, workersRes, runningRes, journalRes, refusedRes] =
+      await Promise.all([
       fetch(`http://${host}:${port}/status`, {
         signal: AbortSignal.timeout(3000),
       }).then((r) => r.json()),
@@ -92,6 +136,12 @@ export async function runWatchdogCheck({
         signal: AbortSignal.timeout(3000),
       }).then((r) => r.json()),
       fetch(`http://${host}:${port}/runs?state=RUNNING`, {
+        signal: AbortSignal.timeout(3000),
+      }).then((r) => r.json()),
+      fetch(`http://${host}:${port}/journal?limit=500`, {
+        signal: AbortSignal.timeout(3000),
+      }).then((r) => r.json()),
+      fetch(`http://${host}:${port}/runs?state=REFUSED&limit=200`, {
         signal: AbortSignal.timeout(3000),
       }).then((r) => r.json()),
     ]);
@@ -130,6 +180,17 @@ export async function runWatchdogCheck({
     }
 
     metrics.queuedRuns = statusRes?.runs?.byState?.QUEUED ?? 0;
+    metrics.sandboxRefusals = recentSandboxRefusals(journalRes, refusedRes);
+    if (metrics.sandboxRefusals.length > 0) {
+      const agents = [
+        ...new Set(metrics.sandboxRefusals.map((entry) => entry.agent)),
+      ].sort();
+      issues.push({
+        severity: "CRITICAL",
+        code: "SCAN_SANDBOX_UNAVAILABLE",
+        message: `Scan loops refused: sandbox unavailable (${agents.join(", ")})`,
+      });
+    }
     const idleWorkers = workers.filter((w) => w.state === "idle").length;
     if (
       metrics.queuedRuns > 0 &&

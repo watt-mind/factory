@@ -133,6 +133,34 @@ export function sandboxRequested(def) {
 }
 
 /**
+ * Whether the operator explicitly accepted host execution for this otherwise
+ * workspace-only run. An explicit definition-level sandbox request always
+ * wins: the instance fallback may relax an implicit workspace boundary, but
+ * it may never erase a sandbox policy authored on the agent itself.
+ */
+export function workspaceOnlyHostFallback(def, runtime = {}) {
+  return (
+    def?.mutating === false &&
+    def?.capabilities?.filesystem === "workspace-only" &&
+    !sandboxRequested(def) &&
+    runtime.workspaceOnlyFallback === "host"
+  );
+}
+
+/** Turn Gondolin's detailed preflight report into a stable audit token. */
+export function sandboxUnavailableDetail(report) {
+  if (!report || report.available !== false) return null;
+  const capability = !report.qemu
+    ? "qemu"
+    : !report.node || !report.nodeVersion
+      ? "node"
+      : !report.sdk
+        ? "sdk"
+        : "host";
+  return `sandbox_unavailable:${capability}${report.reason ? ` — ${report.reason}` : ""}`;
+}
+
+/**
  * Return a typed admission refusal when a non-mutating model run promises a
  * workspace-only filesystem but the selected adapter cannot enforce it.
  *
@@ -147,8 +175,9 @@ export function sandboxRequested(def) {
  * Non-model adapters and mutating definitions are outside this ticket's
  * boundary and retain their existing admission semantics.
  *
- * @param {{ sandboxSupport?: string|null }} [runtime] - worker-side attestation
- *   from the actual selected adapter module; omitted by the deterministic
+ * @param {{ sandboxSupport?: string|null, sandboxAvailability?: object,
+ *   workspaceOnlyFallback?: string|null }} [runtime] - worker-side
+ *   attestations and explicit instance fallback; omitted by the deterministic
  *   planner, which admits the built-in pi route by name.
  * @returns {{ code: string, detail: string } | null}
  */
@@ -165,6 +194,11 @@ export function filesystemConfinementRefusal(adapter, def, runtime = {}) {
     code: FILESYSTEM_CONFINEMENT_REASON,
     detail: `${def?.ref ?? "definition"}: ${detail}`,
   });
+
+  if (workspaceOnlyHostFallback(def, runtime)) return null;
+
+  const unavailable = sandboxUnavailableDetail(runtime.sandboxAvailability);
+  if (unavailable) return refuse(unavailable);
 
   if (adapter !== "pi") {
     return refuse(

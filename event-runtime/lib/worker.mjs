@@ -42,8 +42,10 @@ import { getAgent } from "./registry.mjs";
 import {
   filesystemConfinementRefusal,
   MODEL_BACKED_ADAPTERS,
+  workspaceOnlyHostFallback,
 } from "./adapters/sandboxed.mjs";
 import { isSandboxGuarded } from "./adapters/index.mjs";
+import { preflight as sandboxPreflight } from "./sandbox/gondolin.mjs";
 import { IllegalTransition, transition } from "./lifecycle.mjs";
 import {
   HARNESS_KINDS,
@@ -404,6 +406,21 @@ export function policyMaxRunMinutes(root = FACTORY_ROOT) {
       readFileSync(resolveConfigPath("policy", { root }), "utf8"),
     )?.limits?.max_run_minutes;
     return Number.isFinite(value) && value > 0 ? Number(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Explicit operator opt-out for workspace-only model confinement. Unknown,
+ * malformed, and absent values all fail closed.
+ */
+export function policyWorkspaceOnlyFallback(root = FACTORY_ROOT) {
+  try {
+    const policy = Bun.YAML.parse(
+      readFileSync(resolveConfigPath("policy", { root }), "utf8"),
+    );
+    return policy?.sandbox?.workspace_only_fallback === "host" ? "host" : null;
   } catch {
     return null;
   }
@@ -2031,6 +2048,7 @@ export async function executeClaimed(
     dispatch,
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
+    sandboxAvailability,
   } = {},
 ) {
   const { runId, attempt, fencingToken, spec } = claim;
@@ -2395,9 +2413,17 @@ export async function executeClaimed(
               filesystem: filesystemIntent,
             },
           };
+    const workspaceOnlyFallback = policyWorkspaceOnlyFallback(policyRoot);
+    const unconfinedWorkspaceOnly =
+      modelRuntimeSelected &&
+      workspaceOnlyHostFallback(confinementDef, { workspaceOnlyFallback });
     const confinementRefusal = modelRuntimeSelected
       ? filesystemConfinementRefusal(adapterKey, confinementDef, {
           sandboxSupport: selectedAdapter?.SANDBOX_SUPPORT ?? null,
+          sandboxAvailability: unconfinedWorkspaceOnly
+            ? null
+            : (sandboxAvailability ?? sandboxPreflight()),
+          workspaceOnlyFallback,
         })
       : null;
     if (confinementRefusal) {
@@ -2416,6 +2442,16 @@ export async function executeClaimed(
         receipt: res?.receipt,
       };
     }
+    const filesystemConfinementReceipt = unconfinedWorkspaceOnly
+      ? {
+          filesystemConfinement: {
+            status: "unconfined",
+            declared: "workspace-only",
+            fallback: "host",
+            source: "policy:sandbox.workspace_only_fallback",
+          },
+        }
+      : null;
 
     if (isWorktree && repoName && ticketId) {
       if (!linearConfigured) {
@@ -3355,6 +3391,7 @@ export async function executeClaimed(
           evidenceSetHash: null,
           journalHead: latestJournalHash(db, runId),
           verificationStatus: "passed",
+          extraReceipt: filesystemConfinementReceipt,
           harnessPins: materializedHarnessPins,
         });
         db.query(
@@ -3454,7 +3491,12 @@ export async function executeClaimed(
         evidenceSetHash: verified.result.evidenceSetHash,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
-        extraReceipt: verified.receipt,
+        extraReceipt: filesystemConfinementReceipt
+          ? {
+              ...(verified.receipt ?? {}),
+              ...filesystemConfinementReceipt,
+            }
+          : verified.receipt,
         harnessPins: materializedHarnessPins,
       });
       const { result } = verified;

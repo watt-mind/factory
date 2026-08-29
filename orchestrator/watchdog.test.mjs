@@ -1,5 +1,9 @@
 import { test, expect } from "bun:test";
-import { formatWatchdogReport, runWatchdogCheck } from "./watchdog.mjs";
+import {
+  formatWatchdogReport,
+  recentSandboxRefusals,
+  runWatchdogCheck,
+} from "./watchdog.mjs";
 
 test("formatWatchdogReport formats clean watchdog status", () => {
   const cleanResult = {
@@ -54,6 +58,108 @@ test("formatWatchdogReport formats critical issues", () => {
   expect(formatted).toContain("WEDGED_RUN");
   expect(formatted).toContain("[WARNING]");
   expect(formatted).toContain("WEB_DOWN");
+});
+
+test("recentSandboxRefusals joins recent typed journal entries to agents", () => {
+  const now = Date.parse("2026-08-29T20:00:00Z");
+  const refusals = recentSandboxRefusals(
+    {
+      entries: [
+        {
+          runId: "run_recent",
+          to: "REFUSED",
+          reason:
+            "work-scan@1: sandbox_unavailable:qemu — qemu-system-x86_64 is not on PATH",
+          at: "2026-08-29T19:45:00Z",
+        },
+        {
+          runId: "run_old",
+          to: "REFUSED",
+          reason: "sandbox_unavailable:qemu",
+          at: "2026-08-29T18:00:00Z",
+        },
+        {
+          runId: "run_other",
+          to: "REFUSED",
+          reason: "permission_denied",
+          at: "2026-08-29T19:50:00Z",
+        },
+      ],
+    },
+    {
+      runs: [
+        { runId: "run_recent", agent: "work-scan@1" },
+        { runId: "run_old", agent: "triage-scan@1" },
+      ],
+    },
+    { now },
+  );
+
+  expect(refusals).toEqual([
+    {
+      runId: "run_recent",
+      agent: "work-scan@1",
+      reason:
+        "work-scan@1: sandbox_unavailable:qemu — qemu-system-x86_64 is not on PATH",
+      at: "2026-08-29T19:45:00Z",
+    },
+  ]);
+});
+
+test("runWatchdogCheck surfaces sandbox-unavailable scan refusals", async () => {
+  const at = new Date().toISOString();
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health") return Response.json({ ok: true });
+      if (url.pathname === "/status") {
+        return Response.json({ runs: { byState: {} }, anomalies: {} });
+      }
+      if (url.pathname === "/workers") {
+        return Response.json({
+          workers: [{ workerId: "worker_1", state: "idle" }],
+        });
+      }
+      if (url.pathname === "/journal") {
+        return Response.json({
+          entries: [
+            {
+              runId: "run_scan",
+              to: "REFUSED",
+              reason: "work-scan@1: sandbox_unavailable:qemu",
+              at,
+            },
+          ],
+        });
+      }
+      if (url.pathname === "/runs") {
+        return Response.json(
+          url.searchParams.get("state") === "REFUSED"
+            ? { runs: [{ runId: "run_scan", agent: "work-scan@1" }] }
+            : { runs: [] },
+        );
+      }
+      return new Response("ok");
+    },
+  });
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      checkShadowFleet: false,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.metrics.sandboxRefusals).toHaveLength(1);
+    expect(result.issues).toContainEqual({
+      severity: "CRITICAL",
+      code: "SCAN_SANDBOX_UNAVAILABLE",
+      message: "Scan loops refused: sandbox unavailable (work-scan@1)",
+    });
+  } finally {
+    server.stop(true);
+  }
 });
 
 test("runWatchdogCheck detects unreachable API as critical", async () => {

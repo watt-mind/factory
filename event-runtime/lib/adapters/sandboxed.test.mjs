@@ -32,8 +32,10 @@ import {
   refuseSandbox,
   runSandboxed,
   SANDBOX_CONSOLE_FILE,
+  sandboxUnavailableDetail,
   sandboxRequested,
   SandboxUnsupportedError,
+  workspaceOnlyHostFallback,
   withStdinFile,
 } from "./sandboxed.mjs";
 
@@ -85,6 +87,57 @@ describe("sandboxRequested / refuseSandbox", () => {
 });
 
 describe("workspace-only model admission (#962)", () => {
+  test("an explicit host fallback admits only definitions without their own sandbox policy (#1250)", () => {
+    const runtime = {
+      workspaceOnlyFallback: "host",
+      sandboxAvailability: {
+        available: false,
+        qemu: null,
+        reason: "qemu-system-x86_64 is not on PATH",
+      },
+    };
+
+    expect(workspaceOnlyHostFallback(confinedDef(), runtime)).toBe(true);
+    for (const adapter of ["agy", "claude", "cursor", "hermes", "pi"]) {
+      expect(
+        filesystemConfinementRefusal(adapter, confinedDef(), runtime),
+      ).toBeNull();
+    }
+
+    const explicitlySandboxed = confinedDef({
+      sandbox: { provider: "gondolin" },
+    });
+    expect(workspaceOnlyHostFallback(explicitlySandboxed, runtime)).toBe(false);
+    expect(
+      filesystemConfinementRefusal("pi", explicitlySandboxed, runtime),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("sandbox_unavailable:qemu"),
+    });
+  });
+
+  test("host preflight failures name the missing capability before policy shape (#1250)", () => {
+    const runtime = {
+      sandboxAvailability: {
+        available: false,
+        qemu: null,
+        node: null,
+        nodeVersion: null,
+        sdk: false,
+        reason: "qemu-system-x86_64 is not on PATH",
+      },
+    };
+    expect(sandboxUnavailableDetail(runtime.sandboxAvailability)).toBe(
+      "sandbox_unavailable:qemu — qemu-system-x86_64 is not on PATH",
+    );
+    expect(
+      filesystemConfinementRefusal("pi", confinedDef(), runtime),
+    ).toMatchObject({
+      code: FILESYSTEM_CONFINEMENT_REASON,
+      detail: expect.stringContaining("sandbox_unavailable:qemu"),
+    });
+  });
+
   test("unsupported model adapters fail closed with one typed reason", () => {
     for (const adapter of ["agy", "claude", "cursor", "hermes"]) {
       expect(filesystemConfinementRefusal(adapter, confinedDef())).toEqual({
