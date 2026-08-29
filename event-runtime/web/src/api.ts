@@ -12,7 +12,7 @@ import type {
   EnvIdentity,
   DecisionEffect,
   DecisionResponseInput,
-  InboxItem as BaseInboxItem,
+  InboxItem,
   InboxStatus,
   JournalView,
   MetricsBreakdownView,
@@ -31,9 +31,6 @@ import type {
   TraceView,
   Worker,
 } from "./types";
-
-/** Inbox expiry is server-authoritative; it is optional for older servers. */
-export type InboxItem = BaseInboxItem & { expired?: boolean };
 
 // Same contract as lib/client.mjs: one function per endpoint, an Error with
 // `.status` on non-2xx, no status at all on connection failure.

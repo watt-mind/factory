@@ -413,7 +413,7 @@ export function proposalTtlLabel(
  * event-runtime/lib/inbox.mjs, so the sidebar badge and Open tab count match.
  */
 export function isExpiredInboxItem(
-  item: InboxItem & { expired?: boolean },
+  item: InboxItem,
   proposalsById: Map<string, Proposal>,
   now: number,
 ): boolean {

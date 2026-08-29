@@ -38,8 +38,7 @@ afterEach(() => {
 });
 
 function item(
-  overrides: Partial<InboxItem & { expired?: boolean }> &
-    Pick<InboxItem, "id" | "kind">,
+  overrides: Partial<InboxItem> & Pick<InboxItem, "id" | "kind">,
 ): InboxItem {
   return {
     severity: "normal",

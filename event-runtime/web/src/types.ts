@@ -1053,6 +1053,12 @@ export interface InboxItem {
   decidedAt?: string | null;
   decidedBy?: string | null;
   dedupeKey?: string | null;
+  /**
+   * Server-authoritative expiry projection from the shared predicate in
+   * event-runtime/lib/inbox.mjs. Current servers always set it; it stays
+   * optional for pre-#1223 servers and hand-built fixtures.
+   */
+  expired?: boolean;
 }
 
 /** One recent ticket summary (GET /tickets). */
