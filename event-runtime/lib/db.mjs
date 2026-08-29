@@ -426,6 +426,25 @@ export const MIGRATIONS = [
     },
   },
   {
+    version: 14,
+    name: "chain_resolution_indexes",
+    up(db) {
+      const columns = db
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name);
+      if (!columns.includes("chain_resolved_at")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN chain_resolved_at TEXT;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_causation
+          ON events (causation_id, source);
+        CREATE INDEX IF NOT EXISTS idx_runs_chain_unresolved
+          ON runs (state, chain_resolved_at);
+      `);
+    },
+  },
+  {
     // 15, not 14: #1230 (#1197) also introduces a migration 14 and lands
     // first. Guarded/idempotent like the rest, and the runner applies any
     // migration above the database's user_version, so a v13 or v14 database

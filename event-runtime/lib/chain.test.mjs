@@ -13,6 +13,11 @@ import { planAdmittedEvents } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
+import { tick } from "../cli/serve.mjs";
+// Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
+// temp home for this whole file, so default-home lookups (artifactsRoot(),
+// dbPath()) never reach the operator's real ~/.factory (OPS-425).
+import { realFactorySnapshot } from "../test-helpers.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
@@ -419,6 +424,14 @@ describe("multi-emit chain resolution (WM-119)", () => {
     ).run(runId, JSON.stringify({ artifact }), now);
   }
 
+  function seedChainChild(db, runId, eventId) {
+    const now = new Date().toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at, correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('chain', ?, 'factory.work.requested', 'perf-edge@1', ?, ?, ?, ?, '{}', 'hash', 'admitted', ?)`,
+    ).run(eventId, now, now, `corr-${runId}`, runId, now);
+  }
+
   test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
     const dir = tmpDir("evrt-chain-multi-");
     const db = openDb(path.join(dir, "runtime.db"));
@@ -460,6 +473,161 @@ describe("multi-emit chain resolution (WM-119)", () => {
       skipped: 0,
       errors: [],
     });
+  });
+
+  test("partially emitted fan-out resumes missing siblings before marking the run resolved", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-partial-fanout",
+      agent: "work-scan@1",
+      input: { repo: "wm/partial" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/partial",
+        plan: [
+          { ticket: "WM-301" },
+          { ticket: "WM-302" },
+          { ticket: "WM-303" },
+        ],
+      },
+    });
+    seedChainChild(db, "run-partial-fanout", "chain-run-partial-fanout-WM-301");
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 2,
+      skipped: 0,
+      errors: [],
+    });
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-partial-fanout'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("production-shaped resolved history keeps a no-planning tick and health responsive", async () => {
+    const realHomeBefore = realFactorySnapshot();
+    expect(process.env.FACTORY_EVENT_HOME).toBeDefined();
+    const db = openDb(":memory:");
+    const perfRegistry = {
+      ...registry,
+      edges: {
+        "perf-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+
+    // Production had ~1,300 completed edge runs and ~6,000 chain events. Use
+    // 2,000/6,000 so this guards both that shape and future history growth.
+    db.transaction(() => {
+      for (let i = 0; i < 2_000; i += 1) {
+        const runId = `run-perf-${i}`;
+        seedCompletedRun(db, {
+          runId,
+          agent: "perf-edge@1",
+          input: { repo: "factory" },
+          artifact: { recommendation: "NEXT" },
+        });
+        seedChainChild(db, runId, `chain-${runId}`);
+        seedChainChild(db, runId, `chain-${runId}-legacy-a`);
+        seedChainChild(db, runId, `chain-${runId}-legacy-b`);
+      }
+    })();
+
+    let childEventLookups = 0;
+    const instrumented = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (/JOIN events child\s+ON child\.causation_id/s.test(sql)) {
+              childEventLookups += 1;
+            }
+            return target.query(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const noPlanning = Object.fromEntries(
+      [
+        "tick emit",
+        "plan",
+        "auto-approve",
+        "auto-approve-chains",
+        "announce",
+        "inbox",
+        "notify",
+        "reap",
+        "announce-after",
+        "outbox",
+        "GC",
+      ].map((name) => [name, () => {}]),
+    );
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true });
+      },
+    });
+
+    try {
+      const healthRequests = Array.from({ length: 20 }, async () => {
+        const started = performance.now();
+        const response = await fetch(`http://127.0.0.1:${server.port}/health`);
+        expect(response.status).toBe(200);
+        return performance.now() - started;
+      });
+      const tickStarted = performance.now();
+      await tick({
+        db: instrumented,
+        registry: perfRegistry,
+        policyVersion: PV,
+        subsystems: noPlanning,
+        log: () => {},
+      });
+      const tickMs = performance.now() - tickStarted;
+      const healthMs = (await Promise.all(healthRequests)).sort(
+        (a, b) => a - b,
+      );
+      const healthP95 = healthMs[Math.ceil(healthMs.length * 0.95) - 1];
+
+      console.info(
+        `chain benchmark: tick=${tickMs.toFixed(1)}ms health_p95=${healthP95.toFixed(1)}ms child_event_lookups=${childEventLookups}`,
+      );
+      expect(childEventLookups).toBe(1); // one bulk lookup, never 2,000
+      expect(tickMs).toBeLessThan(200);
+      // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
+      expect(healthP95).toBeLessThan(500);
+      // The production-shaped benchmark must never touch the operator's real
+      // ~/.factory/event-runtime/runtime.db (no default-home openDb/migration).
+      expect(realFactorySnapshot().dbMtime).toBe(realHomeBefore.dbMtime);
+
+      childEventLookups = 0;
+      expect(resolveChains(instrumented, perfRegistry)).toEqual({
+        emitted: 0,
+        skipped: 0,
+        errors: [],
+      });
+      expect(childEventLookups).toBe(0); // resolved history is not re-examined
+    } finally {
+      server.stop(true);
+      db.close();
+    }
   });
 
   test("empty plan skips cleanly without error", () => {
