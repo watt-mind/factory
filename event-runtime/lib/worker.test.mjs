@@ -2556,6 +2556,63 @@ describe("worker", () => {
     });
   });
 
+  test("releasing a stalled worker honors the environment retry ceiling", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({ maxAttempts: 5, maxEnvironmentRetries: 0 }),
+    );
+    db.query(`UPDATE runs SET attempts = 1 WHERE run_id = ?`).run(spec.runId);
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      spec.runId,
+      1,
+      1,
+      new Date(T0 - 1).toISOString(),
+      "FAILED",
+      "lease_expired",
+    );
+    db.query(`INSERT INTO counters (name, value) VALUES (?, ?)`).run(
+      "fencing",
+      1,
+    );
+    const claim = claimNext(db, opts());
+    const staleAt = T0 - 90_001;
+    db.query(
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "w1",
+      "test-host",
+      1,
+      "{}",
+      "fake",
+      new Date(T0).toISOString(),
+      new Date(staleAt).toISOString(),
+      "busy",
+      spec.runId,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        db,
+        { workerId: "w1", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: spec.runId });
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(claim.attempt).toBe(2);
+    expect(
+      db
+        .query(
+          `SELECT terminal_state, reason_code FROM attempts WHERE run_id = ? AND attempt = ?`,
+        )
+        .get(spec.runId, claim.attempt),
+    ).toEqual({ terminal_state: "FAILED", reason_code: "lease_expired" });
+  });
+
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {
     const db = openDb(":memory:");
     let aborted = false;

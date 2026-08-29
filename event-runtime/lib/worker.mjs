@@ -3634,9 +3634,9 @@ export async function executeClaimed(
  * Explicit operator recovery for a worker that stopped heartbeating while it
  * still owned a run. This mirrors the lease reaper's retry/exhaustion rules,
  * but targets exactly the selected worker/run. When the run is retried it is
- * re-queued with the fixed `retry:environment` reason (matching the reaper's
- * lease-expiry requeue); operator provenance is carried by `actor` (default
- * "operator") on the recorded transitions, not by the reason string.
+ * re-queued with the retry cause derived from the same decision as the reaper;
+ * operator provenance is carried by `actor` (default "operator") on the
+ * recorded transitions, not by the reason string.
  */
 export function releaseStalledWorkerLease(
   db,
@@ -3688,36 +3688,36 @@ export function releaseStalledWorkerLease(
     }
 
     const spec = JSON.parse(run.spec_json);
-    const reason = "operator_release_stalled_worker";
+    const failureReason = typedFailureReason("lease_expired");
     db.query(
       `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
     ).run(iso(currentNow - 1), heldRunId, run.attempts);
-    if (run.attempts < spec.maxAttempts) {
-      const failureReason = typedFailureReason("lease_expired");
-      if (run.state === "VERIFYING") {
-        transition(db, {
-          runId: heldRunId,
-          to: "FAILED",
-          actor,
-          reason: failureReason,
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
-      finishAttempt(
-        db,
-        heldRunId,
-        run.attempts,
-        "FAILED",
-        "lease_expired",
-        currentNow,
-      );
+    if (run.state === "VERIFYING") {
+      transition(db, {
+        runId: heldRunId,
+        to: "FAILED",
+        actor,
+        reason: failureReason,
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
+    }
+    finishAttempt(
+      db,
+      heldRunId,
+      run.attempts,
+      "FAILED",
+      "lease_expired",
+      currentNow,
+    );
+    const decision = retryDecision(db, heldRunId, spec, "lease_expired");
+    if (decision.retry) {
       transition(db, {
         runId: heldRunId,
         to: "QUEUED",
         actor,
-        reason: "retry:environment",
+        reason: `retry:${decision.cause}`,
         attempt: run.attempts,
         policyVersion,
         now: currentNow,
@@ -3728,7 +3728,7 @@ export function releaseStalledWorkerLease(
           runId: heldRunId,
           to: "RUNNING",
           actor,
-          reason,
+          reason: failureReason,
           attempt: run.attempts,
           policyVersion,
           now: currentNow,
@@ -3738,19 +3738,11 @@ export function releaseStalledWorkerLease(
         runId: heldRunId,
         to: "FAILED",
         actor,
-        reason,
+        reason: failureReason,
         attempt: run.attempts,
         policyVersion,
         now: currentNow,
       });
-      finishAttempt(
-        db,
-        heldRunId,
-        run.attempts,
-        "FAILED",
-        "stalled_worker_released",
-        currentNow,
-      );
     }
     db.query(
       `UPDATE workers SET state = 'stopped', current_run = NULL, stopped_at = ? WHERE worker_id = ?`,
