@@ -188,7 +188,7 @@ Quote glob arguments: `grep -rn "..." src --include='*.ts'`, never `--include=*.
 Mechanical factory tools run from **any cwd** via the `factory` CLI on PATH — product checkouts and worktrees do not contain `orchestrator/` or `tools/`.
 
 ```bash
-factory linear get CLNT-616
+factory ticket get CLNT-616
 factory queue --repo bj29
 factory next --repo bj29
 factory label-guard --repo bj29 --apply
@@ -198,26 +198,26 @@ Install once: `bun build/emit.mjs --link-bin` (symlinks `~/Develop/factory/bin/f
 
 ### Linear
 
-**Use `factory linear` — not the Linear MCP, and not the standalone `linear` CLI.** The MCP fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback; the schpet `linear` CLI fails differently (`linear issue comment CLNT-526 --body` is wrong syntax — it needs `comment add`; `linear issue query` with hand-rolled filters errors on type coercion). Both waste turns. The factory tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
+**Use `factory ticket` — not the Linear MCP, and not the standalone `linear` CLI.** The `linear` command is a deprecated alias. The MCP fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback; the schpet `linear` CLI fails differently (`linear issue comment CLNT-526 --body` is wrong syntax — it needs `comment add`; `linear issue query` with hand-rolled filters errors on type coercion). Both waste turns. The factory tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
 
-You work in a worktree, not in the factory checkout. **`factory linear` resolves the checkout itself**; headless runs also set `$FACTORY_ROOT`. Fallback when the CLI is missing: `bun "$FACTORY_ROOT/tools/linear.mjs"`.
+You work in a worktree, not in the factory checkout. **`factory ticket` resolves the checkout itself**; headless runs also set `$FACTORY_ROOT`. Fallback when the CLI is missing: `bun "$FACTORY_ROOT/tools/linear.mjs"`.
 
 ```bash
-factory linear get CLNT-616                              # ticket, state, labels, criteria
-factory linear claim CLNT-616 --agent claude             # assign + In Progress + labels + read-back
-factory linear comment CLNT-616 "..."                    # the heartbeat
-factory linear state CLNT-616 "In Review" --add ai:needs-review
-factory linear file --team CLNT --title "..." --body "..." --type bug
-factory linear queue --team CLNT                         # what is dispatchable
+factory ticket get CLNT-616                              # ticket, state, labels, criteria
+factory ticket claim CLNT-616 --agent claude             # assign + In Progress + labels + read-back
+factory ticket comment CLNT-616 "..."                    # the heartbeat
+factory ticket state CLNT-616 "In Review" --add ai:needs-review
+factory ticket file --team CLNT --title "..." --body "..." --type bug
+factory ticket queue --team CLNT                         # what is dispatchable
 ```
 
 `claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.
 
 **Attribution.** Factory runs set `$FACTORY_RUN_ID`. Linear comments and issues filed through `tools/linear.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
 
-**Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory linear state` or `factory linear claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
+**Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory ticket state` or `factory ticket claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
 
-**Strict order of operations for discovered work.** Discovered work filed during a merge review or ticket session cannot have its ticket ID known prior to creation. Pre-writing cross-references in summary or handoff comments before filing causes fake or broken identifiers. Follow this strict order: file follow-ups first via `factory linear file`, collect the returned issue identifiers, and then author summary and handoff comments referencing those real IDs.
+**Strict order of operations for discovered work.** Discovered work filed during a merge review or ticket session cannot have its ticket ID known prior to creation. Pre-writing cross-references in summary or handoff comments before filing causes fake or broken identifiers. Follow this strict order: file follow-ups first via `factory ticket file`, collect the returned issue identifiers, and then author summary and handoff comments referencing those real IDs.
 
 ### Secrets
 

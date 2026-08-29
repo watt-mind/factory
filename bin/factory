@@ -322,6 +322,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   warm          orchestrator/warm.mjs
   tick          orchestrator/tick.mjs
   dispatch      tools/dispatch.mjs (swift event task runner: triage, status, janitor)
+  handoff       tools/handoff.mjs (remote handoff broker)
   events        event-runtime/cli.mjs (status, ps, runs, proposals, approve, reject, inject, requeue)
   pack          scaffold or validate a data-only filesystem pack
   inbox         list open human inbox items

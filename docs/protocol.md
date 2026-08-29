@@ -123,7 +123,7 @@ them to native labels of the same spelling.
 API error. Every new issue carries exactly one `source:*`.
 
 **Labels are replaced wholesale, never merged.** Always go through `--add` /
-`--remove` (`factory linear state` / `claim`, or `setLabels` on the adapter).
+`--remove` (`factory ticket state` / `claim`, or `setLabels` on the adapter).
 A mutation that passes only the labels you want added silently drops every
 other label on the ticket.
 
@@ -247,7 +247,7 @@ deliverable, or an investigation with an operational finding. Do not file
 an ordinary question, a read-only lookup with no actionable finding, or an
 inconsequential edit.
 
-Search for duplicates first (`factory linear`, or the tracker's search).
+Search for duplicates first (`factory ticket`, or the tracker's search).
 Comment on the existing ticket with new evidence rather than filing a
 second issue.
 
@@ -344,18 +344,18 @@ page URL or screenshot path.
 
 ## 13. Tracker access
 
-**Use `factory linear` — not a tracker MCP, and not a standalone tracker
-CLI.** The factory tool is in git, has this protocol's guardrails built in,
+**Use `factory ticket` — not a tracker MCP, and not a standalone tracker
+CLI.** The `linear` command is a deprecated alias. The factory tool is in git, has this protocol's guardrails built in,
 and its `claim` verb performs the advisory read-back. The authoritative
 concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
-factory linear get CLNT-616
-factory linear claim CLNT-616 --agent claude
-factory linear comment CLNT-616 "..."
-factory linear state CLNT-616 "In Review" --add ai:needs-review
-factory linear file --team CLNT --title "..." --body "..." --type bug
-factory linear queue --team CLNT
+factory ticket get CLNT-616
+factory ticket claim CLNT-616 --agent claude
+factory ticket comment CLNT-616 "..."
+factory ticket state CLNT-616 "In Review" --add ai:needs-review
+factory ticket file --team CLNT --title "..." --body "..." --type bug
+factory ticket queue --team CLNT
 ```
 
 `claim` exits non-zero when another agent won the race — that is not a
