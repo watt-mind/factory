@@ -38,7 +38,7 @@ import {
   matchesFilterQuery,
   parseFilterQuery,
 } from "../filterQuery";
-import type { InboxItem } from "../types";
+import type { InboxItem, Proposal } from "../types";
 import {
   Ago,
   BulkActionBar,
@@ -407,6 +407,23 @@ export function proposalTtlLabel(
   return `${minutes}m left`;
 }
 
+/** Expired items stay available in the Open tab, but are not actionable by default. */
+export function isExpiredInboxItem(
+  item: InboxItem,
+  proposalsById: Map<string, Proposal>,
+  now: number,
+): boolean {
+  if (item.kind === "proposal_expired") return true;
+  const proposal = item.refs.proposalId
+    ? proposalsById.get(item.refs.proposalId)
+    : undefined;
+  return (
+    proposal?.status === "open" &&
+    proposalTtlLabel(proposal.created_at, proposal.ttl_seconds, now) ===
+      "expired"
+  );
+}
+
 /** WM-559 will move this precision into shared `Ago`; keep the Inbox local until then. */
 export function inboxAge(iso: string, now: number): string {
   const seconds = Math.max(
@@ -735,7 +752,7 @@ export function Inbox({
     ...refetchIntervals.primary,
   });
   const proposalsById = useMemo(() => {
-    const map = new Map<string, { created_at: string; ttl_seconds: number }>();
+    const map = new Map<string, Proposal>();
     for (const proposal of proposalsQuery.data?.proposals ?? []) {
       map.set(proposal.id, proposal);
     }
@@ -743,7 +760,17 @@ export function Inbox({
   }, [proposalsQuery.data]);
 
   const [tab, setTab] = useState<InboxTab>("open");
+  const [expiredOnly, setExpiredOnly] = useState(false);
   const [filter, setFilter] = useState("");
+  const expiredOpenItems = useMemo(
+    () =>
+      items.filter(
+        (item) =>
+          itemStatus(item) === "open" &&
+          isExpiredInboxItem(item, proposalsById, now),
+      ),
+    [items, now, proposalsById],
+  );
   const counts = useMemo(() => {
     const c: Record<InboxTab, number> = {
       open: 0,
@@ -751,13 +778,28 @@ export function Inbox({
       resolved: 0,
       all: items.length,
     };
-    for (const it of items) c[itemStatus(it)] += 1;
+    for (const it of items) {
+      if (
+        itemStatus(it) === "open" &&
+        isExpiredInboxItem(it, proposalsById, now)
+      ) {
+        continue;
+      }
+      c[itemStatus(it)] += 1;
+    }
     return c;
-  }, [items]);
+  }, [items, now, proposalsById]);
 
   const byTab = useMemo(
-    () => items.filter((item) => matchesTab(item, tab)),
-    [items, tab],
+    () =>
+      items.filter((item) => {
+        if (!matchesTab(item, tab)) return false;
+        if (tab !== "open") return true;
+        return (
+          isExpiredInboxItem(item, proposalsById, now) === expiredOnly
+        );
+      }),
+    [expiredOnly, items, now, proposalsById, tab],
   );
   const parsed = useMemo(
     () => parseFilterQuery(filter, INBOX_FACETS),
@@ -1046,6 +1088,7 @@ export function Inbox({
   const selectTab = (t: InboxTab) => {
     lastInteractedId.current = null;
     setTab(t);
+    setExpiredOnly(false);
     onSelectItem(null);
     setSelectedIds(new Set());
   };
@@ -1216,6 +1259,25 @@ export function Inbox({
                     </PrimitiveButton>
                   ))}
                 </div>
+                {tab === "open" && expiredOpenItems.length > 0 && (
+                  <PrimitiveButton
+                    bare
+                    type="button"
+                    aria-pressed={expiredOnly}
+                    onClick={() => {
+                      setExpiredOnly((current) => !current);
+                      onSelectItem(null);
+                      setSelectedIds(new Set());
+                    }}
+                    className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                      expiredOnly
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-faint) hover:bg-(--surface-1)"
+                    }`}
+                  >
+                    Expired ({expiredOpenItems.length})
+                  </PrimitiveButton>
+                )}
                 <span className="ml-auto">
                   <DisplayOptions
                     config={INBOX_DISPLAY}
