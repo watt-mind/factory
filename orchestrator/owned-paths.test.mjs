@@ -332,7 +332,10 @@ test("a present malformed registry digest policy fails closed", () => {
     }
   }
 
-  expectEqual(ownedPathsClosureGaps({ ownedPaths: [], ownedPathsPolicy: {} }), []);
+  expectEqual(
+    ownedPathsClosureGaps({ ownedPaths: [], ownedPathsPolicy: {} }),
+    [],
+  );
   expectEqual(
     ownedPathsClosureGaps({
       ownedPaths: [],
@@ -430,7 +433,12 @@ test("registry input overlap respects path segments and root-level inputs", () =
   const gap = (owned) =>
     ownedPathsClosureGaps({ ownedPaths: [owned], ownedPathsPolicy: policy });
 
-  for (const owned of ["**/agents/*.md", "pins.json", "*.json", "**/pins.json"]) {
+  for (const owned of [
+    "**/agents/*.md",
+    "pins.json",
+    "*.json",
+    "**/pins.json",
+  ]) {
     expectEqual(gap(owned), [
       {
         rule: "registry-digest",

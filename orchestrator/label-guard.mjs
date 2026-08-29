@@ -139,7 +139,11 @@ function ownedPathsClosureCheck(description = "", repo, manifestCache) {
 }
 
 /** Convert closure errors into an issue-level guard message without aborting a scan. */
-export function ownedPathsClosureGuard(description = "", repo, manifestCache = new Map()) {
+export function ownedPathsClosureGuard(
+  description = "",
+  repo,
+  manifestCache = new Map(),
+) {
   try {
     return ownedPathsClosureCheck(description, repo, manifestCache);
   } catch (err) {

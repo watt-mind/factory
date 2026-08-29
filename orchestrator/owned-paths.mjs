@@ -375,8 +375,14 @@ function segmentsMayOverlap(a, b) {
   const suffixA = literalSuffix(a);
   const suffixB = literalSuffix(b);
   return (
-    (!prefixA || !prefixB || prefixA.startsWith(prefixB) || prefixB.startsWith(prefixA)) &&
-    (!suffixA || !suffixB || suffixA.endsWith(suffixB) || suffixB.endsWith(suffixA))
+    (!prefixA ||
+      !prefixB ||
+      prefixA.startsWith(prefixB) ||
+      prefixB.startsWith(prefixA)) &&
+    (!suffixA ||
+      !suffixB ||
+      suffixA.endsWith(suffixB) ||
+      suffixB.endsWith(suffixA))
   );
 }
 
@@ -399,7 +405,8 @@ function registryGlobOverlaps(owned, input) {
     if (memo.has(key)) return memo.get(key);
     let result;
     if (i === a.length || j === b.length) {
-      result = (i === a.length && b.slice(j).every((segment) => segment === "**")) ||
+      result =
+        (i === a.length && b.slice(j).every((segment) => segment === "**")) ||
         (j === b.length && a.slice(i).every((segment) => segment === "**"));
     } else if (a[i] === "**") {
       result = intersects(i + 1, j) || intersects(i, j + 1);
