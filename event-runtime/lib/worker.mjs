@@ -2292,6 +2292,7 @@ export async function executeClaimed(
   const retain = spec.workspace?.retainOnFailure === true;
   let workspaceDir = null;
   let checkoutPath = null;
+  let worktreePath = null;
   let checkoutBaseline;
   let worktreeRecord;
   const cleanupWorkspace = ({ retainWorkspace = false } = {}) => {
@@ -2493,7 +2494,7 @@ export async function executeClaimed(
         });
       } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
         escalation = scheduleTierEscalation(db, registry, spec, {
-          workspacePath: checkoutPath,
+          workspacePath: worktreePath ?? checkoutPath,
           sourceWorkspacePath: workspaceDir,
           actor: owner,
           policyVersion,
@@ -2996,7 +2997,12 @@ export async function executeClaimed(
     });
     workspaceDir = created.dir;
     assertSandboxWorkspaceSupported(workspaceDir, def);
-    checkoutPath = created.checkout?.path ?? created.worktree?.path ?? null;
+    // Repository checkouts receive instance-local config and integrity
+    // baselining. Delegated worktrees already provision their own instance and
+    // must not be mutated by that repository-only setup; retain their path
+    // separately for an escalation ownership transfer.
+    checkoutPath = created.checkout?.path ?? null;
+    worktreePath = created.worktree?.path ?? null;
     provisionInstanceLocalConfigs({ checkoutPath });
     checkoutBaseline = checkoutPath ? repositoryStatus(checkoutPath) : null;
     worktreeRecord = created.worktree
@@ -3507,7 +3513,7 @@ export async function executeClaimed(
           });
         } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
           escalation = scheduleTierEscalation(db, registry, spec, {
-            workspacePath: checkoutPath,
+            workspacePath: worktreePath ?? checkoutPath,
             sourceWorkspacePath: workspaceDir,
             actor: owner,
             policyVersion,
