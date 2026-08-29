@@ -1801,14 +1801,7 @@ function coalesceWebhookMergeRequest(
     EXECUTING_MERGE_SCAN_STATES.has(blockingRun.state) &&
     !hasQueuedWebhookMergeScan(db, blockingRun.run_id)
   ) {
-    return noopBehindLiveRun(
-      db,
-      event,
-      blockingRun,
-      reason,
-      at,
-      ttlSeconds,
-    );
+    return noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds);
   }
   setEventStatus(db, event, "noop", reason);
   return { decision: "noop", runId: blockingRun.run_id, reason };

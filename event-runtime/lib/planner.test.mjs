@@ -347,7 +347,9 @@ describe("planEvent", () => {
     expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(3);
 
     const trailingRun = db
-      .query(`SELECT run_id FROM proposals WHERE event_id = 'check-2' AND decision = 'run'`)
+      .query(
+        `SELECT run_id FROM proposals WHERE event_id = 'check-2' AND decision = 'run'`,
+      )
       .get();
     for (const to of [
       "APPROVED",
