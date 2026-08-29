@@ -5,6 +5,8 @@ export const USAGE = `event-runtime — watched event → agent runtime (docs/ev
 
 usage: bun event-runtime/cli.mjs <command>
 
+  help | -h | --help             print this usage
+
   serve [--port N] [--adapter-override fake] [--watch] [--with-worker]
                                  start the control API (loopback) and planner
                                  in the foreground. Runs NO worker unless

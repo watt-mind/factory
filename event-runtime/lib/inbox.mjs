@@ -1199,24 +1199,14 @@ function completedShipProposal(db, proposalId) {
   );
 }
 
-function laterCiSuccess(db, row, refs) {
+function laterCiSuccess(row, refs, candidates) {
   const pr = prNumber(refs.pr);
   if (!refs.repo || !pr) return false;
-  const events = db
-    .query(
-      `SELECT subject, envelope_json FROM events
-       WHERE source = 'github'
-         AND type = 'factory.merge.requested'
-         AND admitted_at > ?
-       ORDER BY admitted_at, rowid`,
-    )
-    .all(row.created_at);
-  return events.some((event) => {
-    const envelope = parseObject(event.envelope_json);
-    const payload = envelope.payload;
+  return candidates.some(({ admittedAt, subject, payload }) => {
+    if (admittedAt <= row.created_at) return false;
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       return false;
-    const repo = payload.repo ?? event.subject;
+    const repo = payload.repo ?? subject;
     return (
       repo === refs.repo &&
       Array.isArray(payload.prNumbers) &&
@@ -1313,6 +1303,34 @@ export function reconcileInbox(
      ORDER BY created_at, rowid`,
     )
     .all();
+  const ciRows = rows.filter((row) => row.kind === "CI RED");
+  const earliestCiCreatedAt = ciRows.reduce(
+    (earliest, row) =>
+      earliest === null || row.created_at < earliest
+        ? row.created_at
+        : earliest,
+    null,
+  );
+  const mergeRequestedCandidates =
+    earliestCiCreatedAt === null
+      ? []
+      : db
+          .query(
+            `SELECT admitted_at, subject, envelope_json FROM events
+             WHERE source = 'github'
+               AND type = 'factory.merge.requested'
+               AND admitted_at > ?
+             ORDER BY admitted_at, rowid`,
+          )
+          .all(earliestCiCreatedAt)
+          .map((event) => {
+            const envelope = parseObject(event.envelope_json);
+            return {
+              admittedAt: event.admitted_at,
+              subject: event.subject,
+              payload: envelope.payload,
+            };
+          });
   const linearRows = [];
   for (const row of rows) {
     // Pending decisions are not skipped: once the referent stops waiting the
@@ -1334,7 +1352,8 @@ export function reconcileInbox(
           refs.proposalId = proposalId;
         }
       }
-      if (laterCiSuccess(db, row, refs)) resolvedBy = "auto:ci_green";
+      if (laterCiSuccess(row, refs, mergeRequestedCandidates))
+        resolvedBy = "auto:ci_green";
     } else if (row.kind === "RC READY") {
       if (refs.proposalId && completedShipProposal(db, refs.proposalId))
         resolvedBy = "auto:ship_completed";
