@@ -1011,6 +1011,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
       duplicate: false,
       eventId: "flow-1",
     });
+    // Planning runs off the response path (WM-1162): drain the deferred
+    // setImmediate before asserting the admitted wake-up.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(s.onEvents).toEqual(["admitted"]);
   });
 
