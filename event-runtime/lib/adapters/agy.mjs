@@ -441,6 +441,13 @@ export async function execute({
       path.join(workspaceDir, ".transcript.json"),
     );
     transcript.on("error", () => {});
+    // Child close only says its stdio handles are closed; the file stream may
+    // still have buffered bytes. Register before piping so a fast child cannot
+    // finish before we can observe the output flush.
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("finish", done);
+      transcript.once("close", done);
+    });
     if (child.stdout) {
       child.stdout.pipe(transcript);
     }
@@ -501,13 +508,17 @@ export async function execute({
     abortSignal?.addEventListener("abort", cancel, { once: true });
     signal?.addEventListener("abort", cancel, { once: true });
 
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       if (timer) clearTimeout(timer);
       abortSignal?.removeEventListener("abort", cancel);
       signal?.removeEventListener("abort", cancel);
+      await transcriptClosed;
       resolve({ exitCode, timedOut, usage: finalUsage });
     });
 
-    child.on("error", reject);
+    child.on("error", (err) => {
+      transcript.destroy();
+      reject(err);
+    });
   });
 }

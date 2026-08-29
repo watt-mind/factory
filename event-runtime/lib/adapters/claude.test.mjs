@@ -593,6 +593,16 @@ if (behavior === "normal") {
   process.exit(0);
 }
 
+if (behavior === "large_transcript") {
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] },
+    }) + "\\n",
+    () => process.exit(0),
+  );
+}
+
 if (behavior === "exit_code") {
   const code = parseInt(process.env.FACTORY_TEST_EXIT_CODE || "1", 10);
   process.exit(code);
@@ -845,6 +855,31 @@ if (behavior === "emit_denial_then_recovery") {
     expect(traceEvents[0].payload.text).toBe("Working...");
     expect(traceEvents[1].kind).toBe("usage");
     expect(traceEvents[1].payload.usage.input_tokens).toBe(15);
+  });
+
+  test("waits for a large transcript to flush before resolving", async () => {
+    const workspaceDir = ws();
+
+    await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+    });
+
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(transcript.length).toBeGreaterThan(1024 * 1024);
+    expect(transcript.endsWith("\n")).toBe(true);
+    expect(transcript.split("\n").filter(Boolean).map(JSON.parse)).toHaveLength(
+      1,
+    );
   });
 
   test("nonzero exit code propagates and timedOut is false", async () => {
