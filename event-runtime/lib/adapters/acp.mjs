@@ -16,11 +16,7 @@
  * Owned Paths. Tests register the module through `createAdapterRegistry`.
  */
 import { spawn } from "node:child_process";
-import {
-  createWriteStream,
-  existsSync,
-  writeFileSync,
-} from "node:fs";
+import { createWriteStream, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import {

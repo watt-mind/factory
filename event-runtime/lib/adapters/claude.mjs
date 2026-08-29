@@ -24,11 +24,7 @@
  * the pi path did not have to solve.
  */
 import { spawn, spawnSync } from "node:child_process";
-import {
-  createWriteStream,
-  mkdirSync,
-  writeFileSync,
-} from "node:fs";
+import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
