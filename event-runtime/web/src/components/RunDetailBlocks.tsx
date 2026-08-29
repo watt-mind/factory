@@ -1140,8 +1140,8 @@ export function RunDetailBlocks({
                 className="mb-3 rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] text-(--hue-warn)"
               >
                 <div>
-                  the agent&apos;s summary was dropped: {d.result.presentationErrors.length}{" "}
-                  errors
+                  the agent&apos;s summary was dropped:{" "}
+                  {d.result.presentationErrors.length} errors
                 </div>
                 <Disclosure label="presentation errors">
                   <ul className="mono m-0 list-disc space-y-1 pl-5 text-[11px] text-(--text-dim)">

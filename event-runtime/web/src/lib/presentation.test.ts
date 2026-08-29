@@ -26,7 +26,10 @@ describe("browser presentation port", () => {
   });
 
   test("resolves values while retaining their source pointer", () => {
-    const resolved = resolveRefs(fixture.cases[0].presentation, fixture.artifact);
+    const resolved = resolveRefs(
+      fixture.cases[0].presentation,
+      fixture.artifact,
+    );
     const keyvalue = resolved.blocks[2] as {
       items: Array<{ value: unknown }>;
     };

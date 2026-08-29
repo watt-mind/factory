@@ -197,7 +197,8 @@ describe("presentation result rendering", () => {
     const artifact = r.getByText("artifact").closest("details");
     expect(summary && artifact).toBeTruthy();
     expect(
-      summary!.compareDocumentPosition(artifact!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      summary!.compareDocumentPosition(artifact!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(summary!.querySelectorAll("button")).not.toHaveLength(0);
   });

@@ -385,10 +385,7 @@ export async function inspectWithPresentation(args) {
   const extra = [];
   if (detail?.result?.presentation) {
     const rendered = renderText(
-      resolveRefs(
-        detail.result.presentation,
-        detail.result.artifact ?? {},
-      ),
+      resolveRefs(detail.result.presentation, detail.result.artifact ?? {}),
       { width: Math.max(40, Number(process.stdout.columns ?? 80) - 2) },
     );
     extra.push("  presentation");

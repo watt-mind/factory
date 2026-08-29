@@ -24,7 +24,8 @@ const sourceValue = (value) =>
 
 const text = (value) => {
   const resolved = sourceValue(value);
-  if (resolved === undefined || resolved === null || resolved === "") return "—";
+  if (resolved === undefined || resolved === null || resolved === "")
+    return "—";
   if (typeof resolved === "string") return resolved;
   if (["number", "boolean"].includes(typeof resolved)) return String(resolved);
   return JSON.stringify(resolved);
@@ -40,16 +41,28 @@ function tableLines(block, width) {
   const available = Math.max(8, width - (block.columns.length - 1) * 3);
   const maxCell = Math.max(4, Math.floor(available / block.columns.length));
   const widths = block.columns.map((_, column) =>
-    Math.min(maxCell, Math.max(...rows.map((row) => String(row[column] ?? "").length))),
+    Math.min(
+      maxCell,
+      Math.max(...rows.map((row) => String(row[column] ?? "").length)),
+    ),
   );
   const crop = (value, column) => {
     const raw = String(value ?? "");
     const limit = widths[column];
-    return raw.length <= limit ? raw : `${raw.slice(0, Math.max(1, limit - 1))}…`;
+    return raw.length <= limit
+      ? raw
+      : `${raw.slice(0, Math.max(1, limit - 1))}…`;
   };
   const line = (row) =>
-    row.map((cell, column) => crop(cell, column).padEnd(widths[column])).join(" | ").trimEnd();
-  return [line(block.columns), widths.map((n) => "-".repeat(n)).join("-+-"), ...block.rows.map((row) => line(row.map(text)))];
+    row
+      .map((cell, column) => crop(cell, column).padEnd(widths[column]))
+      .join(" | ")
+      .trimEnd();
+  return [
+    line(block.columns),
+    widths.map((n) => "-".repeat(n)).join("-+-"),
+    ...block.rows.map((row) => line(row.map(text))),
+  ];
 }
 
 function renderBlock(block, width) {
@@ -63,14 +76,21 @@ function renderBlock(block, width) {
     case "list":
       return [
         ...(block.label ? [block.label] : []),
-        ...block.items.map((item) => `${GLYPHS[item.tone ?? "neutral"]} ${item.text}`),
+        ...block.items.map(
+          (item) => `${GLYPHS[item.tone ?? "neutral"]} ${item.text}`,
+        ),
       ];
     case "table":
-      return [...(block.label ? [block.label] : []), ...tableLines(block, width)];
+      return [
+        ...(block.label ? [block.label] : []),
+        ...tableLines(block, width),
+      ];
     case "badge":
       return [`${GLYPHS[block.tone] ?? "•"} ${block.text}`];
     case "code":
-      return String(block.text).split("\n").map((line) => `    ${line}`);
+      return String(block.text)
+        .split("\n")
+        .map((line) => `    ${line}`);
     case "section": {
       const children = block.blocks.flatMap((child, index) => [
         ...(index ? [""] : []),
@@ -81,7 +101,8 @@ function renderBlock(block, width) {
     case "links":
       return block.items.map((item) => {
         const key = ["issue", "pr", "run", "url"].find(
-          (candidate) => item[candidate] !== undefined && item[candidate] !== null,
+          (candidate) =>
+            item[candidate] !== undefined && item[candidate] !== null,
         );
         return `${item.label} <${key ? text(item[key]) : "—"}>`;
       });
@@ -92,7 +113,9 @@ function renderBlock(block, width) {
 
 /** Linearise a validated (optionally reference-resolved) presentation. */
 export function renderText(presentation, { width = 80 } = {}) {
-  const lineWidth = Number.isFinite(width) ? Math.max(20, Math.floor(width)) : 80;
+  const lineWidth = Number.isFinite(width)
+    ? Math.max(20, Math.floor(width))
+    : 80;
   if (!presentation || !Array.isArray(presentation.blocks)) return "";
   return presentation.blocks
     .flatMap((block, index) => [

@@ -4,13 +4,20 @@ import { resolveRefs } from "./presentation.mjs";
 import { renderText } from "./presentation-text.mjs";
 
 const fixture = JSON.parse(
-  readFileSync(new URL("./fixtures/presentation-cases.json", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("./fixtures/presentation-cases.json", import.meta.url),
+    "utf8",
+  ),
 );
 
 describe("renderText", () => {
   test("snapshots every fixture block as bounded plain text", () => {
-    const presentation = resolveRefs(fixture.cases[0].presentation, fixture.artifact);
-    expect(renderText(presentation, { width: 60 })).toBe(`# 58 issues in Triage; 14 can be made agent-ready today
+    const presentation = resolveRefs(
+      fixture.cases[0].presentation,
+      fixture.artifact,
+    );
+    expect(renderText(presentation, { width: 60 }))
+      .toBe(`# 58 issues in Triage; 14 can be made agent-ready today
 
 Most of the backlog is under-specified rather than wrong.
 
@@ -51,6 +58,8 @@ Repo <https://github.com/watt-mind/factory>`);
       },
       { width: 24 },
     );
-    expect(Math.max(...output.split("\n").map((line) => line.length))).toBeLessThanOrEqual(24);
+    expect(
+      Math.max(...output.split("\n").map((line) => line.length)),
+    ).toBeLessThanOrEqual(24);
   });
 });

@@ -76,10 +76,16 @@ function keys(
   for (const key of Object.keys(value))
     if (!allowed.includes(key)) errors.push(`${at}: unknown property "${key}"`);
   for (const key of required)
-    if (!own(value, key)) errors.push(`${at}: missing required property "${key}"`);
+    if (!own(value, key))
+      errors.push(`${at}: missing required property "${key}"`);
 }
 
-function checkValue(value: unknown, at: string, artifact: unknown, errors: string[]) {
+function checkValue(
+  value: unknown,
+  at: string,
+  artifact: unknown,
+  errors: string[],
+) {
   if (!scalarOrRef(value)) {
     errors.push(`${at}: expected scalar, null, or $ref`);
     return;
@@ -90,7 +96,8 @@ function checkValue(value: unknown, at: string, artifact: unknown, errors: strin
 
 function checkTone(value: unknown, at: string, errors: string[]) {
   if (typeof value === "string") {
-    if (!TONES.includes(value as ArtifactTone)) errors.push(`${at}: invalid tone`);
+    if (!TONES.includes(value as ArtifactTone))
+      errors.push(`${at}: invalid tone`);
     return;
   }
   if (!object(value)) {
@@ -119,7 +126,8 @@ function checkBlock(
   const type = value.type;
   const textBlock = (limit: number, byteLimit = false) => {
     keys(value, ["type", "text"], ["text"], at, errors);
-    if (typeof value.text !== "string") errors.push(`${at}.text: expected string`);
+    if (typeof value.text !== "string")
+      errors.push(`${at}.text: expected string`);
     else if ((byteLimit ? bytes(value.text) : value.text.length) > limit)
       errors.push(`${at}: ${type} text is over ${limit}`);
   };
@@ -127,20 +135,25 @@ function checkBlock(
   if (type === "markdown") return textBlock(LIMITS.markdown, true);
   if (type === "code") {
     keys(value, ["type", "text", "language"], ["text"], at, errors);
-    if (typeof value.text !== "string") errors.push(`${at}.text: expected string`);
-    else if (bytes(value.text) > LIMITS.code) errors.push(`${at}: code text is over ${LIMITS.code}`);
+    if (typeof value.text !== "string")
+      errors.push(`${at}.text: expected string`);
+    else if (bytes(value.text) > LIMITS.code)
+      errors.push(`${at}: code text is over ${LIMITS.code}`);
     if (value.language !== undefined && typeof value.language !== "string")
       errors.push(`${at}.language: expected string`);
     return;
   }
   if (type === "badge") {
     keys(value, ["type", "text", "tone"], ["text", "tone"], at, errors);
-    if (typeof value.text !== "string") errors.push(`${at}.text: expected string`);
-    if (!TONES.includes(value.tone as ArtifactTone)) errors.push(`${at}.tone: invalid tone`);
+    if (typeof value.text !== "string")
+      errors.push(`${at}.text: expected string`);
+    if (!TONES.includes(value.tone as ArtifactTone))
+      errors.push(`${at}.tone: invalid tone`);
     return;
   }
   if (type === "keyvalue" || type === "list" || type === "links") {
-    const allowed = type === "list" ? ["type", "label", "items"] : ["type", "items"];
+    const allowed =
+      type === "list" ? ["type", "label", "items"] : ["type", "items"];
     keys(value, allowed, ["items"], at, errors);
     if (!Array.isArray(value.items)) {
       errors.push(`${at}.items: expected array`);
@@ -152,80 +165,154 @@ function checkBlock(
       const itemAt = `${at}.items[${index}]`;
       if (!object(item)) return errors.push(`${itemAt}: expected object`);
       if (type === "keyvalue") {
-        keys(item, ["label", "value", "format", "tone"], ["label", "value"], itemAt, errors);
-        if (typeof item.label !== "string") errors.push(`${itemAt}.label: expected string`);
-        if (own(item, "value")) checkValue(item.value, `${itemAt}.value`, artifact, errors);
-        if (item.format !== undefined && !FORMATS.includes(item.format as ArtifactFormat))
+        keys(
+          item,
+          ["label", "value", "format", "tone"],
+          ["label", "value"],
+          itemAt,
+          errors,
+        );
+        if (typeof item.label !== "string")
+          errors.push(`${itemAt}.label: expected string`);
+        if (own(item, "value"))
+          checkValue(item.value, `${itemAt}.value`, artifact, errors);
+        if (
+          item.format !== undefined &&
+          !FORMATS.includes(item.format as ArtifactFormat)
+        )
           errors.push(`${itemAt}.format: invalid format`);
-        if (item.tone !== undefined && !TONES.includes(item.tone as ArtifactTone))
+        if (
+          item.tone !== undefined &&
+          !TONES.includes(item.tone as ArtifactTone)
+        )
           errors.push(`${itemAt}.tone: invalid tone`);
       } else if (type === "list") {
         keys(item, ["text", "ref", "tone"], ["text"], itemAt, errors);
-        if (typeof item.text !== "string") errors.push(`${itemAt}.text: expected string`);
+        if (typeof item.text !== "string")
+          errors.push(`${itemAt}.text: expected string`);
         if (item.ref !== undefined) {
-          if (typeof item.ref !== "string") errors.push(`${itemAt}.ref: expected string`);
+          if (typeof item.ref !== "string")
+            errors.push(`${itemAt}.ref: expected string`);
           else if (resolvePointer(artifact, item.ref) === undefined)
-            errors.push(`${itemAt}: ref "${item.ref}" does not resolve in the artifact`);
+            errors.push(
+              `${itemAt}: ref "${item.ref}" does not resolve in the artifact`,
+            );
         }
-        if (item.tone !== undefined && !TONES.includes(item.tone as ArtifactTone))
+        if (
+          item.tone !== undefined &&
+          !TONES.includes(item.tone as ArtifactTone)
+        )
           errors.push(`${itemAt}.tone: invalid tone`);
       } else {
         keys(item, ["label", "issue", "pr", "run", "url"], [], itemAt, errors);
-        const targets = ["issue", "pr", "run", "url"].filter((key) => own(item, key) && item[key] !== null);
-        if (targets.length !== 1) errors.push(`${itemAt}: a links item needs exactly one non-null target`);
+        const targets = ["issue", "pr", "run", "url"].filter(
+          (key) => own(item, key) && item[key] !== null,
+        );
+        if (targets.length !== 1)
+          errors.push(
+            `${itemAt}: a links item needs exactly one non-null target`,
+          );
         for (const target of ["issue", "pr", "run", "url"])
-          if (own(item, target)) checkValue(item[target], `${itemAt}.${target}`, artifact, errors);
+          if (own(item, target))
+            checkValue(item[target], `${itemAt}.${target}`, artifact, errors);
       }
     });
     return;
   }
   if (type === "table") {
-    keys(value, ["type", "label", "columns", "rows", "formats", "tone"], ["columns", "rows"], at, errors);
-    if (!Array.isArray(value.columns) || value.columns.length < 1 || value.columns.length > LIMITS.columns)
+    keys(
+      value,
+      ["type", "label", "columns", "rows", "formats", "tone"],
+      ["columns", "rows"],
+      at,
+      errors,
+    );
+    if (
+      !Array.isArray(value.columns) ||
+      value.columns.length < 1 ||
+      value.columns.length > LIMITS.columns
+    )
       errors.push(`${at}.columns: expected 1-${LIMITS.columns} columns`);
     else if (value.columns.some((column) => typeof column !== "string"))
       errors.push(`${at}.columns: expected strings`);
-    if (!Array.isArray(value.rows)) return errors.push(`${at}.rows: expected array`);
-    if (value.rows.length > LIMITS.rows) errors.push(`${at}.rows: too many rows`);
+    if (!Array.isArray(value.rows))
+      return errors.push(`${at}.rows: expected array`);
+    if (value.rows.length > LIMITS.rows)
+      errors.push(`${at}.rows: too many rows`);
     value.rows.forEach((row, r) => {
-      if (!Array.isArray(row)) return errors.push(`${at}.rows[${r}]: expected array`);
+      if (!Array.isArray(row))
+        return errors.push(`${at}.rows[${r}]: expected array`);
       if (Array.isArray(value.columns) && row.length !== value.columns.length)
-        errors.push(`${at}.rows[${r}]: ${row.length} cells != ${value.columns.length} columns`);
-      row.forEach((cell, c) => checkValue(cell, `${at}.rows[${r}][${c}]`, artifact, errors));
+        errors.push(
+          `${at}.rows[${r}]: ${row.length} cells != ${value.columns.length} columns`,
+        );
+      row.forEach((cell, c) =>
+        checkValue(cell, `${at}.rows[${r}][${c}]`, artifact, errors),
+      );
     });
     if (value.formats !== undefined) {
-      if (!Array.isArray(value.formats) || value.formats.some((format) => !FORMATS.includes(format as ArtifactFormat)))
+      if (
+        !Array.isArray(value.formats) ||
+        value.formats.some(
+          (format) => !FORMATS.includes(format as ArtifactFormat),
+        )
+      )
         errors.push(`${at}.formats: invalid formats`);
-      else if (Array.isArray(value.columns) && value.formats.length > value.columns.length)
+      else if (
+        Array.isArray(value.columns) &&
+        value.formats.length > value.columns.length
+      )
         errors.push(`${at}.formats: more formats than columns`);
     }
     if (value.tone !== undefined) checkTone(value.tone, `${at}.tone`, errors);
     return;
   }
   if (type === "section") {
-    keys(value, ["type", "label", "collapsed", "blocks"], ["label", "blocks"], at, errors);
+    keys(
+      value,
+      ["type", "label", "collapsed", "blocks"],
+      ["label", "blocks"],
+      at,
+      errors,
+    );
     if (depth > 0) errors.push(`${at}: section nesting exceeds one level`);
-    if (typeof value.label !== "string") errors.push(`${at}.label: expected string`);
+    if (typeof value.label !== "string")
+      errors.push(`${at}.label: expected string`);
     if (value.collapsed !== undefined && typeof value.collapsed !== "boolean")
       errors.push(`${at}.collapsed: expected boolean`);
-    if (!Array.isArray(value.blocks)) return errors.push(`${at}.blocks: expected array`);
-    if (value.blocks.length > LIMITS.section) errors.push(`${at}.blocks: too many blocks`);
-    value.blocks.forEach((block, index) => checkBlock(block, `${at}.blocks[${index}]`, artifact, errors, depth + 1));
+    if (!Array.isArray(value.blocks))
+      return errors.push(`${at}.blocks: expected array`);
+    if (value.blocks.length > LIMITS.section)
+      errors.push(`${at}.blocks: too many blocks`);
+    value.blocks.forEach((block, index) =>
+      checkBlock(block, `${at}.blocks[${index}]`, artifact, errors, depth + 1),
+    );
   }
 }
 
 /** Validate the document and every artifact citation. Never throws. */
-export function validatePresentation(value: unknown, artifact: unknown): PresentationValidation {
+export function validatePresentation(
+  value: unknown,
+  artifact: unknown,
+): PresentationValidation {
   const errors: string[] = [];
   if (!object(value)) return { valid: false, errors: ["$: expected object"] };
-  keys(value, ["schemaVersion", "blocks"], ["schemaVersion", "blocks"], "$", errors);
+  keys(
+    value,
+    ["schemaVersion", "blocks"],
+    ["schemaVersion", "blocks"],
+    "$",
+    errors,
+  );
   if (value.schemaVersion !== PRESENTATION_SCHEMA_VERSION)
     errors.push("$.schemaVersion: expected factory.presentation/v1");
   if (!Array.isArray(value.blocks)) errors.push("$.blocks: expected array");
   else {
     if (value.blocks.length < 1 || value.blocks.length > LIMITS.blocks)
       errors.push(`$.blocks: expected 1-${LIMITS.blocks} blocks`);
-    value.blocks.forEach((block, index) => checkBlock(block, `blocks[${index}]`, artifact ?? {}, errors, 0));
+    value.blocks.forEach((block, index) =>
+      checkBlock(block, `blocks[${index}]`, artifact ?? {}, errors, 0),
+    );
   }
   if (bytes(JSON.stringify(value)) > LIMITS.bytes)
     errors.push(`$: serialised presentation is over ${LIMITS.bytes} bytes`);
@@ -233,11 +320,21 @@ export function validatePresentation(value: unknown, artifact: unknown): Present
 }
 
 /** Deep-copy a presentation, replacing `$ref` values with value+source pairs. */
-export function resolveRefs(presentation: Presentation, artifact: unknown): Presentation {
+export function resolveRefs(
+  presentation: Presentation,
+  artifact: unknown,
+): Presentation {
   const map = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(map);
-    if (ref(value)) return { value: resolvePointer(artifact ?? {}, value.$ref), ref: value.$ref };
-    if (object(value)) return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, map(child)]));
+    if (ref(value))
+      return {
+        value: resolvePointer(artifact ?? {}, value.$ref),
+        ref: value.$ref,
+      };
+    if (object(value))
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [key, map(child)]),
+      );
     return value;
   };
   return map(presentation) as Presentation;

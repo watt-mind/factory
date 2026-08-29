@@ -503,11 +503,7 @@ export type ArtifactSectionKind =
 
 /** `factory.presentation/v1` — the optional, agent-authored Layer B document. */
 export type PresentationValue =
-  | string
-  | number
-  | boolean
-  | null
-  | { $ref: string };
+  string | number | boolean | null | { $ref: string };
 export type ResolvedPresentationValue =
   | Exclude<PresentationValue, { $ref: string }>
   | { value: unknown; ref: string };

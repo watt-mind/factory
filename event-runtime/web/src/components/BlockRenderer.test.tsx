@@ -14,23 +14,46 @@ const presentation: Presentation = {
   blocks: [
     { type: "heading", text: "Finding" },
     { type: "markdown", text: "Interpretation" },
-    { type: "keyvalue", items: [{ label: "Count", value: { $ref: "/count" }, format: "count" }] },
-    { type: "list", label: "Attention", items: [{ text: "Review this", ref: "/issue", tone: "warn" }] },
-    { type: "table", label: "Rows", columns: ["Issue"], rows: [[{ $ref: "/issue" }]], formats: ["issue"] },
+    {
+      type: "keyvalue",
+      items: [{ label: "Count", value: { $ref: "/count" }, format: "count" }],
+    },
+    {
+      type: "list",
+      label: "Attention",
+      items: [{ text: "Review this", ref: "/issue", tone: "warn" }],
+    },
+    {
+      type: "table",
+      label: "Rows",
+      columns: ["Issue"],
+      rows: [[{ $ref: "/issue" }]],
+      formats: ["issue"],
+    },
     { type: "badge", text: "SHIP", tone: "ok" },
     { type: "code", language: "json", text: "{}" },
-    { type: "section", label: "Method", collapsed: true, blocks: [{ type: "markdown", text: "Details" }] },
+    {
+      type: "section",
+      label: "Method",
+      collapsed: true,
+      blocks: [{ type: "markdown", text: "Details" }],
+    },
     { type: "links", items: [{ label: "Run", run: { $ref: "/run" } }] },
   ],
 };
 const artifact = { count: 1200, issue: "WM-12", run: "run_1234567890" };
 
 test("renders every block and exposes resolved sources", () => {
-  const view = render(<BlockRenderer presentation={presentation} artifact={artifact} />);
+  const view = render(
+    <BlockRenderer presentation={presentation} artifact={artifact} />,
+  );
   expect(view.getByText("Finding")).toBeTruthy();
   expect(view.getByText("Interpretation")).toBeTruthy();
   expect(
-    view.getByText("1,200").closest("[data-presentation-source]")?.getAttribute("title"),
+    view
+      .getByText("1,200")
+      .closest("[data-presentation-source]")
+      ?.getAttribute("title"),
   ).toBe("Source: /count");
   expect(view.getByText("!")).toBeTruthy();
   expect(view.getAllByText("WM-12").length).toBeGreaterThan(0);
@@ -42,7 +65,9 @@ test("renders every block and exposes resolved sources", () => {
 });
 
 test("presentation owns an independent raw toggle", () => {
-  const view = render(<PresentationPanel presentation={presentation} artifact={artifact} />);
+  const view = render(
+    <PresentationPanel presentation={presentation} artifact={artifact} />,
+  );
   fireEvent.click(view.getByText("Raw"));
   expect(view.container.querySelector("[data-presentation-view]")).toBeNull();
   expect(view.getByText("View")).toBeTruthy();
