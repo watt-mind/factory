@@ -297,8 +297,13 @@ describe("registry", () => {
     // adversarial gate-skipping directives to the blocking security-finding
     // ESCALATE behavior. Prompt text and its pin only — no schema, contract,
     // route, capability, or model tier changed.
+    // Regenerated (#833): triage-scan.md gains the shared presentation brief
+    // section plus one worked example, so the agent authors a
+    // `result.presentation` document (Layer B pilot); triage-scan.json is
+    // re-pinned. Prompt text and its pin only — no schema, contract, route,
+    // capability, or model tier changed.
     const expected =
-      "sha256:83e5c34c4b2312efbac585f811c8bc5425a8d179c539c11295e98bedacd3c1f4";
+      "sha256:91a5c728b78852bfe450a71eebddd87a17231e43dbe739c0b590de81cfda34ab";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
