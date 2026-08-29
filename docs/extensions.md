@@ -365,6 +365,34 @@ directory):
 }
 ```
 
+### Where secrets may live
+
+`format: "secret"` is accepted only on fixed object properties declared in
+`properties`, at any nesting depth. A secret under `items`, under
+`additionalProperties`, or at the schema root is rejected when the extension
+loads: the extension is disabled, its `values` are `null`, and an anomaly
+records `config schema ... declares format "secret" beneath ...`.
+
+Rejected (dynamic location):
+
+```json
+{
+  "type": "array",
+  "items": { "type": "string", "format": "secret" }
+}
+```
+
+Accepted (fixed property):
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "apiToken": { "type": "string", "format": "secret" }
+  }
+}
+```
+
 Values (`config/policy.yaml`) — non-secret settings only:
 
 ```yaml
