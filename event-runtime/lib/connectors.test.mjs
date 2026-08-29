@@ -83,15 +83,22 @@ describe("splitConfigSecrets", () => {
       greeting: "hi",
       apiToken: "sk-live",
       nsec: "nsec1abc",
+      credentials: { value: "innocuous-secret-name" },
       nested: { signingKey: "k", retries: 1 },
     };
     const { config, secrets } = splitConfigSecrets(values, [
       { path: ["apiToken"] },
+      { path: ["credentials", "value"] },
     ]);
-    expect(config).toEqual({ greeting: "hi", nested: { retries: 1 } });
+    expect(config).toEqual({
+      greeting: "hi",
+      credentials: {},
+      nested: { retries: 1 },
+    });
     expect(secrets).toEqual({
       apiToken: "sk-live",
       nsec: "nsec1abc",
+      credentials: { value: "innocuous-secret-name" },
       nested: { signingKey: "k" },
     });
     expect(values.apiToken).toBe("sk-live");
