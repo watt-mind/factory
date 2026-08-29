@@ -442,6 +442,31 @@ describe("execute with fake binary", () => {
     return fakeAgy;
   }
 
+  test("refuses a definition without verified promptText before launching agy", async () => {
+    tmp = tmpDir("agy-test-");
+    const binDir = path.join(tmp, "bin");
+    const recordFile = path.join(tmp, "argv.txt");
+    mkdirSync(binDir, { recursive: true });
+    writeFakeAgy(binDir, []);
+    const promptFile = path.join(tmp, "prompt.md");
+    writeFileSync(promptFile, "mutable replacement");
+
+    await expect(
+      execute({
+        spec: {},
+        def: { ref: "test-agy@1", promptPath: promptFile },
+        workspaceDir: tmp,
+        env: {
+          PATH: `${binDir}:${process.env.PATH}`,
+          FACTORY_TEST_ARGV_FILE: recordFile,
+        },
+      }),
+    ).rejects.toThrow(
+      "agy: definition test-agy@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
   test("spawns agy, pipes transcript, records a trace of the real event shapes", async () => {
     tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");

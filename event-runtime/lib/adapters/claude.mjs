@@ -27,7 +27,6 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   createWriteStream,
   mkdirSync,
-  readFileSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -112,6 +111,19 @@ const TEXT_PREVIEW_CHARS = 4000;
 
 export const PROMPT_SUFFIX =
   "\n\n---\nInput is at ./input.json. Write ./result.json per the factory.agent-result/v1 contract. Work only inside this directory.";
+
+/**
+ * Prompt bytes are verified by the registry before they reach an adapter.
+ * `promptPath` remains provenance only: re-reading it would bypass that pin.
+ */
+export function verifiedPrompt(def, adapter) {
+  if (typeof def?.promptText !== "string") {
+    throw new Error(
+      `${adapter}: definition ${def?.ref ?? "<unknown>"} has no verified promptText (registry-loaded definitions only)`,
+    );
+  }
+  return def.promptText + PROMPT_SUFFIX;
+}
 
 // `mutating: false` means no durable mutation beyond the run's declared
 // workspace output; it does not mean a model cannot use the shell to inspect
@@ -490,8 +502,7 @@ export async function execute({
   // definition never reaches the host spawn below (WM-313).
   refuseSandbox("claude", def, SANDBOX_DEFERRAL_REASON);
 
-  const prompt =
-    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "claude");
   const childEnv = safeChildEnvironment(env, def);
 
   const mcpConfig = path.join(FACTORY_ROOT, "config", "mcp", "claude.json");

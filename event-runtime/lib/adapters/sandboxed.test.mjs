@@ -582,6 +582,7 @@ describe("every adapter decides about def.sandbox (WM-313 conformance)", () => {
       const def = {
         ref: `${name}-sandboxed@1`,
         promptPath,
+        promptText: "conformance prompt",
         mutating: false,
         // command adapter shape; ignored by the others
         command: ["/bin/true"],
@@ -632,7 +633,11 @@ describe("pi sandbox prompt staging", () => {
       execute({
         spec: { agent: "pi-invalid-binary@1" },
         def: {
-          ...sandboxDef({ ref: "pi-invalid-binary@1", promptPath }),
+          ...sandboxDef({
+            ref: "pi-invalid-binary@1",
+            promptPath,
+            promptText: "prompt",
+          }),
           sandbox: {
             provider: "gondolin",
             allowedHosts: [],
@@ -661,7 +666,11 @@ describe("pi sandbox prompt staging", () => {
       execute({
         spec: { agent: "pi-invalid-policy@1" },
         def: {
-          ...sandboxDef({ ref: "pi-invalid-policy@1", promptPath }),
+          ...sandboxDef({
+            ref: "pi-invalid-policy@1",
+            promptPath,
+            promptText: "prompt",
+          }),
           sandbox: { provider: "invalid", allowedHosts: [] },
         },
         workspaceDir,

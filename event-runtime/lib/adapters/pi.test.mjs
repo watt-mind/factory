@@ -685,6 +685,29 @@ process.stdin.on("end", () => {
     }
   }
 
+  test("refuses a definition without verified promptText before launching pi", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      execute({
+        spec: defaultSpec,
+        def: unverifiedDef,
+        workspaceDir,
+        timeoutMs: 5000,
+        env: {
+          PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+          FACTORY_TEST_BEHAVIOR: "normal",
+          FACTORY_TEST_RECORD_FILE: recordFile,
+        },
+      }),
+    ).rejects.toThrow(
+      "pi: definition test-pi-agent@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
   test("executes the verified prompt snapshot after its path changes, strips API keys, and captures trace", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");

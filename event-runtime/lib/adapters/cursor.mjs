@@ -26,12 +26,16 @@
  * editor CLI.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { FACTORY_ROOT } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
-import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import {
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  verifiedPrompt,
+} from "./claude.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
@@ -330,8 +334,7 @@ export async function execute({
   signal,
 }) {
   refuseSandbox("cursor", def, SANDBOX_REFUSAL_REASON);
-  const prompt =
-    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "cursor");
   const childEnv = safeChildEnvironment(env, def);
 
   const resolved = resolveCursorCommand({

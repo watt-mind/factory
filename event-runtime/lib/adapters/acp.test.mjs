@@ -607,6 +607,22 @@ describe("permission policy", () => {
 });
 
 describe("execute against a fake ACP agent", () => {
+  test("refuses a definition without verified promptText before launching the ACP agent", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      run(workspaceDir, {
+        def: unverifiedDef,
+        env: { ACP_FAKE_RECORD: recordFile },
+      }),
+    ).rejects.toThrow(
+      "acp: definition test-acp@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
   test("session lifecycle uses the verified prompt snapshot after its path changes", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");

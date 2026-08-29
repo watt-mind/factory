@@ -49,13 +49,17 @@
  * path, so the two cannot drift. See lib/adapters/sandboxed.mjs.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { FACTORY_ROOT } from "../config.mjs";
 import { normalizePolicy } from "../sandbox/gondolin.mjs";
-import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import {
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  verifiedPrompt,
+} from "./claude.mjs";
 import {
   guestBinary,
   guestEnvironment,
@@ -648,8 +652,7 @@ async function executeSandboxed({
   // this preflight also covers injected VM runners used by tests and leaves
   // no stray prompt behind when the definition itself is invalid.
   normalizePolicy(def.sandbox, { workspaceDir });
-  const prompt =
-    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "pi");
   writeFileSync(path.join(workspaceDir, SANDBOX_PROMPT_FILE), prompt, "utf8");
   const argv = [
     bin,
@@ -732,8 +735,7 @@ export async function execute({
     });
   }
 
-  const prompt =
-    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "pi");
   // A remote worker can execute this checked-out adapter from a persistent
   // runner checkout, whose ignored config/ is intentionally absent. Preserve
   // the launching operator's root for the ticket CLI instead of replacing it

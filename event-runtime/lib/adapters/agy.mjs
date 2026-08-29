@@ -12,10 +12,14 @@
  * the `.transcript.json` artifact.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import {
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  verifiedPrompt,
+} from "./claude.mjs";
 import { FACTORY_ROOT } from "../config.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
@@ -405,8 +409,7 @@ export async function execute({
   signal,
 }) {
   refuseSandbox("agy", def, SANDBOX_REFUSAL_REASON);
-  const prompt =
-    (def.promptText ?? readFileSync(def.promptPath, "utf8")) + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "agy");
   const childEnv = safeChildEnvironment(env, def);
 
   const resolved = resolveAgyCommand({

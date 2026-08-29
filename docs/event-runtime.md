@@ -364,6 +364,8 @@ mutating: false
 
 A definition is admitted only when its adapter can prove the required
 capabilities. Adapter support is a contract, not a hopeful command-line flag.
+Adapters execute only the registry-verified `promptText` snapshot and refuse
+definitions without it; `promptPath` is provenance, not executable prompt source.
 
 **Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
 `factory.artifact-view/v1` document beside the definition annotates pointers
