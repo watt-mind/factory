@@ -651,6 +651,26 @@ export interface AgentsView {
   adapters?: string[];
 }
 
+/** Focused policy-model projection shared by GET /config and /overrides/config. */
+export interface ModelTierConfig {
+  adapters: string[];
+  tiers: string[];
+  tracked: Record<string, Record<string, string>>;
+  runtime: Record<string, Record<string, string>>;
+  effective: Record<string, Record<string, string>>;
+}
+
+export interface ModelTierCellResult {
+  adapter: string;
+  tier: string;
+  trackedModel: string | null;
+  runtimeModel: string | null;
+  effectiveModel: string | null;
+  source: "tracked" | "runtime";
+  restartRequired: true;
+  deleted?: boolean;
+}
+
 /** One promotable runtime override row in a promotion preview (gh-860). */
 export interface PromotionSelection {
   key: string;
