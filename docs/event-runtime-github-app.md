@@ -63,6 +63,23 @@ FACTORY_GH_APP_PRIVATE_KEY_PATH="$HOME/.factory/keys/factory-app.pem"
 FACTORY_GH_APP_TOKEN_FILE="$HOME/.factory/gh-app-token.json"
 ```
 
+### The `GH_TOKEN` caveat
+
+Do not export the installation token into the environment that starts the
+stack. `GH_TOKEN` (and `GITHUB_TOKEN`) override the `hosts.yml` user
+credential for every `gh` call, including the one lookup — `GET /user` — that
+must run as a human account, which then fails with `401 Requires
+authentication` or `403 Resource not accessible by integration`.
+
+The control plane defends itself: on that lookup it drops `GH_TOKEN` /
+`GITHUB_TOKEN` from the child environment when their value is exactly the App
+installation token (the resolved token, or the contents of
+`FACTORY_GH_APP_TOKEN_FILE`), so `gh` falls back to the ambient user
+credential. A token with any other value is an operator PAT and is left
+untouched. The App token still authenticates every repository and Projects
+call. Setting `FACTORY_GH_APP_*` and letting the daemon manage the cache is
+the supported configuration; an exported copy is not.
+
 Keep the private key and token cache outside the repository with mode `0600`.
 `bin/live-stack.sh up` performs an initial mint, then supervises
 `bun lib/control-plane/gh-app-auth.mjs --daemon`. If App configuration is
