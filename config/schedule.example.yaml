@@ -12,6 +12,34 @@ defaults:
 # never start unattended mutation merely because a scheduler was installed.
 jobs: []
 
+# Idle watchdog (#1063). The event-runtime schedules below fire a work-scan on a
+# fixed cadence; this job is the shorter loop that answers the other question —
+# is the factory idle *right now* while dispatchable work is waiting? It takes at
+# most one action per tick (approve one waiting dispatch/work-scan proposal, or
+# inject one work-scan), rate-limits injects to one a minute, and skips entirely
+# when serve or the tracker cannot be read, so a wedged runtime never gets a scan
+# storm on top of being wedged. Copy it into config/schedule.yaml to enable it:
+#
+# jobs:
+#   - name: idle-watchdog
+#     every: 5m
+#     dry_command: bun orchestrator/queue.mjs --repo {{repo}}
+#     command: bun orchestrator/watchdog.mjs --idle --once --repo {{repo}}
+#
+# One-shot (`--once`) is the cron/launchd form; the rate limit is kept in
+# ~/.factory/state/idle-watchdog.json so it survives across separate ticks.
+# `bun orchestrator/watchdog.mjs --idle --interval-sec 300` is the equivalent
+# long-running form. Decisions are logged one line per tick to
+# ~/.factory/logs/idle-watchdog.log. To disable: remove the job (or stop the
+# daemon) — nothing else in the runtime depends on it.
+#
+# It answers to config/policy.yaml like every other unattended path: with no
+# runtime policy on disk, or the day budget spent, a tick skips with
+# `reason=budget_gate:<code>` rather than approving as the operator. Three
+# consecutive unreadable/failed ticks log `idle-watchdog ALERT
+# repeated_failures=N` and send at most one `factory notify` an hour — that is
+# what a stale FACTORY_CONTROL_API_TOKEN looks like from here.
+
 # Runtime schedule overlay (optional). `event-runtime/schedules.json` defines
 # tracked kernel defaults; these ignored, instance-specific values are merged
 # at runtime and do not change the registry digest. Existing loop names may

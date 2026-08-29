@@ -133,12 +133,17 @@ function check(schema, value, path, errors) {
     ) {
       errors.push(`${path}: longer than maxLength ${schema.maxLength}`);
     }
-    if (
-      hasOwn(schema, "pattern") &&
-      typeof schema.pattern === "string" &&
-      !new RegExp(schema.pattern).test(value)
-    ) {
-      errors.push(`${path}: does not match pattern ${schema.pattern}`);
+    if (hasOwn(schema, "pattern") && typeof schema.pattern === "string") {
+      let pattern;
+      try {
+        pattern = new RegExp(schema.pattern);
+      } catch {
+        errors.push(`${path}: invalid pattern`);
+        return;
+      }
+      if (!pattern.test(value)) {
+        errors.push(`${path}: does not match pattern ${schema.pattern}`);
+      }
     }
     if (schema.format === "uri" && !URL.canParse(value)) {
       errors.push(`${path}: format "uri" value is not a valid URI`);
