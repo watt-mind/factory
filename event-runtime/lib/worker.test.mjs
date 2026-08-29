@@ -1,5 +1,5 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-test-mjs";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 /**
@@ -30,6 +30,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
+const realReadFileSync = nodeFs.readFileSync;
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -871,72 +873,96 @@ describe("worker", () => {
     expect(parsed.artifacts[1].sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  test("refusal omits a runtime artifact unlinked between preflight and read", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+    // Simulate the guest deleting .transcript.json after confinement passed
+    // but before the host read it: the read itself reports ENOENT.
+    const readSpy = spyOn(nodeFs, "readFileSync").mockImplementation(
+      (file, ...rest) => {
+        if (String(file).endsWith(".transcript.json")) {
+          rmSync(file, { force: true });
+        }
+        return realReadFileSync(file, ...rest);
+      },
+    );
+    try {
+      const summary = await runOnce(db, registry, adapters, opts());
+      expect(summary).toMatchObject({
+        terminalState: "REFUSED",
+        reasonCode: "needs_human",
+      });
+      const parsed = JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      );
+      expect(parsed.artifacts).toEqual([]);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
   for (const artifact of [
     { kind: "transcript", path: ".transcript.json" },
     { kind: "sandbox-console", path: ".sandbox-console.log" },
   ]) {
     for (const linkType of ["absolute", "relative"]) {
-      test(
-        `refusal omits ${artifact.kind} replaced by a ${linkType} final symlink before reading or storing it`,
-        async () => {
-          const db = openDb(":memory:");
-          const spec = queueRun(
-            db,
-            makeSpec({ input: { repos: ["refuse"] } }),
-          );
-          const artifactStore = freshRoot();
-          const outsideDir = freshRoot();
-          const secretBytes = `host bytes for ${artifact.kind} ${linkType}\n`;
-          const outsideFile = path.join(outsideDir, "host-secret.txt");
-          writeFileSync(outsideFile, secretBytes, "utf8");
-          // A non-privileged worker cannot open this target. The refusal must
-          // still complete because confinement rejects the link before read.
-          chmodSync(outsideFile, 0);
-          const secretHash = createHash("sha256")
-            .update(secretBytes)
-            .digest("hex");
-          const symlinkedArtifactAdapter = {
-            async execute(args) {
-              const outcome = await fake.execute(args);
-              const runtimePath = path.join(args.workspaceDir, artifact.path);
-              rmSync(runtimePath, { force: true });
-              const target =
-                linkType === "absolute"
-                  ? outsideFile
-                  : path.relative(args.workspaceDir, outsideFile);
-              symlinkSync(target, runtimePath);
-              return outcome;
-            },
-          };
+      test(`refusal omits ${artifact.kind} replaced by a ${linkType} final symlink before reading or storing it`, async () => {
+        const db = openDb(":memory:");
+        const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+        const artifactStore = freshRoot();
+        const outsideDir = freshRoot();
+        const secretBytes = `host bytes for ${artifact.kind} ${linkType}\n`;
+        const outsideFile = path.join(outsideDir, "host-secret.txt");
+        writeFileSync(outsideFile, secretBytes, "utf8");
+        // A non-privileged worker cannot open this target. The refusal must
+        // still complete because confinement rejects the link before read.
+        chmodSync(outsideFile, 0);
+        const secretHash = createHash("sha256")
+          .update(secretBytes)
+          .digest("hex");
+        const symlinkedArtifactAdapter = {
+          async execute(args) {
+            const outcome = await fake.execute(args);
+            const runtimePath = path.join(args.workspaceDir, artifact.path);
+            rmSync(runtimePath, { force: true });
+            const target =
+              linkType === "absolute"
+                ? outsideFile
+                : path.relative(args.workspaceDir, outsideFile);
+            symlinkSync(target, runtimePath);
+            return outcome;
+          },
+        };
 
-          const summary = await runOnce(
-            db,
-            registry,
-            { fake: symlinkedArtifactAdapter },
-            opts({ artifactStore }),
-          );
+        const summary = await runOnce(
+          db,
+          registry,
+          { fake: symlinkedArtifactAdapter },
+          opts({ artifactStore }),
+        );
 
-          expect(summary).toMatchObject({
-            terminalState: "REFUSED",
-            reasonCode: "needs_human",
-          });
-          const parsed = JSON.parse(
-            db
-              .query(`SELECT result_json FROM results WHERE run_id = ?`)
-              .get(spec.runId).result_json,
-          );
-          expect(parsed.artifacts.map((entry) => entry.kind)).not.toContain(
-            artifact.kind,
-          );
-          if (artifact.kind === "sandbox-console") {
-            expect(parsed.artifacts.map((entry) => entry.kind)).toEqual([
-              "transcript",
-            ]);
-            expect(existsSync(new URL(parsed.artifacts[0].uri))).toBe(true);
-          }
-          expect(existsSync(path.join(artifactStore, secretHash))).toBe(false);
-        },
-      );
+        expect(summary).toMatchObject({
+          terminalState: "REFUSED",
+          reasonCode: "needs_human",
+        });
+        const parsed = JSON.parse(
+          db
+            .query(`SELECT result_json FROM results WHERE run_id = ?`)
+            .get(spec.runId).result_json,
+        );
+        expect(parsed.artifacts.map((entry) => entry.kind)).not.toContain(
+          artifact.kind,
+        );
+        if (artifact.kind === "sandbox-console") {
+          expect(parsed.artifacts.map((entry) => entry.kind)).toEqual([
+            "transcript",
+          ]);
+          expect(existsSync(new URL(parsed.artifacts[0].uri))).toBe(true);
+        }
+        expect(existsSync(path.join(artifactStore, secretHash))).toBe(false);
+      });
     }
   }
 

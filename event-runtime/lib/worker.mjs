@@ -3123,18 +3123,24 @@ export async function executeClaimed(
           if (!(err instanceof PathViolation)) throw err;
           continue;
         }
-        const collectedEntry = {
-          kind: entry.kind,
-          uri: `file://${abs}`,
-          sha256: sha256Hex(readFileSync(abs)),
-        };
-        // The fixed runtime files live at the workspace root. The helper
-        // returned their canonical path, so dirname is canonical provenance
-        // for storeCollected's independent pre-copy confinement check.
-        Object.defineProperty(collectedEntry, "workspaceRoot", {
-          value: path.dirname(abs),
-        });
-        collected.push(collectedEntry);
+        try {
+          const collectedEntry = {
+            kind: entry.kind,
+            uri: `file://${abs}`,
+            sha256: sha256Hex(readFileSync(abs)),
+          };
+          // The fixed runtime files live at the workspace root. The helper
+          // returned their canonical path, so dirname is canonical provenance
+          // for storeCollected's independent pre-copy confinement check.
+          Object.defineProperty(collectedEntry, "workspaceRoot", {
+            value: path.dirname(abs),
+          });
+          collected.push(collectedEntry);
+        } catch (err) {
+          // The guest may unlink the artifact between the preflight and the
+          // read; that is the same best-effort omission as never writing it.
+          if (err?.code !== "ENOENT") throw err;
+        }
       }
       const artifacts = storeCollected({
         entries: collected,
