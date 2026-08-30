@@ -39,6 +39,52 @@ registerTestProcessCleanup(import.meta.url);
 const WORKER_POLICY_VERSION = policyVersion();
 const LIVE_STACK = path.resolve(import.meta.dir, "../../bin/live-stack.sh");
 
+async function seedSkippedRun(
+  home,
+  { runId, placement, promptVersion = WORKER_POLICY_VERSION, queuedReason },
+) {
+  const { createRun, transition } = await import("../lib/lifecycle.mjs");
+  const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");
+  const db = openDb(path.join(home, "runtime.db"));
+  const input = { repos: ["ok"] };
+  const spec = {
+    schemaVersion: "factory.run-spec/v1",
+    runId,
+    agent: "factory-status-report@1",
+    input,
+    inputHash: hashJson(input),
+    workspace: { type: "ephemeral", retainOnFailure: false },
+    adapter: "fake",
+    promptVersion,
+    policyVersion: promptVersion,
+    ...(placement ? { placement } : {}),
+    outputContract: "factory.status-report/v1",
+    capabilities: ["linear:read"],
+    timeoutSeconds: 5,
+    maxAttempts: 1,
+    idempotencyKey: `idem_${runId}`,
+  };
+  createRun(db, {
+    runId,
+    idempotencyKey: spec.idempotencyKey,
+    spec,
+    specJson: canonicalJson(spec),
+    specHash: hashJson(spec),
+    actor: "test",
+    policyVersion: "test",
+    now: Date.now(),
+  });
+  transition(db, { runId, to: "APPROVED", actor: "test", now: Date.now() });
+  transition(db, {
+    runId,
+    to: "QUEUED",
+    actor: "test",
+    ...(queuedReason ? { reason: queuedReason } : {}),
+    now: Date.now(),
+  });
+  db.close();
+}
+
 /** Capture the shell supervisor's restart events, not just its worker's logs. */
 function spawnReloadSupervisor(args, env) {
   const child = spawnTracked(
@@ -83,6 +129,109 @@ describe("work command", () => {
     expect(r.status).not.toBe(0);
     expect(r.all).toContain('work: unknown --adapter-override "nonexistent"');
   });
+
+  test(
+    "reports an unsatisfied queued placement once per skip-report interval",
+    async () => {
+      const home = tmpDir("evrt-work-placement-skip-");
+      await seedSkippedRun(home, {
+        runId: "run_placement_skip",
+        placement: { node: "gpu" },
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--label",
+          "node=cpu",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "1000",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_placement_skip"');
+        await Bun.sleep(100); // at least three more 25ms polls
+        expect(box.out.match(/"runId":"run_placement_skip"/g)).toHaveLength(1);
+        expect(box.out).toContain('"definition":"factory-status-report@1"');
+        expect(box.out).toContain("placement_unsatisfied:node=gpu");
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "folds stale registry refusals into the rate-limited skip report",
+    async () => {
+      const home = tmpDir("evrt-work-registry-skip-");
+      await seedSkippedRun(home, {
+        runId: "run_registry_skip",
+        promptVersion: "git:older-registry",
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "1000",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_registry_skip"');
+        await Bun.sleep(100); // at least three more 25ms polls
+        expect(box.out.match(/"runId":"run_registry_skip"/g)).toHaveLength(1);
+        expect(box.out).toMatch(
+          /registry_stale:spec=git:older-registry\/git:older-registry:worker=git:[^:"]+:checkout=git:[^"}]+/,
+        );
+        expect(box.out).not.toContain("refused run_registry_skip");
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "reports a queued claim backoff with its retry time",
+    async () => {
+      const home = tmpDir("evrt-work-backoff-skip-");
+      await seedSkippedRun(home, {
+        runId: "run_backoff_skip",
+        queuedReason: "claim_lock_contention:1:backoff_10000ms",
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "1000",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_backoff_skip"');
+        expect(box.out).toMatch(/"reason":"backoff_until:\d{4}-\d{2}-\d{2}T/);
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
 
   test("executeClaimed respects adapterOverride option", async () => {
     const { openDb } = await import("../lib/db.mjs");
