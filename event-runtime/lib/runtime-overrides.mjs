@@ -37,7 +37,7 @@ export class OverlayError extends Error {
 }
 
 export function emptyOverrides() {
-  return { eventTypes: {}, agents: {}, modelTierCells: {} };
+  return { eventTypes: {}, agents: {}, modelTierCells: {}, unknown: [] };
 }
 
 /** Adapters the overlay may name: builtins plus any currently routed. */
@@ -51,6 +51,10 @@ export function knownAdapters(registry) {
   return names;
 }
 
+/**
+ * Return stored overrides, rejecting malformed known-kind rows with an
+ * actionable error and retaining unknown kinds for read-only diagnostics.
+ */
 export function listOverrides(db) {
   const rows = db
     .query(
@@ -59,11 +63,26 @@ export function listOverrides(db) {
     .all();
   const out = emptyOverrides();
   for (const row of rows) {
-    const patch = JSON.parse(row.patch_json);
+    if (
+      row.kind !== KIND_EVENT_TYPE &&
+      row.kind !== KIND_AGENT &&
+      row.kind !== KIND_MODEL_TIER_CELL
+    ) {
+      out.unknown.push({ kind: row.kind, key: row.key });
+      continue;
+    }
+    let patch;
+    try {
+      patch = JSON.parse(row.patch_json);
+    } catch (err) {
+      throw new OverlayError(
+        500,
+        `invalid stored ${row.kind} override ${row.key}: ${err.message} — delete or correct this runtime_overrides row`,
+      );
+    }
     if (row.kind === KIND_EVENT_TYPE) out.eventTypes[row.key] = patch;
     else if (row.kind === KIND_AGENT) out.agents[row.key] = patch;
-    else if (row.kind === KIND_MODEL_TIER_CELL)
-      out.modelTierCells[row.key] = patch;
+    else out.modelTierCells[row.key] = patch;
   }
   return out;
 }
@@ -445,10 +464,6 @@ export function overlayForAgent(overrides, ref) {
   return overrides?.agents?.[ref] ?? null;
 }
 
-export function effectiveAdapter(mapping, overrides, type) {
-  return overlayForEventType(overrides, type)?.adapter ?? mapping.adapter;
-}
-
 /*
  * Overlay promotion (gh-860).
  *
@@ -769,9 +784,28 @@ export async function applyPromotion({
   try {
     const readWorktree = requireSeam(seams, "readWorktree");
     const writeWorktree = requireSeam(seams, "writeWorktree");
-    const written = [];
+    const worktreeFiles = new Map();
+    // The isolated worktree is built from target.base, which may have moved
+    // after the live-checkout drift guard above. Validate every target in that
+    // actual base snapshot before writing any of them.
     for (const file of byFile.keys()) {
       const parsed = JSON.parse(readWorktree(dir, file));
+      for (const selection of selected) {
+        if (selection.target.file !== file) continue;
+        if (
+          readSelectionValue(parsed, selection) !== (selection.before ?? null)
+        ) {
+          throw new OverlayError(
+            409,
+            `target drift on ${selection.key}: base-branch value changed since preview`,
+          );
+        }
+      }
+      worktreeFiles.set(file, parsed);
+    }
+
+    const written = [];
+    for (const [file, parsed] of worktreeFiles) {
       for (const selection of selected) {
         if (selection.target.file !== file) continue;
         writeSelectionValue(parsed, selection);

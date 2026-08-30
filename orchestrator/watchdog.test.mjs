@@ -12,6 +12,7 @@ import {
   liveIdleWatchdogDeps,
   runIdleWatchdogTick,
   runWatchdogCheck,
+  FLEET_CHECK_TIMEOUT_MS,
   SANDBOX_REFUSAL_MAX_PAGES,
   SANDBOX_REFUSAL_MAX_RUNS,
   SCAN_LOOP_AGENTS,
@@ -70,6 +71,32 @@ test("formatWatchdogReport formats critical issues", () => {
   expect(formatted).toContain("WEDGED_RUN");
   expect(formatted).toContain("[WARNING]");
   expect(formatted).toContain("WEB_DOWN");
+});
+
+test("formatWatchdogReport keeps the fleet metrics line on warning/critical", () => {
+  const formatted = formatWatchdogReport({
+    ok: false,
+    issues: [
+      {
+        severity: "CRITICAL",
+        code: "FLEET_OFFLINE",
+        message: "5 CI runs queued with 0 online shadow runners",
+      },
+    ],
+    metrics: {
+      apiOk: true,
+      webOk: true,
+      workersCount: 1,
+      runningRuns: 0,
+      wedgedRuns: 0,
+      queuedRuns: 0,
+      anomalies: [],
+      fleetQueued: 5,
+      fleetOnlineShadows: 0,
+    },
+  });
+  expect(formatted).toContain("FLEET_OFFLINE");
+  expect(formatted).toContain("Fleet: queued 5 | online shadows 0");
 });
 
 test("SCAN_LOOP_AGENTS is exactly the set the confinement gate can refuse", () => {
@@ -343,6 +370,144 @@ test("runWatchdogCheck reports control API 401 instead of an empty fleet", async
   } finally {
     if (previous === undefined) delete process.env.FACTORY_CONTROL_API_TOKEN;
     else process.env.FACTORY_CONTROL_API_TOKEN = previous;
+    server.stop(true);
+  }
+});
+
+function watchdogCheckServer() {
+  return Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health") return Response.json({ ok: true });
+      if (url.pathname === "/status") {
+        return Response.json({ runs: { byState: {} }, anomalies: {} });
+      }
+      if (url.pathname === "/workers") {
+        return Response.json({
+          workers: [{ workerId: "worker_1", state: "idle" }],
+        });
+      }
+      if (url.pathname === "/runs") return Response.json({ runs: [] });
+      return new Response("ok");
+    },
+  });
+}
+
+test("runWatchdogCheck warns when the shadow fleet forge check fails", async () => {
+  const server = watchdogCheckServer();
+  const forge = {
+    runList(_repo, options) {
+      expect(options.timeout).toBe(FLEET_CHECK_TIMEOUT_MS);
+      throw new Error("gh: HTTP 401");
+    },
+  };
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.fleetCheck).toBe("error");
+    expect(result.issues).toContainEqual({
+      severity: "WARNING",
+      code: "FLEET_CHECK_ERROR",
+      message: "Shadow fleet check failed: gh: HTTP 401",
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck survives a throwing loadForge as FLEET_CHECK_ERROR", async () => {
+  // A forge that throws on construction (bad config, missing gh) must not
+  // kill the whole watchdog: steps 1-3 still report and the fleet check is
+  // a WARNING, not an uncaught exception.
+  const server = watchdogCheckServer();
+  const forge = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("forge config: no host configured");
+      },
+    },
+  );
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.apiOk).toBe(true);
+    expect(result.metrics.webOk).toBe(true);
+    expect(result.metrics.fleetCheck).toBe("error");
+    expect(result.issues).toContainEqual({
+      severity: "WARNING",
+      code: "FLEET_CHECK_ERROR",
+      message: "Shadow fleet check failed: forge config: no host configured",
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck reports an offline shadow fleet with queued CI runs", async () => {
+  const server = watchdogCheckServer();
+  const forge = {
+    runList(_repo, options) {
+      expect(options.timeout).toBe(FLEET_CHECK_TIMEOUT_MS);
+      return [{ status: "queued" }, { status: "queued" }, { status: "queued" }];
+    },
+    apiRaw(_path, options) {
+      expect(options.timeout).toBe(FLEET_CHECK_TIMEOUT_MS);
+      return "0";
+    },
+  };
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.metrics.fleetQueued).toBe(3);
+    expect(result.metrics.fleetOnlineShadows).toBe(0);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ severity: "CRITICAL", code: "FLEET_OFFLINE" }),
+    );
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck records online shadow runners without a fleet issue", async () => {
+  const server = watchdogCheckServer();
+  const forge = {
+    runList() {
+      return [{ status: "queued" }, { status: "queued" }, { status: "queued" }];
+    },
+    apiRaw() {
+      return "2";
+    },
+  };
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.fleetQueued).toBe(3);
+    expect(result.metrics.fleetOnlineShadows).toBe(2);
+    expect(result.issues.some((issue) => issue.code === "FLEET_OFFLINE")).toBe(
+      false,
+    );
+  } finally {
     server.stop(true);
   }
 });

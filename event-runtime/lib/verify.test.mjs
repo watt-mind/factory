@@ -1245,6 +1245,45 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(out.result.verification.checks).toContain("repo_verify_passed");
   });
 
+  test("a worker-recovered result.json is never reported as an agent claim (#1592)", () => {
+    for (const [reasonCode, recovered] of [
+      ["worker_recovered_missing_result", true],
+      ["ok", false],
+    ]) {
+      const { dir, record } = worktreeWorkspace(
+        "printf 'verification passed\\n'",
+        null,
+      );
+      writeFileSync(
+        path.join(dir, "result.json"),
+        JSON.stringify({ ...dispatchResult, reasonCode }),
+        "utf8",
+      );
+      const out = verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      expect(out.kind).toBe("completed");
+      // The persisted artifact's reasonCode is the source of the marker; the
+      // schema keeps `verification` closed, so nothing is stamped into it.
+      expect(out.handoff.agentReported).toMatchObject({
+        command: "bun test",
+        passed: true,
+        recovered,
+      });
+      const body = composeHandoffVerification(out.handoff);
+      if (recovered) {
+        expect(body).toContain("agent-reported: recovered — not agent-claimed");
+      } else {
+        expect(body).toContain("agent-reported: `bun test`");
+      }
+    }
+  });
+
   test("a ticket test command covered by the repo verify does not run a second sandbox step", () => {
     const { dir, record } = worktreeWorkspace(
       "bun test event-runtime/lib --timeout 20000",
@@ -2240,6 +2279,20 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(lines.filter((l) => l.startsWith("- Verification:"))).toHaveLength(
       1,
     );
+  });
+
+  test("composeHandoffVerification does not attribute a worker-recovered result to the agent", () => {
+    const body = composeHandoffVerification({
+      agentReported: {
+        command: "bun test event-runtime/lib/worker.test.mjs",
+        passed: true,
+        output: "worker recovery; normal handoff verification pending",
+        recovered: true,
+      },
+    });
+
+    expect(body).toContain("- agent-reported: recovered — not agent-claimed");
+    expect(body).not.toContain("agent-reported: `bun test");
   });
 
   test("composeHandoffVerification reports fetched PR form evidence", () => {

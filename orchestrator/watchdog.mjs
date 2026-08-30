@@ -91,6 +91,7 @@ export const SANDBOX_REFUSAL_MAX_RUNS = 50;
 export const SANDBOX_REFUSAL_DETAIL_CONCURRENCY = 4;
 export const SANDBOX_REFUSAL_BUDGET_MS = 5_000;
 export const CONTROL_API_TIMEOUT_MS = 3_000;
+export const FLEET_CHECK_TIMEOUT_MS = 10_000;
 
 /**
  * Read a control-API endpoint with the loopback bearer and a bounded timeout.
@@ -241,6 +242,7 @@ export async function runWatchdogCheck({
   webPort = 7382,
   stuckMinutes = 45,
   checkShadowFleet = true,
+  forge = null,
 } = {}) {
   const issues = [];
   const metrics = {
@@ -409,23 +411,29 @@ export async function runWatchdogCheck({
   // 4. CI Runner Fleet Check
   if (checkShadowFleet) {
     try {
-      const forge = loadForge();
-      const queuedCount = forge
+      // Resolve the forge lazily so a config error surfaces as
+      // FLEET_CHECK_ERROR instead of killing steps 1-3 (and the caller).
+      const f = forge ?? loadForge();
+      const queuedCount = f
         .runList("watt-mind/factory", {
           limit: 10,
           fields: ["status"],
           cwd: ROOT,
+          timeout: FLEET_CHECK_TIMEOUT_MS,
         })
         .filter((r) => r.status === "queued").length;
+      metrics.fleetQueued = queuedCount;
       if (queuedCount > 2) {
-        const onlineShadows =
-          parseInt(
-            forge.apiRaw("orgs/watt-mind/actions/runners", {
-              jq: '[.runners[] | select(.labels | map(.name) | index("shadow")) | select(.status=="online")] | length',
-              cwd: ROOT,
-            }),
-            10,
-          ) || 0;
+        const parsed = parseInt(
+          f.apiRaw("orgs/watt-mind/actions/runners", {
+            jq: '[.runners[] | select(.labels | map(.name) | index("shadow")) | select(.status=="online")] | length',
+            cwd: ROOT,
+            timeout: FLEET_CHECK_TIMEOUT_MS,
+          }),
+          10,
+        );
+        const onlineShadows = Number.isFinite(parsed) ? parsed : 0;
+        metrics.fleetOnlineShadows = onlineShadows;
         if (onlineShadows === 0) {
           issues.push({
             severity: "CRITICAL",
@@ -434,8 +442,14 @@ export async function runWatchdogCheck({
           });
         }
       }
-    } catch {
-      /* intentionally ignored */
+      metrics.fleetCheck = "ok";
+    } catch (err) {
+      metrics.fleetCheck = "error";
+      issues.push({
+        severity: "WARNING",
+        code: "FLEET_CHECK_ERROR",
+        message: `Shadow fleet check failed: ${err?.message ?? String(err)}`,
+      });
     }
   }
 
@@ -447,14 +461,21 @@ export async function runWatchdogCheck({
   };
 }
 
+function fleetReportLine(metrics) {
+  if (metrics.fleetQueued === undefined) return null;
+  return `  Fleet: queued ${metrics.fleetQueued} | online shadows ${metrics.fleetOnlineShadows ?? "n/a"}`;
+}
+
 export function formatWatchdogReport(result) {
   const lines = [];
   const ts = new Date().toUTCString();
+  const fleetLine = fleetReportLine(result.metrics);
   if (result.ok && result.issues.length === 0) {
     lines.push(`${c.green("✓")} ${c.bold("WATCHDOG OK")} — ${ts}`);
     lines.push(
       `  Workers: ${result.metrics.workersCount} | Running: ${result.metrics.runningRuns} | Wedged: ${result.metrics.wedgedRuns}`,
     );
+    if (fleetLine) lines.push(fleetLine);
   } else {
     const badge = result.ok
       ? c.yellow("! WATCHDOG WARNING")
@@ -466,6 +487,7 @@ export function formatWatchdogReport(result) {
         `  ${col(`[${issue.severity}]`)} ${c.bold(issue.code)}: ${issue.message}`,
       );
     }
+    if (fleetLine) lines.push(fleetLine);
   }
   return lines.join("\n");
 }
