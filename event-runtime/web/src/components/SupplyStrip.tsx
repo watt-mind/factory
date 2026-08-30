@@ -1,5 +1,5 @@
 import type { MouseEvent } from "react";
-import { teamUrl } from "../trackerLinks";
+import { teamUrl, type TeamChip } from "../trackerLinks";
 import { Ago } from "./ui";
 
 export type TicketSupplyAction =
@@ -7,7 +7,7 @@ export type TicketSupplyAction =
 
 export type RepoRecommendedAction = "dispatch" | "triage" | "idle";
 
-export type SupplyChip = "triage" | "ready" | "inFlight" | "blocked";
+export type SupplyChip = TeamChip;
 
 export type TicketSupplySource = "linear" | "scan" | null;
 
@@ -43,7 +43,7 @@ export const CHIP_FILTER_STATE: Record<SupplyChip, string> = {
   blocked: "Blocked",
 };
 
-export function linearTeamUrl(
+export function trackerTeamUrl(
   team: string | null,
   chip?: SupplyChip,
 ): string | null {
@@ -262,12 +262,12 @@ function SupplyRow({
   onFilter: (next: { repo: string; state: string }) => void;
 }) {
   const action = recommendedActionForRepo(repo);
-  const tracker = linearTeamUrl(repo.team);
+  const tracker = trackerTeamUrl(repo.team);
   const inFlightLabel =
     repo.inFlight == null ? "—" : `${repo.inFlight}/${repo.cap}`;
 
   const clickChip = (event: MouseEvent, chip: SupplyChip) => {
-    const href = linearTeamUrl(repo.team, chip);
+    const href = trackerTeamUrl(repo.team, chip);
     if ((event.metaKey || event.ctrlKey) && href) {
       event.preventDefault();
       window.open(href, "_blank", "noreferrer");

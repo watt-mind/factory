@@ -19,16 +19,23 @@ export function issueUrl(id: string | null | undefined): string | null {
   return `https://github.com/${github[1]}/${github[2]}/issues/${github[3]}`;
 }
 
+/** Supply chips a team link can be narrowed to; only `triage` changes the view. */
+export type TeamChip = "triage" | "ready" | "inFlight" | "blocked";
+
 /** Return a team/repository tracker URL, optionally narrowed to its triage view. */
 export function teamUrl(
   team: string | null | undefined,
-  chip?: string,
+  chip?: TeamChip,
 ): string | null {
   if (!team) return null;
 
   const github = GITHUB_REPOSITORY.exec(team);
   if (github) {
-    const query = chip === "triage" ? "is:open label:state:Triage" : "is:open";
+    // Ticket state lives in a Projects v2 field on the GitHub plane, not a
+    // label, and the issues search has no board-field filter — both chips
+    // open the open-issues list until a Projects-board link exists.
+    void chip;
+    const query = "is:open";
     return `https://github.com/${github[1]}/${github[2]}/issues?${new URLSearchParams({ q: query })}`;
   }
 

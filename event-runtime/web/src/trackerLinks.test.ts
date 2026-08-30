@@ -20,7 +20,7 @@ describe("trackerLinks", () => {
       "https://github.com/watt-mind/factory/issues?q=is%3Aopen",
     );
     expect(teamUrl("watt-mind/factory", "triage")).toBe(
-      "https://github.com/watt-mind/factory/issues?q=is%3Aopen+label%3Astate%3ATriage",
+      "https://github.com/watt-mind/factory/issues?q=is%3Aopen",
     );
   });
 

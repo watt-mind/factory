@@ -60,6 +60,15 @@ describe("linkifyText", () => {
         title: "https://example.com/watt-mind/factory#1573",
       },
     ]);
+    expect(linkifyText("see docs/protocol.md#4")).toEqual([
+      { kind: "text", text: "see docs/protocol.md#4" },
+    ]);
+    expect(linkifyText("event-runtime/web.ts#3 and build/emit.mjs#2")).toEqual([
+      { kind: "text", text: "event-runtime/web.ts#3 and build/emit.mjs#2" },
+    ]);
+    expect(linkifyText("at example.com/factory#1573")).toEqual([
+      { kind: "text", text: "at example.com/factory#1573" },
+    ]);
     expect(linkifyText("x/watt-mind/factory#1573")).toEqual([
       { kind: "text", text: "x/watt-mind/factory#1573" },
     ]);
