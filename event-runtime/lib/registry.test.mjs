@@ -344,8 +344,13 @@ describe("registry", () => {
     // wrapper; merge-review and merge-notify document the same artifact
     // nesting, and all three agent definitions are re-pinned. Post-review:
     // merge-fix.md drops the bare-artifact twin examples (re-pinned again).
+    // Regenerated (#1445): merge-fix.md preserves freshly fetched foreign PR
+    // commits, uses an exact force-with-lease, compares the pinned headSha
+    // against live PR evidence, and returns stable `branch_in_flight:` /
+    // `branch_moved:` summary prefixes; merge-fix.json is re-pinned. Prompt
+    // text only.
     const expected =
-      "sha256:3da3fdd6554606b51aa8c8c907d0e84fae8e370e0f97c93c2d3234f75af1bdb3";
+      "sha256:a59770c105431644d5c8aa00ceba315ad57c20adf83d8244363bc4ccc9fbc44a";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

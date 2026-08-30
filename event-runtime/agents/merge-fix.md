@@ -68,9 +68,10 @@ isolated worktree for the ticket. This is not a general implementation run.
      Owned Paths, because a rebase touches what the base touched. Never stash
      changes or use `--autostash`. If a hunk is genuinely ambiguous — two real
      behaviours, no way to keep both — that is the one case to BLOCK with the
-     hunk named. After every rebase, run the same changed-file-only prettier
-     and eslint commands described for `format_and_lint`, then re-run
-     verification. Push exactly once with the fetched-tip lease:
+     hunk named. After every rebase, run the same
+     changed-file-only prettier and eslint commands described for
+     `format_and_lint`, then re-run verification. Push exactly once with the
+     fetched-tip lease:
 
      ```sh
      git push origin "HEAD:refs/heads/<headRef>" \
