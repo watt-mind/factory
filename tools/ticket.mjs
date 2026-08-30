@@ -17,6 +17,7 @@
  *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
+ *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug
  *   bun tools/ticket.mjs file --from owner/repo#123 --title "..." --body "..." --type bug
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
@@ -372,6 +373,10 @@ export function resolveRepoNameFromTicket(ticketArg, repos) {
  * Resolve the repository for `file`. Unlike ticket verbs, an explicit
  * `--from` is the only durable repository signal an agent running from an
  * ephemeral workspace has, so it takes precedence over cwd (after --repo).
+ * A `--from` that names no configured GitHub repository (a Linear id such as
+ * `CLNT-616`) is not a routing decision: it falls through to cwd exactly as
+ * if it had not been given, so a Linear-sourced dispatch keeps its default
+ * (`--team`) route instead of being refused.
  */
 export function resolveRepoNameForFile({
   cwd = process.cwd(),
@@ -380,11 +385,16 @@ export function resolveRepoNameForFile({
   fromFlag = flag("from"),
 } = {}) {
   if (repoFlag) return resolveRepoName({ cwd, repos, repoFlag });
-  if (fromFlag) return resolveRepoNameFromTicket(fromFlag, repos);
-  return resolveRepoName({ cwd, repos, repoFlag: undefined });
+  return (
+    (fromFlag ? resolveRepoNameFromTicket(fromFlag, repos) : null) ??
+    resolveRepoName({ cwd, repos, repoFlag: undefined })
+  );
 }
 
-function controlPlane(ticketArg = positional[0], { forFile = false } = {}) {
+function controlPlane(
+  ticketArg = positional[0],
+  { forFile = false, team = flag("team") } = {},
+) {
   // All ticket verbs act on instance-local state. Resolve this before looking
   // at cwd or the identifier so a missing runner config is an explicit refusal
   // rather than a silent default-plane lookup.
@@ -395,12 +405,13 @@ function controlPlane(ticketArg = positional[0], { forFile = false } = {}) {
   let repoName = null;
   if (forFile) {
     repoName = resolveRepoNameForFile({ repos });
-    if (!repoName) {
-      throw new Error(
-        "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N>",
-      );
-    }
-    return loadControlPlane({ root, repoName });
+    if (repoName) return loadControlPlane({ root, repoName });
+    // An explicit --team is the Linear route and needs no repository; refuse
+    // only when nothing at all says where the finding belongs.
+    if (team) return loadControlPlane({ root });
+    throw new Error(
+      "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N> (or --team <KEY> for a Linear team)",
+    );
   }
   try {
     repoName = resolveRepoName({ repos });
@@ -735,11 +746,11 @@ const VERBS = {
   async file() {
     const team = flag("team");
     const title = flag("title");
-    const cp = controlPlane(undefined, { forFile: true });
-    if (!title || (!team && cp.kind !== "github"))
-      throw new Error(
-        `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
-      );
+    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`;
+    // Argument shape first: a missing title is a usage error, not a routing one.
+    if (!title) throw new Error(usage);
+    const cp = controlPlane(undefined, { forFile: true, team });
+    if (!team && cp.kind !== "github") throw new Error(usage);
 
     // New findings land in Triage unless they already meet the agent-ready bar.
     const stateName = has("todo") ? "Todo" : "Triage";
