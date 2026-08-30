@@ -34,6 +34,9 @@ import { findPriorResumeContext } from "./transcripts.mjs";
 /** Hard ceiling for repository-owned worktree lifecycle scripts (WM-262). */
 export const DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS = 120_000;
 
+/** Bound tracker notifications so a preserved worktree cannot wedge its worker. */
+export const PRESERVATION_COMMENT_TIMEOUT_MS = 30_000;
+
 function worktreeScriptTimeoutMs() {
   const configured = Number(process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0
@@ -418,16 +421,35 @@ export function detectWorktreeOwnershipConflict({
   };
 }
 
-function commentOnPreservedWorktree({ ticket, preservation }) {
+export function preservationCommentTimeoutMs() {
+  return Math.min(worktreeScriptTimeoutMs(), PRESERVATION_COMMENT_TIMEOUT_MS);
+}
+
+export function commentOnPreservedWorktree({
+  ticket,
+  preservation,
+  spawn = spawnSync,
+  timeoutMs = preservationCommentTimeoutMs(),
+}) {
   const text = `Recovered an abandoned dirty worktree before re-dispatch: preserved its uncommitted changes at \`${preservation.ref}\` (commit ${preservation.commit}, ${preservation.push === "pushed" ? "pushed to origin" : "kept locally because push failed"}).`;
-  const result = spawnSync(
+  const result = spawn(
     "bun",
     [path.join(FACTORY_ROOT, "tools", "linear.mjs"), "comment", ticket, text],
     {
       cwd: FACTORY_ROOT,
       encoding: "utf8",
+      timeout: timeoutMs,
     },
   );
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`Linear comment timed out after ${timeoutMs}ms`);
+  }
+  if (result.error) {
+    // ENOENT / signal kills leave status null and stderr empty; keep the cause.
+    throw new Error(
+      `Linear comment failed to run: ${result.error.message || result.error.code || String(result.error)}`,
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
       String(

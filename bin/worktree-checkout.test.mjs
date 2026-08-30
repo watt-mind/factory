@@ -55,6 +55,22 @@ function makeTestLockDir(prefix = "test-lock") {
   );
 }
 
+function lifecycleLockPath(ticket) {
+  const repo = path.resolve(import.meta.dir, "..");
+  const common = Bun.spawnSync({
+    cmd: ["git", "-C", repo, "rev-parse", "--git-common-dir"],
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+    .stdout.toString()
+    .trim();
+  return path.join(
+    path.isAbsolute(common) ? common : path.join(repo, common),
+    "factory-worktree-locks",
+    `${ticket}.lock`,
+  );
+}
+
 function cwdForPid(pid) {
   if (process.platform === "linux") {
     const result = Bun.spawnSync({
@@ -429,6 +445,72 @@ test("worktree-up --checkout-only creates checkout without daemons and worktree-
   } finally {
     rmSync(tempWtRoot, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticketId}`] });
+  }
+});
+
+test("worktree-up releases its lifecycle lock when bun install fails", () => {
+  if (handoffSandbox) return;
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-lock-fail-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-lock-bin-"));
+  const ticketId = makeTestTicket("LOCKFAIL");
+  const worktreePath = path.join(tempWtRoot, ticketId);
+  const lockPath = lifecycleLockPath(ticketId);
+
+  writeFileSync(path.join(mockBin, "bun"), "#!/usr/bin/env bash\nexit 1\n", {
+    mode: 0o755,
+  });
+  writeFileSync(path.join(mockBin, "lsof"), "#!/usr/bin/env bash\nexit 1\n", {
+    mode: 0o755,
+  });
+
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        FACTORY_SKIP_FETCH: "1",
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("bun install failed");
+    expect(existsSync(lockPath)).toBe(false);
+  } finally {
+    Bun.spawnSync({
+      cmd: ["git", "worktree", "remove", "--force", worktreePath],
+    });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticketId}`] });
+    rmSync(lockPath, { recursive: true, force: true });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up refuses a live lifecycle lock during checkout-only", () => {
+  if (handoffSandbox) return;
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-lock-live-"));
+  const ticketId = makeTestTicket("LOCKLIVE");
+  const lockPath = lifecycleLockPath(ticketId);
+
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(path.join(lockPath, "pid"), String(process.pid));
+
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("worktree_lifecycle_busy");
+    expect(existsSync(lockPath)).toBe(true);
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+    rmSync(tempWtRoot, { recursive: true, force: true });
   }
 });
 

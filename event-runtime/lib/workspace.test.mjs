@@ -19,6 +19,9 @@ import {
   WorktreeSandboxUnsupportedError,
   WorktreeError,
   MEMOS_JSON_NOTICE,
+  commentOnPreservedWorktree,
+  preservationCommentTimeoutMs,
+  PRESERVATION_COMMENT_TIMEOUT_MS,
   confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
@@ -545,6 +548,88 @@ describe("worktree workspaces (WM-108)", () => {
       guidance: expect.stringContaining("abandoned prior attempt"),
     });
     expect(destroyWorkspace(dir)).toBe(true);
+  });
+
+  test("the preservation comment timeout is bounded by the worktree script timeout", () => {
+    const previous = process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+    try {
+      delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      expect(preservationCommentTimeoutMs()).toBe(
+        PRESERVATION_COMMENT_TIMEOUT_MS,
+      );
+      process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = "25";
+      expect(preservationCommentTimeoutMs()).toBe(25);
+    } finally {
+      if (previous === undefined)
+        delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      else process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = previous;
+    }
+  });
+
+  test("a preservation comment that fails to spawn records the cause, not a blank error", () => {
+    expect(() =>
+      commentOnPreservedWorktree({
+        ticket: "WM-13-enoent",
+        preservation: { ref: "wip/x", commit: "abc", push: "pushed" },
+        spawn: () => ({
+          error: Object.assign(new Error("spawnSync bun ENOENT"), {
+            code: "ENOENT",
+          }),
+          status: null,
+          stdout: "",
+          stderr: "",
+        }),
+      }),
+    ).toThrow(/Linear comment failed to run: spawnSync bun ENOENT/);
+  });
+
+  test("a timed-out preservation comment records the failure without losing the preserved ref", () => {
+    // Only the preservation path gets the short timeout; the real worktree_up
+    // spawn keeps a generous bound so this cannot flake under load.
+    const root = tmpRoot();
+    const workspaceDir = path.join(root, "run_wt13_timeout-a1");
+    const calls = [];
+    let caught;
+    try {
+      createWorkspace({
+        root,
+        runId: "run_wt13_timeout",
+        attempt: 1,
+        input: { repo: "recovered-up", ticket: "WM-13-timeout" },
+        workspace: { type: "worktree" },
+        worktreeTimeoutMs: 120_000,
+        worktreePreservationComment: ({ ticket, preservation }) =>
+          commentOnPreservedWorktree({
+            ticket,
+            preservation,
+            timeoutMs: 25,
+            spawn: (...args) => {
+              calls.push(args);
+              return { error: { code: "ETIMEDOUT" } };
+            },
+          }),
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(WorktreeError);
+    expect(caught.message).toContain("Linear comment timed out after 25ms");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][2]).toMatchObject({ timeout: 25 });
+    const marker = JSON.parse(
+      readFileSync(path.join(workspaceDir, ".worktree.json"), "utf8"),
+    );
+    expect(marker).toMatchObject({
+      preservedWip: {
+        ref: "wip/WM-13-20260817T183000Z",
+        commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        comment: {
+          status: "failed",
+          error: "Linear comment timed out after 25ms",
+        },
+      },
+    });
   });
 
   test("a red baseline is recorded in the marker and agent input without aborting workspace creation", () => {

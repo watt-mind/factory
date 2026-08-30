@@ -1,4 +1,8 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-proposals-test-mjs";
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { hashJson } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { lifecycleOf, runState } from "./lifecycle.mjs";
@@ -48,6 +52,101 @@ function planned(
   );
   expect(outcome.decision).toBe("run");
   return { db, proposal: outcome.proposal, runId: outcome.runId };
+}
+
+/**
+ * Plan the dispatch against a repos root owned by this test, never the
+ * ambient one. The dispatch gate resolves `repo: "factory"` through
+ * `FACTORY_REPOS_ROOT`/`config/repos.yaml` and checks that the checkout path
+ * exists; with the example config (`~/Develop/factory`) that only holds on an
+ * operator host, and inside the handoff sandbox (`HOME=/tmp/home`) the plan
+ * refuses with `owned_paths_not_closed` before any proposal exists.
+ */
+function withHermeticReposRoot(fn) {
+  const root = tmpDir("evrt-proposals-ttl-");
+  const repoPath = path.join(root, "checkout");
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  mkdirSync(repoPath, { recursive: true });
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    `repos:\n  - name: factory\n    path: ${repoPath}\n    base: develop\n` +
+      `    github: watt-mind/factory\n    team: WM\n    project: Factory\n` +
+      `    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: ${path.join(root, "worktrees")}\n    escalate_paths: []\n`,
+  );
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  process.env.FACTORY_REPOS_ROOT = root;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+  }
+}
+
+function dispatchPlanned() {
+  const db = openDb(":memory:");
+  const admitted = admitEvent(
+    db,
+    registry,
+    envelope({
+      eventId: "ttl-dispatch-1",
+      type: "factory.dispatch.requested",
+      source: "handoff",
+      subject: "watt-mind/factory#1611",
+      correlationId: "ttl-dispatch-1",
+      payload: {
+        repo: "factory",
+        ticket: "watt-mind/factory#1611",
+        modelTier: "light",
+      },
+    }),
+    { now: NOW },
+  );
+  expect(admitted.admitted).toBe(true);
+  const outcome = withHermeticReposRoot(() =>
+    planEvent(
+      db,
+      registry,
+      { source: admitted.event.source, eventId: admitted.event.event_id },
+      {
+        now: NOW,
+        policyVersion: "git:test",
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1611",
+            state: { name: "Todo" },
+            assignee: null,
+            labels: { nodes: [{ name: "ai:agent-ready" }] },
+            description: "## Owned Paths\n- event-runtime/lib/proposals.mjs\n",
+          }),
+          fetchInFlight: () => [],
+        },
+      },
+    ),
+  );
+  expect(outcome.decision, outcome.reason ?? "").toBe("run");
+  const spec = JSON.parse(outcome.proposal.spec_json);
+  spec.idempotencyKey = `${spec.idempotencyKey}#1`;
+  spec.configSnapshot = {
+    root: "/policy/snapshot",
+    repos: [{ name: "factory", base: "develop" }],
+  };
+  const specJson = JSON.stringify(spec);
+  const specHash = hashJson(spec);
+  db.query(
+    `UPDATE runs SET idempotency_key = ?, spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+  ).run(spec.idempotencyKey, specJson, specHash, outcome.runId);
+  db.query(
+    `UPDATE proposals SET idempotency_key = ?, spec_json = ?, spec_hash = ? WHERE id = ?`,
+  ).run(spec.idempotencyKey, specJson, specHash, outcome.proposal.id);
+  return {
+    db,
+    proposal: getProposal(db, outcome.proposal.id),
+    runId: outcome.runId,
+  };
 }
 
 describe("openProposals / getProposal", () => {
@@ -207,6 +306,73 @@ describe("ambiguousOpenProposalRuns", () => {
 });
 
 describe("approveProposal after TTL expiry (§12)", () => {
+  test("dispatch-shaped plan preserves its authorization, model, and generation key across TTL", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    const originalSpec = JSON.parse(proposal.spec_json);
+    expect(originalSpec.approvalPolicy).toBeTruthy();
+    expect(originalSpec.modelTier).toBe("light");
+    expect(originalSpec.model).toBeTruthy();
+    expect(originalSpec.configSnapshot).toEqual({
+      root: "/policy/snapshot",
+      repos: [{ name: "factory", base: "develop" }],
+    });
+    expect(originalSpec.idempotencyKey).toContain("#");
+
+    const result = approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW + TTL_MS + 1,
+      policyVersion: "git:test",
+    });
+    expect(result).toEqual({ approved: true, runId });
+    expect(getProposal(db, proposal.id).status).toBe("approved");
+    expect(runState(db, runId)).toBe("QUEUED");
+    expect(
+      JSON.parse(
+        db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+          .spec_json,
+      ),
+    ).toEqual(originalSpec);
+    expect(lifecycleOf(db, runId).at(-1).reason).toBe(
+      "approved_after_ttl_replan",
+    );
+  });
+
+  test("changed registry supersedes while retaining dispatch authorization and generation key", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    const originalSpec = JSON.parse(proposal.spec_json);
+    const changedRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    changedRegistry.agents.set("dispatch@1", {
+      ...changedRegistry.agents.get("dispatch@1"),
+      limits: { timeout_seconds: 5401, attempts: 1, budget_usd: 15 },
+    });
+
+    const result = approveProposal(db, changedRegistry, proposal.id, {
+      actor: "operator",
+      now: NOW + TTL_MS + 1,
+      policyVersion: "git:test",
+    });
+    expect(result).toMatchObject({ approved: false, replanned: true });
+    expect(getProposal(db, proposal.id).status).toBe("superseded");
+    expect(runState(db, runId)).toBe("PROPOSED");
+
+    const freshSpec = result.proposal.spec;
+    expect(freshSpec.timeoutSeconds).toBe(5401);
+    expect(freshSpec.approvalPolicy).toEqual(originalSpec.approvalPolicy);
+    expect(freshSpec.modelTier).toBe(originalSpec.modelTier);
+    expect(freshSpec.model).toBe(originalSpec.model);
+    expect(freshSpec.configSnapshot).toEqual(originalSpec.configSnapshot);
+    expect(freshSpec.idempotencyKey).toBe(originalSpec.idempotencyKey);
+    expect(
+      JSON.parse(
+        db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+          .spec_json,
+      ),
+    ).toEqual(freshSpec);
+  });
+
   test("unchanged conditions: re-plan matches, run is approved with a replan reason", () => {
     const { db, proposal, runId } = planned();
     const later = NOW + TTL_MS + 1;

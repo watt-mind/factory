@@ -28,6 +28,7 @@ test("formatPulse renders structured pulse text", () => {
       dispatchable: 5,
       triage: 20,
       tickets: [{ identifier: "WM-100", title: "Sample ticket title" }],
+      truncated: true,
     },
     prs: {
       total: 1,
@@ -59,22 +60,112 @@ test("formatPulse renders structured pulse text", () => {
   expect(output).toContain("run_test_123");
   expect(output).toContain("LINEAR SUPPLY (WM)");
   expect(output).toContain("5 tickets");
+  expect(output).toContain("(truncated)");
   expect(output).toContain("WM-100");
   expect(output).toContain("#99");
   expect(output).toContain("[CI PASS]");
 });
 
-test("gatherPulse handles unreachable API gracefully", async () => {
-  // A hardcoded port assumes nothing else is listening on it, which a
-  // stranger process (or a concurrent worktree) can invalidate (#876).
-  // Bind loopback:0 to get an OS-assigned port, then release it
-  // immediately so it is unreachable when gatherPulse fetches it.
+function linearIssue(number, { ready = false, triage = false } = {}) {
+  return {
+    id: `issue-${number}`,
+    identifier: `WM-${number}`,
+    title: `Issue ${number}`,
+    state: { name: triage ? "Triage" : "Todo" },
+    labels: { nodes: ready ? [{ name: "ai:agent-ready" }] : [] },
+    assignee: null,
+  };
+}
+
+// Bind loopback:0 for an OS-assigned port, then release it immediately so
+// gatherPulse's /health probe hits nothing instead of a live local stack.
+function deadPort() {
   const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
   const port = probe.port;
   probe.stop(true);
+  return port;
+}
+
+test("gatherPulse counts qualifying Linear issues across pages", async () => {
+  const firstPage = Array.from({ length: 100 }, (_, index) =>
+    linearIssue(index + 1, {
+      ready: index < 45,
+      triage: index >= 45 && index < 55,
+    }),
+  );
+  const secondPage = Array.from({ length: 20 }, (_, index) =>
+    linearIssue(index + 101, {
+      ready: index < 10,
+      triage: index >= 10 && index < 15,
+    }),
+  );
+  const calls = [];
+  const controlPlane = {
+    raw(query, variables) {
+      calls.push({ query, variables });
+      return Promise.resolve(
+        variables.after
+          ? {
+              issues: {
+                nodes: secondPage,
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            }
+          : {
+              issues: {
+                nodes: firstPage,
+                pageInfo: { hasNextPage: true, endCursor: "page-2" },
+              },
+            },
+      );
+    },
+  };
 
   const pulse = await gatherPulse({
-    port,
+    port: deadPort(),
+    fetchGitHub: false,
+    controlPlane,
+  });
+
+  expect(pulse.supply.dispatchable).toBe(55);
+  expect(pulse.supply.triage).toBe(15);
+  expect(pulse.supply.tickets).toHaveLength(5);
+  expect(pulse.supply.truncated).toBe(false);
+  expect(calls).toHaveLength(2);
+  expect(calls[0].query).toContain('state:{name:{in:["Todo","Triage"]}}');
+  expect(calls[1].variables.after).toBe("page-2");
+});
+
+test("gatherPulse marks Linear supply as truncated at the page cap", async () => {
+  const calls = [];
+  const controlPlane = {
+    raw(_query, variables) {
+      calls.push(variables);
+      return Promise.resolve({
+        issues: {
+          nodes: [linearIssue(calls.length, { ready: true })],
+          pageInfo: { hasNextPage: true, endCursor: `page-${calls.length}` },
+        },
+      });
+    },
+  };
+
+  const pulse = await gatherPulse({
+    port: deadPort(),
+    fetchGitHub: false,
+    controlPlane,
+  });
+
+  expect(calls).toHaveLength(5);
+  expect(pulse.supply.dispatchable).toBe(5);
+  expect(pulse.supply.truncated).toBe(true);
+});
+
+test("gatherPulse handles unreachable API gracefully", async () => {
+  // A hardcoded port assumes nothing else is listening on it, which a
+  // stranger process (or a concurrent worktree) can invalidate (#876).
+  const pulse = await gatherPulse({
+    port: deadPort(),
     fetchLinear: false,
     fetchGitHub: false,
   });
