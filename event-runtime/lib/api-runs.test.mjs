@@ -553,6 +553,90 @@ describe("list views carry repos[] (OPS-356)", () => {
 });
 
 describe("ticket journey join (WM-595)", () => {
+  test("accepts canonical GitHub ticket IDs in journeys and the ticket index", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "github-ticket",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "Watt-Mind/Factory#1572",
+            nested: { issue: "Watt-Mind/Other#1573" },
+            subject: "Watt-Mind/Third#1574",
+            note: "mentions Watt-Mind/Prose#1575 without naming it",
+          },
+        }),
+      );
+
+      const journey = await fetch(
+        s.url("/runs?ticket=WATT-MIND/FACTORY%231572"),
+      );
+      expect(journey.status).toBe(200);
+      expect(
+        (await journey.json()).events.map((event) => event.eventId),
+      ).toEqual(["github-ticket"]);
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining([
+          "watt-mind/factory#1572",
+          "watt-mind/other#1573",
+          "watt-mind/third#1574",
+        ]),
+      );
+      expect(tickets).not.toContain("watt-mind/prose#1575");
+
+      const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
+      expect(invalid.status).toBe(422);
+      expect((await invalid.json()).error).toBe(
+        "ticket must look like WM-123 or owner/repo#123",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("lowercase hyphenated prose never becomes a ticket row", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "prose-noise",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "WM-7",
+            nested: { issue: "watt-mind/factory#1572" },
+            note: "hashed with sha-256, encoded utf-8, dated iso-8601",
+          },
+        }),
+      );
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining(["WM-7", "watt-mind/factory#1572"]),
+      );
+      for (const id of tickets) {
+        expect(id).not.toMatch(/^(sha-256|utf-8|iso-8601)$/i);
+      }
+      expect(tickets.filter((id) => /^[a-z]/.test(id))).toEqual([
+        "watt-mind/factory#1572",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
     const home = tmpDir("evrt-journey-home-");
     const s = await makeServer({ env: { name: "test", home } });
@@ -2019,7 +2103,7 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
       const bad = await fetch(s.url("/tickets/not-a-ticket/detail"));
       expect(bad.status).toBe(422);
       expect(await bad.json()).toEqual({
-        error: "ticket must look like WM-123",
+        error: "ticket must look like WM-123 or owner/repo#123",
       });
 
       const missing = await fetch(s.url("/tickets/WM-999/detail"));

@@ -17,7 +17,8 @@
  *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
- *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug
+ *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug --dedupe-key "..."
+ *   bun tools/ticket.mjs file --from owner/repo#123 --title "..." --body "..." --type bug
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
@@ -88,6 +89,48 @@ export {
 export async function transitionThenComment(cp, key, state, options, comment) {
   await cp.transition(key, state, options);
   if (comment?.trim()) await cp.comment(key, comment);
+}
+
+/**
+ * File one ticket through the control plane and report the outcome.
+ *
+ * `dedupeKey` (opt-in) makes an immediate retry reuse the issue the first
+ * attempt created; the key is scoped to this exact finding by also matching
+ * the title (`matchTitle: true`), never any historical use of the same key.
+ * Without a key neither field is sent, so plain filing keeps its behaviour.
+ *
+ * The control plane may return `warnings` (a follow-up board write failed, or
+ * the key matched a closed issue) and `reused` (no new issue was created).
+ * Warnings flip the structured result to `ok: false` and set a non-zero exit
+ * code: the issue exists, but callers must not mistake it for a complete
+ * filing. The result stays available for recovery either way.
+ */
+export async function fileTicket(
+  cp,
+  { team, title, body, labels, state, projectId, dedupeKey },
+  { emit = out, setExitCode = (code) => (process.exitCode = code) } = {},
+) {
+  const key = typeof dedupeKey === "string" ? dedupeKey.trim() : "";
+  const created = await cp.file({
+    team,
+    title,
+    body,
+    labels,
+    state,
+    projectId,
+    ...(key ? { dedupeKey: key, matchTitle: true } : {}),
+  });
+  const warnings = Array.isArray(created.warnings)
+    ? created.warnings.filter(Boolean)
+    : [];
+  const verb = created.reused ? "reused" : "filed";
+  const line = `${verb} ${created.identifier} in ${state}  ${created.url}`;
+  emit(
+    { ok: warnings.length === 0, ...created },
+    warnings.length ? `${line}\nwarning: ${warnings.join("; ")}` : line,
+  );
+  if (warnings.length) setExitCode(1);
+  return created;
 }
 
 // Budget capture lives on disk so `doctor` / `linear budget` can read it
@@ -368,7 +411,32 @@ export function resolveRepoNameFromTicket(ticketArg, repos) {
   return null;
 }
 
-function controlPlane(ticketArg = positional[0]) {
+/**
+ * Resolve the repository for `file`. Unlike ticket verbs, an explicit
+ * `--from` is the only durable repository signal an agent running from an
+ * ephemeral workspace has, so it takes precedence over cwd (after --repo).
+ * A `--from` that names no configured GitHub repository (a Linear id such as
+ * `CLNT-616`) is not a routing decision: it falls through to cwd exactly as
+ * if it had not been given, so a Linear-sourced dispatch keeps its default
+ * (`--team`) route instead of being refused.
+ */
+export function resolveRepoNameForFile({
+  cwd = process.cwd(),
+  repos,
+  repoFlag = flag("repo"),
+  fromFlag = flag("from"),
+} = {}) {
+  if (repoFlag) return resolveRepoName({ cwd, repos, repoFlag });
+  return (
+    (fromFlag ? resolveRepoNameFromTicket(fromFlag, repos) : null) ??
+    resolveRepoName({ cwd, repos, repoFlag: undefined })
+  );
+}
+
+function controlPlane(
+  ticketArg = positional[0],
+  { forFile = false, team = flag("team") } = {},
+) {
   // All ticket verbs act on instance-local state. Resolve this before looking
   // at cwd or the identifier so a missing runner config is an explicit refusal
   // rather than a silent default-plane lookup.
@@ -377,6 +445,16 @@ function controlPlane(ticketArg = positional[0]) {
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
   let repoName = null;
+  if (forFile) {
+    repoName = resolveRepoNameForFile({ repos });
+    if (repoName) return loadControlPlane({ root, repoName });
+    // An explicit --team is the Linear route and needs no repository; refuse
+    // only when nothing at all says where the finding belongs.
+    if (team) return loadControlPlane({ root });
+    throw new Error(
+      "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N> (or --team <KEY> for a Linear team)",
+    );
+  }
   try {
     repoName = resolveRepoName({ repos });
   } catch (err) {
@@ -479,6 +557,8 @@ const VALUE_FLAGS = new Set([
   "area",
   "body",
   "comment",
+  "dedupe-key",
+  "from",
   "label",
   "project",
   "remove",
@@ -709,10 +789,12 @@ const VERBS = {
   async file() {
     const team = flag("team");
     const title = flag("title");
-    if (!team || !title)
-      throw new Error(
-        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
-      );
+    const dedupeKey = flag("dedupe-key")?.trim() || undefined;
+    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--todo] [--dedupe-key "..."]`;
+    // Argument shape first: a missing title is a usage error, not a routing one.
+    if (!title) throw new Error(usage);
+    const cp = controlPlane(undefined, { forFile: true, team });
+    if (!team && cp.kind !== "github") throw new Error(usage);
 
     // New findings land in Triage unless they already meet the agent-ready bar.
     const stateName = has("todo") ? "Todo" : "Triage";
@@ -723,18 +805,15 @@ const VERBS = {
       ...(has("todo") ? ["ai:agent-ready"] : []),
       ...flagAll("label"),
     ];
-    const created = await controlPlane().file({
+    await fileTicket(cp, {
       team,
       title,
       body: flag("body", ""),
       labels: wanted,
       state: stateName,
       projectId: flag("project") || undefined,
+      dedupeKey,
     });
-    out(
-      { ok: true, ...created },
-      `filed ${created.identifier} in ${stateName}  ${created.url}`,
-    );
   },
 
   async inflight() {
