@@ -592,6 +592,23 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 21,
+    name: "worker_skipped_run_diagnostics",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(workers)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("skipped_json")) {
+        db.exec(
+          `ALTER TABLE workers ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '[]';`,
+        );
+      }
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

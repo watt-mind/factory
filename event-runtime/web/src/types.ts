@@ -757,6 +757,12 @@ export interface WorkerCapacity {
   classes: WorkerClassCapacity[];
 }
 
+/** One run a worker skipped, as reported in its heartbeat. */
+export interface WorkerSkippedRun {
+  runId: string;
+  reason: string;
+}
+
 /** One registered worker process (GET /workers) — the fleet, not the leases. */
 export interface Worker {
   workerId: string;
@@ -765,6 +771,12 @@ export interface Worker {
   /** Placement labels the worker declared, e.g. `{ node: "lab" }`. */
   labels: Record<string, string>;
   adapters: string[];
+  /**
+   * Runs this worker declined at its last heartbeat, with the reason for each.
+   * Always present on the wire (`[]` when none); optional here so fixtures
+   * predating schema v21 still type-check.
+   */
+  skipped?: WorkerSkippedRun[];
   state: WorkerState;
   currentRun: string | null;
   lastSeen: string;
