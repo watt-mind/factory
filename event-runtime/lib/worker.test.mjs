@@ -4000,6 +4000,9 @@ sh -c 'sleep 5 & wait'
     expect(capturedMutatingEnv.SSH_AUTH_SOCK).toBe("/tmp/worker-dispatch.sock");
     expect(capturedMutatingEnv.GITHUB_TOKEN).toBe("ghp_worker_dispatch_token");
     expect(capturedMutatingEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(capturedMutatingEnv.FACTORY_RUN_ID).toBe(mutatingSpec.runId);
+    expect(capturedMutatingEnv.FACTORY_TICKET).toBe("WM-128");
+    expect(capturedMutatingEnv.FACTORY_REPO).toBe("bj29");
 
     // 2. Non-mutating run (factory-status-report@1 has mutating: false)
     const readOnlySpec = queueRun(

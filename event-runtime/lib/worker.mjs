@@ -3579,6 +3579,18 @@ export async function executeClaimed(
 
     let outcome;
     try {
+      // Dispatch identity comes from the immutable RunSpec, never the ambient
+      // worker environment. The adapter's child-environment builder preserves
+      // these values while continuing to strip credentials it does not need.
+      const adapterEnv =
+        spec.agent === "dispatch@1"
+          ? {
+              ...env,
+              FACTORY_RUN_ID: runId,
+              FACTORY_TICKET: String(ticketId),
+              FACTORY_REPO: String(repoName),
+            }
+          : env;
       outcome = await adapter.execute({
         spec,
         def,
@@ -3588,7 +3600,7 @@ export async function executeClaimed(
           spec,
           maxRunMinutes: policyMaxRunMinutes(policyRoot),
         }),
-        env,
+        env: adapterEnv,
         onTrace,
         onUsage,
         resume: created.resume ?? null,

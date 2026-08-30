@@ -368,6 +368,13 @@ capabilities. Adapter support is a contract, not a hopeful command-line flag.
 Adapters execute only the registry-verified `promptText` snapshot and refuse
 definitions without it; `promptPath` is provenance, not executable prompt source.
 
+**Dispatch agent environment.** A worktree dispatch receives three
+RunSpec-derived identity variables: `FACTORY_RUN_ID` (the dispatch run ID),
+`FACTORY_TICKET` (the ticket identifier), and `FACTORY_REPO` (the configured
+repository name). They are set by the worker rather than inherited from its
+ambient environment, so a dispatch prompt can bind its PR handoff to the run
+that owns the worktree.
+
 **Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
 `factory.artifact-view/v1` document beside the definition annotates pointers
 into the output schema with rendering hints ([event-runtime-artifact-views.md](event-runtime-artifact-views.md)

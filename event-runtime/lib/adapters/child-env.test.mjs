@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  DISPATCH_IDENTITY_ENV,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -28,6 +29,7 @@ describe("shared child environment", () => {
       [
         ...PUSH_CREDENTIAL_ENV,
         ...PROVIDER_CREDENTIAL_ENV,
+        ...DISPATCH_IDENTITY_ENV,
         "ANTIGRAVITY_AGENT",
         "ANTIGRAVITY_LS_ADDRESS",
         "CURSOR_API_ENDPOINT",
@@ -45,6 +47,9 @@ describe("shared child environment", () => {
     for (const output of Object.values(outputs)) {
       for (const key of [...PUSH_CREDENTIAL_ENV, ...PROVIDER_CREDENTIAL_ENV]) {
         expect(output[key]).toBeUndefined();
+      }
+      for (const key of DISPATCH_IDENTITY_ENV) {
+        expect(output[key]).toBe(`supplied-${key}`);
       }
     }
     expect(keySet(outputs.command)).toEqual(

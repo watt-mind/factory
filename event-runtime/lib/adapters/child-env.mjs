@@ -22,6 +22,16 @@ export const RUNTIME_IDENTITY_ENV = [
   "FACTORY_EVENT_ENV",
 ];
 
+// These are assigned from a dispatch RunSpec by the worker, rather than
+// inherited from the worker process. Keep the list explicit so adapters do
+// not accidentally strip the identity the dispatch prompt needs for its PR
+// handoff.
+export const DISPATCH_IDENTITY_ENV = [
+  "FACTORY_RUN_ID",
+  "FACTORY_TICKET",
+  "FACTORY_REPO",
+];
+
 export const PUSH_CREDENTIAL_ENV = [
   "SSH_AUTH_SOCK",
   "SSH_AGENT_PID",
