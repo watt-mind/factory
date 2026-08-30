@@ -108,6 +108,8 @@ export const HANDOFF_REASON_CODES = new Set([
   "handoff_pr_form_invalid",
 ]);
 export const HANDOFF_TAIL_LINES = 40;
+/** reasonCode the worker stamps on a result.json it synthesized itself (#1592). */
+export const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
 export const HANDOFF_WEB_SRC_PREFIX = "event-runtime/web/src/";
 export const HANDOFF_WEB_BUILD_DIR = "event-runtime/web";
 export const HANDOFF_WEB_BUILD_COMMAND = "bun run build";
@@ -1674,6 +1676,9 @@ function verifyCompleted({
             command: claim.command ?? null,
             passed: claim.passed === true,
             output: claim.output ?? null,
+            // Derived from the persisted artifact, never stamped after the
+            // fact: a worker-synthesized result.json is not an agent claim.
+            recovered: candidate.reasonCode === RECOVERED_RESULT_REASON,
           }
         : null,
       ticketVerifyCoveredByRepoVerify: ticketVerifyCoveredByRepoVerify(

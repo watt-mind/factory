@@ -68,6 +68,7 @@ import {
   HANDOFF_REASON_CODES,
   HANDOFF_SANDBOX_UNAVAILABLE,
   normalizeFailureOutput,
+  RECOVERED_RESULT_REASON,
   verifyResult,
 } from "./verify.mjs";
 import {
@@ -1467,7 +1468,6 @@ export function defaultFindWorkspacePullRequest({ workspacePath }) {
   );
 }
 
-const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
 const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
 
 function missingResultFailure(workspaceDir) {
@@ -2623,10 +2623,18 @@ export function defaultReconcileVerifiedHandoffTicket({
   }
 }
 
-/** Convert an already-opened PR to draft and say why, so nobody merges a red handoff. */
-function defaultHoldPullRequest({ github, prNumber, body }) {
+/**
+ * Convert an already-opened PR to draft and say why, so nobody merges a red
+ * handoff (merge-apply skips drafts). `forge` is a test seam only.
+ */
+export function defaultHoldPullRequest({
+  github,
+  prNumber,
+  body,
+  forge = null,
+}) {
   if (!github || !Number.isInteger(prNumber)) return false;
-  const forge = loadForge();
+  forge ??= loadForge();
   const opts = { timeout: workerSubprocessTimeoutMs() };
   let held = false;
   try {
@@ -3620,28 +3628,6 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
-        // The retained PR was rejected by the worker's handoff gate. Route it
-        // to the review label/state rather than silently stranding it behind
-        // a refused continuation that cannot create a second PR.
-        if (
-          gate === "dispatch" &&
-          gateRefusal.reason === "ticket_pr_handoff_verification_failed" &&
-          worktreeHandoff &&
-          assertCurrentToken(db, runId, fencingToken)
-        ) {
-          try {
-            reconcileVerifiedHandoffTicketFn({
-              repo: repoName,
-              ticket: ticketId,
-              reason: worktreeHandoff.failedRunReasonCode,
-              prNumber:
-                gateResult.evidence?.escalatedWorkspacePullRequest?.number ??
-                null,
-            });
-          } catch {
-            /* The continuation refusal remains durable if projection fails. */
-          }
-        }
         // A forge read failure while checking the failed run's PR is as
         // transient as a Linear read failure: requeue with backoff instead
         // of permanently killing the escalation continuation. Only when the
@@ -3659,6 +3645,45 @@ export async function executeClaimed(
           return deferred;
         }
         releaseClaimLock(lockFile);
+        // The retained PR was rejected by the failed run's handoff gate and is
+        // still open as a ready (non-draft) PR. Route it to review rather than
+        // silently stranding it behind a refused continuation that cannot
+        // open a second PR — and hold the PR itself (draft + quoted reason)
+        // so the merge stage cannot land it without a fix round. Runs after
+        // the claim lock is released: both are CLI subprocesses.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_pr_handoff_verification_failed" &&
+          worktreeHandoff &&
+          assertCurrentToken(db, runId, fencingToken)
+        ) {
+          const heldPr = gateResult.evidence?.escalatedWorkspacePullRequest;
+          const heldPrNumber = Number(heldPr?.number);
+          const failedReason = worktreeHandoff.failedRunReasonCode ?? null;
+          if (Number.isInteger(heldPrNumber) && heldPrNumber > 0) {
+            try {
+              holdPullRequestFn({
+                repo: repoName,
+                github: gateResult.evidence?.repo?.github ?? null,
+                prNumber: heldPrNumber,
+                prUrl: heldPr?.url ?? null,
+                body: `**Result:** run ${worktreeHandoff.failedRunId} FAILED \`${failedReason ?? "handoff_verification_failed"}\` — the tier-${spec.modelTier ?? "escalation"} continuation ${runId} was refused (\`${gateRefusal.reason}\`) because this PR was still open and ready.\n\nConverted to draft by the factory worker: the handoff did not verify. Address the recorded failure before marking it ready for review.`,
+              });
+            } catch {
+              /* intentionally ignored */
+            }
+          }
+          try {
+            reconcileVerifiedHandoffTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              reason: failedReason,
+              prNumber: Number.isInteger(heldPrNumber) ? heldPrNumber : null,
+            });
+          } catch {
+            /* The continuation refusal remains durable if projection fails. */
+          }
+        }
         if (
           gate === "dispatch" &&
           [
@@ -4300,9 +4325,6 @@ export async function executeClaimed(
             });
           }
           verified.result.reasonCode = RECOVERED_RESULT_REASON;
-          if (verified.handoff?.agentReported) {
-            verified.handoff.agentReported.recovered = true;
-          }
           break verificationAttempt;
         } catch (recoveryError) {
           if (!(recoveryError instanceof ContractViolation))

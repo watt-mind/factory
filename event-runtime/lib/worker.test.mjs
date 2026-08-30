@@ -50,6 +50,7 @@ import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
 import { createAdapterRegistry } from "./adapters/index.mjs";
 import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
+import { memoryForge } from "../../lib/forge/index.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
@@ -86,6 +87,7 @@ import {
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
   defaultReconcileVerifiedHandoffTicket,
+  defaultHoldPullRequest,
   defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
@@ -3352,12 +3354,24 @@ sh -c 'sleep 5 & wait'
     );
 
     const routed = [];
+    // The PR-side effect is asserted through the DEFAULT hold helper against
+    // an in-memory forge (the dispatch stub would otherwise no-op it): the
+    // merge stage skips drafts, so drafting is what stops a refused handoff
+    // from landing without a fix round.
+    const forge = memoryForge({
+      repos: {
+        "watt-mind/factory": {
+          prs: [{ number: 1533, state: "OPEN", isDraft: false }],
+        },
+      },
+    });
     const summary = await runOnce(
       db,
       registry,
       adapters,
       opts({
         dispatch: {
+          holdPullRequest: (args) => defaultHoldPullRequest({ ...args, forge }),
           locksDir: tmpDir("tier-verify-pr-locks-"),
           leasesDir: tmpDir("tier-verify-pr-leases-"),
           fetchTicket: () => ({
@@ -3393,8 +3407,25 @@ sh -c 'sleep 5 & wait'
         repo: "factory",
         ticket: "watt-mind/factory#1539",
         reason: "handoff_verification_failed",
+        prNumber: 1533,
       }),
     ]);
+    expect(forge.calls).toEqual([
+      expect.objectContaining({
+        op: "prSetDraft",
+        repo: "watt-mind/factory",
+        number: 1533,
+        draft: true,
+      }),
+      expect.objectContaining({
+        op: "prComment",
+        repo: "watt-mind/factory",
+        number: 1533,
+        body: expect.stringContaining("handoff_verification_failed"),
+      }),
+    ]);
+    expect(forge.calls[1].body).toContain("Converted to draft");
+    expect(forge.seed.repos["watt-mind/factory"].prs[0].isDraft).toBe(true);
     expect(
       db
         .query(

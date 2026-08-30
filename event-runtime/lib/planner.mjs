@@ -1220,6 +1220,7 @@ export function worktreeDispatchAutoEligibility(
   const live = countLeases(repo.name);
   evidence.repo = {
     name: repo.name,
+    github: repo.github ?? null,
     team: repo.team ?? null,
     project: repo.project ?? null,
     capLimit: cap,
