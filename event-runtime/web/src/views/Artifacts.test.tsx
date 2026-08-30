@@ -76,7 +76,11 @@ afterEach(() => {
 function renderArtifacts(
   onJumpRun = mock(() => {}),
   initialFilters: ArtifactFilters = { kind: null, orphan: null, search: "" },
-  seed: { items?: ArtifactInventoryItem[]; agents?: unknown[] } = {},
+  seed: {
+    items?: ArtifactInventoryItem[];
+    agents?: unknown[];
+    nextBefore?: string | null;
+  } = {},
   onOpenFull = mock(() => {}),
 ) {
   const client = new QueryClient({
@@ -84,7 +88,18 @@ function renderArtifacts(
       queries: { retry: false, refetchInterval: false, staleTime: Infinity },
     },
   });
-  client.setQueryData(["artifacts"], { artifacts: seed.items ?? ITEMS });
+  client.setQueryData(
+    [
+      "artifacts",
+      initialFilters.kind,
+      initialFilters.orphan,
+      initialFilters.search,
+    ],
+    {
+      artifacts: seed.items ?? ITEMS,
+      nextBefore: seed.nextBefore,
+    },
+  );
   if (seed.agents)
     client.setQueryData(["agents"], {
       agents: seed.agents,
@@ -244,6 +259,44 @@ describe("Artifacts inventory (WM-207)", () => {
     const grid = view.getByRole("grid");
     expect(within(grid).queryByText("aaaaaaaaaaaa")).toBeNull();
     expect(within(grid).queryByText("cccccccccccc")).toBeNull();
+  });
+
+  test("requests the active kind, orphan, and search filters", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ artifacts: ITEMS }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
+      target: { value: "report" },
+    });
+    fireEvent.click(view.getByRole("tab", { name: "Orphans 28" }));
+    changeControlledInput(
+      view.getByRole("combobox", { name: "Search artifacts" }),
+      "reporter@1",
+    );
+
+    await waitFor(() =>
+      expect(requests).toContain(
+        "/api/artifacts?kind=report&orphan=true&search=reporter%401",
+      ),
+    );
+  });
+
+  test("warns when the server has more artifacts than this page", async () => {
+    const view = renderArtifacts(undefined, undefined, {
+      nextBefore: "older-artifacts",
+    });
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    expect(view.getByRole("status").textContent).toMatch(
+      /showing 3 artifacts.*more.*narrow the filter/i,
+    );
   });
 
   test("opens a deep-linked inspector with formatted preview, actions, search, and bidirectional references", async () => {

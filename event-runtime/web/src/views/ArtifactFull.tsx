@@ -51,16 +51,14 @@ export function ArtifactFull({
   const [artifactRaw, setArtifactRaw] = useState(loadArtifactRaw);
 
   const artifactsQ = useQuery({
-    queryKey: ["artifacts"],
-    queryFn: () => fetchArtifacts(),
+    queryKey: ["artifact", digest],
+    queryFn: () => fetchArtifacts({ search: digest, limit: 1 }),
+    enabled: Boolean(digest),
     ...refetchIntervals.primary,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
 
-  const selected = useMemo(
-    () => artifacts.find((artifact) => artifact.sha256 === digest) ?? null,
-    [artifacts, digest],
-  );
+  const selected = artifacts[0] ?? null;
 
   const contentQ = useQuery({
     queryKey: ["artifact-content", digest],

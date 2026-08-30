@@ -279,8 +279,14 @@ export function Artifacts({
 }) {
   const now = useNow();
   const artifactsQ = useQuery({
-    queryKey: ["artifacts"],
-    queryFn: () => fetchArtifacts(),
+    queryKey: ["artifacts", filters.kind, filters.orphan, filters.search],
+    queryFn: () =>
+      fetchArtifacts({
+        kind: filters.kind ?? undefined,
+        orphan: filters.orphan ?? undefined,
+        search: filters.search || undefined,
+      }),
+    placeholderData: (previousData) => previousData,
     ...refetchIntervals.primary,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
@@ -609,6 +615,12 @@ export function Artifacts({
                 </>
               }
             />
+            {artifactsQ.data?.nextBefore && (
+              <p role="status" className="mt-2 text-[12px] text-(--text-dim)">
+                Showing {artifacts.length.toLocaleString()} artifacts; more are
+                available. Narrow the filter to see a smaller result set.
+              </p>
+            )}
           </>
         }
       >
