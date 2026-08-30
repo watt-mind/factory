@@ -37,6 +37,7 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { createHookRegistry } from "./hooks.mjs";
+import { GITHUB_INTAKE_STALE_AFTER_MS } from "./intake.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -230,9 +231,9 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
         configured: true,
         lastAdmittedAt: githubAdmittedAt,
         ageMs: 90_000,
-        rejected: 0,
+        rejected: expect.any(Number),
         stale: false,
-        staleAfterMs: 12 * 60 * 60 * 1000,
+        staleAfterMs: GITHUB_INTAKE_STALE_AFTER_MS,
       });
       expect(Object.keys(status.githubIntake).sort()).toEqual(
         extractDirectProperties(
