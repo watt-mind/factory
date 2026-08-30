@@ -135,6 +135,8 @@ function existingChainEvents(db, edges) {
  * independent edges selected by non-empty artifact arrays (OPS-223, WM-119,
  * WM-430). Idempotent — derived event IDs dedup at intake, fully emitted sets
  * are zero-ops, and partially emitted sets resume with only missing siblings.
+ * Invalid chain data and intake collisions are terminal too: reporting them
+ * once is preferable to re-attempting a deterministic failure on every tick.
  *
  * @returns {{ emitted: number, skipped: number, errors: string[] }}
  */
@@ -148,10 +150,10 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
   const resolvedAt = new Date(now).toISOString();
 
   for (const row of candidates) {
-    const spec = JSON.parse(row.spec_json);
-    const result = JSON.parse(row.result_json);
-    const rule = edges[spec.agent];
     try {
+      const spec = JSON.parse(row.spec_json);
+      const result = JSON.parse(row.result_json);
+      const rule = edges[spec.agent];
       const recommendation = result.artifact?.[rule.recommendationField];
       const artifact = result.artifact ?? {};
       const selectionContext = { input: spec.input, artifact };
@@ -341,27 +343,38 @@ export function resolveChains(db, registry, { now = Date.now() } = {}) {
       const pending = envelopes.filter(
         (envelope) => !existingIds.has(envelope.eventId),
       );
+      let terminalFailure = false;
       for (const envelope of pending) {
         const admitted = admitChainEvent(db, registry, envelope, { now });
         if (admitted.admitted) {
           outcome.emitted += 1;
           existingIds.add(envelope.eventId);
         } else if (admitted.duplicate) {
-          outcome.skipped += 1;
           if (admitted.event?.causation_id === row.run_id) {
+            outcome.skipped += 1;
             existingIds.add(envelope.eventId);
+          } else {
+            terminalFailure = true;
+            outcome.errors.push(
+              `${envelope.eventId}: duplicate chain event belongs to ${admitted.event?.causation_id ?? "an unknown run"}`,
+            );
           }
         } else {
+          terminalFailure = true;
           outcome.errors.push(
             `${envelope.eventId}: ${admitted.errors.join("; ")}`,
           );
         }
       }
-      if (envelopes.every((envelope) => existingIds.has(envelope.eventId))) {
+      if (
+        terminalFailure ||
+        envelopes.every((envelope) => existingIds.has(envelope.eventId))
+      ) {
         resolvedRunIds.push(row.run_id);
       }
     } catch (err) {
       outcome.errors.push(`chain-${row.run_id}: ${err.message}`);
+      resolvedRunIds.push(row.run_id);
     }
   }
   if (resolvedRunIds.length > 0) {

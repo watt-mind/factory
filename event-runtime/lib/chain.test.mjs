@@ -717,6 +717,131 @@ describe("multi-emit chain resolution (WM-119)", () => {
     expect(outcome.emitted).toBe(0);
     expect(outcome.errors).toHaveLength(1);
     expect(outcome.errors[0]).toContain('missing key "ticket"');
+    expect(
+      db
+        .query(`SELECT chain_resolved_at FROM runs WHERE run_id = 'run-err-1'`)
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("foreign chain-event duplicates resolve and report their collision once", () => {
+    const db = openDb(":memory:");
+    const collisionRegistry = {
+      ...registry,
+      edges: {
+        "collision-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    seedCompletedRun(db, {
+      runId: "run-foreign-duplicate",
+      agent: "collision-edge@1",
+      input: { repo: "wm/collision" },
+      artifact: { recommendation: "NEXT" },
+    });
+    expect(
+      admitChainEvent(
+        db,
+        collisionRegistry,
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "chain-run-foreign-duplicate",
+          type: "factory.work.requested",
+          subject: "collision-edge@1",
+          occurredAt: new Date(now).toISOString(),
+          correlationId: "corr-run-foreign-duplicate",
+          causationId: "run-other",
+          payload: { repo: "wm/collision" },
+        },
+        { now },
+      ).admitted,
+    ).toBe(true);
+
+    const outcome = resolveChains(db, collisionRegistry, { now });
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      "chain-run-foreign-duplicate: duplicate chain event belongs to run-other",
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-foreign-duplicate'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, collisionRegistry, { now })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("intake conflicts resolve and report their refusal once", () => {
+    const db = openDb(":memory:");
+    const conflictRegistry = {
+      ...registry,
+      edges: {
+        "conflict-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    seedCompletedRun(db, {
+      runId: "run-intake-conflict",
+      agent: "conflict-edge@1",
+      input: { repo: "wm/expected" },
+      artifact: { recommendation: "NEXT" },
+    });
+    expect(
+      admitChainEvent(
+        db,
+        conflictRegistry,
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "chain-run-intake-conflict",
+          type: "factory.work.requested",
+          subject: "conflict-edge@1",
+          occurredAt: new Date(now).toISOString(),
+          correlationId: "corr-run-intake-conflict",
+          causationId: "run-other",
+          payload: { repo: "wm/conflicting" },
+        },
+        { now },
+      ).admitted,
+    ).toBe(true);
+
+    const outcome = resolveChains(db, conflictRegistry, { now });
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      "chain-run-intake-conflict: eventId: already admitted with a different payload",
+    ]);
+    expect(resolveChains(db, conflictRegistry, { now })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
   });
 
   test("triage-apply outcome edges route to the correct follow-up", () => {
