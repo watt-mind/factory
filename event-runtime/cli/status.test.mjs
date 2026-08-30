@@ -222,6 +222,14 @@ describe("pool visibility in status/doctor (WM-226)", () => {
       writeFileSync(path.join(dir, "worker-1.drain"), "scale-down\n");
       expect(getPoolLines(readPool(dir), {}).line).toContain("(1 draining)");
 
+      writeFileSync(
+        path.join(dir, "worker-1.crash-loop.json"),
+        JSON.stringify({ fastExits: 3, nextAttemptAt: Date.now() + 2_000 }),
+      );
+      expect(getPoolLines(readPool(dir), {}).line).toContain(
+        "crashLoops slot 1: 3",
+      );
+
       // A queue with waiting runs and a dead supervisor is the §13 anomaly:
       // nothing is left that can grow the pool behind the workers still up.
       writeFileSync(path.join(dir, "supervisor.pid"), "2147483646\n");

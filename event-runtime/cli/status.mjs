@@ -122,7 +122,13 @@ export function getPoolLines(pool, s) {
       ? `live (pid ${sup.pid})`
       : `DEAD (stale pid ${sup.pid})`;
   const draining = pool.slots.filter((sl) => sl.alive && sl.draining).length;
-  const line = `${pad("pool", 11)}supervisor ${supText}   workers ${pool.size}${draining > 0 ? ` (${draining} draining)` : ""}`;
+  const crashLoops = pool.slots.filter((sl) => sl.crashLoops > 0);
+  const crashText = crashLoops.length
+    ? `   crashLoops ${crashLoops
+        .map((sl) => `slot ${sl.n}: ${sl.crashLoops}`)
+        .join(", ")}`
+    : "";
+  const line = `${pad("pool", 11)}supervisor ${supText}   workers ${pool.size}${draining > 0 ? ` (${draining} draining)` : ""}${crashText}`;
 
   // §13's shape of anomaly: work waiting with nothing left that can grow the
   // pool. The queue is not stuck yet — the live workers may still drain it —

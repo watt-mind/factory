@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
-import { workerPassthroughArgs } from "./supervise.mjs";
+import { readPool, workerPassthroughArgs } from "./supervise.mjs";
 import {
   CLI,
   DEAD_PORT,
@@ -160,6 +160,89 @@ describe("supervise (WM-226)", () => {
     }
   }, 60_000);
 
+  test("fast-exit slots back off exponentially instead of respawning every tick", async () => {
+    const home = tmpDir("evrt-pool-crash-loop-");
+    const dir = tmpDir("evrt-pool-crash-loop-run-");
+    const box = spawnSupervisor(
+      [
+        "--workers",
+        "1:1",
+        "--interval-ms",
+        "100",
+        "--spawn-grace-ms",
+        "500",
+        "--adapter-override",
+        "does-not-exist",
+      ],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(
+        await waitFor(
+          box,
+          "crash-loop slot 1: 3 fast exits, next attempt in 2s",
+          15_000,
+        ),
+      ).toBe(true);
+      expect(
+        await waitFor(
+          box,
+          "crash-loop slot 1: 4 fast exits, next attempt in 4s",
+          15_000,
+        ),
+      ).toBe(true);
+      expect(readPool(dir).slots[0].crashLoops).toBeGreaterThanOrEqual(4);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 45_000);
+
+  test("a registered worker that survives grace resets its crash-loop counter", async () => {
+    const home = tmpDir("evrt-pool-crash-reset-");
+    const dir = tmpDir("evrt-pool-crash-reset-run-");
+    writeFileSync(
+      path.join(dir, "worker-1.crash-loop.json"),
+      JSON.stringify({
+        fastExits: 2,
+        spawnedAt: Date.now() - 1_000,
+        workerId: "old-worker",
+        nextAttemptAt: null,
+        loggedRetryAt: null,
+      }),
+    );
+    const box = spawnSupervisor(
+      [
+        "--workers",
+        "1:1",
+        "--interval-ms",
+        "100",
+        "--spawn-grace-ms",
+        "500",
+        "--adapter-override",
+        "fake",
+        "--poll-ms",
+        "50",
+      ],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(
+        await waitFor(
+          box,
+          "slot 1 registered past spawn grace — crash-loop counter reset",
+          10_000,
+        ),
+      ).toBe(true);
+      expect(readPool(dir).slots[0].crashLoops).toBe(0);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("surplus idle workers drain back to workers.min, and the pool is not respawned past target", async () => {
     const home = tmpDir("evrt-pool-down-");
     const dir = tmpDir("evrt-pool-down-run-");
@@ -191,6 +274,18 @@ describe("supervise (WM-226)", () => {
     );
     try {
       expect(await waitFor(box, "spawn slot 2", 30_000)).toBe(true);
+      // A stale backoff for an unavailable slot must not turn a scale-down
+      // decision into a retry hold; draining live capacity remains safe.
+      writeFileSync(
+        path.join(dir, "worker-3.crash-loop.json"),
+        JSON.stringify({
+          fastExits: 3,
+          spawnedAt: null,
+          workerId: "previous-worker",
+          nextAttemptAt: Date.now() + 60_000,
+          loggedRetryAt: null,
+        }),
+      );
       expect(await waitFor(box, "drain slot", 30_000)).toBe(true);
       expect(box.out).toMatch(
         /drain slot \d+ \(worker \S+\): \d+ idle worker\(s\) and no queued runs, pool 2 above workers.min 1/,
