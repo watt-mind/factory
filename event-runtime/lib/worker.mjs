@@ -4227,6 +4227,7 @@ export async function executeClaimed(
       }
     } catch (err) {
       if (!(err instanceof ContractViolation)) throw err;
+      let activeError = err;
       const recovered = recoverMissingDispatchResult({
         error: err,
         spec,
@@ -4261,22 +4262,23 @@ export async function executeClaimed(
         } catch (recoveryError) {
           if (!(recoveryError instanceof ContractViolation))
             throw recoveryError;
-          err = recoveryError;
+          activeError = recoveryError;
         }
       }
       const reasonCode =
-        err.reasonCode === "baseline_red" ||
-        err.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
-        HANDOFF_REASON_CODES.has(err.reasonCode)
-          ? err.reasonCode
+        activeError.reasonCode === "baseline_red" ||
+        activeError.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
+        HANDOFF_REASON_CODES.has(activeError.reasonCode)
+          ? activeError.reasonCode
           : "contract_violation";
       let failureReason =
-        err.violations.length === 1 && err.violations[0] === "missing_result"
+        activeError.violations.length === 1 &&
+        activeError.violations[0] === "missing_result"
           ? `${reasonCode}: ${missingResultFailure(workspaceDir)}`
-          : `${reasonCode}: ${err.violations.join(", ")}`;
-      const handoff = err.handoff ?? null;
+          : `${reasonCode}: ${activeError.violations.join(", ")}`;
+      const handoff = activeError.handoff ?? null;
       const handoffBody = handoff
-        ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${err.violations.join("; ")}`
+        ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${activeError.violations.join("; ")}`
         : null;
       const escalating = tierEscalationDue(reasonCode);
       // WM-718: the PR is the agent's, already opened; the structural hold is
