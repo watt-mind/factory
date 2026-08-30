@@ -283,16 +283,22 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrated.close();
   });
 
-  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 18 from a fresh and from a v14 database", () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(18);
+  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 19 from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(19);
     const fresh = openDb(freshFile());
-    expect(getSchemaVersion(fresh)).toBe(18);
+    expect(getSchemaVersion(fresh)).toBe(19);
     expect(
       fresh
         .query(`PRAGMA table_info(outbox)`)
         .all()
         .map((row) => row.name),
     ).toEqual(expect.arrayContaining(["delivery_attempts", "delivery_error"]));
+    expect(
+      fresh
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("subject");
     fresh.close();
 
     // #1230 (#1197) owns migration 14 and lands first; a database already at
@@ -303,15 +309,21 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrateDb(at14, { targetVersion: 13 });
     at14.exec("PRAGMA user_version = 14;");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(18);
+    expect(getSchemaVersion(at14)).toBe(19);
     expect(
       at14
         .query(`PRAGMA table_info(outbox)`)
         .all()
         .map((row) => row.name),
     ).toEqual(expect.arrayContaining(["delivery_attempts", "delivery_error"]));
+    expect(
+      at14
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("subject");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(18);
+    expect(getSchemaVersion(at14)).toBe(19);
     expect(
       at14
         .query(
@@ -336,8 +348,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
 
     migrateDb(db);
 
-    expect(CURRENT_SCHEMA_VERSION).toBe(18);
-    expect(getSchemaVersion(db)).toBe(18);
+    expect(CURRENT_SCHEMA_VERSION).toBe(19);
+    expect(getSchemaVersion(db)).toBe(19);
     expect(
       db
         .query(
@@ -379,7 +391,61 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
   });
 
-  test("hot proposal and inbox lookup indexes upgrade an existing database", () => {
+  test("runs subject migration backfills populated v18 rows and indexes the column", () => {
+    const db = new Database(freshFile());
+    migrateDb(db, { targetVersion: 18 });
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "with-ticket",
+      "with-ticket-key",
+      JSON.stringify({ input: { ticket: " wm-1503 " } }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "with-subject",
+      "with-subject-key",
+      JSON.stringify({ subject: "ops-42" }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "without-ticket",
+      "without-ticket-key",
+      JSON.stringify({ input: { repo: "factory" } }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+
+    migrateDb(db);
+
+    expect(getSchemaVersion(db)).toBe(19);
+    expect(
+      db.query(`SELECT run_id, subject FROM runs ORDER BY run_id`).all(),
+    ).toEqual([
+      { run_id: "with-subject", subject: "OPS-42" },
+      { run_id: "with-ticket", subject: "WM-1503" },
+      { run_id: "without-ticket", subject: null },
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_runs_subject'`,
+        )
+        .get()?.sql,
+    ).toContain("runs (subject)");
+    db.close();
+  });
+
+  test("hot proposal, inbox and runs subject lookup indexes upgrade an existing database", () => {
     const file = freshFile();
     const db = new Database(file);
     // #1325 owns migration 16 (inbox_proposal_id); a database already at 16
@@ -390,9 +456,9 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
 
     const migrated = openDb(file);
-    expect(getSchemaVersion(migrated)).toBe(18);
+    expect(getSchemaVersion(migrated)).toBe(19);
     migrateDb(migrated);
-    expect(getSchemaVersion(migrated)).toBe(18);
+    expect(getSchemaVersion(migrated)).toBe(19);
     const plans = [
       [
         "metrics latest proposal",
@@ -416,6 +482,11 @@ describe("schema migration runner and assertions (OPS-415)", () => {
          WHERE e.correlation_id = 'inbox-1'
          ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
         "idx_events_correlation",
+      ],
+      [
+        "runs subject",
+        `SELECT run_id FROM runs WHERE subject = 'WM-1503'`,
+        "idx_runs_subject",
       ],
     ];
 

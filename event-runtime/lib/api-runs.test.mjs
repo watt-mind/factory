@@ -589,8 +589,8 @@ describe("ticket journey join (WM-595)", () => {
         });
       s.db
         .query(
-          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .run(
           "run_ticket",
@@ -600,6 +600,7 @@ describe("ticket journey join (WM-595)", () => {
           "COMPLETED",
           "2026-01-01T10:00:00.000Z",
           "2026-01-01T10:10:00.000Z",
+          "WM-595",
         );
       s.db
         .query(
@@ -754,7 +755,7 @@ describe("ticket journey join (WM-595)", () => {
           schemaVersion: "factory.run-spec/v1",
           runId: "ignored",
           agent: "dispatch@1",
-          input: { repo: "factory", ticket },
+          input: { repo: "factory" },
         });
       for (const [runId, ticket] of [
         ["run-json-only", "WM-1328"],
@@ -762,8 +763,8 @@ describe("ticket journey join (WM-595)", () => {
       ]) {
         s.db
           .query(
-            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
           )
           .run(
             runId,
@@ -773,6 +774,7 @@ describe("ticket journey join (WM-595)", () => {
             "COMPLETED",
             "2026-01-01T10:00:00.000Z",
             "2026-01-01T10:01:00.000Z",
+            ticket,
           );
       }
       const guardedDb = {

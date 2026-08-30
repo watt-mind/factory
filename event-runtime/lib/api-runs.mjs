@@ -307,8 +307,8 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   const runs = new Set();
 
   // Keep only the small connected component for this ticket in memory. JSON
-  // LIKE is deliberately a broad SQL prefilter: objectNamesTicket below still
-  // checks the parsed, named fields so prose mentioning a ticket is excluded.
+  // LIKE is deliberately a broad prefilter for legacy event/proposal/result
+  // payloads; runs carry a normalized, indexed subject instead.
   const ticketLike = `%${ticket}%`;
   const eventRows = new Map();
   const proposalRows = new Map();
@@ -419,9 +419,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     (row) => row.id,
   );
   addRows(
-    db
-      .query(`SELECT * FROM runs WHERE UPPER(spec_json) LIKE ?`)
-      .all(ticketLike),
+    db.query(`SELECT * FROM runs WHERE subject = ?`).all(ticket),
     runRows,
     (row) => row.run_id,
   );
@@ -447,7 +445,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
       proposals.add(row.id);
   }
   for (const row of runRows.values()) {
-    if (objectNamesTicket(parseObject(row.spec_json).input, ticket))
+    if (String(row.subject ?? "").toUpperCase() === ticket)
       runs.add(row.run_id);
   }
   for (const row of resultRows.values()) {
