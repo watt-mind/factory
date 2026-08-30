@@ -493,6 +493,17 @@ describe("metrics breakdowns (WM-281)", () => {
       createdAt: at(25 * 60 * 60_000),
       updatedAt: at(25 * 60 * 60_000),
     });
+    // Seen first for delta@1: sorts inside the SQL window but Date.parse()
+    // returns NaN, which must not pin the key ahead of the parsable run.
+    insertRun(db, "delta-unparsable", {
+      agent: "delta@1",
+      createdAt: "2026-08-15T11:3x:00.000Z",
+      updatedAt: at(1 * 60_000),
+    });
+    insertRun(db, "delta-parsable", {
+      agent: "delta@1",
+      createdAt: at(20 * 60_000),
+    });
 
     const options = { now: NOW, window: "24h", by: "agent" };
     expect(
@@ -513,6 +524,7 @@ describe("metrics breakdowns (WM-281)", () => {
     ).toEqual([
       { key: "gamma@1", value: NOW - 5 * 60_000, at: at(5 * 60_000) },
       { key: "alpha@1", value: NOW - 15 * 60_000, at: at(15 * 60_000) },
+      { key: "delta@1", value: NOW - 20 * 60_000, at: at(20 * 60_000) },
       { key: "beta@1", value: NOW - 25 * 60_000, at: at(25 * 60_000) },
     ]);
 

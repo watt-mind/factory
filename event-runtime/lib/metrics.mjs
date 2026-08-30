@@ -683,6 +683,7 @@ export function metricsBreakdownView(
         grouped.set(key, samples);
       } else if (metric === "last_run_at") {
         const value = Date.parse(fact.last_run_at);
+        if (!Number.isFinite(value)) continue;
         const current = grouped.get(key);
         if (!current || value > current.value)
           grouped.set(key, { value, at: fact.last_run_at });
