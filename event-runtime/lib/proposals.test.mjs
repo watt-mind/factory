@@ -212,7 +212,10 @@ describe("sweepOrphanedNonRunProposals", () => {
       "UPDATE events SET status = 'admitted' WHERE source = ? AND event_id = ?",
     ).run(orphaned.proposal.event_source, orphaned.proposal.event_id);
 
-    expect(sweepOrphanedNonRunProposals(db, { now: NOW + 1_000 })).toBe(1);
+    expect(sweepOrphanedNonRunProposals(db, { now: NOW + 1_000 })).toEqual({
+      expired: 1,
+      remaining: 0,
+    });
     expect(getProposal(db, orphaned.proposal.id)).toMatchObject({
       status: "expired",
       decided_by: "serve",
@@ -220,6 +223,37 @@ describe("sweepOrphanedNonRunProposals", () => {
       decided_at: new Date(NOW + 1_000).toISOString(),
     });
     expect(getProposal(db, parked.proposal.id).status).toBe("open");
+  });
+
+  test("caps the oldest orphaned rows before newer rows", () => {
+    const db = openDb(":memory:");
+    const at = new Date(NOW).toISOString();
+    const later = new Date(NOW + 1_000).toISOString();
+    const insertEvent = db.query(
+      `INSERT INTO events (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, admitted_at, status)
+       VALUES ('test', ?, 'test.event', ?, ?, '{}', 'hash', ?, 'admitted')`,
+    );
+    const insertProposal = db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, 'human_needed', 'open', ?, 1800)`,
+    );
+
+    for (const [id, createdAt] of [
+      ["oldest-first", at],
+      ["oldest-second", at],
+      ["newest", later],
+    ]) {
+      insertEvent.run(id, at, at, at);
+      insertProposal.run(id, id, createdAt);
+    }
+
+    expect(
+      sweepOrphanedNonRunProposals(db, { now: NOW + 2_000, limit: 2 }),
+    ).toEqual({ expired: 2, remaining: 1 });
+    expect(getProposal(db, "oldest-first").status).toBe("expired");
+    expect(getProposal(db, "oldest-second").status).toBe("expired");
+    expect(getProposal(db, "newest").status).toBe("open");
+    db.close();
   });
 });
 

@@ -493,6 +493,142 @@ describe("cli routing", () => {
     ]);
   });
 
+  test("cancel attempts every explicit run ID when one cancellation fails", async () => {
+    const attempted = [];
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        const runId = decodeURIComponent(
+          new URL(request.url).pathname.split("/")[2],
+        );
+        attempted.push(runId);
+        return runId === "run_fail"
+          ? Response.json({ error: "cannot cancel" }, { status: 409 })
+          : Response.json({});
+      },
+    });
+    try {
+      const child = Bun.spawn(
+        [
+          "bun",
+          CLI,
+          "cancel",
+          "run_one",
+          "run_fail",
+          "run_three",
+          "--reason",
+          "cleanup",
+        ],
+        {
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+            FACTORY_EVENT_PORT: String(server.port),
+            FACTORY_RUN_DIR: throwawayRunDir(),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [status, stdout] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+      ]);
+      expect(status).toBe(1);
+      expect(stdout).toContain("cancelled run_one");
+      expect(stdout).toContain("cancel failed run_fail: cannot cancel");
+      expect(stdout).toContain("cancelled run_three");
+    } finally {
+      server.stop(true);
+    }
+    expect(attempted.sort()).toEqual(["run_fail", "run_one", "run_three"]);
+  });
+
+  test("cancel state selection refuses multiple targets without --yes", async () => {
+    const requests = [];
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${url.pathname}${url.search}`);
+        if (url.pathname === "/runs")
+          return Response.json({
+            runs: [{ runId: "run_one" }, { runId: "run_two" }],
+          });
+        return Response.json({});
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "cancel", "--state", "PROPOSED"], {
+        env: {
+          ...process.env,
+          FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+          FACTORY_EVENT_PORT: String(server.port),
+          FACTORY_RUN_DIR: throwawayRunDir(),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status).toBe(1);
+      expect(stdout).toContain("run_one");
+      expect(stdout).toContain("run_two");
+      expect(stderr).toContain("--yes");
+    } finally {
+      server.stop(true);
+    }
+    expect(requests).toEqual(["/runs?state=PROPOSED"]);
+  });
+
+  test("cancel state selection dry-run lists targets without cancellation", async () => {
+    const requests = [];
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${url.pathname}${url.search}`);
+        return Response.json({ runs: [{ runId: "run_one" }] });
+      },
+    });
+    try {
+      const child = Bun.spawn(
+        [
+          "bun",
+          CLI,
+          "cancel",
+          "--state",
+          "PROPOSED",
+          "--agent",
+          "worker@1",
+          "--dry-run",
+        ],
+        {
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+            FACTORY_EVENT_PORT: String(server.port),
+            FACTORY_RUN_DIR: throwawayRunDir(),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [status, stdout] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+      ]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("run_one");
+    } finally {
+      server.stop(true);
+    }
+    expect(requests).toEqual(["/runs?state=PROPOSED&agent=worker%401"]);
+  });
+
   test("registered command set is unchanged", () => {
     expect(COMMAND_NAMES).toEqual(EXPECTED_COMMANDS);
   });

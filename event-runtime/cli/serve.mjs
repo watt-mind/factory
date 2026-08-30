@@ -231,6 +231,7 @@ export async function tick({
   announceTransitions = () => {},
   subsystems = {},
   skipPlan = false,
+  proposalSweepLimit,
 } = {}) {
   const tickStart = Date.now();
   const stepMs = {};
@@ -314,10 +315,13 @@ export async function tick({
   });
 
   await runStep("proposals", () => {
-    const expired = sweepOrphanedNonRunProposals(db, { now });
+    const { expired, remaining } = sweepOrphanedNonRunProposals(db, {
+      now,
+      limit: proposalSweepLimit,
+    });
     if (expired > 0)
       logLine(
-        `proposals: expired ${expired} orphaned human_needed/noop row(s)`,
+        `proposals: expired ${expired} orphaned human_needed/noop row(s) (${remaining} remaining)`,
       );
   });
 
