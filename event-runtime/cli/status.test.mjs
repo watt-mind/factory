@@ -79,9 +79,9 @@ describe("status and doctor commands", () => {
     });
     expect(json.status).not.toBe(0);
     expect(json.stdout).toBe("");
-    expect(json.stderr).toContain(
-      `control API not reachable on 127.0.0.1:${DEAD_PORT} — start it with: bun event-runtime/cli.mjs serve`,
-    );
+    expect(JSON.parse(json.stderr)).toEqual({
+      error: `control API not reachable on 127.0.0.1:${DEAD_PORT} — start it with: bun event-runtime/cli.mjs serve`,
+    });
   });
 
   test("ps against a dead port says serve is not running, non-zero exit", () => {

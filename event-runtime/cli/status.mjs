@@ -1,5 +1,6 @@
 import { readPool } from "./supervise.mjs";
 import { pad, withClient } from "./shared.mjs";
+import { apiClient } from "../lib/client.mjs";
 
 function countLine(label, counts, order = Object.keys(counts)) {
   const parts = order.map((k) => `${k} ${counts[k] ?? 0}`);
@@ -204,6 +205,20 @@ export async function status(client, args = []) {
   return anomalyLines;
 }
 
-export default function statusCommand(args) {
-  return withClient((client) => status(client, args));
+export default async function statusCommand(args = []) {
+  if (!args.includes("--json")) {
+    return withClient((client) => status(client, args));
+  }
+
+  const client = apiClient();
+  try {
+    return await status(client, args);
+  } catch (err) {
+    const error =
+      err.status === undefined
+        ? `control API not reachable on ${client.host}:${client.port} — start it with: bun event-runtime/cli.mjs serve`
+        : err.message;
+    console.error(JSON.stringify({ error }));
+    process.exit(1);
+  }
 }
