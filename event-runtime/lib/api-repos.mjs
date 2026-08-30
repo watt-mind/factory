@@ -483,3 +483,5 @@ export function createRepoApi({ repos, db, configRoot = reposRoot() }) {
 
   return { repos, handle };
 }
+
+export { HostConfigConflictError, readHostConfig, writeHostConfig };
