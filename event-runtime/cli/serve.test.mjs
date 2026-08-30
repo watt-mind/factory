@@ -634,7 +634,7 @@ export default async function start() {
     db.close();
   });
 
-  test("tick expires orphaned non-run proposals and logs only when it does", async () => {
+  test("tick bounds orphaned non-run proposal sweeps and logs the remainder", async () => {
     const { tick } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");
     const db = openDb(":memory:");
@@ -644,13 +644,17 @@ export default async function start() {
       `INSERT INTO events (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, admitted_at, status)
        VALUES ('test', ?, 'test.event', ?, ?, '{}', 'hash', ?, ?)`,
     );
-    insertEvent.run("moved-on", at, at, at, "admitted");
+    insertEvent.run("moved-on-1", at, at, at, "admitted");
+    insertEvent.run("moved-on-2", at, at, at, "admitted");
+    insertEvent.run("moved-on-3", at, at, at, "admitted");
     insertEvent.run("still-parked", at, at, at, "human_needed");
     const insertProposal = db.query(
       `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
        VALUES (?, 'test', ?, 'human_needed', 'open', ?, 1800)`,
     );
-    insertProposal.run("orphaned", "moved-on", at);
+    insertProposal.run("orphaned-1", "moved-on-1", at);
+    insertProposal.run("orphaned-2", "moved-on-2", at);
+    insertProposal.run("orphaned-3", "moved-on-3", at);
     insertProposal.run("parked", "still-parked", at);
     const logs = [];
 
@@ -660,17 +664,24 @@ export default async function start() {
       now,
       policyVersion: "git:test",
       skipPlan: true,
+      proposalSweepLimit: 2,
       log: (line) => logs.push(line),
     });
 
     expect(
-      db.query("SELECT status FROM proposals WHERE id = 'orphaned'").get(),
+      db.query("SELECT status FROM proposals WHERE id = 'orphaned-1'").get(),
     ).toEqual({ status: "expired" });
+    expect(
+      db.query("SELECT status FROM proposals WHERE id = 'orphaned-2'").get(),
+    ).toEqual({ status: "expired" });
+    expect(
+      db.query("SELECT status FROM proposals WHERE id = 'orphaned-3'").get(),
+    ).toEqual({ status: "open" });
     expect(
       db.query("SELECT status FROM proposals WHERE id = 'parked'").get(),
     ).toEqual({ status: "open" });
     expect(logs).toContain(
-      "proposals: expired 1 orphaned human_needed/noop row(s)",
+      "proposals: expired 2 orphaned human_needed/noop row(s) (1 remaining)",
     );
 
     logs.length = 0;
@@ -680,10 +691,14 @@ export default async function start() {
       now: now + 1_000,
       policyVersion: "git:test",
       skipPlan: true,
+      proposalSweepLimit: 2,
       log: (line) => logs.push(line),
     });
-    expect(logs).not.toContain(
-      "proposals: expired 0 orphaned human_needed/noop row(s)",
+    expect(
+      db.query("SELECT status FROM proposals WHERE id = 'orphaned-3'").get(),
+    ).toEqual({ status: "expired" });
+    expect(logs).toContain(
+      "proposals: expired 1 orphaned human_needed/noop row(s) (0 remaining)",
     );
     db.close();
   });

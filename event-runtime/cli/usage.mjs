@@ -66,7 +66,10 @@ usage: bun event-runtime/cli.mjs <command>
   reject <proposal-id> <reason>  reject an open proposal
   inject <envelope.json|->       replay an event envelope (same intake as the webhook)
   requeue <source> <event-id>    re-plan a dead-lettered or human_needed event
-  cancel <run-id> [reason]       cancel a run before it is RUNNING
+  cancel <run-id>... [--reason TEXT]
+                                 cancel runs before they are RUNNING
+  cancel --state STATE [--agent ID] [--reason TEXT] [--yes] [--dry-run]
+                                 select exact state/agent targets before cancelling
   retry <run-id> [--force]       re-queue a FAILED run (--force past maxAttempts)
   extend <run-id> --seconds N [--override]
                                  extend a RUNNING/VERIFYING deadline (max 3600s per call)

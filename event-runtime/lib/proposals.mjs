@@ -81,11 +81,32 @@ export function openProposals(db, { now = Date.now() } = {}) {
  * proposals, human-needed and noop rows do not expire by TTL: they remain
  * open while the event is still parked so the inbox can surface the decision.
  */
-export function sweepOrphanedNonRunProposals(db, { now = Date.now() } = {}) {
+export function sweepOrphanedNonRunProposals(
+  db,
+  { now = Date.now(), limit = 200 } = {},
+) {
   const result = db
     .query(
       `UPDATE proposals AS p
        SET status = 'expired', decided_by = 'serve', reason = 'event_moved_on', decided_at = ?
+       WHERE p.rowid IN (
+         SELECT rowid FROM proposals AS candidate
+         WHERE candidate.status = 'open'
+           AND candidate.decision IN ('human_needed', 'noop')
+           AND NOT EXISTS (
+             SELECT 1 FROM events AS e
+             WHERE e.source = candidate.event_source
+               AND e.event_id = candidate.event_id
+               AND e.status IN ('human_needed', 'noop')
+           )
+         ORDER BY candidate.created_at, candidate.rowid
+         LIMIT ?
+       )`,
+    )
+    .run(new Date(now).toISOString(), limit);
+  const remaining = db
+    .query(
+      `SELECT COUNT(*) AS count FROM proposals AS p
        WHERE p.status = 'open'
          AND p.decision IN ('human_needed', 'noop')
          AND NOT EXISTS (
@@ -95,8 +116,8 @@ export function sweepOrphanedNonRunProposals(db, { now = Date.now() } = {}) {
              AND e.status IN ('human_needed', 'noop')
          )`,
     )
-    .run(new Date(now).toISOString());
-  return result.changes;
+    .get().count;
+  return { expired: result.changes, remaining };
 }
 
 /**
