@@ -82,14 +82,25 @@ export async function runCase({
     return record(FAIL, `case not runnable: ${evalCase.problem}`);
 
   let spent = 0;
+  const hasCaseBudget =
+    typeof budgetUsd === "number" &&
+    Number.isFinite(budgetUsd) &&
+    budgetUsd > 0;
   const outcome = await withDeadline(timeoutMs, async (signal) => {
     const response = await runSkill({ evalCase, timeoutMs, budgetUsd, signal });
     spent += Number(response?.costUsd) || 0;
+    const remaining = budgetUsd - spent;
+    if (hasCaseBudget && remaining <= 0) {
+      return {
+        pass: false,
+        reason: "case budget exhausted by the subject run",
+      };
+    }
     const verdict = await grade({
       evalCase,
       response,
       timeoutMs,
-      budgetUsd,
+      budgetUsd: hasCaseBudget ? remaining : budgetUsd,
       signal,
     });
     spent += Number(verdict?.costUsd) || 0;
