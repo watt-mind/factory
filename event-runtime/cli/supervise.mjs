@@ -6,6 +6,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -65,7 +66,11 @@ function readCrashLoop(file) {
 }
 
 function writeCrashLoop(file, state) {
-  writeFileSync(file, `${JSON.stringify(state)}\n`);
+  // tmp + rename: a concurrent `status` reads either the previous complete
+  // state or the new one, never a torn file.
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(state)}\n`);
+  renameSync(tmp, file);
 }
 
 export function crashBackoffMs(fastExits) {

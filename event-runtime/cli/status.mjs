@@ -112,8 +112,12 @@ export function getAnomalyLines(s) {
  */
 export function getPoolLines(pool, s) {
   const started = pool?.supervisor !== null && pool?.supervisor !== undefined;
-  if (!started && (pool?.slots?.length ?? 0) === 0)
-    return { line: null, anomalies: [] };
+  // A leftover `fastExits: 0` crash-loop file (kept across restarts as the
+  // durable backoff counter) is not a slot worth a pool line on its own.
+  const liveSlots = (pool?.slots ?? []).filter(
+    (sl) => sl.hasPidFile || sl.crashLoops > 0,
+  );
+  if (!started && liveSlots.length === 0) return { line: null, anomalies: [] };
 
   const sup = pool.supervisor;
   const supText = !sup
