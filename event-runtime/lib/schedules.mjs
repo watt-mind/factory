@@ -91,8 +91,18 @@ export function dueSlots({
     return { slots, skipped };
   }
 
-  // "none" and "last" both fire exactly one tick here; they differ only in
-  // which slot it claims to be, and therefore in what a replay would mean.
+  if (catchUp === "last" && totalMissed > 1) {
+    // The current slot is not missed yet. Emit its immediate predecessor —
+    // the newest missed slot — and leave the current one for the next tick.
+    return {
+      slots: [new Date(Date.parse(current) - period).toISOString()],
+      skipped: totalMissed - 2,
+    };
+  }
+
+  // `none`, and `last` when the previous slot is already the last admitted
+  // one, fire the current slot. There is no missed slot to replay in that
+  // `last` case.
   const slots = [current];
   return { slots, skipped: Math.max(0, totalMissed - 1) };
 }
