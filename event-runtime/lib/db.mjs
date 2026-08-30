@@ -609,6 +609,15 @@ export const MIGRATIONS = [
       }
     },
   },
+  {
+    version: 22,
+    name: "events_subject_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_subject ON events (subject);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
