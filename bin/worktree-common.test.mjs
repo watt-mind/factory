@@ -58,6 +58,16 @@ const PORT_BASE = pickPortBase();
 const PORT_RESERVATION_ROOT = mkdtempSync(
   path.join(tmpdir(), "factory-port-reservations-"),
 );
+// The handoff verifier exposes read-only /usr but intentionally starts with an
+// empty /etc. On Debian, /usr/bin/awk points through /etc/alternatives, so give
+// shell fixtures a direct wrapper to the real executable they are testing with.
+const TEST_TOOL_BIN = mkdtempSync(path.join(tmpdir(), "factory-test-tools-"));
+writeFileSync(
+  path.join(TEST_TOOL_BIN, "awk"),
+  '#!/bin/bash\nexec /usr/bin/mawk "$@"\n',
+);
+chmodSync(path.join(TEST_TOOL_BIN, "awk"), 0o755);
+const TEST_PATH = `${TEST_TOOL_BIN}:${process.env.PATH}`;
 const P = (offset) => PORT_BASE + offset;
 const BAND_ENV = {
   FACTORY_PORT_BASE: String(PORT_BASE),
@@ -67,6 +77,7 @@ const BAND_ENV = {
 
 afterAll(() => {
   rmSync(PORT_RESERVATION_ROOT, { recursive: true, force: true });
+  rmSync(TEST_TOOL_BIN, { recursive: true, force: true });
 });
 
 function sh(body, extraEnv = {}) {
@@ -74,7 +85,7 @@ function sh(body, extraEnv = {}) {
     cmd: ["bash", "-c", `source "${COMMON}"\n${body}`],
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...BAND_ENV, ...extraEnv },
+    env: { ...process.env, PATH: TEST_PATH, ...BAND_ENV, ...extraEnv },
   });
   return {
     status: result.exitCode,
@@ -89,7 +100,7 @@ function command(cmd, cwd, extraEnv = {}) {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...extraEnv },
+    env: { ...process.env, PATH: TEST_PATH, ...extraEnv },
   });
   return {
     status: result.exitCode,
@@ -138,7 +149,7 @@ function runWorktreeUp(fixture, ticket) {
     fixture.root,
     {
       FACTORY_WT_ROOT: fixture.worktrees,
-      PATH: `${fixture.mockBin}:${process.env.PATH}`,
+      PATH: `${fixture.mockBin}:${TEST_PATH}`,
     },
   );
 }
@@ -147,7 +158,7 @@ async function shAsync(body, extraEnv = {}) {
   const proc = Bun.spawn(["bash", "-c", `source "${COMMON}"\n${body}`], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...BAND_ENV, ...extraEnv },
+    env: { ...process.env, PATH: TEST_PATH, ...BAND_ENV, ...extraEnv },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -399,7 +410,7 @@ test("normalize_path is portable and accepts a missing final component", () => {
     chmodSync(path.join(mockBin, "realpath"), 0o755);
     const missing = path.join(root, "existing", "missing-leaf");
     const r = sh(`normalize_path "${root}/existing/../existing/missing-leaf"`, {
-      PATH: `${mockBin}:${process.env.PATH}`,
+      PATH: `${mockBin}:${TEST_PATH}`,
     });
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe(missing);
@@ -430,7 +441,7 @@ test("provision_instance_local_configs does not invoke GNU-only realpath", () =>
         `provision_instance_local_configs "${checkout}" "${source}"`,
         `test "$(cat "${checkout}/config/repos.yaml")" = "repos: []"`,
       ].join("\n"),
-      { PATH: `${mockBin}:${process.env.PATH}` },
+      { PATH: `${mockBin}:${TEST_PATH}` },
     );
     expect(r.status).toBe(0);
     expect(r.stderr).toBe("");
@@ -449,7 +460,7 @@ test("listen_tcp_port rejects a dead pid even if lsof returns a listener", () =>
     // Override the initial guard to reproduce the kill/lsof TOCTOU window on
     // platforms where lsof correctly rejects a dead -p value.
     const r = sh(`pid_alive() { return 0; }\nlisten_tcp_port "${pidfile}"`, {
-      PATH: `${dir}:${process.env.PATH}`,
+      PATH: `${dir}:${TEST_PATH}`,
       MOCK_LSOF_PORT: String(P(352)),
     });
     expect(r.status).not.toBe(0);
@@ -466,7 +477,7 @@ test("listen_tcp_port rejects a recovered port outside the configured band", () 
     const r = sh(
       `printf '%s\\n' $$ > "${pidfile}"\nlisten_tcp_port "${pidfile}"`,
       {
-        PATH: `${dir}:${process.env.PATH}`,
+        PATH: `${dir}:${TEST_PATH}`,
         MOCK_LSOF_PORT: String(PORT_BASE + 2 * PORT_SPAN),
       },
     );
@@ -484,7 +495,7 @@ test("listen_tcp_port accepts the fixed --here web port below the ticket band", 
     const r = sh(
       `printf '%s\\n' $$ > "${pidfile}"\nlisten_tcp_port "${pidfile}"`,
       {
-        PATH: `${dir}:${process.env.PATH}`,
+        PATH: `${dir}:${TEST_PATH}`,
         MOCK_LSOF_PORT: "7392",
       },
     );

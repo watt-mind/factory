@@ -21,25 +21,80 @@ source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 # down a daemon an operator already had running.
 UP_STARTED_PIDFILES=()
 UP_STARTED_LABELS=()
+UP_PREEXISTING_PIDFILES=()
+UP_PREEXISTING_PIDS=()
+
+snapshot_up_pidfiles() {
+  local pidfile
+  for pidfile in "$RUN_DIR"/*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    UP_PREEXISTING_PIDFILES+=("$pidfile")
+    UP_PREEXISTING_PIDS+=("$(cat "$pidfile" 2>/dev/null || true)")
+  done
+}
+
+up_pidfile_preexisted_unchanged() { # <pidfile>
+  local pidfile="$1" i current
+  current="$(cat "$pidfile" 2>/dev/null || true)"
+  for i in "${!UP_PREEXISTING_PIDFILES[@]}"; do
+    if [[ "${UP_PREEXISTING_PIDFILES[$i]}" == "$pidfile" \
+      && "${UP_PREEXISTING_PIDS[$i]}" == "$current" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+track_up_pidfile() { # <label> <pidfile>
+  local label="$1" pidfile="$2" existing
+  for existing in "${UP_STARTED_PIDFILES[@]}"; do
+    [[ "$existing" == "$pidfile" ]] && return 0
+  done
+  UP_STARTED_PIDFILES+=("$pidfile")
+  UP_STARTED_LABELS+=("$label")
+}
+
+track_up_pool_pidfiles() {
+  local pidfile label
+  for pidfile in "$RUN_DIR/supervisor.pid" "$RUN_DIR"/worker-[0-9]*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    up_pidfile_preexisted_unchanged "$pidfile" && continue
+    label="worker pool $(basename "${pidfile%.pid}")"
+    track_up_pidfile "$label" "$pidfile"
+  done
+}
 
 cleanup_up_daemons() {
-  local i pidfile label
+  local round i pidfile label
+  # The pool supervisor creates its own supervisor/worker-N pidfiles after the
+  # top-level worker daemon is spawned. Discover those before teardown so its
+  # detached worker groups are terminated too, while snapshot-matched files
+  # belonging to a pre-existing stack remain untouched.
+  track_up_pool_pidfiles
   [[ ${#UP_STARTED_PIDFILES[@]} -gt 0 ]] || return 0
 
   warn "up failed — stopping daemons started by this invocation"
-  for i in "${!UP_STARTED_PIDFILES[@]}"; do
-    pidfile="${UP_STARTED_PIDFILES[$i]}"
-    label="${UP_STARTED_LABELS[$i]}"
-    term_daemon "$pidfile" "$label" || true
-  done
-  for i in "${!UP_STARTED_PIDFILES[@]}"; do
-    pidfile="${UP_STARTED_PIDFILES[$i]}"
-    label="${UP_STARTED_LABELS[$i]}"
-    await_daemon "$pidfile" "$label" || true
-    # await_daemon normally removes this itself. Keep the invariant even for a
-    # platform-specific implementation that only waits, or a dead child whose
-    # pidfile was never valid.
-    rm -f "$pidfile"
+  # Re-scan after the first await: a just-spawned pool supervisor can publish
+  # its detached worker pidfiles while the top-level supervisor is stopping.
+  for round in 1 2; do
+    track_up_pool_pidfiles
+    for i in "${!UP_STARTED_PIDFILES[@]}"; do
+      pidfile="${UP_STARTED_PIDFILES[$i]}"
+      label="${UP_STARTED_LABELS[$i]}"
+      term_daemon "$pidfile" "$label" || true
+    done
+    for i in "${!UP_STARTED_PIDFILES[@]}"; do
+      pidfile="${UP_STARTED_PIDFILES[$i]}"
+      label="${UP_STARTED_LABELS[$i]}"
+      await_daemon "$pidfile" "$label" || true
+      # await_daemon normally removes this itself. Keep the invariant even for
+      # a platform-specific implementation that only waits, or a dead child
+      # whose pidfile was never valid.
+      rm -f "$pidfile"
+      if [[ "$(basename "$pidfile")" == worker-[0-9]*.pid ]]; then
+        rm -f "${pidfile%.pid}.drain" "${pidfile%.pid}.id"
+      fi
+    done
   done
   UP_STARTED_PIDFILES=()
   UP_STARTED_LABELS=()
@@ -55,8 +110,7 @@ spawn_daemon_tracked() { # <label> <pidfile> <logfile> <workdir> <cmd...>
   local label="$1" pidfile="$2"
   shift 2
   spawn_daemon "$pidfile" "$@"
-  UP_STARTED_PIDFILES+=("$pidfile")
-  UP_STARTED_LABELS+=("$label")
+  track_up_pidfile "$label" "$pidfile"
 }
 
 print_daemon_command() { # <label> <cmd...>
@@ -77,6 +131,7 @@ WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
 
 mkdir -p "$RUN_DIR" "$HOME_DIR"
 REPO="$(repo_root)"
+if [[ "$ACTION" == "up" ]]; then snapshot_up_pidfiles; fi
 
 elapsed_seconds() {
   local elapsed="${1//[[:space:]]/}" days=0 rest hours=0 minutes=0 seconds=0
@@ -102,9 +157,12 @@ cleanup_stale_fake_runtimes() {
     return 0
   }
 
-  local pid pgid elapsed command age_seconds process_with_env seen_groups=" "
+  local pid pgid elapsed command age_seconds process_with_env seen_groups=" " processes
   local current_pgid
   current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+  # A captured stream works in minimal chroots that expose /proc but omit the
+  # conventional /dev/fd symlink Bash process substitution relies on.
+  processes="$(ps -axo pid=,pgid=,etime=,command= 2>/dev/null || true)"
   while read -r pid pgid elapsed command; do
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
     [[ "$pgid" =~ ^[0-9]+$ ]] || continue
@@ -125,7 +183,7 @@ cleanup_stale_fake_runtimes() {
     # being mistaken for test debris. Marked runtimes are detached group
     # leaders, so a group kill also removes wrappers and grandchildren.
     kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-  done < <(ps -axo pid=,pgid=,etime=,command=)
+  done <<<"$processes"
 }
 
 # PIDs listening on <port> that THIS checkout started (WM-657, #1068). Ownership
@@ -136,13 +194,14 @@ cleanup_stale_fake_runtimes() {
 # on the shared operator box.
 owned_port_holders() { # <port>
   command -v lsof >/dev/null 2>&1 || return 0
-  local pid cmd
+  local pid cmd holders
+  holders="$(lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
   while read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
     cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
     [[ "$cmd" == *"$REPO/"* ]] || continue
     printf '%s\n' "$pid"
-  done < <(lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u)
+  done <<<"$holders"
 }
 
 # Reap an orphan of ours still holding <port> after the pidfile teardown, or
@@ -181,8 +240,9 @@ reap_owned_port() { # <port> <label>
 # never touched. This is the acceptance guarantee that no cli.mjs serve/work or
 # web/serve.mjs the stack owns remains after `down`.
 reap_owned_processes() {
-  local pid pgid cmd current_pgid
+  local pid pgid cmd current_pgid processes
   current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+  processes="$(ps -axo pid=,pgid=,command= 2>/dev/null || true)"
   while read -r pid pgid cmd; do
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
     [[ "$pgid" =~ ^[0-9]+$ ]] || continue
@@ -195,7 +255,7 @@ reap_owned_processes() {
     esac
     warn "reaping orphaned stack process pid $pid: $cmd"
     kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-  done < <(ps -axo pid=,pgid=,command=)
+  done <<<"$processes"
 }
 
 case "$ACTION" in

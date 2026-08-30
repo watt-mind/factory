@@ -49,6 +49,11 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   shift 3
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
   printf '1\\n' >"$pidfile"
+  if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" && "$*" == *"cli.mjs supervise"* ]]; then
+    printf '2\\n' >"$(dirname "$pidfile")/supervisor.pid"
+    printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
+    printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+  fi
 }
 term_daemon() {
   printf 'TERM %s\\n' "$2" >>"$SPAWN_LOG"
@@ -132,7 +137,16 @@ function makeFixture({
 
   // The health polls must not gate a test on a server nobody started.
   const curl = path.join(root, "stubs", "curl");
-  writeFileSync(curl, '#!/bin/sh\nexit "${FAKE_CURL_STATUS:-0}"\n', "utf8");
+  writeFileSync(
+    curl,
+    `#!/bin/sh
+if [ -n "\${FAKE_CURL_FAIL_URL:-}" ]; then
+  case "$*" in *"$FAKE_CURL_FAIL_URL"*) exit 1 ;; esac
+fi
+exit "\${FAKE_CURL_STATUS:-0}"
+`,
+    "utf8",
+  );
   chmodSync(curl, 0o755);
 
   // Non-dev web builds are recorded and materialize the one artifact the
@@ -285,6 +299,29 @@ test("failed `up` leaves an already-running daemon alone", () => {
     expect(r.stdout).toContain("event runtime already running");
     expect(r.spawns).not.toContain("TERM event runtime");
     expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("failed web health removes supervised pool children from this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_POOL_CHILDREN: "1",
+      FAKE_CURL_FAIL_URL: ":7382",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("web server failed to start");
+    expect(r.spawns).toContain("TERM worker pool worker-1");
+    for (const file of [
+      "worker.pid",
+      "supervisor.pid",
+      "worker-1.pid",
+      "worker-1.id",
+    ]) {
+      expect(existsSync(path.join(f.runDir, file))).toBe(false);
+    }
   } finally {
     f.cleanup();
   }
