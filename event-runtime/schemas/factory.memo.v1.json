@@ -38,7 +38,7 @@
           "type": "string",
           "pattern": "^sha256:[a-f0-9]{64}$"
         },
-        "headSha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "expiresAt": {
           "type": "string",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",

@@ -142,6 +142,33 @@ describe("factory.memo/v1 contract", () => {
     expect(valid).toBe(false);
     expect(errors).toContain("$.bindings.expiresAt: not a valid time");
   });
+
+  test("rejects an expiresAt binding that is already in the past", () => {
+    const now = Date.parse("2026-08-30T12:00:00.000Z");
+    const past = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "2026-08-30T11:59:59Z" } }),
+      { now },
+    );
+    expect(past.valid).toBe(false);
+    expect(past.errors).toContain("$.bindings.expiresAt: already in the past");
+    const future = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "2026-08-30T12:00:01Z" } }),
+      { now },
+    );
+    expect(future.valid).toBe(true);
+  });
+
+  test("rejects an abbreviated headSha binding", () => {
+    const { valid, errors } = validateMemo(
+      postmortemDoc({ bindings: { headSha: "abc1234" } }),
+    );
+    expect(valid).toBe(false);
+    expect(errors.some((e) => e.startsWith("$.bindings.headSha"))).toBe(true);
+    expect(
+      validateMemo(postmortemDoc({ bindings: { headSha: "a".repeat(40) } }))
+        .valid,
+    ).toBe(true);
+  });
 });
 
 describe("subject normalization", () => {
@@ -700,6 +727,22 @@ describe("verifyResult memo collection", () => {
     const def = { ...statusDef, emits: { memos: ["postmortem"] } };
     const dir = writeMemoWorkspace(
       postmortemDoc({ bindings: { expiresAt: "2026-99-99T99:99:99Z" } }),
+    );
+    expect(() =>
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+      }),
+    ).toThrow(ContractViolation);
+  });
+
+  test("rejects an abbreviated headSha before memo registration", () => {
+    const def = { ...statusDef, emits: { memos: ["postmortem"] } };
+    const dir = writeMemoWorkspace(
+      postmortemDoc({ bindings: { headSha: "abc1234" } }),
     );
     expect(() =>
       verifyResult({
