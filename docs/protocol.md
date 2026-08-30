@@ -371,8 +371,9 @@ factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress
 factory ticket label CLNT-616
 # Change state and/or labels, optionally with a comment.
 factory ticket state CLNT-616 "In Review" --add ai:needs-review
-# File a new Triage or Todo ticket.
-factory ticket file --team CLNT --title "..." --body "..." --type bug
+# File a new Triage or Todo ticket. `--from` routes a dispatched workspace to
+# the source ticket's repository; `--team` remains required when that route is Linear.
+factory ticket file --from owner/repo#123 --title "..." --body "..." --type bug
 # List In Progress tickets for Owned Paths collision checks.
 factory ticket inflight --team CLNT --project "BJ29 Coaching"
 # List dispatchable tickets for a team or configured repo.

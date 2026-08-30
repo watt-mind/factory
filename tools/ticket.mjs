@@ -17,7 +17,7 @@
  *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
- *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug
+ *   bun tools/ticket.mjs file --from owner/repo#123 --title "..." --body "..." --type bug
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
@@ -368,7 +368,23 @@ export function resolveRepoNameFromTicket(ticketArg, repos) {
   return null;
 }
 
-function controlPlane(ticketArg = positional[0]) {
+/**
+ * Resolve the repository for `file`. Unlike ticket verbs, an explicit
+ * `--from` is the only durable repository signal an agent running from an
+ * ephemeral workspace has, so it takes precedence over cwd (after --repo).
+ */
+export function resolveRepoNameForFile({
+  cwd = process.cwd(),
+  repos,
+  repoFlag = flag("repo"),
+  fromFlag = flag("from"),
+} = {}) {
+  if (repoFlag) return resolveRepoName({ cwd, repos, repoFlag });
+  if (fromFlag) return resolveRepoNameFromTicket(fromFlag, repos);
+  return resolveRepoName({ cwd, repos, repoFlag: undefined });
+}
+
+function controlPlane(ticketArg = positional[0], { forFile = false } = {}) {
   // All ticket verbs act on instance-local state. Resolve this before looking
   // at cwd or the identifier so a missing runner config is an explicit refusal
   // rather than a silent default-plane lookup.
@@ -377,6 +393,15 @@ function controlPlane(ticketArg = positional[0]) {
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
   let repoName = null;
+  if (forFile) {
+    repoName = resolveRepoNameForFile({ repos });
+    if (!repoName) {
+      throw new Error(
+        "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N>",
+      );
+    }
+    return loadControlPlane({ root, repoName });
+  }
   try {
     repoName = resolveRepoName({ repos });
   } catch (err) {
@@ -479,6 +504,7 @@ const VALUE_FLAGS = new Set([
   "area",
   "body",
   "comment",
+  "from",
   "label",
   "project",
   "remove",
@@ -709,9 +735,10 @@ const VERBS = {
   async file() {
     const team = flag("team");
     const title = flag("title");
-    if (!team || !title)
+    const cp = controlPlane(undefined, { forFile: true });
+    if (!title || (!team && cp.kind !== "github"))
       throw new Error(
-        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
+        `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
       );
 
     // New findings land in Triage unless they already meet the agent-ready bar.
@@ -723,7 +750,7 @@ const VERBS = {
       ...(has("todo") ? ["ai:agent-ready"] : []),
       ...flagAll("label"),
     ];
-    const created = await controlPlane().file({
+    const created = await cp.file({
       team,
       title,
       body: flag("body", ""),

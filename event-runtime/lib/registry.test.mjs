@@ -345,7 +345,7 @@ describe("registry", () => {
     // nesting, and all three agent definitions are re-pinned. Post-review:
     // merge-fix.md drops the bare-artifact twin examples (re-pinned again).
     const expected =
-      "sha256:3da3fdd6554606b51aa8c8c907d0e84fae8e370e0f97c93c2d3234f75af1bdb3";
+      "sha256:96e021246e1e025989f5389835d64edcaea1fcee6f28f303c399d858321dd8f8";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -593,7 +593,7 @@ describe("registry", () => {
     // check, so its prompt pin legitimately moved; `pack` remains
     // non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:64692fdaf524fb0e54e8d2156bcf9a3bfe3356c663ce6a7b83910a9043b6314e",
+        "sha256:d79f9fde2a0d507bedd8fcea3ddb20024f101ecb96c71c767bcf68a251681db3",
     );
   });
 

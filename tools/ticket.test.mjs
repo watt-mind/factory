@@ -32,6 +32,7 @@ import {
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
+  resolveRepoNameForFile,
   instanceConfigRoot,
   InstanceConfigMissingError,
   __resetLinearReposCache,
@@ -650,6 +651,61 @@ test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () 
   expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
+});
+
+test("resolveRepoNameForFile: --from chooses its GitHub repo and refuses an ambiguous workspace", () => {
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: "watt-mind/factory#975",
+    }),
+  ).toBe("factory");
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: undefined,
+    }),
+  ).toBeNull();
+});
+
+test("file refuses an unresolvable workspace with both routing flags", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ticket-file-route-"));
+  const workspace = path.join(root, "workspace");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(workspace);
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${path.join(root, "repo")}\n    github: watt-mind/factory\n`,
+    );
+    const result = Bun.spawnSync({
+      cmd: [
+        "bun",
+        path.join(cliRoot, "tools", "ticket.mjs"),
+        "file",
+        "--title",
+        "finding",
+      ],
+      cwd: workspace,
+      env: { ...process.env, FACTORY_REPOS_ROOT: root },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(
+      "--repo <name> or --from <owner/repo#N>",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ----------------------------------- instance config resolution (GH-975) ---
