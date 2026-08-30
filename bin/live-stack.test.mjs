@@ -132,7 +132,7 @@ function makeFixture({
 
   // The health polls must not gate a test on a server nobody started.
   const curl = path.join(root, "stubs", "curl");
-  writeFileSync(curl, "#!/bin/sh\nexit 0\n", "utf8");
+  writeFileSync(curl, '#!/bin/sh\nexit "${FAKE_CURL_STATUS:-0}"\n', "utf8");
   chmodSync(curl, 0o755);
 
   // Non-dev web builds are recorded and materialize the one artifact the
@@ -220,6 +220,75 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     f.cleanup();
   }
 });
+
+test("`up --dry-run` prints the resolved daemon plan without spawning", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, [
+      "up",
+      "--dry-run",
+      "--port",
+      "7411",
+      "--web-port",
+      "7412",
+    ]);
+    expect(r.status).toBe(0);
+    expect(r.spawns).toEqual([]);
+    expect(r.builds).toEqual([]);
+    expect(r.stdout).toContain("dry run — no daemons will be started");
+    expect(r.stdout).toContain(`RUN_DIR=${f.runDir}`);
+    expect(r.stdout).toContain("API_PORT=7411");
+    expect(r.stdout).toContain("WEB_PORT=7412");
+    expect(r.stdout).toContain("event runtime: env");
+    expect(r.stdout).toContain("cli.mjs serve --port 7411");
+    expect(r.stdout).toContain("worker: env");
+    expect(r.stdout).toContain("web server: env");
+    expect(r.stdout).toContain("web supervisor: env");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("failed runtime health cleans up only daemons spawned by this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FAKE_CURL_STATUS: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime failed to start");
+    expect(r.spawns).toContainEqual(
+      expect.stringContaining("pid=gh-app-auth.pid"),
+    );
+    expect(r.spawns).toContainEqual(expect.stringContaining("pid=serve.pid"));
+    expect(r.spawns).toContain("TERM GitHub App token daemon");
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "gh-app-auth.pid"))).toBe(false);
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("failed `up` leaves an already-running daemon alone", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "serve.pid"), "4242\n", "utf8");
+    const r = runStack(f, ["up"], {
+      FAKE_ALIVE: "1",
+      FAKE_CURL_STATUS: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain("event runtime already running");
+    expect(r.spawns).not.toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
 
 test("plain `up` rebuilds a stale web bundle and reports the elapsed time", () => {
   const f = makeFixture({ bundle: "stale" });
