@@ -1,6 +1,16 @@
 import { fail, withClient } from "./shared.mjs";
 
 export const CANCEL_CONCURRENCY = 4;
+// A state selection is intentionally exhaustive, but must not follow a
+// malformed server cursor indefinitely. This matches the 50-page bound used
+// by `factory runs` (at most 10,000 rows at the API's maximum page size).
+export const CANCEL_MAX_PAGES = 50;
+
+function pagingError(message) {
+  // `withClient` reserves an absent status for connection failures. Mark local
+  // pagination validation errors so its CLI wrapper preserves this message.
+  return Object.assign(new Error(message), { status: 400 });
+}
 
 function optionValue(args, index, option) {
   const value = args[index + 1];
@@ -93,26 +103,53 @@ async function cancelAll(client, ids, reason) {
   return !failed;
 }
 
-export default function cancel(args) {
+export async function stateRunIds(client, options) {
+  const ids = [];
+  let before = null;
+  let pages = 0;
+
+  while (true) {
+    const page = await client.runs({
+      state: options.state,
+      ...(options.agent ? { agent: options.agent } : {}),
+      ...(before ? { before } : {}),
+    });
+    pages += 1;
+    ids.push(...(page.runs ?? []).map((run) => run.runId));
+
+    if (page.nextBefore == null) return ids;
+    if (typeof page.nextBefore !== "string" || page.nextBefore === "") {
+      throw pagingError(
+        "runs response has a next page but no nextBefore cursor",
+      );
+    }
+    if (pages >= CANCEL_MAX_PAGES) {
+      throw pagingError(
+        `cancel state selection exceeded the ${CANCEL_MAX_PAGES} page cap; narrow the state or agent filter`,
+      );
+    }
+    before = page.nextBefore;
+  }
+}
+
+export async function cancelWithClient(client, args) {
   const options = parseCancelArgs(args);
-  return withClient(async (client) => {
-    let ids = options.ids;
-    if (options.state) {
-      const page = await client.runs({
-        state: options.state,
-        ...(options.agent ? { agent: options.agent } : {}),
-      });
-      ids = (page.runs ?? []).map((run) => run.runId);
-      printTargets(ids);
-      if (options.dryRun || !ids.length) return;
-      if (ids.length > 1 && !options.yes) {
-        console.error("refusing to cancel multiple runs without --yes");
-        process.exitCode = 1;
-        return;
-      }
-    }
-    if (!(await cancelAll(client, ids, options.reason))) {
+  let ids = options.ids;
+  if (options.state) {
+    ids = await stateRunIds(client, options);
+    printTargets(ids);
+    if (options.dryRun || !ids.length) return;
+    if (ids.length > 1 && !options.yes) {
+      console.error("refusing to cancel multiple runs without --yes");
       process.exitCode = 1;
+      return;
     }
-  });
+  }
+  if (!(await cancelAll(client, ids, options.reason))) {
+    process.exitCode = 1;
+  }
+}
+
+export default function cancel(args) {
+  return withClient((client) => cancelWithClient(client, args));
 }
