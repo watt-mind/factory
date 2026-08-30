@@ -229,6 +229,30 @@ describe("registry", () => {
     }
   });
 
+  test("dispatch documented result envelope validates its registered output schema", () => {
+    const registry = loadRegistry();
+    const def = getAgent(registry, "dispatch@1");
+    const examples = [
+      ...readFileSync(def.promptPath, "utf8").matchAll(
+        /```json\n([\s\S]*?)\n```/g,
+      ),
+    ]
+      .map(([, source]) => JSON.parse(source))
+      .filter(
+        (example) => example.terminalState === "completed" && example.artifact,
+      );
+
+    expect(examples).toHaveLength(1);
+    expect(validate(registry.schemas.agentResult, examples[0])).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(validate(def.outputSchema, examples[0].artifact)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+
   test("zero-pack merged-view digest matches the develop baseline", () => {
     // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
     // The serializer omits only WM-470's new pack provenance and normalizes
@@ -358,8 +382,12 @@ describe("registry", () => {
     // is filed with `ticket.mjs file --dedupe-key <source issue id>`;
     // triage-apply.json is re-pinned. Prompt text and its pin only — no
     // schema, contract, route, capability, or model tier changed.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; prompt pin only.
+    // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
+    // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
     const expected =
-      "sha256:847555a80cb0dc6df59d012c1885ab673ad8fef65a8e39af5d04498550d3aa77";
+      "sha256:df06213a7ce4a24be5218bee31968b4a6b75ca6c7144e218015c5c9b5b8e0ea3";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -638,8 +666,12 @@ describe("registry", () => {
     // Regenerated (CLNT-123): dispatch prompt pin moved for the web typecheck
     // and bounded handoff-failure continuation instructions; `pack` remains
     // non-enumerable.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; `pack` remains non-enumerable.
+    // Regenerated (#1500): dispatch.md instructs `file --from <TICKET>` for
+    // out-of-scope follow-ups; prompt pin only.
     expect(computeDefHash(def)).toBe(
-      "sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88",
+      "sha256:bcb2ad73016ca65076edf59034106044e9603c74edcbc007bd8317444e58276e",
     );
   });
 

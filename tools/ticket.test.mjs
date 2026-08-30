@@ -10,6 +10,7 @@
 import {
   mkdtempSync,
   mkdirSync,
+  existsSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -33,6 +34,7 @@ import {
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
+  resolveRepoNameForFile,
   instanceConfigRoot,
   InstanceConfigMissingError,
   __resetLinearReposCache,
@@ -783,6 +785,164 @@ test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () 
   expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
+});
+
+test("resolveRepoNameForFile: --from chooses its GitHub repo and refuses an ambiguous workspace", () => {
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: "watt-mind/factory#975",
+    }),
+  ).toBe("factory");
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: undefined,
+    }),
+  ).toBeNull();
+});
+
+test("resolveRepoNameForFile: a Linear-style --from falls through to cwd instead of terminating", () => {
+  const repos = new Map([
+    [
+      "factory",
+      { name: "factory", path: "/srv/factory", github: "watt-mind/factory" },
+    ],
+  ]);
+  // Unresolvable cwd: the Linear id names no repository, so nothing resolves.
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos,
+      repoFlag: undefined,
+      fromFlag: "CLNT-616",
+    }),
+  ).toBeNull();
+  // Inside a configured checkout the same flag lets cwd decide.
+  expect(
+    resolveRepoNameForFile({
+      cwd: "/srv/factory/tools",
+      repos,
+      repoFlag: undefined,
+      fromFlag: "CLNT-616",
+    }),
+  ).toBe("factory");
+});
+
+/**
+ * Spawn `ticket.mjs file` against an ephemeral instance root whose cwd is
+ * outside every configured repository. `gh` is shadowed by a stub that logs
+ * its arguments and fails, and HOME points at the fixture so no operator
+ * Linear key leaks in: each route therefore ends in a deterministic, offline
+ * failure that identifies which control plane was reached.
+ */
+function spawnFileOutsideRepo(args, { controlPlane } = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ticket-file-route-"));
+  const workspace = path.join(root, "workspace");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(workspace);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        `printf '%s\n' "$*" >> "${ghLog}"`,
+        'echo "stub gh: offline" >&2',
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    // The default (repo-less) plane is read from policy.yaml, as in a real
+    // instance root; the fixture pins it to Linear.
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: linear\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${path.join(root, "repo")}\n    github: watt-mind/factory\n` +
+        (controlPlane ? `    control_plane: ${controlPlane}\n` : ""),
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), "file", ...args],
+      cwd: workspace,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("file refuses an unresolvable workspace with both routing flags", () => {
+  const result = spawnFileOutsideRepo(["--title", "finding"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file --from <Linear-id> --team reaches the Linear plane from an unresolvable workspace", () => {
+  const result = spawnFileOutsideRepo([
+    "--from",
+    "CLNT-616",
+    "--team",
+    "CLNT",
+    "--title",
+    "finding",
+  ]);
+  expect(result.exitCode).toBe(1);
+  // The default (Linear) plane was selected and went looking for its key.
+  expect(result.stderr).toContain("LINEAR_API_KEY not found");
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file --from owner/repo#N reaches that repository's GitHub plane without --team", () => {
+  const result = spawnFileOutsideRepo(
+    ["--from", "watt-mind/factory#1", "--title", "finding"],
+    { controlPlane: "github" },
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.stderr).not.toContain("usage: file");
+  // The GitHub adapter bound to watt-mind/factory and asked gh for its labels.
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/labels");
+});
+
+test("file without --title reports usage before any routing", () => {
+  const result = spawnFileOutsideRepo(["--body", "no title"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("usage: file --title");
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
 });
 
 // ----------------------------------- instance config resolution (GH-975) ---
