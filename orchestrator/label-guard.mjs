@@ -210,9 +210,15 @@ export function parseArgs(argv = process.argv.slice(2)) {
   return { apply, repos };
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(
+  argv = process.argv.slice(2),
+  {
+    resolveControlPlane = loadControlPlane,
+    resolveRepos = () => [...loadRepos().values()],
+  } = {},
+) {
   const args = parseArgs(argv);
-  const allRepos = [...loadRepos().values()].filter(
+  const allRepos = resolveRepos().filter(
     (r) => !args.repos.length || args.repos.includes(r.name),
   );
   const repos = allRepos.map((r) => ({
@@ -239,8 +245,8 @@ export async function main(argv = process.argv.slice(2)) {
   let violations = 0;
 
   for (const repo of repos) {
-    const issues = await fetchReadyIssues(repo);
-    const controlPlane = loadControlPlane({ repoName: repo.name });
+    const issues = await fetchReadyIssues(repo, resolveControlPlane);
+    const controlPlane = resolveControlPlane({ repoName: repo.name });
     const closureRequirements = new Map();
     const bad = (
       await Promise.all(
@@ -262,7 +268,10 @@ export async function main(argv = process.argv.slice(2)) {
           };
         }),
       )
-    ).filter(({ gaps, pinStatus }) => gaps.length || pinStatus === "stale");
+    ).filter(
+      ({ gaps, pinStatus }) =>
+        gaps.length || pinStatus === "stale" || pinStatus === "unreadable",
+    );
 
     console.log(
       `${repo.name}  ${repo.team} / ${repo.project}  --  ${issues.length} ai:agent-ready ticket(s), ${bad.length} guard finding(s)`,
@@ -278,13 +287,19 @@ export async function main(argv = process.argv.slice(2)) {
       for (const g of gaps) console.log(`      missing: ${g}`);
       if (pinStatus === "stale")
         console.log("      stale: Ready Pin (body changed after promotion)");
+      // A comment feed that could not be read is neither fresh nor stale;
+      // say so rather than silently passing the ticket as clean.
+      if (pinStatus === "unreadable")
+        console.log(
+          "      unreadable: Ready Pin (comment feed could not be read; re-run)",
+        );
 
       // `--apply` retains its existing structural-template demotion behavior,
       // but a stale pin is reported only. Re-stamping it automatically would
       // erase the approval-boundary signal the pin was introduced to keep.
       if (args.apply && gaps.length) {
         try {
-          await demote(issue, repo, gaps, true);
+          await demote(issue, repo, gaps, true, resolveControlPlane);
           console.log(`      -> demoted to Triage, ai:agent-ready removed`);
         } catch (err) {
           console.log(`      ! failed: ${err.message || err}`);

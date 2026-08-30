@@ -27,3 +27,18 @@ test("queue excludes stale pins from the dispatchable group", () => {
   ]);
   expect(groups.stale.map((ticket) => ticket.identifier)).toEqual(["WM-1"]);
 });
+
+test("queue reports a pin-less GitHub ticket separately from stale, not as dispatchable", () => {
+  const groups = qualifyReadyTickets(
+    [{ identifier: "#1" }, { identifier: "#2" }],
+    new Map([
+      ["#1", "missing"],
+      ["#2", "fresh"],
+    ]),
+    { missingAdmissible: false },
+  );
+
+  expect(groups.admissible.map((t) => t.identifier)).toEqual(["#2"]);
+  expect(groups.missing.map((t) => t.identifier)).toEqual(["#1"]);
+  expect(groups.stale).toEqual([]);
+});

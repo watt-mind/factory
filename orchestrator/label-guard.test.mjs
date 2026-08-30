@@ -16,6 +16,7 @@ import {
   fetchReadyIssues,
   ownedPathsClosureGuard,
   readyPinGuard,
+  main,
   templateGaps,
 } from "./label-guard.mjs";
 import { readyPinMarker } from "../event-runtime/lib/triage.mjs";
@@ -84,6 +85,37 @@ None
     npm test
 `;
   expect(templateGaps(desc)).toEqual([]);
+});
+
+test("main reports an unreadable ready pin instead of passing the ticket as clean", async () => {
+  const cp = {
+    listDispatchable: async () => [
+      { identifier: "#1", title: "unreadable feed", description: FULL_SPEC },
+      { identifier: "#2", title: "clean", description: FULL_SPEC },
+    ],
+    listComments: async (id) => {
+      if (id === "#1") throw new Error("comments 502");
+      return [
+        { body: readyPinMarker(FULL_SPEC), createdAt: "2026-08-30T10:00:00Z" },
+      ];
+    },
+  };
+  const lines = [];
+  const log = console.log;
+  console.log = (...args) => lines.push(args.join(" "));
+  try {
+    await main(["--repo", "factory"], {
+      resolveControlPlane: () => cp,
+      resolveRepos: () => [{ name: "factory", team: "WM", project: "Factory" }],
+    });
+  } finally {
+    console.log = log;
+  }
+  const out = lines.join("\n");
+  expect(out).toContain("#1");
+  expect(out).toContain("unreadable: Ready Pin");
+  expect(out).not.toMatch(/#2 .*clean/);
+  expect(out).toContain("Guard findings: 1");
 });
 
 test("listing and demotion select the control plane configured for the repo", async () => {

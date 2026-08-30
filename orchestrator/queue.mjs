@@ -81,6 +81,7 @@ for (const repo of repos) {
   if (s.readyStale) line("READY, stale pin", s.readyStale, c.yellow);
   if (s.readyUnreadable)
     line("READY, pin unreadable", s.readyUnreadable, c.yellow);
+  if (s.readyMissingPin) line("READY, no pin", s.readyMissingPin, c.yellow);
   if (s.readyHeld) line("READY, held by blocker", s.readyHeld, c.yellow);
   line("In Progress", s.inProgress);
   line("In Review", s.inReview, s.inReview ? c.cyan : (x) => x);
@@ -135,12 +136,15 @@ for (const repo of repos) {
         `\n  nothing startable — all ready tickets collide with running or with each other's unparseable Owned Paths`,
       ),
     );
-  } else if (s.readyStale || s.readyUnreadable) {
-    console.log(
-      c.dim(
-        `\n  nothing startable — ${s.readyStale} ready ticket(s) have stale pins and ${s.readyUnreadable} pin feed(s) could not be read`,
-      ),
-    );
+  } else if (s.readyStale || s.readyUnreadable || s.readyMissingPin) {
+    // Only name the counts that are non-zero; "0 pin feed(s) could not be
+    // read" is noise that hides the one line that matters.
+    const reasons = [
+      s.readyStale && `${s.readyStale} ready ticket(s) have stale pins`,
+      s.readyMissingPin && `${s.readyMissingPin} ready ticket(s) have no pin`,
+      s.readyUnreadable && `${s.readyUnreadable} pin feed(s) could not be read`,
+    ].filter(Boolean);
+    console.log(c.dim(`\n  nothing startable — ${reasons.join(", ")}`));
   } else if (s.readyHeld) {
     // Not "queue empty": there IS specified work, it is waiting on its
     // blockers, and if those never finish this line is the only symptom.
@@ -174,6 +178,15 @@ for (const repo of repos) {
       ),
     );
     for (const t of s.readyStaleTickets)
+      console.log(`    ${t.identifier.padEnd(10)} ${t.title.slice(0, 60)}`);
+  }
+  if (s.readyMissingPin) {
+    console.log(
+      c.yellow(
+        `\n  ${s.readyMissingPin} ready ticket(s) have no ready-pin — re-promote (remove/add ai:agent-ready) to stamp one:`,
+      ),
+    );
+    for (const t of s.readyMissingPinTickets)
       console.log(`    ${t.identifier.padEnd(10)} ${t.title.slice(0, 60)}`);
   }
   if (s.inReview) {
