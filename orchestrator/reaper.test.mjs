@@ -6,7 +6,45 @@ import {
   parseTs,
   HEARTBEAT_LABEL,
   AGENT_LABEL_PREFIX,
+  gql,
 } from "./reaper.mjs";
+
+describe("Linear GraphQL cancellation", () => {
+  test("forwards an AbortSignal to fetch and stops retrying when aborted", async () => {
+    const previousFetch = globalThis.fetch;
+    const previousKey = process.env.LINEAR_API_KEY;
+    const controller = new AbortController();
+    let observed;
+    process.env.LINEAR_API_KEY = "test-key";
+    globalThis.fetch = (_url, options) => {
+      observed = options.signal;
+      return new Promise((_, reject) =>
+        controller.signal.addEventListener("abort", () =>
+          reject(new Error("aborted")),
+        ),
+      );
+    };
+
+    try {
+      const request = gql(
+        "query { ping }",
+        {},
+        {
+          retries: 1,
+          signal: controller.signal,
+        },
+      );
+      controller.abort(new Error("timeout"));
+      await expect(request).rejects.toThrow("timeout");
+      expect(observed).toBe(controller.signal);
+      expect(observed.aborted).toBe(true);
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = previousKey;
+    }
+  });
+});
 
 describe("reaper argument parser", () => {
   test("default arguments", () => {

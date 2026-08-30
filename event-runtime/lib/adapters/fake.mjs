@@ -75,6 +75,49 @@ function ciDoctorArtifact(input) {
   };
 }
 
+/**
+ * `hold:<file>` (gh-1423) — the run stays in flight until <file> exists (the
+ * test's release signal), then completes normally. `<file>.held` is written
+ * the moment the adapter starts waiting, so a test can prove the run is
+ * inside the hold before acting, instead of guessing from wall-clock time.
+ * Abort resolves at once (like "hang"); the spec timeout still bounds it.
+ */
+export const HOLD_PREFIX = "hold:";
+export const HOLD_POLL_MS = 25;
+
+export const holdMarkerFile = (releaseFile) => `${releaseFile}.held`;
+
+/** Resolves "released" | "aborted" | "timed_out"; never throws on a lost race. */
+export async function holdUntilReleased({
+  releaseFile,
+  timeoutMs,
+  signal,
+  pollMs = HOLD_POLL_MS,
+}) {
+  if (!releaseFile)
+    throw new Error("fake: hold mode needs a release file path");
+  if (signal?.aborted) return "aborted";
+  writeFileSync(holdMarkerFile(releaseFile), `${Date.now()}\n`, "utf8");
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  return new Promise((resolve) => {
+    let timer = null;
+    const done = (outcome) => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve(outcome);
+    };
+    const onAbort = () => done("aborted");
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    const tick = () => {
+      if (signal?.aborted) return done("aborted");
+      if (existsSync(releaseFile)) return done("released");
+      if (Date.now() >= deadline) return done("timed_out");
+      timer = setTimeout(tick, pollMs);
+    };
+    tick();
+  });
+}
+
 export const FAKE_PLAN_SHA = "c".repeat(40);
 
 export function mergeScanArtifact(repo) {
@@ -550,6 +593,25 @@ export async function execute({
   }
 
   const mode = spec.input?.repos?.[0];
+
+  if (typeof mode === "string" && mode.startsWith(HOLD_PREFIX)) {
+    // Held open until the test releases it — a deterministic in-flight
+    // window that does not depend on the spec timeout (gh-1423).
+    const outcome = await holdUntilReleased({
+      releaseFile: mode.slice(HOLD_PREFIX.length),
+      timeoutMs,
+      signal: abortSignal ?? signal,
+    });
+    if (outcome !== "released")
+      return { exitCode: null, timedOut: outcome === "timed_out" };
+    writeResult(workspaceDir, {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: { repos: [repoRow("hold")], recommendedAction: "wait" },
+      evidence: { queries: ["fake"], released: true },
+    });
+    return { exitCode: 0, timedOut: false };
+  }
 
   switch (mode) {
     case "with-artifact": {

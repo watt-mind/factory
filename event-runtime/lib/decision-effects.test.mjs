@@ -254,6 +254,33 @@ describe("runtime decision effects", () => {
     expect(admitted).toBe(false);
   });
 
+  test("authorise records a payload conflict as a retryable failed effect", () => {
+    const result = applyDecisionEffect(
+      null,
+      item("authorise"),
+      response({ paths: ["a"] }),
+      {
+        linear: { get: () => ({ description: "Current Linear body" }) },
+        planner: {
+          admit: () => ({
+            admitted: false,
+            duplicate: false,
+            conflict: true,
+            errors: ["eventId: already admitted with a different payload"],
+          }),
+        },
+        now: NOW,
+      },
+    );
+
+    expect(result).toEqual({
+      kind: "authorise",
+      outcome: "failed",
+      error:
+        "dispatch admission failed: eventId: already admitted with a different payload",
+    });
+  });
+
   test("transport failure stays open with the response recorded and retry resolves", () => {
     const db = openDb(":memory:");
     const request = {

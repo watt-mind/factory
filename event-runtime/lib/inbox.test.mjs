@@ -24,6 +24,62 @@ import { decisionRequestHash } from "./decision.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { listMemos, MEMO_SCHEMA_VERSION, memoDigest } from "./memos.mjs";
 
+const inboxDocPath = path.resolve(
+  import.meta.dir,
+  "../../docs/event-runtime-inbox.md",
+);
+const inboxSourcePath = path.resolve(import.meta.dir, "inbox.mjs");
+
+function between(source, start, end) {
+  const first = source.indexOf(start);
+  const last = source.indexOf(end, first);
+  if (first < 0 || last < 0)
+    throw new Error(`missing source boundary ${start}`);
+  return source.slice(first, last);
+}
+
+function decisionErrorCodesFromSource() {
+  const source = readFileSync(inboxSourcePath, "utf8");
+  const operations = [
+    between(source, "function decisionRow", "/** WM-391"),
+    between(
+      source,
+      "function retargetInboxDecision",
+      "/**\n * Record the effect outcome",
+    ),
+    between(
+      source,
+      "function decideInboxItemInTransaction",
+      "export function decideInboxItem",
+    ),
+    between(
+      source,
+      "function retryInboxDecisionInTransaction",
+      "export function retryInboxDecision",
+    ),
+  ];
+  return [
+    ...new Set(
+      operations.flatMap((operation) =>
+        [...operation.matchAll(/new InboxDecisionError\(\s*"([^"]+)"/g)].map(
+          ([, code]) => code,
+        ),
+      ),
+    ),
+  ].sort();
+}
+
+function documentedDecisionErrorCodes() {
+  const document = readFileSync(inboxDocPath, "utf8");
+  const block = document.match(
+    /<!-- inbox-decision-errors:start -->([\s\S]*?)<!-- inbox-decision-errors:end -->/,
+  )?.[1];
+  if (!block) throw new Error("missing inbox decision error documentation");
+  return [...block.matchAll(/^\|\s*`([^`]+)`\s*\|\s*\d{3}\s*\|/gm)]
+    .map(([, code]) => code)
+    .sort();
+}
+
 function decision(
   options = [{ id: "dismiss", label: "Not now", effect: "dismiss" }],
 ) {
@@ -52,6 +108,12 @@ function insertProposal(db, { id, status = "open" }) {
      VALUES (?, 'test', 'evt', 'run', ?, ?, 1800)`,
   ).run(id, status, at);
 }
+
+test("the documented decision API errors match decide and retry", () => {
+  expect(documentedDecisionErrorCodes()).toEqual(
+    decisionErrorCodesFromSource(),
+  );
+});
 
 describe("human inbox ledger (WM-285)", () => {
   test("decision requests are validated and exposed with decision metadata", () => {
@@ -416,6 +478,43 @@ describe("human inbox ledger (WM-285)", () => {
     expect(retried.item.resolvedAt).toBe(new Date(3000).toISOString());
     expect(retried.item.response.effect.retryAttempt).toBe(1);
     expect(() => retryInboxDecision(db, item.id)).toThrow("already applied");
+  });
+
+  test("whitespace-only required text is rejected before a response is recorded", () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "answer", label: "Answer", effect: "answer" },
+    ]);
+    request.fields = [
+      { id: "reply", kind: "text", label: "Reply", required: true },
+    ];
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "answer",
+        refs: { issue: "WM-1" },
+        decision: request,
+      },
+      { id: "whitespace_response" },
+    );
+
+    try {
+      decideInboxItem(db, "whitespace_response", {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "answer",
+        fields: { reply: " \n " },
+      });
+      throw new Error("expected invalid response");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "invalid_response",
+        status: 400,
+        errors: ["$.fields.reply: required text must not be empty"],
+      });
+    }
+    expect(getInboxItem(db, "whitespace_response").response).toBeNull();
   });
 
   test("each failed retry advances a durable attempt token", () => {

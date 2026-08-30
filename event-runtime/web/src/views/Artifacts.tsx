@@ -279,8 +279,14 @@ export function Artifacts({
 }) {
   const now = useNow();
   const artifactsQ = useQuery({
-    queryKey: ["artifacts"],
-    queryFn: () => fetchArtifacts(),
+    queryKey: ["artifacts", filters.kind, filters.orphan, filters.search],
+    queryFn: () =>
+      fetchArtifacts({
+        kind: filters.kind ?? undefined,
+        orphan: filters.orphan ?? undefined,
+        search: filters.search.trim() || undefined,
+      }),
+    placeholderData: (previousData) => previousData,
     ...refetchIntervals.primary,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
@@ -296,10 +302,28 @@ export function Artifacts({
     return () => window.removeEventListener("hashchange", syncSelection);
   }, []);
 
-  const selected = useMemo(
+  const listMatch = useMemo(
     () => artifacts.find((artifact) => artifact.sha256 === selectedSha) ?? null,
     [artifacts, selectedSha],
   );
+  // The list is server-filtered by the active facets, so a deep link
+  // (`#/artifacts/<sha>` or a jump from Runs) may target an artifact outside
+  // the current page. Resolve it directly, the same way ArtifactFull does.
+  const fallbackQ = useQuery({
+    queryKey: ["artifact", selectedSha],
+    queryFn: () => fetchArtifacts({ search: selectedSha as string, limit: 1 }),
+    enabled:
+      selectedSha !== null && listMatch === null && !artifactsQ.isPending,
+    ...refetchIntervals.primary,
+  });
+  const selected = useMemo(() => {
+    if (listMatch) return listMatch;
+    const fallback = fallbackQ.data?.artifacts[0];
+    return fallback && fallback.sha256 === selectedSha ? fallback : null;
+  }, [listMatch, fallbackQ.data, selectedSha]);
+  const metadataPending =
+    artifactsQ.isPending ||
+    (fallbackQ.isPending && fallbackQ.fetchStatus !== "idle");
   const contentQ = useQuery({
     queryKey: ["artifact-content", selectedSha],
     queryFn: async () => {
@@ -609,6 +633,12 @@ export function Artifacts({
                 </>
               }
             />
+            {artifactsQ.data?.nextBefore && (
+              <p role="status" className="mt-2 text-[12px] text-(--text-dim)">
+                Showing {visible.length.toLocaleString()} artifacts; more are
+                available. Narrow the filter to see a smaller result set.
+              </p>
+            )}
           </>
         }
       >
@@ -880,12 +910,12 @@ export function Artifacts({
           }
           close={<Button onClick={closeInspector}>Close</Button>}
         >
-          {!selected && artifactsQ.isPending && (
+          {!selected && metadataPending && (
             <div className="text-(--text-faint)">
               Loading artifact metadata…
             </div>
           )}
-          {!selected && !artifactsQ.isPending && (
+          {!selected && !metadataPending && (
             <div className="mb-4 rounded-md border border-(--border) p-3 text-(--text-faint)">
               Artifact metadata is unavailable. The content may have been
               pruned.

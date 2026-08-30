@@ -617,6 +617,89 @@ if (behavior === "emit_error_tool_result") {
     );
   });
 
+  test("caps the transcript, flags truncation, and still exits cleanly (GH-1420)", async () => {
+    const workspaceDir = ws();
+    const traceEvents = [];
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: loadAdjustedTimeout(5_000),
+      transcriptMaxBytes: 64,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.transcriptTruncated).toBe(true);
+    expect(
+      traceEvents.some(
+        (event) =>
+          event.kind === "lifecycle" &&
+          event.payload.note === "transcript_truncated" &&
+          event.payload.bytes === 64,
+      ),
+    ).toBe(true);
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(Buffer.byteLength(transcript)).toBeLessThanOrEqual(
+      64 +
+        Buffer.byteLength(
+          '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+        ),
+    );
+    expect(
+      transcript.endsWith(
+        '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+      ),
+    ).toBe(true);
+  });
+
+  test("a transcript under the cap is byte-identical to the child's output (GH-1420)", async () => {
+    const workspaceDir = ws();
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: loadAdjustedTimeout(5_000),
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "normal",
+      },
+    });
+    expect(outcome.transcriptTruncated).toBeUndefined();
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    const lines = transcript.split("\n");
+    expect(lines.at(-1)).toBe("");
+    expect(lines.slice(0, -1).map(JSON.parse)).toEqual([
+      { type: "system", subtype: "init", model: "Composer 2.5" },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Working..." }],
+        },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        duration_ms: 1200,
+        is_error: false,
+        result: "Working...",
+      },
+    ]);
+  });
+
   test("nonzero exit code propagates and timedOut is false", async () => {
     const outcome = await execute({
       spec: defaultSpec,

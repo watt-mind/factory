@@ -26,10 +26,10 @@
  * editor CLI.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
@@ -38,7 +38,11 @@ import {
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment as sharedSafeChildEnvironment,
 } from "./child-env.mjs";
-import { DETACHED_SPAWN_OPTIONS, killProcessGroup } from "./child-process.mjs";
+import {
+  boundedTranscriptStream,
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./child-process.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export {
@@ -283,6 +287,7 @@ export async function execute({
   onUsage,
   abortSignal,
   signal,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   refuseSandbox("cursor", def, SANDBOX_REFUSAL_REASON);
   const prompt = verifiedPrompt(def, "cursor");
@@ -309,8 +314,13 @@ export async function execute({
       ...DETACHED_SPAWN_OPTIONS,
     });
 
-    const transcript = createWriteStream(
+    const transcript = boundedTranscriptStream(
       path.join(workspaceDir, ".transcript.json"),
+      {
+        maxBytes: maxTranscriptBytes,
+        onTruncated: ({ bytes }) =>
+          onTrace?.("lifecycle", { note: "transcript_truncated", bytes }),
+      },
     );
     transcript.on("error", () => {});
     // Child close only says its stdio handles are closed; the file stream may
@@ -465,6 +475,7 @@ export async function execute({
         exitCode,
         timedOut,
         policyDenials: exitCode === 0 ? [] : policyDenials,
+        ...(transcript.truncated ? { transcriptTruncated: true } : {}),
       });
     });
   });

@@ -15,6 +15,7 @@ import {
   CLI,
   DEAD_PORT,
   assertHealthyLiveServe,
+  awaitFile,
   editStampRoot,
   exitOf,
   killPool,
@@ -36,6 +37,27 @@ registerCliTmpCleanup();
 registerTestProcessCleanup(import.meta.url);
 
 const WORKER_POLICY_VERSION = policyVersion();
+const LIVE_STACK = path.resolve(import.meta.dir, "../../bin/live-stack.sh");
+
+/** Capture the shell supervisor's restart events, not just its worker's logs. */
+function spawnReloadSupervisor(args, env) {
+  const child = spawnTracked(
+    "bash",
+    [LIVE_STACK, "__supervise-worker", ...args],
+    {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const box = { out: "", child };
+  child.stdout.on("data", (b) => {
+    box.out += b;
+  });
+  child.stderr.on("data", (b) => {
+    box.out += b;
+  });
+  return box;
+}
 
 describe("work command", () => {
   test("work rejects an unsafe idle poll interval", () => {
@@ -659,8 +681,11 @@ describe("work --reload-on-change (WM-213)", () => {
         // No commit — only a working-tree write. HEAD is unchanged (this tree has
         // no git at all), so a HEAD-only stamp would sit here forever.
         editStampRoot(stampRoot, "// v2\n");
-        const { code } = await exitOf(box.child);
-        expect(code).toBe(75);
+        const { code, signal } = await exitOf(box.child);
+        expect({ code, signal, tail: box.out.slice(-600) }).toMatchObject({
+          code: 75,
+          signal: null,
+        });
         expect(box.out).toContain("reloading worker (exit 75)");
         // The log names both stamps so the developer can see what moved.
         expect(box.out).toMatch(
@@ -696,8 +721,11 @@ describe("work --reload-on-change (WM-213)", () => {
           "// v2\n",
           "utf8",
         );
-        const { code } = await exitOf(box.child);
-        expect(code).toBe(75);
+        const { code, signal } = await exitOf(box.child);
+        expect({ code, signal, tail: box.out.slice(-600) }).toMatchObject({
+          code: 75,
+          signal: null,
+        });
         expect(box.out).toContain("reloading worker (exit 75)");
       } finally {
         box.child.kill("SIGKILL");
@@ -708,19 +736,23 @@ describe("work --reload-on-change (WM-213)", () => {
   );
 
   test(
-    "a run in flight defers the reload; the worker restarts only once it is idle",
+    "a run in flight defers reload; its supervisor restarts only once it is idle",
     async () => {
       const { openDb } = await import("../lib/db.mjs");
       const { createRun, transition } = await import("../lib/lifecycle.mjs");
       const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");
+      const { HOLD_PREFIX, holdMarkerFile } =
+        await import("../lib/adapters/fake.mjs");
 
       const home = tmpDir("evrt-reload-busy-");
       const stampRoot = makeStampRoot();
       const db = openDb(path.join(home, "runtime.db"));
 
-      // The fake adapter's "hang" mode occupies the worker for the whole spec
-      // timeout — the in-flight window this reload must not interrupt.
-      const input = { repos: ["hang"] };
+      // The fake adapter's hold mode keeps the run in flight until this file
+      // exists — the in-flight window is opened and closed by the test, not by
+      // the wall clock (gh-1423). The spec timeout is only a safety net.
+      const releaseFile = path.join(home, "release-run_reload_busy");
+      const input = { repos: [`${HOLD_PREFIX}${releaseFile}`] };
       const spec = {
         schemaVersion: "factory.run-spec/v1",
         runId: "run_reload_busy",
@@ -733,7 +765,7 @@ describe("work --reload-on-change (WM-213)", () => {
         policyVersion: WORKER_POLICY_VERSION,
         outputContract: "factory.status-report/v1",
         capabilities: ["linear:read"],
-        timeoutSeconds: 4,
+        timeoutSeconds: 120,
         maxAttempts: 1,
         idempotencyKey: "idem_reload_busy",
       };
@@ -767,7 +799,8 @@ describe("work --reload-on-change (WM-213)", () => {
         input: { repos: ["ok"] },
       });
 
-      const box = spawnWorker(
+      const DEADLINE_MS = 30_000;
+      const box = spawnReloadSupervisor(
         ["--adapter-override", "fake", "--poll-ms", "50", "--reload-on-change"],
         {
           FACTORY_EVENT_HOME: home,
@@ -775,29 +808,62 @@ describe("work --reload-on-change (WM-213)", () => {
         },
       );
       try {
-        expect(await waitFor(box, "claimed run_reload_busy")).toBe(true);
+        expect(await waitFor(box, "claimed run_reload_busy", DEADLINE_MS)).toBe(
+          true,
+        );
+        // Proven in flight: the adapter has entered the hold, not merely been
+        // claimed — so the edit below lands strictly inside the run.
+        await awaitFile(holdMarkerFile(releaseFile), "hold marker", {
+          timeoutMs: DEADLINE_MS,
+        });
         editStampRoot(stampRoot, "// v2\n");
 
         expect(
-          await waitFor(box, "reload deferred until run_reload_busy finishes"),
+          await waitFor(
+            box,
+            "reload deferred until run_reload_busy finishes",
+            DEADLINE_MS,
+          ),
         ).toBe(true);
-        // Proven, not assumed: the deferral was logged while the run was still
-        // going, and the worker was still alive at that point.
+        // The deferral was logged while the run was still held open, and the
+        // worker was still alive at that point — asserted, not slept for.
         expect(box.out).not.toContain("run_reload_busy → ");
+        expect(box.out).not.toContain("reloading worker");
+        expect(box.out).not.toContain("[supervisor] worker reloaded");
         expect(box.child.exitCode).toBe(null);
 
-        const { code } = await exitOf(box.child);
-        expect(code).toBe(75);
-        // Order is the guarantee: the run reached a terminal state BEFORE the reload.
-        expect(box.out.indexOf("run_reload_busy → ")).toBeGreaterThan(-1);
+        writeFileSync(releaseFile, "go\n", "utf8");
+        // Observe the handoff from the component that actually restarts the
+        // worker. The replacement then claims the queued run, proving it was
+        // re-execed only after the held lease was released.
+        expect(
+          await waitFor(
+            box,
+            "[supervisor] worker reloaded (exit 75) — restarting on new code",
+            DEADLINE_MS,
+          ),
+        ).toBe(true);
+        expect(
+          await waitFor(box, "claimed run_reload_waiting", DEADLINE_MS),
+        ).toBe(true);
+        expect(
+          await waitFor(box, "run_reload_waiting → COMPLETED", DEADLINE_MS),
+        ).toBe(true);
+        // Order is the guarantee: the held run reached a terminal state before
+        // the supervisor accepted the reload handoff.
+        expect(box.out).toContain("run_reload_busy → COMPLETED");
         expect(box.out.indexOf("run_reload_busy → ")).toBeLessThan(
-          box.out.indexOf("reloading worker"),
+          box.out.indexOf("[supervisor] worker reloaded"),
         );
-        expect(box.out).not.toContain("claimed run_reload_waiting");
-        // And exactly one deferral line, however many intervals it spanned.
+        // Exactly one deferral line however many intervals it spanned, and
+        // exactly one reload recorded by the supervisor that owns restarts.
         expect(box.out.split("reload deferred until").length - 1).toBe(1);
+        expect(box.out.split("[supervisor] worker reloaded").length - 1).toBe(
+          1,
+        );
       } finally {
-        box.child.kill("SIGKILL");
+        box.child.kill("SIGTERM");
+        await exitOf(box.child, DEADLINE_MS);
         rmSync(stampRoot, { recursive: true, force: true });
       }
 
@@ -805,10 +871,10 @@ describe("work --reload-on-change (WM-213)", () => {
       const row = verifyDb
         .query(`SELECT state FROM runs WHERE run_id = ?`)
         .get("run_reload_busy");
-      expect(["TIMED_OUT", "FAILED", "COMPLETED"]).toContain(row?.state);
+      expect(row?.state).toBe("COMPLETED");
       verifyDb.close();
     },
-    loadAdjustedTimeout(45_000),
+    loadAdjustedTimeout(90_000),
   );
 });
 

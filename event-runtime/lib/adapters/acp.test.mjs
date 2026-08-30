@@ -346,8 +346,65 @@ function run(workspaceDir, extra = {}) {
     onUsage: extra.onUsage,
     onPermissionRequest: extra.onPermissionRequest,
     abortSignal: extra.abortSignal,
+    ...(extra.transcriptMaxBytes !== undefined
+      ? { transcriptMaxBytes: extra.transcriptMaxBytes }
+      : {}),
   });
 }
+
+describe("transcript cap (GH-1420)", () => {
+  test("caps the transcript, flags truncation, and still exits cleanly", async () => {
+    const workspaceDir = ws();
+    const traceEvents = [];
+    const outcome = await run(workspaceDir, {
+      transcriptMaxBytes: 64,
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.transcriptTruncated).toBe(true);
+    expect(
+      traceEvents.some(
+        (event) =>
+          event.kind === "lifecycle" &&
+          event.payload.note === "transcript_truncated" &&
+          event.payload.bytes === 64,
+      ),
+    ).toBe(true);
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(Buffer.byteLength(transcript)).toBeLessThanOrEqual(
+      64 +
+        Buffer.byteLength(
+          '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+        ),
+    );
+    expect(
+      transcript.endsWith(
+        '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+      ),
+    ).toBe(true);
+  });
+
+  test("a transcript under the cap is stored whole with no truncation flag", async () => {
+    const workspaceDir = ws();
+    const outcome = await run(workspaceDir);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.transcriptTruncated).toBeUndefined();
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    const lines = transcript.split("\n");
+    expect(lines.at(-1)).toBe("");
+    const parsed = lines.slice(0, -1).map(JSON.parse);
+    expect(parsed.length).toBeGreaterThan(1);
+    expect(parsed.some((msg) => msg.type === "factory")).toBe(false);
+  });
+});
 
 describe("adapter contract", () => {
   test("satisfies WM-837: execute + SANDBOX_SUPPORT unsupported", () => {

@@ -80,6 +80,19 @@ describe("decision form helpers", () => {
     expect(fieldErrors(request, "go", values)).toEqual({});
   });
 
+  test("treats whitespace-only required text as empty", () => {
+    const requiredTextRequest: DecisionRequest = {
+      ...request,
+      fields: [{ id: "note", kind: "text", label: "Note", required: true }],
+    };
+    expect(fieldErrors(requiredTextRequest, "go", { note: " \n\t " })).toEqual({
+      note: "Note is required.",
+    });
+    expect(fieldErrors(requiredTextRequest, "go", { note: " note " })).toEqual(
+      {},
+    );
+  });
+
   test("enforces number bounds and integer values", () => {
     const values = initialValues(request);
     values.count = 1;

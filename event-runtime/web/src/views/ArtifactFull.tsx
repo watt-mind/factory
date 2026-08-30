@@ -51,16 +51,16 @@ export function ArtifactFull({
   const [artifactRaw, setArtifactRaw] = useState(loadArtifactRaw);
 
   const artifactsQ = useQuery({
-    queryKey: ["artifacts"],
-    queryFn: () => fetchArtifacts(),
+    queryKey: ["artifact", digest],
+    queryFn: () => fetchArtifacts({ search: digest, limit: 1 }),
+    enabled: Boolean(digest),
     ...refetchIntervals.primary,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
 
-  const selected = useMemo(
-    () => artifacts.find((artifact) => artifact.sha256 === digest) ?? null,
-    [artifacts, digest],
-  );
+  // The search endpoint matches broadly; only trust the row when it is the
+  // requested digest rather than a positional hit.
+  const selected = artifacts[0]?.sha256 === digest ? artifacts[0] : null;
 
   const contentQ = useQuery({
     queryKey: ["artifact-content", digest],

@@ -278,7 +278,7 @@ function validateFieldValue(field, value, path, errors) {
       return;
     }
     const maximum = field.maxLength ?? TEXT_DEFAULT_MAX_LENGTH;
-    if (field.required === true && value.length === 0)
+    if (field.required === true && value.trim().length === 0)
       errors.push(`${path}: required text must not be empty`);
     if (value.length > maximum)
       errors.push(`${path}: longer than maxLength ${maximum}`);

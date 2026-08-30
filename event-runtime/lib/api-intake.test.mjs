@@ -120,6 +120,75 @@ describe("webhook intake (§14)", () => {
     expect(s.onEvents).toEqual(["admitted"]); // no second wake-up for a duplicate
   });
 
+  test("same event id with a different payload returns payload_mismatch", async () => {
+    const isolated = await makeServer();
+    try {
+      const firstBody = JSON.stringify(
+        envelope({ eventId: "hook-payload-mismatch" }),
+      );
+      const secondBody = JSON.stringify(
+        envelope({
+          eventId: "hook-payload-mismatch",
+          payload: { repos: ["different"] },
+        }),
+      );
+      const timestamp = String(Date.now());
+      const headers = (body) => ({
+        "content-type": "application/json",
+        "x-factory-timestamp": timestamp,
+        "x-factory-signature": sign(body, timestamp),
+      });
+
+      const first = await fetch(isolated.url("/events"), {
+        method: "POST",
+        headers: headers(firstBody),
+        body: firstBody,
+      });
+      expect(first.status).toBe(200);
+
+      const mismatch = await fetch(isolated.url("/events"), {
+        method: "POST",
+        headers: headers(secondBody),
+        body: secondBody,
+      });
+      expect(mismatch.status).toBe(409);
+      expect(await mismatch.json()).toEqual({
+        error: "payload_mismatch",
+        eventId: "hook-payload-mismatch",
+      });
+
+      const replay = await fetch(isolated.url("/replay"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          envelope({
+            eventId: "replay-payload-mismatch",
+            payload: { repos: ["first"] },
+          }),
+        ),
+      });
+      expect(replay.status).toBe(200);
+
+      const replayMismatch = await fetch(isolated.url("/replay"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          envelope({
+            eventId: "replay-payload-mismatch",
+            payload: { repos: ["second"] },
+          }),
+        ),
+      });
+      expect(replayMismatch.status).toBe(409);
+      expect(await replayMismatch.json()).toEqual({
+        error: "payload_mismatch",
+        eventId: "replay-payload-mismatch",
+      });
+    } finally {
+      isolated.close();
+    }
+  });
+
   test("bad signature → 401 and nothing written", async () => {
     const before = await (await fetch(s.url("/status"))).json();
 
