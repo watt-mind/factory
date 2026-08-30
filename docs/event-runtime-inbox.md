@@ -224,16 +224,21 @@ write transactions around an unlocked effect, not one transaction:
    SQLite lock for that starved every other writer (#1434).
 3. **Settle.** The outcome replaces the pending record (`applied` resolves
    the item, `failed` keeps it open with the error) in a second transaction.
+   That write matches the pending claim's `claimedAt` and `retryAttempt`; a
+   late owner whose claim was taken over receives `claim_lost` and leaves the
+   newer settlement untouched.
 
 If serve dies between the claim and the settle, the pending record outlives
 it. `/decide/retry` treats a pending claim older than
 `PENDING_EFFECT_CLAIM_TIMEOUT_MS` (60 s, above the transport timeout —
 `event-runtime/lib/inbox.mjs`) as abandoned and takes it over: it re-stamps
 the claim with the next `retryAttempt` and a fresh `claimedAt`, runs the
-effect, and settles. Readers must tolerate `response.effect` being `null`
-(rows decided before this window existed) or `pending`; the web
-`DecisionCard` shows the outcome verbatim and offers retry for anything not
-`applied`.
+effect, and settles. This is deliberately at-least-once: if `answer` or
+`send_to_triage` reaches Linear but serve dies before settlement, the
+takeover repeats its comment-producing effect. Readers must tolerate
+`response.effect` being `null` (rows decided before this window existed) or
+`pending`; the web `DecisionCard` shows the outcome verbatim and offers retry
+for anything not `applied`.
 
 | Effect             | What the runtime does                                                                                                                                                                                                                                                                | Legal only when the item has            |
 | :----------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------- |

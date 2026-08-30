@@ -694,6 +694,66 @@ describe("human inbox ledger (WM-285)", () => {
     void crashed;
   });
 
+  test("a stale owner cannot overwrite the settlement from its takeover", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "starved owner",
+        refs: { issue: "WM-1434" },
+        decision: request,
+      },
+      { id: "taken_over_claim" },
+    );
+    const response = {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "triage",
+      fields: {},
+    };
+    let finishStaleEffect;
+    const stale = decideInboxItem(db, "taken_over_claim", response, {
+      now: 1_000,
+      applyEffect: () =>
+        new Promise((resolve) => {
+          finishStaleEffect = () => resolve({ outcome: "applied" });
+        }),
+    });
+    await Promise.resolve();
+
+    const takeoverAt = 1_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS;
+    const takeover = await retryInboxDecision(db, "taken_over_claim", {
+      now: takeoverAt,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(takeover.item.response.effect).toEqual({
+      kind: "send_to_triage",
+      outcome: "applied",
+      retryAttempt: 1,
+    });
+
+    finishStaleEffect();
+    await expect(stale).resolves.toMatchObject({
+      claimLost: true,
+      effect: { kind: "send_to_triage", outcome: "claim_lost" },
+    });
+    expect(getInboxItem(db, "taken_over_claim")).toMatchObject({
+      resolvedAt: new Date(takeoverAt).toISOString(),
+      resolvedBy: "operator:send_to_triage",
+      response: {
+        effect: {
+          kind: "send_to_triage",
+          outcome: "applied",
+          retryAttempt: 1,
+        },
+      },
+    });
+  });
+
   test("a retry claim that dies mid-effect can be taken over as well", async () => {
     const db = openDb(":memory:");
     const request = decision([
