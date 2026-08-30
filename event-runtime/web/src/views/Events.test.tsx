@@ -14,6 +14,7 @@ import {
   withApi,
 } from "../test-render";
 import { shortId } from "../components/ui";
+import { useContextActions } from "../palette";
 import type { AdmittedEvent, AgentsView, EventFocus } from "../types";
 
 afterEach(() => {
@@ -24,6 +25,15 @@ afterEach(() => {
 
 const noop = () => {};
 const NOW = new Date().toISOString();
+
+function PaletteProbe() {
+  const actions = useContextActions();
+  return (
+    <div data-testid="palette-probe">
+      {actions.map((a) => a.label).join(" | ")}
+    </div>
+  );
+}
 
 function stubEvent(
   eventId: string,
@@ -46,19 +56,22 @@ function stubEvent(
 
 function renderEvents(props: Partial<Parameters<typeof Events>[0]> = {}) {
   return renderWithClient(
-    <Events
-      connected={true}
-      context={{ kind: "all" }}
-      focusEvent={null}
-      onFocusConsumed={noop}
-      onSelectEvent={noop}
-      onSelectType={noop}
-      onJumpProposal={noop}
-      onJumpRun={noop}
-      onTriggerAgain={noop}
-      onInject={noop}
-      {...props}
-    />,
+    <>
+      <Events
+        connected={true}
+        context={{ kind: "all" }}
+        focusEvent={null}
+        onFocusConsumed={noop}
+        onSelectEvent={noop}
+        onSelectType={noop}
+        onJumpProposal={noop}
+        onJumpRun={noop}
+        onTriggerAgain={noop}
+        onInject={noop}
+        {...props}
+      />
+      <PaletteProbe />
+    </>,
   );
 }
 
@@ -81,6 +94,124 @@ function ticketSchemaRegistry(eventType: string): AgentsView {
 }
 
 describe("Events component harness: selection & detail view", () => {
+  test("successful detail replay is one-shot until a different event is selected", async () => {
+    const replay = mock(async (_envelope: unknown) => ({
+      admitted: true,
+      duplicate: false,
+      eventId: "evt_replayed",
+    }));
+    const first = stubEvent("evt_replay_first", "admitted");
+    const second = stubEvent("evt_replay_second", "admitted");
+
+    await withApi(
+      {
+        events: async () => ({ events: [first, second] }),
+        replay,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: first.eventId },
+        });
+
+        const detailReplay = await waitFor(() =>
+          r.getByRole("button", { name: "Replay…" }),
+        );
+        expect(r.getByTestId("palette-probe").textContent).toContain(
+          `Replay ${first.eventId} through intake…`,
+        );
+
+        fireEvent.click(detailReplay);
+        fireEvent.click(r.getByRole("button", { name: "Replay" }));
+        await waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+
+        const replayedButton = await waitFor(() =>
+          r.getByRole("button", { name: "Replayed" }),
+        );
+        expect(replayedButton.hasAttribute("disabled")).toBe(true);
+        expect(replayedButton.getAttribute("title")).toContain(
+          "Already replayed",
+        );
+        expect(r.getByTestId("palette-probe").textContent).not.toContain(
+          `Replay ${first.eventId} through intake…`,
+        );
+        fireEvent.click(replayedButton);
+        expect(replay).toHaveBeenCalledTimes(1);
+
+        r.rerender(
+          <>
+            <Events
+              connected
+              context={{ kind: "all" }}
+              focusEvent={{ source: "github", eventId: second.eventId }}
+              onFocusConsumed={noop}
+              onSelectEvent={noop}
+              onSelectType={noop}
+              onJumpProposal={noop}
+              onJumpRun={noop}
+              onTriggerAgain={noop}
+              onInject={noop}
+            />
+            <PaletteProbe />
+          </>,
+        );
+
+        await waitFor(() =>
+          expect(
+            r.getByRole("button", { name: "Replay…" }).hasAttribute("disabled"),
+          ).toBe(false),
+        );
+        expect(r.getByTestId("palette-probe").textContent).toContain(
+          `Replay ${second.eventId} through intake…`,
+        );
+      },
+    );
+  });
+
+  test("a rejected detail replay keeps the control enabled and surfaces the error", async () => {
+    const replay = mock(async (_envelope: unknown) => {
+      throw new Error("boom");
+    });
+    const event = stubEvent("evt_replay_reject", "admitted");
+
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        replay,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: event.eventId },
+        });
+
+        const detailReplay = await waitFor(() =>
+          r.getByRole("button", { name: "Replay…" }),
+        );
+        fireEvent.click(detailReplay);
+        fireEvent.click(r.getByRole("button", { name: "Replay" }));
+        await waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+
+        // The dialog stays open with the failure; the confirm stays actionable.
+        await waitFor(() =>
+          expect(r.getAllByText("boom").length).toBeGreaterThan(0),
+        );
+        expect(
+          r.getByRole("button", { name: "Replay" }).hasAttribute("disabled"),
+        ).toBe(false);
+        expect(r.queryByRole("button", { name: "Replayed" })).toBeNull();
+
+        // The detail control is not consumed by a failed attempt.
+        expect(
+          r.getByRole("button", { name: "Replay…" }).hasAttribute("disabled"),
+        ).toBe(false);
+        expect(r.getByTestId("palette-probe").textContent).toContain(
+          `Replay ${event.eventId} through intake…`,
+        );
+      },
+    );
+  });
+
   test("loads older event pages with the cursor and keeps existing rows", async () => {
     const newest = stubEvent("evt_newest", "admitted");
     const older = stubEvent("evt_older", "admitted");

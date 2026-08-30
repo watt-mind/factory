@@ -146,12 +146,23 @@ CREATE INDEX IF NOT EXISTS idx_attempt_trace_run ON attempt_trace (run_id, seq);
 
 const SCHEMA = SCHEMA_V1;
 
-/** Return the normalized ticket subject carried by a run specification. */
+const LINEAR_TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/i;
+const GITHUB_ISSUE_REF =
+  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*#\d+$/;
+
+/**
+ * Return the ticket subject carried by a run specification. Linear IDs are
+ * normalized to uppercase; GitHub-style owner/repo#number references are
+ * retained verbatim for the GitHub control plane. Ambiguous non-ticket values
+ * are left unclassified rather than being indexed as ticket subjects.
+ */
 export function runSubject(spec) {
   const candidates = [spec?.input?.ticket, spec?.subject];
   for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim())
-      return candidate.trim().toUpperCase();
+    if (typeof candidate !== "string") continue;
+    const subject = candidate.trim();
+    if (LINEAR_TICKET_ID.test(subject)) return subject.toUpperCase();
+    if (GITHUB_ISSUE_REF.test(subject)) return subject;
   }
   return null;
 }

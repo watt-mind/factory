@@ -32,6 +32,7 @@ import {
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { DecisionCard } from "../components/DecisionCard";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { hasInboxPlainActions, InboxActions } from "../components/InboxActions";
 import {
   INBOX_FACETS,
@@ -241,6 +242,54 @@ const DELIVERY_HUES: Record<DeliveryState, string> = {
   failed: "var(--hue-err)",
   none: "var(--hue-idle)",
 };
+
+function rawInboxItem(item: InboxItem): string {
+  try {
+    return JSON.stringify(item, null, 2);
+  } catch {
+    return "Raw item payload could not be serialized.";
+  }
+}
+
+function InboxDetailFallback({
+  item,
+  onRetry,
+  onClose,
+}: {
+  item: InboxItem;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <DetailPane
+      widthClass="w-full sm:w-[460px]"
+      title={<span className="mono truncate">{shortId(item.id)}</span>}
+      close={<Button onClick={onClose}>Close</Button>}
+    >
+      <section
+        role="alert"
+        className="rounded-md border border-(--hue-warn) bg-(--surface-0) p-4"
+      >
+        <h2 className="text-[14px] font-semibold text-(--text)">
+          This item could not render
+        </h2>
+        <p className="mt-2 text-sm text-(--text-dim)">{item.title}</p>
+        <p className="mono mt-1 text-[12px] text-(--text-faint)">{item.id}</p>
+        <Button className="mt-4" variant="primary" onClick={onRetry}>
+          Retry
+        </Button>
+        <details className="mt-4">
+          <summary className="cursor-pointer text-sm text-(--accent)">
+            Open raw item
+          </summary>
+          <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-md bg-(--surface-2) p-3 text-[11px] text-(--text-dim)">
+            {rawInboxItem(item)}
+          </pre>
+        </details>
+      </section>
+    </DetailPane>
+  );
+}
 
 /** Group in triage order, oldest first inside a group; empty groups are dropped. */
 export function groupItems(
@@ -1643,246 +1692,263 @@ export function Inbox({
       </div>
 
       {sel && (
-        <DetailPane
-          widthClass="w-full sm:w-[460px]"
-          title={
-            <nav
-              aria-label="Breadcrumb"
-              className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
-            >
-              <PrimitiveButton
-                bare
-                type="button"
-                onClick={() => onSelectItem(null)}
-                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
-                title="Back to inbox list"
+        <ErrorBoundary
+          resetKey={sel.id}
+          fallback={(_error, retry) => (
+            <InboxDetailFallback
+              item={sel}
+              onRetry={retry}
+              onClose={() => onSelectItem(null)}
+            />
+          )}
+        >
+          <DetailPane
+            widthClass="w-full sm:w-[460px]"
+            title={
+              <nav
+                aria-label="Breadcrumb"
+                className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
               >
-                Inbox
-              </PrimitiveButton>
-              <span className="text-(--text-faint)" aria-hidden="true">
-                /
-              </span>
-              <span
-                className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
-                aria-current="page"
-              >
-                {groupOf(sel.kind).id === "other" && (
+                <PrimitiveButton
+                  bare
+                  type="button"
+                  onClick={() => onSelectItem(null)}
+                  className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                  title="Back to inbox list"
+                >
+                  Inbox
+                </PrimitiveButton>
+                <span className="text-(--text-faint)" aria-hidden="true">
+                  /
+                </span>
+                <span
+                  className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
+                  aria-current="page"
+                >
+                  {groupOf(sel.kind).id === "other" && (
+                    <StateBadge
+                      state={sel.kind}
+                      hues={INBOX_KIND_HUES}
+                      dot={false}
+                    />
+                  )}
+                  <span className="mono truncate" title={sel.id}>
+                    {shortId(sel.id)}
+                  </span>
+                </span>
+              </nav>
+            }
+            actions={
+              !sel.decision &&
+              !hasInboxPlainActions(sel.kind) &&
+              itemStatus(sel) !== "resolved" ? (
+                <div className="flex items-center gap-1.5">
+                  <Button disabled={!canResolve} onClick={openResolve}>
+                    Resolve…{" "}
+                    <span
+                      className="mono ml-1 text-(--text-faint)"
+                      aria-hidden="true"
+                    >
+                      x
+                    </span>
+                  </Button>
+                  {itemStatus(sel) === "open" && (
+                    <Button
+                      variant="primary"
+                      disabled={!canAck}
+                      onClick={() => ack.mutate(sel.id)}
+                    >
+                      Ack{" "}
+                      <span className="mono ml-1 opacity-80" aria-hidden="true">
+                        a
+                      </span>
+                    </Button>
+                  )}
+                </div>
+              ) : null
+            }
+            utility={<CopyActions id={sel.id} idLabel="inbox item id" />}
+            close={<Button onClick={() => onSelectItem(null)}>Close</Button>}
+          >
+            {hasInboxPlainActions(sel.kind) &&
+              itemStatus(sel) !== "resolved" && (
+                <Section title="Actions" card={false}>
+                  <InboxActions
+                    // Per-item state: a failed verb on one item must not follow
+                    // the operator to the next.
+                    key={sel.id}
+                    item={sel}
+                    connected={connected}
+                    prUrl={inboxActionPrHref(sel)}
+                    onResolve={() => setConfirmResolve(true)}
+                    onItemChange={invalidate}
+                  />
+                </Section>
+              )}
+
+            <Section title="Item" icons>
+              <KV
+                k="kind"
+                v={
                   <StateBadge
                     state={sel.kind}
                     hues={INBOX_KIND_HUES}
                     dot={false}
                   />
-                )}
-                <span className="mono truncate" title={sel.id}>
-                  {shortId(sel.id)}
-                </span>
-              </span>
-            </nav>
-          }
-          actions={
-            !sel.decision &&
-            !hasInboxPlainActions(sel.kind) &&
-            itemStatus(sel) !== "resolved" ? (
-              <div className="flex items-center gap-1.5">
-                <Button disabled={!canResolve} onClick={openResolve}>
-                  Resolve…{" "}
-                  <span
-                    className="mono ml-1 text-(--text-faint)"
-                    aria-hidden="true"
-                  >
-                    x
-                  </span>
-                </Button>
-                {itemStatus(sel) === "open" && (
-                  <Button
-                    variant="primary"
-                    disabled={!canAck}
-                    onClick={() => ack.mutate(sel.id)}
-                  >
-                    Ack{" "}
-                    <span className="mono ml-1 opacity-80" aria-hidden="true">
-                      a
+                }
+              />
+              <KV k="status" v={itemStatus(sel)} />
+              {waitingLabel(waitingCount(sel)) && (
+                <KV k="waiting" v={waitingLabel(waitingCount(sel))} />
+              )}
+              {sel.severity !== "normal" && (
+                <KV k="severity" v={sel.severity} />
+              )}
+              <KV k="created" v={<Ago iso={sel.createdAt} now={now} />} />
+              {sel.ackedAt && (
+                <KV k="acked" v={<Ago iso={sel.ackedAt} now={now} />} />
+              )}
+              {sel.resolvedAt && (
+                <KV
+                  k="resolved"
+                  v={
+                    <span>
+                      <Ago iso={sel.resolvedAt} now={now} />
+                      {sel.resolvedReason && <> · {sel.resolvedReason}</>}
                     </span>
-                  </Button>
-                )}
-              </div>
-            ) : null
-          }
-          utility={<CopyActions id={sel.id} idLabel="inbox item id" />}
-          close={<Button onClick={() => onSelectItem(null)}>Close</Button>}
-        >
-          {hasInboxPlainActions(sel.kind) && itemStatus(sel) !== "resolved" && (
-            <Section title="Actions" card={false}>
-              <InboxActions
-                // Per-item state: a failed verb on one item must not follow
-                // the operator to the next.
-                key={sel.id}
-                item={sel}
-                connected={connected}
-                prUrl={inboxActionPrHref(sel)}
-                onResolve={() => setConfirmResolve(true)}
-                onItemChange={invalidate}
+                  }
+                />
+              )}
+              {sel.resolvedBy && <KV k="resolved by" v={sel.resolvedBy} />}
+              <KV
+                k="source"
+                v={
+                  sourceRunId(sel.source) ? (
+                    <JumpLink
+                      onClick={() => onJumpRun(sourceRunId(sel.source)!)}
+                      title={`Open run ${sourceRunId(sel.source)}`}
+                    >
+                      {sel.source}
+                    </JumpLink>
+                  ) : (
+                    sel.source
+                  )
+                }
               />
             </Section>
-          )}
 
-          <Section title="Item" icons>
-            <KV
-              k="kind"
-              v={
-                <StateBadge
-                  state={sel.kind}
-                  hues={INBOX_KIND_HUES}
-                  dot={false}
+            <Section title="Message" card={false}>
+              <div className="rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] leading-relaxed">
+                <div className="font-medium text-(--text)">{sel.title}</div>
+                {sel.body && (
+                  <div className="mt-1.5 whitespace-pre-wrap break-words text-(--text-dim)">
+                    {sel.body}
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            {sel.decision && (
+              <Section title="Decision" card={false}>
+                <DecisionCard
+                  itemId={sel.id}
+                  request={sel.decision}
+                  response={sel.response}
+                  refs={sel.refs}
+                  onJumpProposal={onJumpProposal}
+                  connected={connected}
+                  onItemChange={invalidate}
                 />
-              }
-            />
-            <KV k="status" v={itemStatus(sel)} />
-            {waitingLabel(waitingCount(sel)) && (
-              <KV k="waiting" v={waitingLabel(waitingCount(sel))} />
+              </Section>
             )}
-            {sel.severity !== "normal" && <KV k="severity" v={sel.severity} />}
-            <KV k="created" v={<Ago iso={sel.createdAt} now={now} />} />
-            {sel.ackedAt && (
-              <KV k="acked" v={<Ago iso={sel.ackedAt} now={now} />} />
+
+            {Object.keys(sel.refs).length > 0 && (
+              <Section title="References" icons>
+                {sel.refs.runId && (
+                  <KV
+                    k="run"
+                    v={
+                      <JumpLink
+                        onClick={() => onJumpRun(sel.refs.runId!)}
+                        title={`Open run ${sel.refs.runId}`}
+                      >
+                        {shortId(sel.refs.runId)}
+                      </JumpLink>
+                    }
+                  />
+                )}
+                {sel.refs.proposalId && (
+                  <KV
+                    k="proposal"
+                    v={
+                      <JumpLink
+                        onClick={() => onJumpProposal(sel.refs.proposalId!)}
+                        title={`Open proposal ${sel.refs.proposalId}`}
+                      >
+                        {shortId(sel.refs.proposalId)}
+                      </JumpLink>
+                    }
+                  />
+                )}
+                {sel.refs.eventId && (
+                  <KV
+                    k="event"
+                    v={
+                      sel.refs.eventSource ? (
+                        <JumpLink
+                          onClick={() =>
+                            onJumpEvent(
+                              sel.refs.eventSource!,
+                              sel.refs.eventId!,
+                            )
+                          }
+                          title={`Open event ${sel.refs.eventId}`}
+                        >
+                          {shortId(sel.refs.eventId)}
+                        </JumpLink>
+                      ) : (
+                        shortId(sel.refs.eventId)
+                      )
+                    }
+                  />
+                )}
+                {sel.refs.issue && (
+                  <KV
+                    k="issue"
+                    v={
+                      <JumpLink
+                        href={`${LINEAR_ISSUE_URL}${encodeURIComponent(sel.refs.issue)}`}
+                        title="Open in Linear"
+                      >
+                        {sel.refs.issue}
+                      </JumpLink>
+                    }
+                  />
+                )}
+                {sel.refs.pr && <KV k="pr" v={<PrRef item={sel} />} />}
+                {sel.refs.repo && <KV k="repo" v={sel.refs.repo} />}
+              </Section>
             )}
-            {sel.resolvedAt && (
+
+            <Section title="Delivery" icons>
               <KV
-                k="resolved"
+                k="telegram"
                 v={
-                  <span>
-                    <Ago iso={sel.resolvedAt} now={now} />
-                    {sel.resolvedReason && <> · {sel.resolvedReason}</>}
+                  <span
+                    style={{ color: DELIVERY_HUES[deliveryState(sel)] }}
+                    title={deliveryText(sel)}
+                  >
+                    {deliveryText(sel).replace(/^Telegram: /, "")}
                   </span>
                 }
               />
+            </Section>
+
+            {(ack.isError || resolve.isError) && (
+              <VerbError error={ack.error ?? resolve.error} />
             )}
-            {sel.resolvedBy && <KV k="resolved by" v={sel.resolvedBy} />}
-            <KV
-              k="source"
-              v={
-                sourceRunId(sel.source) ? (
-                  <JumpLink
-                    onClick={() => onJumpRun(sourceRunId(sel.source)!)}
-                    title={`Open run ${sourceRunId(sel.source)}`}
-                  >
-                    {sel.source}
-                  </JumpLink>
-                ) : (
-                  sel.source
-                )
-              }
-            />
-          </Section>
-
-          <Section title="Message" card={false}>
-            <div className="rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] leading-relaxed">
-              <div className="font-medium text-(--text)">{sel.title}</div>
-              {sel.body && (
-                <div className="mt-1.5 whitespace-pre-wrap break-words text-(--text-dim)">
-                  {sel.body}
-                </div>
-              )}
-            </div>
-          </Section>
-
-          {sel.decision && (
-            <Section title="Decision" card={false}>
-              <DecisionCard
-                itemId={sel.id}
-                request={sel.decision}
-                response={sel.response}
-                refs={sel.refs}
-                onJumpProposal={onJumpProposal}
-                connected={connected}
-                onItemChange={invalidate}
-              />
-            </Section>
-          )}
-
-          {Object.keys(sel.refs).length > 0 && (
-            <Section title="References" icons>
-              {sel.refs.runId && (
-                <KV
-                  k="run"
-                  v={
-                    <JumpLink
-                      onClick={() => onJumpRun(sel.refs.runId!)}
-                      title={`Open run ${sel.refs.runId}`}
-                    >
-                      {shortId(sel.refs.runId)}
-                    </JumpLink>
-                  }
-                />
-              )}
-              {sel.refs.proposalId && (
-                <KV
-                  k="proposal"
-                  v={
-                    <JumpLink
-                      onClick={() => onJumpProposal(sel.refs.proposalId!)}
-                      title={`Open proposal ${sel.refs.proposalId}`}
-                    >
-                      {shortId(sel.refs.proposalId)}
-                    </JumpLink>
-                  }
-                />
-              )}
-              {sel.refs.eventId && (
-                <KV
-                  k="event"
-                  v={
-                    sel.refs.eventSource ? (
-                      <JumpLink
-                        onClick={() =>
-                          onJumpEvent(sel.refs.eventSource!, sel.refs.eventId!)
-                        }
-                        title={`Open event ${sel.refs.eventId}`}
-                      >
-                        {shortId(sel.refs.eventId)}
-                      </JumpLink>
-                    ) : (
-                      shortId(sel.refs.eventId)
-                    )
-                  }
-                />
-              )}
-              {sel.refs.issue && (
-                <KV
-                  k="issue"
-                  v={
-                    <JumpLink
-                      href={`${LINEAR_ISSUE_URL}${encodeURIComponent(sel.refs.issue)}`}
-                      title="Open in Linear"
-                    >
-                      {sel.refs.issue}
-                    </JumpLink>
-                  }
-                />
-              )}
-              {sel.refs.pr && <KV k="pr" v={<PrRef item={sel} />} />}
-              {sel.refs.repo && <KV k="repo" v={sel.refs.repo} />}
-            </Section>
-          )}
-
-          <Section title="Delivery" icons>
-            <KV
-              k="telegram"
-              v={
-                <span
-                  style={{ color: DELIVERY_HUES[deliveryState(sel)] }}
-                  title={deliveryText(sel)}
-                >
-                  {deliveryText(sel).replace(/^Telegram: /, "")}
-                </span>
-              }
-            />
-          </Section>
-
-          {(ack.isError || resolve.isError) && (
-            <VerbError error={ack.error ?? resolve.error} />
-          )}
-        </DetailPane>
+          </DetailPane>
+        </ErrorBoundary>
       )}
 
       {selectedIds.size > 0 && selectionEnabled && (

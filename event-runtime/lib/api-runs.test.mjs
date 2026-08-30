@@ -602,6 +602,22 @@ describe("ticket journey join (WM-595)", () => {
           "2026-01-01T10:10:00.000Z",
           "WM-595",
         );
+      // A legacy direct run can name its ticket only below a nested input
+      // field. It has no linked proposal/event to pull it into the journey.
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+        )
+        .run(
+          "run_nested_issue_id",
+          "nested-issue-key",
+          spec({ repo: "factory", dispatch: { issueId: "WM-595" } }),
+          "sha256:nested-issue",
+          "COMPLETED",
+          "2026-01-01T10:05:00.000Z",
+          "2026-01-01T10:06:00.000Z",
+        );
       s.db
         .query(
           `INSERT INTO results
@@ -673,8 +689,12 @@ describe("ticket journey join (WM-595)", () => {
       expect(journey.events.map((event) => event.eventId)).toContain(
         "pr-linked-merge",
       );
+      expect(journey.runs.map((run) => run.run.runId)).toEqual(
+        expect.arrayContaining(["run_ticket", "run_nested_issue_id"]),
+      );
       expect(journey.runs.map((run) => run.run.runId)).toEqual([
         "run_ticket",
+        "run_nested_issue_id",
         "run_merge",
       ]);
       expect(journey.activity).toBe(true);
@@ -750,7 +770,7 @@ describe("ticket journey join (WM-595)", () => {
           payload: { ticket: "WM-999" },
         }),
       );
-      const spec = (ticket) =>
+      const spec = () =>
         JSON.stringify({
           schemaVersion: "factory.run-spec/v1",
           runId: "ignored",
@@ -769,7 +789,7 @@ describe("ticket journey join (WM-595)", () => {
           .run(
             runId,
             `${runId}-key`,
-            spec(ticket),
+            spec(),
             `sha256:${runId}`,
             "COMPLETED",
             "2026-01-01T10:00:00.000Z",

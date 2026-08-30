@@ -5,6 +5,7 @@ import {
   NAV as REGISTRY_NAV,
   RESERVED_GO_SUFFIXES,
   VIEWS,
+  artifactBackPath,
   findView,
   navIsCurrent,
   resolveView,
@@ -12,6 +13,16 @@ import {
 } from "./registry";
 
 describe("view registry (WM-839)", () => {
+  test("artifact reader returns to its explicit catalogue context or the plain fallback", () => {
+    const digest = "a".repeat(64);
+    expect(
+      artifactBackPath(
+        `#/artifact/${digest}?back=artifacts%2F${digest}%3Fkind%3Dtranscript%26search%3Df99e8b%26project%3Dfactory`,
+      ),
+    ).toBe(`artifacts/${digest}?kind=transcript&search=f99e8b&project=factory`);
+    expect(artifactBackPath(`#/artifact/${digest}`)).toBe("artifacts");
+  });
+
   test("every view has a unique key", () => {
     const keys = VIEWS.map((v) => v.key);
     expect(new Set(keys).size).toBe(keys.length);

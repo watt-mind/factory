@@ -694,6 +694,66 @@ describe("human inbox ledger (WM-285)", () => {
     void crashed;
   });
 
+  test("a stale owner cannot overwrite the settlement from its takeover", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "starved owner",
+        refs: { issue: "WM-1434" },
+        decision: request,
+      },
+      { id: "taken_over_claim" },
+    );
+    const response = {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "triage",
+      fields: {},
+    };
+    let finishStaleEffect;
+    const stale = decideInboxItem(db, "taken_over_claim", response, {
+      now: 1_000,
+      applyEffect: () =>
+        new Promise((resolve) => {
+          finishStaleEffect = () => resolve({ outcome: "applied" });
+        }),
+    });
+    await Promise.resolve();
+
+    const takeoverAt = 1_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS;
+    const takeover = await retryInboxDecision(db, "taken_over_claim", {
+      now: takeoverAt,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(takeover.item.response.effect).toEqual({
+      kind: "send_to_triage",
+      outcome: "applied",
+      retryAttempt: 1,
+    });
+
+    finishStaleEffect();
+    await expect(stale).resolves.toMatchObject({
+      claimLost: true,
+      effect: { kind: "send_to_triage", outcome: "claim_lost" },
+    });
+    expect(getInboxItem(db, "taken_over_claim")).toMatchObject({
+      resolvedAt: new Date(takeoverAt).toISOString(),
+      resolvedBy: "operator:send_to_triage",
+      response: {
+        effect: {
+          kind: "send_to_triage",
+          outcome: "applied",
+          retryAttempt: 1,
+        },
+      },
+    });
+  });
+
   test("a retry claim that dies mid-effect can be taken over as well", async () => {
     const db = openDb(":memory:");
     const request = decision([
@@ -1715,6 +1775,51 @@ describe("approving an expired proposal retargets its item (WM-714)", () => {
       },
     });
     expect(invoked).toBe(1);
+  });
+
+  test("a starved approve that loses its claim to a takeover does not retarget", async () => {
+    const db = openDb(":memory:");
+    const { id, approve, applyEffect } = replanned(db);
+    let finishStaleEffect;
+    const stale = decideInboxItem(db, id, approve, {
+      now: 1_000,
+      applyEffect: () =>
+        new Promise((resolve) => {
+          finishStaleEffect = () => resolve(applyEffect());
+        }),
+    });
+    await Promise.resolve();
+
+    // The owner starves past the claim timeout and a retry takes the claim
+    // over, settling the item as a plain approval.
+    const takeoverAt = 1_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS;
+    const takeover = await retryInboxDecision(db, id, {
+      now: takeoverAt,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(takeover.claimLost).toBeUndefined();
+    expect(takeover.item.resolvedAt).toBe(new Date(takeoverAt).toISOString());
+    expect(takeover.item.refs.proposalId).toBe(OLD);
+
+    // The stale owner's re-plan lands late: it must lose, not re-open the item.
+    finishStaleEffect();
+    await expect(stale).resolves.toMatchObject({
+      claimLost: true,
+      effect: { kind: "approve_proposal", outcome: "claim_lost" },
+    });
+    const item = getInboxItem(db, id);
+    expect(item.refs.proposalId).toBe(OLD);
+    expect(item.title).toContain(OLD);
+    expect(item.title).not.toContain(FRESH);
+    expect(item.resolvedAt).toBe(new Date(takeoverAt).toISOString());
+    expect(item.resolvedBy).toBe("operator:approve_proposal");
+    expect(item.response.effect).toMatchObject({
+      outcome: "applied",
+      retryAttempt: 1,
+    });
+    expect(item.response.effect.detail).toBeUndefined();
+    expect(item.responseHistory ?? []).toHaveLength(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
   });
 });
 

@@ -673,6 +673,67 @@ describe("Inbox view", () => {
     expect(view.queryByRole("button", { name: /^Ack/ })).toBeNull();
   });
 
+  test("contains a detail render failure and retries it without losing the list", async () => {
+    let failDetail = true;
+    const decision = {
+      schemaVersion: "factory.decision-request/v1" as const,
+      question: "Can this detail recover?",
+      get options() {
+        if (failDetail) {
+          throw new Error("first detail render failed");
+        }
+        return [{ id: "retry", label: "Retry", effect: "dismiss" as const }];
+      },
+    };
+    ledger = [
+      item({
+        id: "inbox_detail_failure",
+        kind: "decision_needed",
+        title: "Decision that initially fails",
+        decision,
+      }),
+    ];
+
+    const { view } = renderInbox({ focusItemId: "inbox_detail_failure" });
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByTitle("Decision that initially fails")).toBeTruthy();
+    expect(view.getByText("Open raw item")).toBeTruthy();
+
+    failDetail = false;
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => view.getByText("Can this detail recover?"));
+    expect(view.queryByText("This item could not render")).toBeNull();
+  });
+
+  test("the detail fallback can be closed like the real detail pane", async () => {
+    const decision = {
+      schemaVersion: "factory.decision-request/v1" as const,
+      question: "Will this ever render?",
+      get options(): { id: string; label: string; effect: "dismiss" }[] {
+        throw new Error("detail render failed");
+      },
+    };
+    ledger = [
+      item({
+        id: "inbox_detail_failure",
+        kind: "decision_needed",
+        title: "Decision that always fails",
+        decision,
+      }),
+    ];
+    const onSelectItem = mock(() => {});
+    const { view } = renderInbox({
+      focusItemId: "inbox_detail_failure",
+      onSelectItem,
+    });
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByText("This item could not render")).toBeTruthy();
+
+    fireEvent.click(view.getByRole("button", { name: "Close" }));
+    expect(onSelectItem).toHaveBeenCalledWith(null);
+  });
+
   test("unknown deep link shows an inline notice, not a blank list", async () => {
     const { view } = renderInbox({ focusItemId: "inbox_nope" });
     await waitFor(() => view.getByText(/^No inbox item/));

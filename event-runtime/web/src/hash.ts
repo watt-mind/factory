@@ -208,6 +208,18 @@ export function artifactsHash(
   return qs ? `artifacts?${qs}` : "artifacts";
 }
 
+/**
+ * Full-page artifact reader hash with an optional, URL-backed catalogue return
+ * target. Keep the source path explicit: the reader must not infer filters
+ * from shell state when returning to the inspector.
+ */
+export function artifactFullHash(digest: string, backHash?: string): string {
+  const path = hashPath("artifact", digest);
+  if (!backHash || hashView(backHash) !== "artifacts") return path;
+  const back = backHash.replace(/^#\/?/, "");
+  return `${path}?back=${encodeURIComponent(back)}`;
+}
+
 /** `?project=` on the hash — the context strip's active filter, not the view. */
 export function hashProject(hash: string): string | null {
   return hashSearch(hash).get("project");

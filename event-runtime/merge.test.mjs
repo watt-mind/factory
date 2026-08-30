@@ -388,12 +388,12 @@ function seedPlanPredecessor(db, runId = "parent-run") {
 }
 
 describe("merge-fix result contract (WM-447)", () => {
-  test("UPDATED and BLOCKED prompt artifacts exactly match the registered schema", () => {
+  test("UPDATED and BLOCKED prompt envelope artifacts exactly match the registered schema", () => {
     const def = registry.agents.get("merge-fix@1");
     const schema = def.outputSchema;
     const prompt = readFileSync(def.promptPath, "utf8");
     const declaration = prompt.match(
-      /Both artifacts must\s+contain exactly these properties, in this order:([\s\S]*?)\. Do not add/,
+      /Both artifacts[\s\S]*?must\s+contain exactly these properties, in this order:([\s\S]*?)\. Do not (?:put|add)/,
     );
 
     expect(declaration).not.toBeNull();
@@ -401,15 +401,19 @@ describe("merge-fix result contract (WM-447)", () => {
       [...declaration[1].matchAll(/`([^`]+)`/g)].map((match) => match[1]),
     ).toEqual(schema.required);
 
+    // #1521: the prompt documents only the wrapped result envelope — a bare
+    // artifact twin is exactly the shape that produced contract_violation.
+    expect(prompt).not.toMatch(/### (UPDATED|BLOCKED) artifact\n/);
     for (const outcome of ["UPDATED", "BLOCKED"]) {
       const example = prompt.match(
         new RegExp(
-          `### ${outcome} artifact[\\s\\S]*?` + "```json\\n([\\s\\S]*?)\\n```",
+          `### ${outcome} result envelope[\\s\\S]*?` +
+            "```json\\n([\\s\\S]*?)\\n```",
         ),
       );
 
       expect(example).not.toBeNull();
-      const artifact = JSON.parse(example[1]);
+      const { artifact } = JSON.parse(example[1]);
       expect(Object.keys(artifact)).toEqual(schema.required);
       expect(artifact.outcome).toBe(outcome);
       expect(validate(schema, artifact)).toEqual({ valid: true, errors: [] });
@@ -423,7 +427,7 @@ describe("merge-fix result contract (WM-447)", () => {
     );
 
     expect(prompt).toMatch(
-      /Use the pinned `input\.json` `headSha` as the required `headSha`, including when\s+the live PR head moved/,
+      /Use the\s+pinned `input\.json` `headSha` as the required `artifact\.headSha`, including when\s+the live PR head moved/,
     );
   });
 });

@@ -21,6 +21,7 @@ import {
 } from "./Artifacts";
 import { ARTIFACT_RAW_KEY } from "../components/ArtifactView";
 import { handleRunArtifactClick } from "./Runs";
+import { createHashWriter, setActiveHashWriter } from "../hash";
 
 const originalFetch = globalThis.fetch;
 const originalClipboard = navigator.clipboard;
@@ -87,7 +88,9 @@ function renderArtifacts(
     nextBefore?: string | null;
     formatContent?: typeof formattedContent;
   } = {},
-  onOpenFull = mock(() => {}),
+  onOpenFull: ((sha256: string, backHash?: string) => void) | null = mock(
+    () => {},
+  ),
 ) {
   const client = new QueryClient({
     defaultOptions: {
@@ -149,7 +152,7 @@ function renderArtifacts(
           filters={filters}
           onFiltersChange={setFilters}
           onJumpRun={onJumpRun}
-          onOpenFull={onOpenFull}
+          onOpenFull={onOpenFull ?? undefined}
           formatContent={seed.formatContent}
         />
       </QueryClientProvider>
@@ -904,7 +907,7 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     await view.findByRole("region", { name: "Artifact content" });
 
     fireEvent.keyDown(document.body, { key: "o" });
-    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
+    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
   });
 
   test("detail pane includes Open in full page action with 'o' shortcut hint", async () => {
@@ -927,7 +930,101 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     expect(openBtns[0].getAttribute("title")).toBe("Open in full page (o)");
 
     fireEvent.click(openBtns[0]);
-    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
+    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
+  });
+
+  test("passes filtered catalogue context when opening the full-page reader", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts();
+    await view.findByRole("region", { name: "Artifact content" });
+
+    const query = "kind=transcript&search=f99e8b&project=demo";
+    window.location.hash = `#/artifacts/${SHA_A}?${query}`;
+    fireEvent.click(
+      view.getAllByRole("button", { name: "Open in full page" })[0]!,
+    );
+    expect(view.onOpenFull).toHaveBeenCalledWith(
+      SHA_A,
+      `#/artifacts/${SHA_A}?${query}`,
+    );
+  });
+
+  test("flushes a buffered filter change before capturing the return context", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    // Stand in for App's coalescing writer: the first write lands, the second
+    // (inside the interval) stays buffered, so the URL trails the filters.
+    let now = 1_000;
+    const writer = createHashWriter(
+      (hash) => {
+        window.location.hash = hash;
+      },
+      { now: () => now, after: () => () => {} },
+    );
+    setActiveHashWriter(writer);
+    try {
+      writer.replace(`#/artifacts/${SHA_A}?kind=report`);
+      const view = renderArtifacts();
+      await view.findByRole("region", { name: "Artifact content" });
+
+      now += 100;
+      const query = "kind=transcript&search=f99e8b&project=demo";
+      writer.replace(`#/artifacts/${SHA_A}?${query}`);
+      expect(window.location.hash).toBe(`#/artifacts/${SHA_A}?kind=report`);
+
+      fireEvent.click(
+        view.getAllByRole("button", { name: "Open in full page" })[0]!,
+      );
+      expect(view.onOpenFull).toHaveBeenCalledWith(
+        SHA_A,
+        `#/artifacts/${SHA_A}?${query}`,
+      );
+    } finally {
+      setActiveHashWriter(null);
+    }
+  });
+
+  test("fallback reader route keeps ?project= alongside back=", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts(undefined, undefined, {}, null);
+    await view.findByRole("region", { name: "Artifact content" });
+
+    const back = `artifacts/${SHA_A}?kind=transcript&project=demo`;
+    window.location.hash = `#/${back}`;
+    fireEvent.click(
+      view.getAllByRole("button", { name: "Open in full page" })[0]!,
+    );
+    expect(window.location.hash).toBe(
+      `#/artifact/${SHA_A}?back=${encodeURIComponent(back)}&project=demo`,
+    );
   });
 });
 

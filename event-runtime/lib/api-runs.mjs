@@ -308,7 +308,8 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
 
   // Keep only the small connected component for this ticket in memory. JSON
   // LIKE is deliberately a broad prefilter for legacy event/proposal/result
-  // payloads; runs carry a normalized, indexed subject instead.
+  // payloads and direct runs that named their ticket only in a nested input
+  // field. Newer runs also carry a normalized, indexed subject.
   const ticketLike = `%${ticket}%`;
   const eventRows = new Map();
   const proposalRows = new Map();
@@ -419,7 +420,9 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     (row) => row.id,
   );
   addRows(
-    db.query(`SELECT * FROM runs WHERE subject = ?`).all(ticket),
+    db
+      .query(`SELECT * FROM runs WHERE subject = ? OR UPPER(spec_json) LIKE ?`)
+      .all(ticket, ticketLike),
     runRows,
     (row) => row.run_id,
   );
@@ -445,7 +448,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
       proposals.add(row.id);
   }
   for (const row of runRows.values()) {
-    if (String(row.subject ?? "").toUpperCase() === ticket)
+    if (
+      String(row.subject ?? "").toUpperCase() === ticket ||
+      objectNamesTicket(parseObject(row.spec_json).input, ticket)
+    )
       runs.add(row.run_id);
   }
   for (const row of resultRows.values()) {

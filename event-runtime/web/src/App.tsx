@@ -20,6 +20,7 @@ import {
   type OperatorContext,
 } from "./context";
 import {
+  artifactFullHash,
   artifactsHash,
   eventsHash,
   hashPath,
@@ -277,8 +278,8 @@ export function App() {
     navigate(hashPath("runs", runId));
   };
   const openRunFull = (runId: string) => navigate(hashPath("run", runId));
-  const openArtifactFull = (digest: string) =>
-    navigate(hashPath("artifact", digest));
+  const openArtifactFull = (digest: string, backHash?: string) =>
+    navigate(artifactFullHash(digest, backHash));
   const jumpToTicket = (ticketId: string) =>
     navigate(hashPath("tickets", ticketId));
   const jumpToPr = (number: number) =>

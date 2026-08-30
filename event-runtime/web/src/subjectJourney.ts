@@ -8,6 +8,7 @@
 
 import { nextScheduledRetry, scheduledRetryLabel } from "./chainTimeline";
 import { REASONS, humanizeReason } from "./reasons";
+import type { Attempt } from "./types";
 
 export const TICKET_ID_PATTERN = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
 
@@ -223,6 +224,8 @@ export interface JourneyRun {
     };
   };
   lifecycle: JourneyLifecycle[];
+  /** Attempts emitted by `runView`, ordered by ascending attempt number. */
+  attempts?: Array<Partial<Attempt>>;
   result: Record<string, any> | null;
   usage?: {
     totals?: { attempts?: number; totalTokens?: number; costUSD?: number };
@@ -502,7 +505,8 @@ function runDuration(run: JourneyRun): number | null {
   return window ? window.end - window.start : null;
 }
 
-export function formatDuration(ms: number | null): string {
+/** Formats a duration expressed in milliseconds. */
+export function formatDurationMs(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
@@ -1003,7 +1007,7 @@ export function subjectJourney(
       run.run.spec.agent,
       run.run.spec.adapter,
       model,
-      formatDuration(duration),
+      formatDurationMs(duration),
       attempts > 0 ? `$${Number(totals?.costUSD ?? 0).toFixed(2)}` : "—",
     ]
       .filter(Boolean)

@@ -549,7 +549,13 @@ function retargetedDedupeKey(db, row, previousProposalId, proposalId) {
  * superseded proposal with the new request installed, or decided against a
  * question nobody asked.
  */
-function retargetInboxDecision(db, id, answer, proposalId, { now }) {
+function retargetInboxDecision(
+  db,
+  id,
+  answer,
+  proposalId,
+  { now, claimEffect },
+) {
   const row = decisionRow(db, id);
   const refs = parseObject(row.refs_json);
   const previousProposalId = refs.proposalId ?? null;
@@ -578,33 +584,39 @@ function retargetInboxDecision(db, id, answer, proposalId, { now }) {
     previousProposalId && row.title.includes(previousProposalId)
       ? row.title.split(previousProposalId).join(proposalId)
       : row.title;
-  db.query(
-    `UPDATE inbox_items
+  const retargeted = db
+    .query(
+      `UPDATE inbox_items
      SET refs_json = ?, proposal_id = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
          title = ?,
          response_json = NULL, decided_at = NULL, decided_by = NULL
-     WHERE id = ?`,
-  ).run(
-    JSON.stringify(nextRefs),
-    proposalId,
-    JSON.stringify(request),
-    retargetedDedupeKey(db, row, previousProposalId, proposalId),
-    JSON.stringify({
-      ...delivery,
-      responseHistory: [
-        ...history,
-        {
-          retargetedFrom: previousProposalId,
-          retargetedTo: proposalId,
-          retargetedAt: new Date(now).toISOString(),
-          response: answer,
-        },
-      ],
-    }),
-    nextTitle,
-    id,
-  );
-  return getInboxItem(db, id);
+     WHERE id = ?
+       AND json_extract(response_json, '$.effect.claimedAt') = ?
+       AND json_extract(response_json, '$.effect.retryAttempt') = ?`,
+    )
+    .run(
+      JSON.stringify(nextRefs),
+      proposalId,
+      JSON.stringify(request),
+      retargetedDedupeKey(db, row, previousProposalId, proposalId),
+      JSON.stringify({
+        ...delivery,
+        responseHistory: [
+          ...history,
+          {
+            retargetedFrom: previousProposalId,
+            retargetedTo: proposalId,
+            retargetedAt: new Date(now).toISOString(),
+            response: answer,
+          },
+        ],
+      }),
+      nextTitle,
+      id,
+      claimEffect.claimedAt,
+      claimEffect.retryAttempt,
+    );
+  return retargeted.changes === 1 ? getInboxItem(db, id) : null;
 }
 
 /**
@@ -620,7 +632,7 @@ function settleInboxDecision(
   id,
   response,
   effect,
-  { now, recordedEffect = effect, artifactStore },
+  { now, claimEffect, recordedEffect = effect, artifactStore },
 ) {
   const replanned =
     effect.outcome === "applied" && effect.detail === REPLANNED_DETAIL;
@@ -641,28 +653,44 @@ function settleInboxDecision(
   }
   const answer = { ...response, effect: recordedEffect };
   if (replanned && newProposalId) {
+    const item = retargetInboxDecision(db, id, answer, newProposalId, {
+      now,
+      claimEffect,
+    });
+    if (!item) return lostInboxDecisionClaim(db, id, effect);
     return {
-      item: retargetInboxDecision(db, id, answer, newProposalId, {
-        now,
-      }),
+      item,
       effect,
     };
   }
-  db.query("UPDATE inbox_items SET response_json = ? WHERE id = ?").run(
-    JSON.stringify(answer),
-    id,
-  );
-  if (effect.outcome === "applied" && !replanned) {
-    db.query(
+  const resolves = effect.outcome === "applied" && !replanned;
+  const settled = db
+    .query(
       `UPDATE inbox_items
-       SET resolved_at = COALESCE(resolved_at, ?),
-           resolved_by = COALESCE(resolved_by, ?)
-       WHERE id = ?`,
-    ).run(new Date(now).toISOString(), `operator:${effect.kind}`, id);
-  }
+       SET response_json = ?${
+         resolves
+           ? `,
+           resolved_at = COALESCE(resolved_at, ?),
+           resolved_by = COALESCE(resolved_by, ?)`
+           : ""
+       }
+       WHERE id = ?
+         AND json_extract(response_json, '$.effect.claimedAt') = ?
+         AND json_extract(response_json, '$.effect.retryAttempt') = ?`,
+    )
+    .run(
+      JSON.stringify(answer),
+      ...(resolves
+        ? [new Date(now).toISOString(), `operator:${effect.kind}`]
+        : []),
+      id,
+      claimEffect.claimedAt,
+      claimEffect.retryAttempt,
+    );
+  if (settled.changes !== 1) return lostInboxDecisionClaim(db, id, effect);
   const item = getInboxItem(db, id);
   let memos = [];
-  if (effect.outcome === "applied" && !replanned) {
+  if (resolves) {
     memos = registerInboxDecisionMemos(db, item, response, {
       now,
       artifactStore,
@@ -670,6 +698,16 @@ function settleInboxDecision(
     });
   }
   return { item, effect, memos };
+}
+
+/** A late owner must not overwrite the newer claim's settlement. */
+function lostInboxDecisionClaim(db, id, effect) {
+  return {
+    item: getInboxItem(db, id),
+    effect: { ...effect, outcome: "claim_lost" },
+    claimLost: true,
+    memos: [],
+  };
 }
 
 /** The effect record held while the effect runs outside the write lock. */
@@ -821,6 +859,7 @@ async function settleClaimedInboxDecision(
     settleInboxDecision(db, item.id, response, effect, {
       now,
       artifactStore,
+      claimEffect: item.response.effect,
       recordedEffect,
     }),
   );
@@ -898,8 +937,8 @@ function retryInboxDecisionInTransaction(
   }
   if (!recorded.effect) {
     throw new InboxDecisionError(
-      "retry_superseded",
-      `inbox item ${id} decision retry was superseded`,
+      "not_decided",
+      `inbox item ${id} has no decision effect to retry`,
       409,
     );
   }

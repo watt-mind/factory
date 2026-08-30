@@ -32,7 +32,13 @@ import {
   type DisplayConfig,
 } from "../displayOptions";
 import { EMPTY, formatBytes, formatRelative } from "../format";
-import { hashSearch } from "../hash";
+import {
+  artifactFullHash,
+  flushHash,
+  hashProject,
+  hashSearch,
+  withProject,
+} from "../hash";
 import {
   refetchIntervals,
   useDisplayOptions,
@@ -276,7 +282,7 @@ export function Artifacts({
   filters: ArtifactFilters;
   onFiltersChange: (filters: ArtifactFilters) => void;
   onJumpRun: (runId: string) => void;
-  onOpenFull?: (digest: string) => void;
+  onOpenFull?: (digest: string, backHash?: string) => void;
   /** Injectable formatter keeps the expensive preview derivation testable. */
   formatContent?: typeof formattedContent;
 }) {
@@ -472,12 +478,19 @@ export function Artifacts({
 
   const openFull = useCallback(
     (sha256: string) => {
+      // App-level hash writes are coalesced (HASH_WRITE_INTERVAL_MS), so a
+      // filter change made just before opening the reader may not have
+      // reached the URL yet. Land it first, or `back=` carries the stale
+      // catalogue — the very bug the return context exists to fix.
+      flushHash();
+      const backHash = window.location.hash;
       if (onOpenFull) {
-        onOpenFull(sha256);
+        onOpenFull(sha256, backHash);
       } else {
-        window.location.hash = withCurrentArtifactQuery(
-          `artifact/${encodeURIComponent(sha256)}`,
-        );
+        window.location.hash = `#/${withProject(
+          artifactFullHash(sha256, backHash),
+          hashProject(backHash),
+        )}`;
       }
     },
     [onOpenFull],
