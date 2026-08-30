@@ -33,6 +33,7 @@ import {
   MIN_GIT_VERSION,
   ossOnboardingDiagnostics,
   parseCliVersion,
+  repoToolchainDiagnostics,
 } from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -124,6 +125,114 @@ describe("OSS onboarding diagnostics (WM-957)", () => {
     expect(diagnostics.find((d) => d.label === "worktree isolation")?.ok).toBe(
       "warn",
     );
+  });
+});
+
+describe("repo toolchain diagnostics (#1097)", () => {
+  test("declared-and-passing: map-form toolchain prints constraint and observed version", async () => {
+    let probes = 0;
+    const rows = await repoToolchainDiagnostics({
+      repos: [{ name: "demo", toolchain: { bun: ">=1.3 <2", git: ">=2.40" } }],
+      which: async (executable) => {
+        probes += 1;
+        return { bun: "/opt/bun", git: "/usr/bin/git" }[executable] ?? null;
+      },
+      spawn: async ([resolved]) => {
+        probes += 1;
+        return {
+          exitCode: 0,
+          stdout:
+            {
+              "/opt/bun": "1.3.14\n",
+              "/usr/bin/git": "git version 2.45.1\n",
+            }[resolved] ?? "",
+          stderr: "",
+        };
+      },
+    });
+    expect(probes).toBeGreaterThan(0);
+    expect(rows).toEqual([
+      {
+        ok: true,
+        label: "toolchain bun",
+        detail: ">=1.3 <2  observed 1.3.14",
+        fix: null,
+      },
+      {
+        ok: true,
+        label: "toolchain git",
+        detail: ">=2.40  observed 2.45.1",
+        fix: null,
+      },
+    ]);
+  });
+
+  test("declared-and-mismatched: missing and out-of-range are doctor problems with the reason's action", async () => {
+    const rows = await repoToolchainDiagnostics({
+      repos: [{ name: "demo", toolchain: { bun: ">=1.3 <2", uv: ">=0.5" } }],
+      which: async (executable) => (executable === "bun" ? "/opt/bun" : null),
+      spawn: async () => ({ exitCode: 0, stdout: "1.1.45\n", stderr: "" }),
+    });
+    expect(rows).toHaveLength(2);
+    const bun = rows.find((r) => r.label === "toolchain bun");
+    const uv = rows.find((r) => r.label === "toolchain uv");
+    expect(bun).toMatchObject({
+      ok: false,
+      detail: ">=1.3 <2  observed 1.1.45",
+    });
+    expect(bun.fix).toContain("make bun >=1.3 <2");
+    expect(uv).toMatchObject({
+      ok: false,
+      label: "toolchain uv",
+      detail: ">=0.5  missing",
+    });
+    expect(uv.fix).toContain("install uv >=0.5");
+  });
+
+  test("not-declared: no new rows and no probe is spawned", async () => {
+    let probes = 0;
+    const counted = {
+      which: async () => {
+        probes += 1;
+        return "/opt/bun";
+      },
+      spawn: async () => {
+        probes += 1;
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    };
+    const absent = await repoToolchainDiagnostics({
+      repos: [{ name: "bare", path: "/tmp/bare" }],
+      ...counted,
+    });
+    const emptyBlock = await repoToolchainDiagnostics({
+      repos: [{ name: "empty", toolchain: {} }],
+      ...counted,
+    });
+    expect(absent).toEqual([]);
+    expect(emptyBlock).toEqual([]);
+    expect(probes).toBe(0);
+  });
+
+  test("malformed block: yields a red toolchain check instead of throwing", async () => {
+    let probes = 0;
+    const rows = await repoToolchainDiagnostics({
+      repos: [
+        { name: "broken", toolchain: "bun>=1.3" },
+        { name: "fine", toolchain: { bun: ">=1.0" } },
+      ],
+      which: async () => "/opt/bun",
+      spawn: async () => {
+        probes += 1;
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+    expect(rows[0]).toMatchObject({ ok: false, label: "toolchain" });
+    expect(rows[0].detail).toContain("repo broken toolchain must be a map");
+    expect(rows[0].fix).toContain("broken");
+    // Doctor keeps going: the next repo is still probed.
+    expect(rows[1]).toMatchObject({ ok: true, label: "toolchain bun" });
+    expect(probes).toBe(1);
   });
 });
 

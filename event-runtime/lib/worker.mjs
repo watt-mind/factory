@@ -903,6 +903,11 @@ function workerSubprocessTimeoutMs() {
     : DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS;
 }
 
+/** Worktree vanished between agent finish and handoff verify (`realpath` ENOENT). */
+const HANDOFF_WORKTREE_MISSING = "handoff_worktree_missing";
+/** Non-`ContractViolation` throw from `verifyResult` / `assertHandoffPullRequestBase`. */
+const VERIFICATION_INTERNAL_ERROR = "verification_internal_error";
+
 const ENVIRONMENT_FAILURES = new Set([
   "adapter_error",
   "lease_expired",
@@ -915,6 +920,9 @@ const ENVIRONMENT_FAILURES = new Set([
   // The offline sandbox cannot restore packages; this is a host fault rather
   // than evidence that the agent's branch is red.
   HANDOFF_DEPENDENCIES_MISSING,
+  // Same family: the worktree is gone, so continuation/retry must not treat
+  // the throw as an agent red (#1663).
+  HANDOFF_WORKTREE_MISSING,
 ]);
 const isAgentHandoffFailure = (reasonCode) =>
   HANDOFF_REASON_CODES.has(reasonCode) &&
@@ -934,6 +942,7 @@ const FATAL_FAILURES = new Set([
   "unknown_adapter",
   "agent_definition_mismatch",
   "workspace_integrity_violation",
+  VERIFICATION_INTERNAL_ERROR,
 ]);
 
 /** Closed failure taxonomy: unknown reasons fail safe as fatal and never retry. */
@@ -953,6 +962,35 @@ export function classifyFailureCause(reasonCode) {
     return "fatal";
   }
   return "fatal";
+}
+
+/**
+ * Only an ENOENT whose target lies inside the run's own workspace (the
+ * delegated worktree or the workspace dir `verifyResult` realpaths) is the
+ * vanished-worktree environment failure. An ENOENT elsewhere — a missing
+ * verifier binary or config — is a harness defect and must not draw on the
+ * environment retry budget.
+ */
+function verificationInternalReasonCode(err, roots = []) {
+  if (err?.code !== "ENOENT") return VERIFICATION_INTERNAL_ERROR;
+  const target = err.path ?? err.dest ?? null;
+  if (typeof target !== "string" || !target) return VERIFICATION_INTERNAL_ERROR;
+  const resolved = path.resolve(target);
+  for (const root of roots) {
+    if (typeof root !== "string" || !root) continue;
+    const rel = path.relative(path.resolve(root), resolved);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+      return HANDOFF_WORKTREE_MISSING;
+    }
+  }
+  return VERIFICATION_INTERNAL_ERROR;
+}
+
+function verificationInternalErrorPayload(err) {
+  return {
+    code: err?.code ?? err?.name ?? null,
+    message: err?.message ?? String(err),
+  };
 }
 
 /** Closed eligibility predicate; a continuation can never escalate again. */
@@ -3042,6 +3080,7 @@ export async function executeClaimed(
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
     sandboxAvailability,
+    verifyResult: verifyResultFn = verifyResult,
   } = {},
 ) {
   const { runId, attempt, fencingToken, spec } = claim;
@@ -3451,6 +3490,85 @@ export async function executeClaimed(
       );
       return { ok: true, receipt };
     });
+
+  /** Convert a non-ContractViolation verify throw into a terminal FAILED summary. */
+  const failVerificationInternal = (err) => {
+    const reasonCode = verificationInternalReasonCode(err, [
+      worktreePath,
+      workspaceDir,
+    ]);
+    const error = verificationInternalErrorPayload(err);
+    const journalReason = `${reasonCode}: ${error.message}`;
+    if (mayMutateClaimedTicket()) {
+      try {
+        unclaimTicketFn({
+          repo: repoName,
+          ticket: ticketId,
+          why: journalReason,
+          log: null,
+        });
+      } catch {
+        /* intentionally ignored */
+      }
+    }
+    const result = {
+      schemaVersion: "factory.run-result/v1",
+      runId,
+      attempt,
+      terminalState: "failed",
+      reasonCode,
+      outputContract: spec.outputContract,
+      error,
+      verification: {
+        status: "failed",
+        stage: "verification",
+        checks: [],
+      },
+      artifacts: [],
+    };
+    let res;
+    let terminalError;
+    try {
+      res = failTerminal("FAILED", journalReason, reasonCode, (currentNow) => {
+        const receipt = receiptWithDeadlineExtensions(db, runId, {
+          runId,
+          spec,
+          def,
+          artifactHash: null,
+          evidenceSetHash: null,
+          journalHead: latestJournalHash(db, runId),
+          verificationStatus: "failed",
+          extraReceipt: filesystemConfinementReceipt,
+          harnessPins: materializedHarnessPins,
+        });
+        db.query(
+          `INSERT INTO results (run_id, attempt, result_json, artifact_hash, evidence_set_hash, verification_json, receipt_json, accepted_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          runId,
+          attempt,
+          canonicalJson(result),
+          "none",
+          null,
+          canonicalJson(result.verification),
+          canonicalJson(receipt),
+          iso(currentNow),
+        );
+      });
+    } catch (failErr) {
+      terminalError = recordTerminalError("failTerminal", failErr);
+    }
+    cleanupWorkspace({ retainWorkspace: retain });
+    if (res?.fenced) return { fenced: true };
+    return {
+      runId,
+      attempt,
+      terminalState: "FAILED",
+      reasonCode,
+      error,
+      ...(terminalError ? { terminalError } : {}),
+    };
+  };
 
   try {
     const started = txImmediate(db, () => {
@@ -4330,7 +4448,7 @@ export async function executeClaimed(
       // worktree command verification until after the fenced VERIFYING
       // transition below. The normal verifier then runs again in full.
       try {
-        verifyResult({
+        verifyResultFn({
           spec,
           def,
           registry,
@@ -4341,7 +4459,9 @@ export async function executeClaimed(
         });
         lateCompletion = true;
       } catch (err) {
-        if (!(err instanceof ContractViolation)) throw err;
+        if (!(err instanceof ContractViolation)) {
+          return failVerificationInternal(err);
+        }
       }
 
       if (!lateCompletion) {
@@ -4469,7 +4589,7 @@ export async function executeClaimed(
 
     let verified;
     verificationAttempt: try {
-      verified = verifyResult({
+      verified = verifyResultFn({
         spec,
         def,
         registry,
@@ -4489,7 +4609,9 @@ export async function executeClaimed(
         });
       }
     } catch (err) {
-      if (!(err instanceof ContractViolation)) throw err;
+      if (!(err instanceof ContractViolation)) {
+        return failVerificationInternal(err);
+      }
       let activeError = err;
       const recovered = recoverMissingDispatchResult({
         error: err,
@@ -4504,7 +4626,7 @@ export async function executeClaimed(
       });
       if (recovered) {
         try {
-          verified = verifyResult({
+          verified = verifyResultFn({
             spec,
             def,
             registry,
@@ -4523,8 +4645,9 @@ export async function executeClaimed(
           verified.result.reasonCode = RECOVERED_RESULT_REASON;
           break verificationAttempt;
         } catch (recoveryError) {
-          if (!(recoveryError instanceof ContractViolation))
-            throw recoveryError;
+          if (!(recoveryError instanceof ContractViolation)) {
+            return failVerificationInternal(recoveryError);
+          }
           activeError = recoveryError;
         }
       }

@@ -442,6 +442,12 @@ describe("execute with fake binary", () => {
     return fakeAgy;
   }
 
+  test("tmpDir returns its own canonical realpath (GH-1099)", () => {
+    tmp = tmpDir("agy-test-realpath-");
+    // On Darwin this distinguishes /var/... from its /private/var/... realpath.
+    expect(tmp).toBe(realpathSync(tmp));
+  });
+
   test("refuses a definition without verified promptText before launching agy", async () => {
     tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");
@@ -662,11 +668,14 @@ describe("execute with fake binary", () => {
     tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");
     const pidFile = path.join(tmp, "grandchild.pid");
+    const fixtureErrorFile = path.join(tmp, "grandchild-error.txt");
     mkdirSync(binDir, { recursive: true });
     writeFakeAgy(
       binDir,
       [],
-      'sleep 30 & echo $! > "$FACTORY_TEST_PID_FILE"; wait',
+      // GH-1099: keep fixture setup stderr in the workspace so a Darwin spawn
+      // or PID-file failure is reported instead of becoming only "false".
+      '{ sleep 30 & grandchild_pid=$!; printf "%s\\n" "$grandchild_pid" > "$FACTORY_TEST_PID_FILE"; wait "$grandchild_pid"; } 2> "$FACTORY_TEST_ERROR_FILE"',
     );
 
     const outcome = await execute({
@@ -678,13 +687,21 @@ describe("execute with fake binary", () => {
       env: {
         PATH: `${binDir}:${process.env.PATH}`,
         FACTORY_TEST_PID_FILE: pidFile,
+        FACTORY_TEST_ERROR_FILE: fixtureErrorFile,
       },
     });
     expect(outcome.timedOut).toBe(true);
 
     // Give the kernel a brief moment to reap the signalled process group.
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(existsSync(pidFile)).toBe(true);
+    if (!existsSync(pidFile)) {
+      const fixtureError = existsSync(fixtureErrorFile)
+        ? readFileSync(fixtureErrorFile, "utf8")
+        : "fixture wrote no diagnostic";
+      throw new Error(
+        `agy grandchild fixture did not write ${pidFile}: ${fixtureError}`,
+      );
+    }
     const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
     let alive = true;
     try {
