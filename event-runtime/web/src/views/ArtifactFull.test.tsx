@@ -101,6 +101,20 @@ describe("ArtifactFull reader view (WM-828)", () => {
     );
   });
 
+  test("ignores a positional hit whose digest differs from the requested one", async () => {
+    globalThis.fetch = mock(
+      async () => new Response("{}", { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const view = renderArtifactFull({
+      seed: { items: [{ ...ITEMS[0], sha256: "b".repeat(64) }] },
+    });
+
+    await view.findByRole("button", { name: /← Artifacts/ });
+    expect(view.queryByText("1.0 KB")).toBeNull();
+    expect(view.queryByRole("button", { name: "run_12345678" })).toBeNull();
+  });
+
   test("renders header with back button, kind badges, short digest, size, timestamp, producing run jump link, and copy actions", async () => {
     const raw = JSON.stringify({ summary: "report content", status: "ok" });
     globalThis.fetch = mock(

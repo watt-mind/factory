@@ -58,7 +58,9 @@ export function ArtifactFull({
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
 
-  const selected = artifacts[0] ?? null;
+  // The search endpoint matches broadly; only trust the row when it is the
+  // requested digest rather than a positional hit.
+  const selected = artifacts[0]?.sha256 === digest ? artifacts[0] : null;
 
   const contentQ = useQuery({
     queryKey: ["artifact-content", digest],
